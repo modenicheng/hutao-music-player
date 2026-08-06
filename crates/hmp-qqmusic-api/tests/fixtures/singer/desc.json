@@ -1,0 +1,45 @@
+{
+ "code": 0,
+ "ts": 1786030161293,
+ "start_ts": 1786030161281,
+ "traceid": "2d98b30335f21b16",
+ "req_0": {
+  "code": 0,
+  "data": {
+   "singer_list": [
+    {
+     "basic_info": {
+      "singer_mid": "0025NhlN2yWrP4",
+      "name": "周杰伦",
+      "type": 0,
+      "has_photo": 11,
+      "singer_id": 4558,
+      "singer_pmid": "0025NhlN2yWrP4_11",
+      "wikiurl": "https://wiki.y.qq.com/i/c6a607u3deasnfhmmgg0"
+     },
+     "ex_info": {
+      "area": 0,
+      "desc": "",
+      "tag": "",
+      "identity": 0,
+      "instrument": 0,
+      "genre": 0,
+      "foreign_name": "",
+      "birthday": "",
+      "enter": 0,
+      "blogFlag": 0
+     },
+     "wiki": "",
+     "group_list": [],
+     "pic": {
+      "big_black": "https://y.gtimg.cn/music/photo_new/T001V21M3010025NhlN2yWrP4_11.jpg",
+      "big_white": "https://y.gtimg.cn/music/photo_new/T001V21M3020025NhlN2yWrP4_11.jpg",
+      "pic": "http://y.gtimg.cn/music/photo_new/T001R300x300M0000025NhlN2yWrP4_11.jpg"
+     },
+     "photos": [],
+     "group_info": []
+    }
+   ]
+  }
+ }
+}

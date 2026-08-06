@@ -32,7 +32,12 @@
 | `qqmusic_api/modules/login_utils.py` | `login.rs` | 🔶 部分 | PollInterval + wait_qrcode_login（轮询/去重/退避/取消）；无 PhoneLoginSession |
 | `qqmusic_api/modules/song.py` | `song.rs` | ✅ 已移植 | 详情/批量查询/播放 URL（取流）；凭证解耦 |
 | `qqmusic_api/modules/lyric.py` | `lyric.rs` | ✅ 已移植 | 歌词（自动 QRC 解密） |
-| `qqmusic_api/models/base.py` | `models.rs` | ✅ 已移植 | Song/Singer/Album/File/Pay/MV |
+| `qqmusic_api/models/base.py` | `models.rs` | ✅ 已移植 | Song/Singer/Album/File/Pay/MV + SongList |
+| `qqmusic_api/modules/songlist.py` | `songlist.rs` | ✅ 已移植 | 歌单详情（免登录）+ 创建/删除/加歌/收藏（需登录） |
+| `qqmusic_api/modules/album.py` | `album.rs` | ✅ 已移植 | 专辑详情/歌曲/新碟（免登录）+ 收藏/取消收藏（需登录） |
+| `qqmusic_api/modules/singer.py` | `singer.rs` | ✅ 已移植 | 歌手列表/索引/主页(Android)/Tab/歌曲/专辑/MV/相似/简介 |
+| `qqmusic_api/modules/top.py` | `top.rs` | ✅ 已移植 | 排行榜分类/详情 |
+| `qqmusic_api/modules/recommend.py` | `recommend.rs` | ✅ 已移植 | 首页 Feed/雷达/推荐歌单/新歌（免登录）；猜你喜欢（需登录） |
 | `qqmusic_api/algorithms/__init__.py` | `algorithms/qrc.rs` | ✅ 已移植 | qrc_decrypt（3DES + zlib） |
 | `qqmusic_api/algorithms/tripledes.py` | `algorithms/tripledes.rs` | ✅ 已移植 | 自定义 3DES 变体（PC-2 偏移） |
 | `qqmusic_api/modules/song.py` | （待移植） | ⬜ 未移植 | 阶段 C |
@@ -90,6 +95,25 @@
 - 免登录：`RS02`（试听）返回 `purl`+`vkey`；`M500`/`C400` 等完整音质返回 `104003`（无权限，需登录态）；
 - 完整音质需调用方传入 `credential`（`str_musicid` 注入 `uin` 参数）。
 
+### 歌单/专辑/歌手/排行榜/推荐（阶段 D，docs/PROJECT.md §6.6）
+
+- [x] `SonglistApi.get_detail` → `songlist::SonglistApi::get_detail`（`CgiGetDiss`）
+- [x] `SonglistApi.create/delete/add_songs/del_songs/like_song/unlike_song` → 同签名（需登录，凭证解耦）
+- [x] `AlbumApi.get_detail/get_song/get_new_album` → `album::AlbumApi`（`GetAlbumDetail`/`GetAlbumSongList`/`get_new_album_info`）
+- [x] `AlbumApi.fav_album/del_fav_album` → 需登录
+- [x] `SingerApi` 全部 9 接口 → `singer::SingerApi`；`get_info`/`get_tab_detail` 用 Android comm（ct=11/cv=14090008）
+- [x] `TopApi.get_category/get_detail` → `top::TopApi`（`GetAll`/`GetDetail`）
+- [x] `RecommendApi.get_home_feed/get_radar_recommend/get_recommend_songlist/get_recommend_newsong` → `recommend::RecommendApi`
+- [x] `RecommendApi.get_guess_recommend` → 需登录（免登录实测 1000）
+
+### 阶段 D 实测记录（2026-08-06）
+
+- 歌单/专辑/歌手/榜单/推荐分类全部免登录可用；「猜你喜欢」需登录态；
+- `GetSingerDetail`（歌手简介）布尔参数必须以 0/1 整数编码，JSON `true` 返回 10006（上游直接传 Python bool 属上游缺陷，移植已修正）；
+- `GetSingerDetail` 传 `ex_singer`/`group_singer` 等扩展参数时 10006，最小参数（`singer_mids` + `pic`）可用；
+- 歌手歌曲/专辑接口服务端可能忽略 `number` 参数（请求 5 返回 30）；
+- `GetRecommendFeed` 免登录返回的 `cover`/`creator` 全为 null（提取逻辑由合成测试覆盖）。
+
 ## 尚未移植
 
 - 登录（QQ 二维码 / 微信扫码 / 微信换取登录态）—— 阶段 B
@@ -99,6 +123,7 @@
 - 微信扫码登录 / 手机客户端扫码（MQTT）—— 微信需 open.weixin.qq.com 页面解析，手机端依赖 MQTT
 - 短信验证码登录（`PhoneLoginSession`）—— 待移植
 - 加密音质取流（`GetEVkey`/`CgiGetEVkey`）—— 待移植
+- MV 播放地址（`modules/mv.py`）—— 待移植
 - 写操作（收藏、歌单管理）—— 阶段 E
 - Android 平台会话（`ensure_session`/QIMEI/设备指纹）—— HMP 目标为 Linux 桌面，暂不移植
 

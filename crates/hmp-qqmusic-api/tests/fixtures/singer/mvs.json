@@ -1,0 +1,74 @@
+{
+ "code": 0,
+ "ts": 1786030104377,
+ "start_ts": 1786030104363,
+ "traceid": "0de2443813ce71c9",
+ "req_0": {
+  "code": 0,
+  "data": {
+   "list": [
+    {
+     "duration": 189,
+     "icon_type": 0,
+     "mvid": 2395348,
+     "picformat": 0,
+     "picurl": "http://y.gtimg.cn/music/photo_new/T015R640x360M101001MOefa2Z2Rso.jpg",
+     "playcnt": 557251,
+     "pubdate": 1779206400,
+     "title": "七月的极光",
+     "type": 0,
+     "vid": "001MOefa2Z2Rso"
+    },
+    {
+     "duration": 317,
+     "icon_type": 0,
+     "mvid": 293791,
+     "picformat": 0,
+     "picurl": "http://y.gtimg.cn/music/photo_new/T015R640x360M10300061J2t0b0PPW.jpg",
+     "playcnt": 120172419,
+     "pubdate": 1059408000,
+     "title": "晴天",
+     "type": 0,
+     "vid": "w0026q7f01a"
+    },
+    {
+     "duration": 224,
+     "icon_type": 0,
+     "mvid": 2407468,
+     "picformat": 0,
+     "picurl": "http://y.gtimg.cn/music/photo_new/T015R640x360M102004JA1hx0DkIA1.jpg",
+     "playcnt": 456603,
+     "pubdate": 1781452800,
+     "title": "女儿殿下",
+     "type": 0,
+     "vid": "004JA1hx0DkIA1"
+    },
+    {
+     "duration": 265,
+     "icon_type": 0,
+     "mvid": 55221,
+     "picformat": 0,
+     "picurl": "http://y.gtimg.cn/music/photo_new/T015R640x360M103004K3l0u3GTjCp.jpg",
+     "playcnt": 32941726,
+     "pubdate": 1277913600,
+     "title": "搁浅",
+     "type": 0,
+     "vid": "x00135ao69x"
+    },
+    {
+     "duration": 303,
+     "icon_type": 0,
+     "mvid": 55200,
+     "picformat": 0,
+     "picurl": "http://y.gtimg.cn/music/photo_new/T015R640x360M101002nqnEb0stVkM.jpg",
+     "playcnt": 60591251,
+     "pubdate": 1277913600,
+     "title": "七里香",
+     "type": 0,
+     "vid": "k0013x8ao6z"
+    }
+   ],
+   "total": 10425
+  }
+ }
+}

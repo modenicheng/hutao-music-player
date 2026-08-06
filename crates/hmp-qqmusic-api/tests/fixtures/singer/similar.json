@@ -1,0 +1,65 @@
+{
+ "code": 0,
+ "ts": 1786030104615,
+ "start_ts": 1786030104539,
+ "traceid": "014e4b99b0bcb5c4",
+ "req_0": {
+  "code": 0,
+  "data": {
+   "singerlist": [
+    {
+     "singerId": 245,
+     "singerMid": "0010PLKl2Wgolz",
+     "singerName": "F.I.R.飞儿乐团",
+     "singerPic": "http://y.gtimg.cn/music/photo_new/T001R150x150M0000010PLKl2Wgolz.jpg",
+     "pic_mid": "0010PLKl2Wgolz_4",
+     "trace": "11_0_31_2_4558_2_245_2001_0_1",
+     "abt": "",
+     "tf": ""
+    },
+    {
+     "singerId": 265,
+     "singerMid": "001JDzPT3JdvqK",
+     "singerName": "王力宏",
+     "singerPic": "http://y.gtimg.cn/music/photo_new/T001R150x150M000001JDzPT3JdvqK.jpg",
+     "pic_mid": "001JDzPT3JdvqK_6",
+     "trace": "11_0_31_2_4558_2_265_2001_0_2",
+     "abt": "",
+     "tf": ""
+    },
+    {
+     "singerId": 4351,
+     "singerMid": "003vyG9q2klWs4",
+     "singerName": "范玮琪",
+     "singerPic": "http://y.gtimg.cn/music/photo_new/T001R150x150M000003vyG9q2klWs4.jpg",
+     "pic_mid": "003vyG9q2klWs4_3",
+     "trace": "11_0_31_2_4558_2_4351_2001_0_3",
+     "abt": "",
+     "tf": ""
+    },
+    {
+     "singerId": 227,
+     "singerMid": "0027pdHE4STooO",
+     "singerName": "蔡依林",
+     "singerPic": "http://y.gtimg.cn/music/photo_new/T001R150x150M0000027pdHE4STooO.jpg",
+     "pic_mid": "0027pdHE4STooO_8",
+     "trace": "11_0_31_2_4558_2_227_2001_0_4",
+     "abt": "",
+     "tf": ""
+    },
+    {
+     "singerId": 60505,
+     "singerMid": "000aHmbL2aPXWH",
+     "singerName": "李荣浩",
+     "singerPic": "http://y.gtimg.cn/music/photo_new/T001R150x150M000000aHmbL2aPXWH.jpg",
+     "pic_mid": "000aHmbL2aPXWH_5",
+     "trace": "11_0_31_2_4558_2_60505_2001_0_5",
+     "abt": "",
+     "tf": ""
+    }
+   ],
+   "code": 0,
+   "errMsg": ""
+  }
+ }
+}

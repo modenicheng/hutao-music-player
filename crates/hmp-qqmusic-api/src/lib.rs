@@ -28,6 +28,7 @@
 // 生产代码禁止 unwrap/expect（测试/示例中放行，属惯例用法）
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod album;
 pub mod algorithms;
 pub mod client;
 pub mod config;
@@ -37,12 +38,32 @@ pub mod login;
 pub mod lyric;
 pub mod models;
 pub mod protocol;
+pub mod recommend;
+pub mod singer;
 pub mod song;
+pub mod songlist;
+pub mod top;
 
+pub use album::{
+    AlbumApi, AlbumFavWriteResponse, GetAlbumDetailResponse, GetAlbumSongResponse,
+    GetNewAlbumResponse,
+};
 pub use client::QqMusicClient;
 pub use config::ClientConfig;
 pub use credential::Credential;
 pub use error::QqMusicError;
 pub use login::{LoginApi, QR, QRCodeLoginEvents, QRLoginResult, QRLoginType};
 pub use lyric::{GetLyricResponse, LyricApi};
+pub use recommend::{
+    GuessRecommendResponse, RadarRecommendResponse, RecommendApi, RecommendFeedCardResponse,
+    RecommendNewSongResponse, RecommendSonglistResponse,
+};
+pub use singer::{
+    AlbumBrief, AreaType, GenreType, HomepageHeaderResponse, HomepageTabDetailResponse, IndexType,
+    SexType, SimilarSingerResponse, SingerAlbumListResponse, SingerApi, SingerDetailResponse,
+    SingerIndexPageResponse, SingerMvListResponse, SingerSongListResponse, SingerTypeListResponse,
+    TabType, VideoBrief,
+};
 pub use song::{GetSongDetailResponse, GetSongUrlsResponse, SongApi, SongFileInfo, SongFileType};
+pub use songlist::{CreateDeleteSonglistResp, GetSonglistDetailResponse, SonglistApi};
+pub use top::{TopApi, TopCategoryResponse, TopDetailResponse};

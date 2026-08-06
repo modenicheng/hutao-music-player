@@ -1,0 +1,923 @@
+{
+ "code": 0,
+ "ts": 1786030104961,
+ "start_ts": 1786030104954,
+ "traceid": "30484b2812e60c9d",
+ "req_0": {
+  "code": 0,
+  "data": {
+   "albums": [
+    {
+     "id": 99271794,
+     "mid": "000qNWwz2c9cVj",
+     "name": "风华绝代",
+     "trans_name": "",
+     "singers": [
+      {
+       "id": 1509136,
+       "mid": "002Wyv493SK6V9",
+       "name": "BrAnTB白景屹",
+       "foreign_name": "",
+       "type": 0,
+       "genre": 0,
+       "area": 0,
+       "company": {
+        "id": 0,
+        "name": "",
+        "ex": {
+         "desc": "",
+         "company_photo": 0
+        }
+       },
+       "grade": 0,
+       "origin": 0,
+       "enter": 0,
+       "country": 0,
+       "identity": 0,
+       "birthday": "",
+       "instrument": 0,
+       "ex": {
+        "desc": "",
+        "wiki": "",
+        "tag": "",
+        "ex_status": 0,
+        "ex_identity": 0,
+        "info_name": "",
+        "name_spell": "",
+        "band": "",
+        "dieDate": "",
+        "force_show": 0,
+        "auth_status": 0,
+        "control": 0
+       },
+       "photo": {
+        "has_photo": 0,
+        "photo_cnt": 0,
+        "big_photo_flag": "",
+        "magic_rgb": 0,
+        "pic1_flag": 0,
+        "pic2_flag": 0,
+        "pic_mid": ""
+       },
+       "opt_grade": 0,
+       "status": 0,
+       "opt_grade_new": 0,
+       "vertical_type": "",
+       "singer_wiki": "",
+       "index": "",
+       "is_classical": 0
+      },
+      {
+       "id": 1444841,
+       "mid": "000tcc3J0Z52pm",
+       "name": "辉子",
+       "foreign_name": "",
+       "type": 0,
+       "genre": 0,
+       "area": 0,
+       "company": {
+        "id": 0,
+        "name": "",
+        "ex": {
+         "desc": "",
+         "company_photo": 0
+        }
+       },
+       "grade": 0,
+       "origin": 0,
+       "enter": 0,
+       "country": 0,
+       "identity": 0,
+       "birthday": "",
+       "instrument": 0,
+       "ex": {
+        "desc": "",
+        "wiki": "",
+        "tag": "",
+        "ex_status": 0,
+        "ex_identity": 0,
+        "info_name": "",
+        "name_spell": "",
+        "band": "",
+        "dieDate": "",
+        "force_show": 0,
+        "auth_status": 0,
+        "control": 0
+       },
+       "photo": {
+        "has_photo": 0,
+        "photo_cnt": 0,
+        "big_photo_flag": "",
+        "magic_rgb": 0,
+        "pic1_flag": 0,
+        "pic2_flag": 0,
+        "pic_mid": ""
+       },
+       "opt_grade": 0,
+       "status": 0,
+       "opt_grade_new": 0,
+       "vertical_type": "",
+       "singer_wiki": "",
+       "index": "",
+       "is_classical": 0
+      }
+     ],
+     "type": 0,
+     "language": 0,
+     "genre": 0,
+     "area": 0,
+     "movie": "",
+     "release_time": "2026-08-06",
+     "company": {
+      "id": 0,
+      "name": "",
+      "ex": {
+       "desc": "",
+       "company_photo": 0
+      }
+     },
+     "status": 0,
+     "index": "",
+     "tag": "",
+     "pay": {
+      "payment_total": 0,
+      "payment_album_type": 0,
+      "payment_discount": 0,
+      "payment_discount_beg": 0,
+      "payment_discount_end": 0,
+      "payment_beg": "",
+      "payment_end": "",
+      "pre_sale_beg": "",
+      "str_payment_discount_beg": "",
+      "str_payment_discount_end": ""
+     },
+     "ex": {
+      "desc": "",
+      "track_nums": 0,
+      "playable_track_nums": 0,
+      "album_tag3": 0,
+      "singer_tag": "",
+      "album_tag5": "",
+      "schedule_status": 0,
+      "long_audio_nums": 0,
+      "caliber": 0,
+      "recommend_reason": "",
+      "short_recommend_reason": "",
+      "lr_book_id": 0,
+      "lr_tag": "",
+      "status": 0,
+      "has_special_fnote": 0
+     },
+     "photo": {
+      "gaus_pic": "",
+      "has_photo": 0,
+      "pic_mid": "000qNWwz2c9cVj_1",
+      "vip_flag": 0,
+      "pay_flag": 0,
+      "version": 0,
+      "primecolor": 0,
+      "magic_class": 0,
+      "magic_color": 0,
+      "src_w": 0,
+      "src_h": 0
+     },
+     "tmetags": "",
+     "ex_status": 1,
+     "show_com_new": 0,
+     "companyshow": {
+      "id": 0,
+      "name": "",
+      "ex": {
+       "desc": "",
+       "company_photo": 0
+      }
+     },
+     "modify_time": "",
+     "str_genre": "",
+     "album_right": 0,
+     "Fpay_control": 0,
+     "cd_album_id": "",
+     "mini_album_id": "",
+     "data": {
+      "int2": 0,
+      "int3": 0,
+      "update_time": "",
+      "int4": 0,
+      "int0": 0,
+      "str0": "",
+      "str1": "",
+      "str2": ""
+     },
+     "album_wiki": "",
+     "vip_play_conf": {
+      "start_time": "",
+      "fnote": 0,
+      "status": 0
+     },
+     "album_ori_name": "",
+     "singers_with_anonymous": [],
+     "other_name": "",
+     "mv_ids": "",
+     "vids": "",
+     "head_magic_color": ""
+    },
+    {
+     "id": 99337962,
+     "mid": "000U0tGf0LglmK",
+     "name": "远走高飞（律动版）",
+     "trans_name": "",
+     "singers": [
+      {
+       "id": 12111,
+       "mid": "004YXxql1sSr2o",
+       "name": "金志文",
+       "foreign_name": "",
+       "type": 0,
+       "genre": 0,
+       "area": 0,
+       "company": {
+        "id": 0,
+        "name": "",
+        "ex": {
+         "desc": "",
+         "company_photo": 0
+        }
+       },
+       "grade": 0,
+       "origin": 0,
+       "enter": 0,
+       "country": 0,
+       "identity": 0,
+       "birthday": "",
+       "instrument": 0,
+       "ex": {
+        "desc": "",
+        "wiki": "",
+        "tag": "",
+        "ex_status": 0,
+        "ex_identity": 0,
+        "info_name": "",
+        "name_spell": "",
+        "band": "",
+        "dieDate": "",
+        "force_show": 0,
+        "auth_status": 0,
+        "control": 0
+       },
+       "photo": {
+        "has_photo": 0,
+        "photo_cnt": 0,
+        "big_photo_flag": "",
+        "magic_rgb": 0,
+        "pic1_flag": 0,
+        "pic2_flag": 0,
+        "pic_mid": ""
+       },
+       "opt_grade": 0,
+       "status": 0,
+       "opt_grade_new": 0,
+       "vertical_type": "",
+       "singer_wiki": "",
+       "index": "",
+       "is_classical": 0
+      }
+     ],
+     "type": 0,
+     "language": 0,
+     "genre": 0,
+     "area": 0,
+     "movie": "",
+     "release_time": "2026-08-06",
+     "company": {
+      "id": 0,
+      "name": "",
+      "ex": {
+       "desc": "",
+       "company_photo": 0
+      }
+     },
+     "status": 0,
+     "index": "",
+     "tag": "",
+     "pay": {
+      "payment_total": 0,
+      "payment_album_type": 0,
+      "payment_discount": 0,
+      "payment_discount_beg": 0,
+      "payment_discount_end": 0,
+      "payment_beg": "",
+      "payment_end": "",
+      "pre_sale_beg": "",
+      "str_payment_discount_beg": "",
+      "str_payment_discount_end": ""
+     },
+     "ex": {
+      "desc": "",
+      "track_nums": 0,
+      "playable_track_nums": 0,
+      "album_tag3": 0,
+      "singer_tag": "",
+      "album_tag5": "",
+      "schedule_status": 0,
+      "long_audio_nums": 0,
+      "caliber": 0,
+      "recommend_reason": "",
+      "short_recommend_reason": "",
+      "lr_book_id": 0,
+      "lr_tag": "",
+      "status": 0,
+      "has_special_fnote": 0
+     },
+     "photo": {
+      "gaus_pic": "",
+      "has_photo": 0,
+      "pic_mid": "000U0tGf0LglmK_1",
+      "vip_flag": 0,
+      "pay_flag": 0,
+      "version": 0,
+      "primecolor": 0,
+      "magic_class": 0,
+      "magic_color": 0,
+      "src_w": 0,
+      "src_h": 0
+     },
+     "tmetags": "",
+     "ex_status": 1,
+     "show_com_new": 0,
+     "companyshow": {
+      "id": 0,
+      "name": "",
+      "ex": {
+       "desc": "",
+       "company_photo": 0
+      }
+     },
+     "modify_time": "",
+     "str_genre": "",
+     "album_right": 0,
+     "Fpay_control": 0,
+     "cd_album_id": "",
+     "mini_album_id": "",
+     "data": {
+      "int2": 0,
+      "int3": 0,
+      "update_time": "",
+      "int4": 0,
+      "int0": 0,
+      "str0": "",
+      "str1": "",
+      "str2": ""
+     },
+     "album_wiki": "",
+     "vip_play_conf": {
+      "start_time": "",
+      "fnote": 0,
+      "status": 0
+     },
+     "album_ori_name": "",
+     "singers_with_anonymous": [],
+     "other_name": "",
+     "mv_ids": "",
+     "vids": "",
+     "head_magic_color": ""
+    },
+    {
+     "id": 98726718,
+     "mid": "001VrRJG1YaUQS",
+     "name": "幸好遇见你",
+     "trans_name": "",
+     "singers": [
+      {
+       "id": 17629542,
+       "mid": "0003oyD80OJlea",
+       "name": "王子璇",
+       "foreign_name": "",
+       "type": 0,
+       "genre": 0,
+       "area": 0,
+       "company": {
+        "id": 0,
+        "name": "",
+        "ex": {
+         "desc": "",
+         "company_photo": 0
+        }
+       },
+       "grade": 0,
+       "origin": 0,
+       "enter": 0,
+       "country": 0,
+       "identity": 0,
+       "birthday": "",
+       "instrument": 0,
+       "ex": {
+        "desc": "",
+        "wiki": "",
+        "tag": "",
+        "ex_status": 0,
+        "ex_identity": 0,
+        "info_name": "",
+        "name_spell": "",
+        "band": "",
+        "dieDate": "",
+        "force_show": 0,
+        "auth_status": 0,
+        "control": 0
+       },
+       "photo": {
+        "has_photo": 0,
+        "photo_cnt": 0,
+        "big_photo_flag": "",
+        "magic_rgb": 0,
+        "pic1_flag": 0,
+        "pic2_flag": 0,
+        "pic_mid": ""
+       },
+       "opt_grade": 0,
+       "status": 0,
+       "opt_grade_new": 0,
+       "vertical_type": "",
+       "singer_wiki": "",
+       "index": "",
+       "is_classical": 0
+      }
+     ],
+     "type": 0,
+     "language": 0,
+     "genre": 0,
+     "area": 0,
+     "movie": "",
+     "release_time": "2026-08-06",
+     "company": {
+      "id": 0,
+      "name": "",
+      "ex": {
+       "desc": "",
+       "company_photo": 0
+      }
+     },
+     "status": 0,
+     "index": "",
+     "tag": "",
+     "pay": {
+      "payment_total": 0,
+      "payment_album_type": 0,
+      "payment_discount": 0,
+      "payment_discount_beg": 0,
+      "payment_discount_end": 0,
+      "payment_beg": "",
+      "payment_end": "",
+      "pre_sale_beg": "",
+      "str_payment_discount_beg": "",
+      "str_payment_discount_end": ""
+     },
+     "ex": {
+      "desc": "",
+      "track_nums": 0,
+      "playable_track_nums": 0,
+      "album_tag3": 0,
+      "singer_tag": "",
+      "album_tag5": "",
+      "schedule_status": 0,
+      "long_audio_nums": 0,
+      "caliber": 0,
+      "recommend_reason": "",
+      "short_recommend_reason": "",
+      "lr_book_id": 0,
+      "lr_tag": "",
+      "status": 0,
+      "has_special_fnote": 0
+     },
+     "photo": {
+      "gaus_pic": "",
+      "has_photo": 0,
+      "pic_mid": "001VrRJG1YaUQS_1",
+      "vip_flag": 0,
+      "pay_flag": 0,
+      "version": 0,
+      "primecolor": 0,
+      "magic_class": 0,
+      "magic_color": 0,
+      "src_w": 0,
+      "src_h": 0
+     },
+     "tmetags": "",
+     "ex_status": 1,
+     "show_com_new": 0,
+     "companyshow": {
+      "id": 0,
+      "name": "",
+      "ex": {
+       "desc": "",
+       "company_photo": 0
+      }
+     },
+     "modify_time": "",
+     "str_genre": "",
+     "album_right": 0,
+     "Fpay_control": 0,
+     "cd_album_id": "",
+     "mini_album_id": "",
+     "data": {
+      "int2": 0,
+      "int3": 0,
+      "update_time": "",
+      "int4": 0,
+      "int0": 0,
+      "str0": "",
+      "str1": "",
+      "str2": ""
+     },
+     "album_wiki": "",
+     "vip_play_conf": {
+      "start_time": "",
+      "fnote": 0,
+      "status": 0
+     },
+     "album_ori_name": "",
+     "singers_with_anonymous": [],
+     "other_name": "",
+     "mv_ids": "",
+     "vids": "",
+     "head_magic_color": ""
+    },
+    {
+     "id": 98542763,
+     "mid": "004NtIKU4TeThD",
+     "name": "山河荒",
+     "trans_name": "",
+     "singers": [
+      {
+       "id": 154330,
+       "mid": "000t1B6X1OCGos",
+       "name": "阿云嘎",
+       "foreign_name": "",
+       "type": 0,
+       "genre": 0,
+       "area": 0,
+       "company": {
+        "id": 0,
+        "name": "",
+        "ex": {
+         "desc": "",
+         "company_photo": 0
+        }
+       },
+       "grade": 0,
+       "origin": 0,
+       "enter": 0,
+       "country": 0,
+       "identity": 0,
+       "birthday": "",
+       "instrument": 0,
+       "ex": {
+        "desc": "",
+        "wiki": "",
+        "tag": "",
+        "ex_status": 0,
+        "ex_identity": 0,
+        "info_name": "",
+        "name_spell": "",
+        "band": "",
+        "dieDate": "",
+        "force_show": 0,
+        "auth_status": 0,
+        "control": 0
+       },
+       "photo": {
+        "has_photo": 0,
+        "photo_cnt": 0,
+        "big_photo_flag": "",
+        "magic_rgb": 0,
+        "pic1_flag": 0,
+        "pic2_flag": 0,
+        "pic_mid": ""
+       },
+       "opt_grade": 0,
+       "status": 0,
+       "opt_grade_new": 0,
+       "vertical_type": "",
+       "singer_wiki": "",
+       "index": "",
+       "is_classical": 0
+      }
+     ],
+     "type": 0,
+     "language": 0,
+     "genre": 0,
+     "area": 0,
+     "movie": "",
+     "release_time": "2026-08-06",
+     "company": {
+      "id": 0,
+      "name": "",
+      "ex": {
+       "desc": "",
+       "company_photo": 0
+      }
+     },
+     "status": 0,
+     "index": "",
+     "tag": "",
+     "pay": {
+      "payment_total": 0,
+      "payment_album_type": 0,
+      "payment_discount": 0,
+      "payment_discount_beg": 0,
+      "payment_discount_end": 0,
+      "payment_beg": "",
+      "payment_end": "",
+      "pre_sale_beg": "",
+      "str_payment_discount_beg": "",
+      "str_payment_discount_end": ""
+     },
+     "ex": {
+      "desc": "",
+      "track_nums": 0,
+      "playable_track_nums": 0,
+      "album_tag3": 0,
+      "singer_tag": "",
+      "album_tag5": "",
+      "schedule_status": 0,
+      "long_audio_nums": 0,
+      "caliber": 0,
+      "recommend_reason": "",
+      "short_recommend_reason": "",
+      "lr_book_id": 0,
+      "lr_tag": "",
+      "status": 0,
+      "has_special_fnote": 0
+     },
+     "photo": {
+      "gaus_pic": "",
+      "has_photo": 0,
+      "pic_mid": "004NtIKU4TeThD_1",
+      "vip_flag": 0,
+      "pay_flag": 0,
+      "version": 0,
+      "primecolor": 0,
+      "magic_class": 0,
+      "magic_color": 0,
+      "src_w": 0,
+      "src_h": 0
+     },
+     "tmetags": "",
+     "ex_status": 1,
+     "show_com_new": 0,
+     "companyshow": {
+      "id": 0,
+      "name": "",
+      "ex": {
+       "desc": "",
+       "company_photo": 0
+      }
+     },
+     "modify_time": "",
+     "str_genre": "",
+     "album_right": 0,
+     "Fpay_control": 0,
+     "cd_album_id": "",
+     "mini_album_id": "",
+     "data": {
+      "int2": 0,
+      "int3": 0,
+      "update_time": "",
+      "int4": 0,
+      "int0": 0,
+      "str0": "",
+      "str1": "",
+      "str2": ""
+     },
+     "album_wiki": "",
+     "vip_play_conf": {
+      "start_time": "",
+      "fnote": 0,
+      "status": 0
+     },
+     "album_ori_name": "",
+     "singers_with_anonymous": [],
+     "other_name": "",
+     "mv_ids": "",
+     "vids": "",
+     "head_magic_color": ""
+    },
+    {
+     "id": 99076455,
+     "mid": "000RpxeQ0418Dk",
+     "name": "过命交往",
+     "trans_name": "",
+     "singers": [
+      {
+       "id": 7734145,
+       "mid": "002V9XKs1RMrcm",
+       "name": "张景昀",
+       "foreign_name": "",
+       "type": 0,
+       "genre": 0,
+       "area": 0,
+       "company": {
+        "id": 0,
+        "name": "",
+        "ex": {
+         "desc": "",
+         "company_photo": 0
+        }
+       },
+       "grade": 0,
+       "origin": 0,
+       "enter": 0,
+       "country": 0,
+       "identity": 0,
+       "birthday": "",
+       "instrument": 0,
+       "ex": {
+        "desc": "",
+        "wiki": "",
+        "tag": "",
+        "ex_status": 0,
+        "ex_identity": 0,
+        "info_name": "",
+        "name_spell": "",
+        "band": "",
+        "dieDate": "",
+        "force_show": 0,
+        "auth_status": 0,
+        "control": 0
+       },
+       "photo": {
+        "has_photo": 0,
+        "photo_cnt": 0,
+        "big_photo_flag": "",
+        "magic_rgb": 0,
+        "pic1_flag": 0,
+        "pic2_flag": 0,
+        "pic_mid": ""
+       },
+       "opt_grade": 0,
+       "status": 0,
+       "opt_grade_new": 0,
+       "vertical_type": "",
+       "singer_wiki": "",
+       "index": "",
+       "is_classical": 0
+      },
+      {
+       "id": 13851296,
+       "mid": "003N8cC41Zcn9i",
+       "name": "赵奂然",
+       "foreign_name": "",
+       "type": 0,
+       "genre": 0,
+       "area": 0,
+       "company": {
+        "id": 0,
+        "name": "",
+        "ex": {
+         "desc": "",
+         "company_photo": 0
+        }
+       },
+       "grade": 0,
+       "origin": 0,
+       "enter": 0,
+       "country": 0,
+       "identity": 0,
+       "birthday": "",
+       "instrument": 0,
+       "ex": {
+        "desc": "",
+        "wiki": "",
+        "tag": "",
+        "ex_status": 0,
+        "ex_identity": 0,
+        "info_name": "",
+        "name_spell": "",
+        "band": "",
+        "dieDate": "",
+        "force_show": 0,
+        "auth_status": 0,
+        "control": 0
+       },
+       "photo": {
+        "has_photo": 0,
+        "photo_cnt": 0,
+        "big_photo_flag": "",
+        "magic_rgb": 0,
+        "pic1_flag": 0,
+        "pic2_flag": 0,
+        "pic_mid": ""
+       },
+       "opt_grade": 0,
+       "status": 0,
+       "opt_grade_new": 0,
+       "vertical_type": "",
+       "singer_wiki": "",
+       "index": "",
+       "is_classical": 0
+      }
+     ],
+     "type": 0,
+     "language": 0,
+     "genre": 0,
+     "area": 0,
+     "movie": "",
+     "release_time": "2026-08-06",
+     "company": {
+      "id": 0,
+      "name": "",
+      "ex": {
+       "desc": "",
+       "company_photo": 0
+      }
+     },
+     "status": 0,
+     "index": "",
+     "tag": "",
+     "pay": {
+      "payment_total": 0,
+      "payment_album_type": 0,
+      "payment_discount": 0,
+      "payment_discount_beg": 0,
+      "payment_discount_end": 0,
+      "payment_beg": "",
+      "payment_end": "",
+      "pre_sale_beg": "",
+      "str_payment_discount_beg": "",
+      "str_payment_discount_end": ""
+     },
+     "ex": {
+      "desc": "",
+      "track_nums": 0,
+      "playable_track_nums": 0,
+      "album_tag3": 0,
+      "singer_tag": "",
+      "album_tag5": "",
+      "schedule_status": 0,
+      "long_audio_nums": 0,
+      "caliber": 0,
+      "recommend_reason": "",
+      "short_recommend_reason": "",
+      "lr_book_id": 0,
+      "lr_tag": "",
+      "status": 0,
+      "has_special_fnote": 0
+     },
+     "photo": {
+      "gaus_pic": "",
+      "has_photo": 0,
+      "pic_mid": "000RpxeQ0418Dk_1",
+      "vip_flag": 0,
+      "pay_flag": 0,
+      "version": 0,
+      "primecolor": 0,
+      "magic_class": 0,
+      "magic_color": 0,
+      "src_w": 0,
+      "src_h": 0
+     },
+     "tmetags": "",
+     "ex_status": 1,
+     "show_com_new": 0,
+     "companyshow": {
+      "id": 0,
+      "name": "",
+      "ex": {
+       "desc": "",
+       "company_photo": 0
+      }
+     },
+     "modify_time": "",
+     "str_genre": "",
+     "album_right": 0,
+     "Fpay_control": 0,
+     "cd_album_id": "",
+     "mini_album_id": "",
+     "data": {
+      "int2": 0,
+      "int3": 0,
+      "update_time": "",
+      "int4": 0,
+      "int0": 0,
+      "str0": "",
+      "str1": "",
+      "str2": ""
+     },
+     "album_wiki": "",
+     "vip_play_conf": {
+      "start_time": "",
+      "fnote": 0,
+      "status": 0
+     },
+     "album_ori_name": "",
+     "singers_with_anonymous": [],
+     "other_name": "",
+     "mv_ids": "",
+     "vids": "",
+     "head_magic_color": ""
+    }
+   ],
+   "ret_msg": "success!",
+   "total": 4499
+  }
+ }
+}

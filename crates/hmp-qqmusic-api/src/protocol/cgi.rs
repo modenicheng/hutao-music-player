@@ -42,6 +42,18 @@ impl CgiRequest {
         }
     }
 
+    /// 标记请求需要登录态（`musicu_request` 校验凭证）。
+    pub fn with_require_login(mut self, require: bool) -> Self {
+        self.require_login = require;
+        self
+    }
+
+    /// 设置自定义公共参数（合并进默认 comm；`override` 时完全替换）。
+    pub fn with_comm(mut self, comm: Value) -> Self {
+        self.comm = Some(comm);
+        self
+    }
+
     /// 序列化为 `req_N` 子项。
     pub fn to_req_value(&self) -> Value {
         json!({

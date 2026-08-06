@@ -4,6 +4,43 @@
 //! 反序列化使用 serde `#[serde(default)]` 容忍缺省字段。
 
 use serde::Deserialize;
+use serde_json::Value;
+
+/// 把 `null` 视为字段默认值（上游 `NoneToEmptyList`/`NoneOrZeroToEmptyStr` 的通用版）。
+///
+/// 供 `#[serde(default, deserialize_with = "crate::models::de_null_as_default")]` 使用。
+pub fn de_null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+/// 字符串字段容忍 `null` / `0` / 数字（上游 `NoneOrZeroToEmptyStr`）。
+///
+/// 接口常返回 `0` 或 `null` 表示无文本；非零数字转为字符串。
+pub fn de_str_or_zero<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let v = Value::deserialize(d)?;
+    match v {
+        Value::Null => Ok(String::new()),
+        Value::Number(n) => {
+            if n.as_i64() == Some(0) {
+                Ok(String::new())
+            } else {
+                Ok(n.to_string())
+            }
+        }
+        Value::String(s) => Ok(s),
+        other => Err(D::Error::custom(format!(
+            "expected string or zero, got {other:?}"
+        ))),
+    }
+}
 
 /// 歌手摘要（上游 `Singer`）。
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -21,7 +58,7 @@ pub struct Singer {
     #[serde(default)]
     pub title: String,
     /// 歌手类型（0=艺人，1=组合）。
-    #[serde(default, alias = "SingerType", alias = "vt")]
+    #[serde(default, rename = "type", alias = "SingerType", alias = "vt")]
     pub type_: i64,
     /// 关联用户 ID。
     #[serde(default)]
@@ -146,7 +183,7 @@ pub struct MV {
     #[serde(default)]
     pub vid: String,
     /// MV 类型。
-    #[serde(default, alias = "vt")]
+    #[serde(default, rename = "type", alias = "vt")]
     pub type_: i64,
     /// MV 名称。
     #[serde(default, alias = "mvname")]
@@ -154,6 +191,32 @@ pub struct MV {
     /// MV 展示标题。
     #[serde(default, alias = "title_main")]
     pub title: String,
+}
+
+/// 歌单或曲库目录的摘要信息（上游 `SongList`）。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SongList {
+    /// 歌单数字 ID。
+    #[serde(default, alias = "tid", alias = "dissid")]
+    pub id: i64,
+    /// 目录 ID。
+    #[serde(default, alias = "dirId")]
+    pub dirid: i64,
+    /// 歌单标题。
+    #[serde(default, alias = "dissname", alias = "dirName")]
+    pub title: String,
+    /// 歌单封面地址。
+    #[serde(default, alias = "cover", alias = "logo", alias = "picUrl")]
+    pub picurl: String,
+    /// 歌单简介。
+    #[serde(default, alias = "description")]
+    pub desc: String,
+    /// 歌曲数量。
+    #[serde(default, alias = "songNum", alias = "song_cnt")]
+    pub songnum: i64,
+    /// 播放量。
+    #[serde(default, alias = "playCnt", alias = "play_cnt")]
+    pub listennum: i64,
 }
 
 /// 歌曲基础模型（上游 `Song`）。
@@ -169,7 +232,7 @@ pub struct Song {
     #[serde(default)]
     pub name: String,
     /// 歌曲类型（1=普通歌曲，2=长音频，6=视频/直播）。
-    #[serde(default)]
+    #[serde(default, rename = "type")]
     pub type_: i64,
     /// 歌曲标题。
     #[serde(default)]

@@ -1,0 +1,1197 @@
+{
+ "code": 0,
+ "ts": 1786030195996,
+ "start_ts": 1786030195835,
+ "traceid": "2574fbb7092a9546",
+ "req_0": {
+  "code": 0,
+  "data": {
+   "ad_config": {
+    "priority": 0
+   },
+   "d_num": 0,
+   "ext": {},
+   "load_mark": -1,
+   "msg": "",
+   "prompt": "",
+   "retcode": 0,
+   "v_shelf": [
+    {
+     "abt": "",
+     "content_refresh": "",
+     "ding_switch": {
+      "Op": {
+       "CommInfo": {},
+       "Mid": "",
+       "Status": 0
+      },
+      "Status": 0
+     },
+     "expire": 604800,
+     "extra_base_info": {
+      "ExtSongIds": [],
+      "VipUiShow": {
+       "iconlist": [],
+       "nickname": {
+        "darkColor": "",
+        "lightColor": ""
+       }
+      },
+      "hippyConfig": {
+       "BundleID": "",
+       "Height": 0,
+       "Style": ""
+      }
+     },
+     "extra_info": {
+      "layout_seq": "",
+      "layout_trace": ""
+     },
+     "fb_switch": {
+      "AffirmText": "",
+      "IsOpen": 0,
+      "Ops": []
+     },
+     "feedback_opt": 0,
+     "group": 0,
+     "group_top": 0,
+     "id": 203,
+     "miscellany": {},
+     "more": {
+      "abt": "",
+      "button_type": 0,
+      "extra_info": {},
+      "id": "",
+      "jumptype": 0,
+      "pingpong": "",
+      "scheme": "",
+      "title": "",
+      "tjreport": "21_53",
+      "trace": ""
+     },
+     "pingpong": "",
+     "refresh_param": {
+      "ExtraInfo": {},
+      "LayoutSeq": "",
+      "LayoutTrace": "",
+      "ModuleID": "",
+      "Page": 0,
+      "ShelfID": ""
+     },
+     "replaceOpt": 0,
+     "style": 0,
+     "style_detail": {
+      "is_big": "0"
+     },
+     "title_content": "",
+     "title_template": "",
+     "tjreport": "21_53",
+     "trace": "",
+     "v_niche": [
+      {
+       "abt": "",
+       "bgpic": "",
+       "extra_info": {},
+       "id": 203,
+       "miscellany": {},
+       "more": {
+        "abt": "",
+        "button_type": 0,
+        "extra_info": {},
+        "id": "",
+        "jumptype": 0,
+        "pingpong": "",
+        "scheme": "",
+        "title": "",
+        "tjreport": "",
+        "trace": ""
+       },
+       "pingpong": "",
+       "style": 4,
+       "sub_style": 0,
+       "title_content": "",
+       "title_template": "",
+       "tjreport": "21_53_1",
+       "trace": "",
+       "v_card": [
+        {
+         "abt": "",
+         "card_extra_info": {
+          "PlaylistExt": [],
+          "SongList": [],
+          "Tracks": [],
+          "VipUiShow": []
+         },
+         "cnt": 1012216,
+         "cover": "http://qpic.y.qq.com/music_cover/6R1AtPGLBU3zfrVz65tFnBEwGghIetia9lGALthZK1TA1hfIgPg6HRw/300?n=1",
+         "extra_info": {
+          "tf": ""
+         },
+         "fb_switch": {
+          "AffirmText": "",
+          "IsOpen": 0,
+          "Ops": []
+         },
+         "group": 0,
+         "id": "7110294730",
+         "jumptype": 10014,
+         "miscellany": {
+          "IsTwoColumnFlow": "",
+          "bHitDiyAbt": "0",
+          "cnt_content": "101.2W 播放",
+          "dttype": "hot",
+          "fav_cnt": "9839",
+          "fav_cnt_content": "5k+",
+          "isFav": "0",
+          "layer_url": "",
+          "rcmd_reason": "",
+          "rcmdcontent": "",
+          "rcmdtemplate": "达人精选 · 暗恋心事集"
+         },
+         "overlap_card": [],
+         "pingpong": "",
+         "scheme": "",
+         "smallIcons": [],
+         "style": 0,
+         "subid": "",
+         "subtitle": "",
+         "subtype": 0,
+         "tags": [],
+         "time": 1636325379,
+         "title": "致当年暗恋的我，给现在暗恋的你",
+         "tjreport": "21_53_1_1_10014_7110294730_1216",
+         "trace": "152_0_155_155_1418_10014_7110294730_0_0_1",
+         "type": 500,
+         "v_user": []
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "abt": "",
+     "content_refresh": "",
+     "ding_switch": {
+      "Op": {
+       "CommInfo": {},
+       "Mid": "",
+       "Status": 0
+      },
+      "Status": 0
+     },
+     "expire": 604800,
+     "extra_base_info": {
+      "ExtSongIds": [],
+      "VipUiShow": {
+       "iconlist": [],
+       "nickname": {
+        "darkColor": "",
+        "lightColor": ""
+       }
+      },
+      "hippyConfig": {
+       "BundleID": "",
+       "Height": 0,
+       "Style": ""
+      }
+     },
+     "extra_info": {
+      "layout_seq": "",
+      "layout_trace": ""
+     },
+     "fb_switch": {
+      "AffirmText": "",
+      "IsOpen": 0,
+      "Ops": []
+     },
+     "feedback_opt": 0,
+     "group": 0,
+     "group_top": 0,
+     "id": 203,
+     "miscellany": {},
+     "more": {
+      "abt": "",
+      "button_type": 0,
+      "extra_info": {},
+      "id": "",
+      "jumptype": 0,
+      "pingpong": "",
+      "scheme": "",
+      "title": "",
+      "tjreport": "21_53",
+      "trace": ""
+     },
+     "pingpong": "",
+     "refresh_param": {
+      "ExtraInfo": {},
+      "LayoutSeq": "",
+      "LayoutTrace": "",
+      "ModuleID": "",
+      "Page": 0,
+      "ShelfID": ""
+     },
+     "replaceOpt": 0,
+     "style": 0,
+     "style_detail": {
+      "is_big": "0"
+     },
+     "title_content": "",
+     "title_template": "",
+     "tjreport": "21_53",
+     "trace": "",
+     "v_niche": [
+      {
+       "abt": "",
+       "bgpic": "",
+       "extra_info": {},
+       "id": 203,
+       "miscellany": {},
+       "more": {
+        "abt": "",
+        "button_type": 0,
+        "extra_info": {},
+        "id": "",
+        "jumptype": 0,
+        "pingpong": "",
+        "scheme": "",
+        "title": "",
+        "tjreport": "",
+        "trace": ""
+       },
+       "pingpong": "",
+       "style": 4,
+       "sub_style": 0,
+       "title_content": "",
+       "title_template": "",
+       "tjreport": "21_53_1",
+       "trace": "",
+       "v_card": [
+        {
+         "abt": "",
+         "card_extra_info": {
+          "PlaylistExt": [],
+          "SongList": [],
+          "Tracks": [],
+          "VipUiShow": []
+         },
+         "cnt": 1721823,
+         "cover": "http://qpic.y.qq.com/music_cover/lYiaEbscaryrFiaicJFp8euuUDkKFIqP1ZjdeT0IPpFWBFUEHwyOMV0nA/300?n=1",
+         "extra_info": {
+          "tf": ""
+         },
+         "fb_switch": {
+          "AffirmText": "",
+          "IsOpen": 0,
+          "Ops": []
+         },
+         "group": 0,
+         "id": "6929902945",
+         "jumptype": 10014,
+         "miscellany": {
+          "IsTwoColumnFlow": "",
+          "bHitDiyAbt": "0",
+          "cnt_content": "172.1W 播放",
+          "dttype": "hot",
+          "fav_cnt": "24188",
+          "fav_cnt_content": "2w+",
+          "isFav": "0",
+          "layer_url": "",
+          "rcmd_reason": "",
+          "rcmdcontent": "",
+          "rcmdtemplate": "生活方案 · 治愈一刻"
+         },
+         "overlap_card": [],
+         "pingpong": "",
+         "scheme": "",
+         "smallIcons": [],
+         "style": 0,
+         "subid": "",
+         "subtitle": "",
+         "subtype": 0,
+         "tags": [],
+         "time": 1582949559,
+         "title": "日系疗愈 · 失落时の暖心音符",
+         "tjreport": "21_53_1_1_10014_6929902945_1216",
+         "trace": "152_0_155_155_1420_10014_6929902945_0_0_1",
+         "type": 500,
+         "v_user": []
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "abt": "",
+     "content_refresh": "",
+     "ding_switch": {
+      "Op": {
+       "CommInfo": {},
+       "Mid": "",
+       "Status": 0
+      },
+      "Status": 0
+     },
+     "expire": 604800,
+     "extra_base_info": {
+      "ExtSongIds": [],
+      "VipUiShow": {
+       "iconlist": [],
+       "nickname": {
+        "darkColor": "",
+        "lightColor": ""
+       }
+      },
+      "hippyConfig": {
+       "BundleID": "",
+       "Height": 0,
+       "Style": ""
+      }
+     },
+     "extra_info": {
+      "layout_seq": "",
+      "layout_trace": ""
+     },
+     "fb_switch": {
+      "AffirmText": "",
+      "IsOpen": 0,
+      "Ops": []
+     },
+     "feedback_opt": 0,
+     "group": 0,
+     "group_top": 0,
+     "id": 203,
+     "miscellany": {},
+     "more": {
+      "abt": "",
+      "button_type": 0,
+      "extra_info": {},
+      "id": "",
+      "jumptype": 0,
+      "pingpong": "",
+      "scheme": "",
+      "title": "",
+      "tjreport": "21_53",
+      "trace": ""
+     },
+     "pingpong": "",
+     "refresh_param": {
+      "ExtraInfo": {},
+      "LayoutSeq": "",
+      "LayoutTrace": "",
+      "ModuleID": "",
+      "Page": 0,
+      "ShelfID": ""
+     },
+     "replaceOpt": 0,
+     "style": 0,
+     "style_detail": {
+      "is_big": "0"
+     },
+     "title_content": "",
+     "title_template": "",
+     "tjreport": "21_53",
+     "trace": "",
+     "v_niche": [
+      {
+       "abt": "",
+       "bgpic": "",
+       "extra_info": {},
+       "id": 203,
+       "miscellany": {},
+       "more": {
+        "abt": "",
+        "button_type": 0,
+        "extra_info": {},
+        "id": "",
+        "jumptype": 0,
+        "pingpong": "",
+        "scheme": "",
+        "title": "",
+        "tjreport": "",
+        "trace": ""
+       },
+       "pingpong": "",
+       "style": 4,
+       "sub_style": 0,
+       "title_content": "",
+       "title_template": "",
+       "tjreport": "21_53_1",
+       "trace": "",
+       "v_card": [
+        {
+         "abt": "",
+         "card_extra_info": {
+          "PlaylistExt": [],
+          "SongList": [],
+          "Tracks": [],
+          "VipUiShow": []
+         },
+         "cnt": 1145103,
+         "cover": "http://qpic.y.qq.com/music_cover/JwclnudaObJXGgJOkTPBGfQ9uLo3t5oSpib320X6aV2U5zicgrooUToA/300?n=1",
+         "extra_info": {
+          "tf": ""
+         },
+         "fb_switch": {
+          "AffirmText": "",
+          "IsOpen": 0,
+          "Ops": []
+         },
+         "group": 0,
+         "id": "7381481011",
+         "jumptype": 10014,
+         "miscellany": {
+          "IsTwoColumnFlow": "",
+          "bHitDiyAbt": "0",
+          "cnt_content": "114.5W 播放",
+          "dttype": "hot",
+          "fav_cnt": "9070",
+          "fav_cnt_content": "5k+",
+          "isFav": "0",
+          "layer_url": "",
+          "rcmd_reason": "",
+          "rcmdcontent": "",
+          "rcmdtemplate": "达人精选 · 古风作曲人"
+         },
+         "overlap_card": [],
+         "pingpong": "",
+         "scheme": "",
+         "smallIcons": [],
+         "style": 0,
+         "subid": "",
+         "subtitle": "",
+         "subtype": 0,
+         "tags": [],
+         "time": 1659375722,
+         "title": "百味是人间｜黄诗扶古风作曲集",
+         "tjreport": "21_53_1_1_10014_7381481011_1216",
+         "trace": "152_0_155_155_1422_10014_7381481011_0_0_1",
+         "type": 500,
+         "v_user": []
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "abt": "",
+     "content_refresh": "",
+     "ding_switch": {
+      "Op": {
+       "CommInfo": {},
+       "Mid": "",
+       "Status": 0
+      },
+      "Status": 0
+     },
+     "expire": 604800,
+     "extra_base_info": {
+      "ExtSongIds": [],
+      "VipUiShow": {
+       "iconlist": [],
+       "nickname": {
+        "darkColor": "",
+        "lightColor": ""
+       }
+      },
+      "hippyConfig": {
+       "BundleID": "",
+       "Height": 0,
+       "Style": ""
+      }
+     },
+     "extra_info": {
+      "layout_seq": "",
+      "layout_trace": ""
+     },
+     "fb_switch": {
+      "AffirmText": "",
+      "IsOpen": 0,
+      "Ops": []
+     },
+     "feedback_opt": 0,
+     "group": 0,
+     "group_top": 0,
+     "id": 203,
+     "miscellany": {},
+     "more": {
+      "abt": "",
+      "button_type": 0,
+      "extra_info": {},
+      "id": "",
+      "jumptype": 0,
+      "pingpong": "",
+      "scheme": "",
+      "title": "",
+      "tjreport": "21_54",
+      "trace": ""
+     },
+     "pingpong": "",
+     "refresh_param": {
+      "ExtraInfo": {},
+      "LayoutSeq": "",
+      "LayoutTrace": "",
+      "ModuleID": "",
+      "Page": 0,
+      "ShelfID": ""
+     },
+     "replaceOpt": 0,
+     "style": 0,
+     "style_detail": {
+      "is_big": "0"
+     },
+     "title_content": "",
+     "title_template": "",
+     "tjreport": "21_54",
+     "trace": "",
+     "v_niche": [
+      {
+       "abt": "",
+       "bgpic": "",
+       "extra_info": {},
+       "id": 203,
+       "miscellany": {},
+       "more": {
+        "abt": "",
+        "button_type": 0,
+        "extra_info": {},
+        "id": "",
+        "jumptype": 0,
+        "pingpong": "",
+        "scheme": "",
+        "title": "",
+        "tjreport": "",
+        "trace": ""
+       },
+       "pingpong": "",
+       "style": 7,
+       "sub_style": 0,
+       "title_content": "",
+       "title_template": "",
+       "tjreport": "21_54_1",
+       "trace": "",
+       "v_card": [
+        {
+         "abt": "",
+         "card_extra_info": {
+          "PlaylistExt": [],
+          "SongList": [],
+          "Tracks": [],
+          "VipUiShow": []
+         },
+         "cnt": 4653797,
+         "cover": "https://y.gtimg.cn/music/photo_new/T023R750x750M000002aVwuz3KPEiO.jpg",
+         "extra_info": {
+          "tf": ""
+         },
+         "fb_switch": {
+          "AffirmText": "",
+          "IsOpen": 0,
+          "Ops": []
+         },
+         "group": 0,
+         "id": "4010210",
+         "jumptype": 10012,
+         "miscellany": {
+          "aspect_state": "0",
+          "dttype": "hot",
+          "duration": "327",
+          "rcmd_reason": "",
+          "video_icon_type": "0"
+         },
+         "overlap_card": [],
+         "pingpong": "",
+         "scheme": "",
+         "smallIcons": [],
+         "style": 0,
+         "subid": "0101sUL43nxa0K",
+         "subtitle": "惊艳翻唱",
+         "subtype": 311,
+         "tags": [],
+         "time": 1534219564,
+         "title": "罕见！周杰伦弹奏古筝演唱《菊花台》 全场被杰伦惊艳到不行！",
+         "tjreport": "21_54_1_1_10048_4010210_1216",
+         "trace": "",
+         "type": 300,
+         "v_user": []
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "abt": "",
+     "content_refresh": "",
+     "ding_switch": {
+      "Op": {
+       "CommInfo": {},
+       "Mid": "",
+       "Status": 0
+      },
+      "Status": 0
+     },
+     "expire": 604800,
+     "extra_base_info": {
+      "ExtSongIds": [],
+      "VipUiShow": {
+       "iconlist": [],
+       "nickname": {
+        "darkColor": "",
+        "lightColor": ""
+       }
+      },
+      "hippyConfig": {
+       "BundleID": "",
+       "Height": 0,
+       "Style": ""
+      }
+     },
+     "extra_info": {
+      "layout_seq": "",
+      "layout_trace": ""
+     },
+     "fb_switch": {
+      "AffirmText": "",
+      "IsOpen": 0,
+      "Ops": []
+     },
+     "feedback_opt": 0,
+     "group": 0,
+     "group_top": 0,
+     "id": 203,
+     "miscellany": {},
+     "more": {
+      "abt": "",
+      "button_type": 0,
+      "extra_info": {},
+      "id": "",
+      "jumptype": 0,
+      "pingpong": "",
+      "scheme": "",
+      "title": "",
+      "tjreport": "21_54",
+      "trace": ""
+     },
+     "pingpong": "",
+     "refresh_param": {
+      "ExtraInfo": {},
+      "LayoutSeq": "",
+      "LayoutTrace": "",
+      "ModuleID": "",
+      "Page": 0,
+      "ShelfID": ""
+     },
+     "replaceOpt": 0,
+     "style": 0,
+     "style_detail": {
+      "is_big": "0"
+     },
+     "title_content": "",
+     "title_template": "",
+     "tjreport": "21_54",
+     "trace": "",
+     "v_niche": [
+      {
+       "abt": "",
+       "bgpic": "",
+       "extra_info": {},
+       "id": 203,
+       "miscellany": {},
+       "more": {
+        "abt": "",
+        "button_type": 0,
+        "extra_info": {},
+        "id": "",
+        "jumptype": 0,
+        "pingpong": "",
+        "scheme": "",
+        "title": "",
+        "tjreport": "",
+        "trace": ""
+       },
+       "pingpong": "",
+       "style": 7,
+       "sub_style": 0,
+       "title_content": "",
+       "title_template": "",
+       "tjreport": "21_54_1",
+       "trace": "",
+       "v_card": [
+        {
+         "abt": "",
+         "card_extra_info": {
+          "PlaylistExt": [],
+          "SongList": [],
+          "Tracks": [],
+          "VipUiShow": []
+         },
+         "cnt": 684124,
+         "cover": "https://y.gtimg.cn/music/photo_new/T023R750x750M000003GzJ7737mrIi.jpg",
+         "extra_info": {
+          "tf": ""
+         },
+         "fb_switch": {
+          "AffirmText": "",
+          "IsOpen": 0,
+          "Ops": []
+         },
+         "group": 0,
+         "id": "16134",
+         "jumptype": 10012,
+         "miscellany": {
+          "aspect_state": "0",
+          "dttype": "hot",
+          "duration": "239",
+          "rcmd_reason": "",
+          "video_icon_type": "0"
+         },
+         "overlap_card": [],
+         "pingpong": "",
+         "scheme": "",
+         "smallIcons": [],
+         "style": 0,
+         "subid": "012mbiYP30sDfe",
+         "subtitle": "就是爱音乐",
+         "subtype": 311,
+         "tags": [],
+         "time": 1529548495,
+         "title": "【BLACKPINK】不要离开，just stay~<FOREVER YOUNG> 练习室舞蹈",
+         "tjreport": "21_54_1_1_10048_16134_1216",
+         "trace": "",
+         "type": 300,
+         "v_user": []
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "abt": "",
+     "content_refresh": "",
+     "ding_switch": {
+      "Op": {
+       "CommInfo": {},
+       "Mid": "",
+       "Status": 0
+      },
+      "Status": 0
+     },
+     "expire": 604800,
+     "extra_base_info": {
+      "ExtSongIds": [],
+      "VipUiShow": {
+       "iconlist": [],
+       "nickname": {
+        "darkColor": "",
+        "lightColor": ""
+       }
+      },
+      "hippyConfig": {
+       "BundleID": "",
+       "Height": 0,
+       "Style": ""
+      }
+     },
+     "extra_info": {
+      "layout_seq": "",
+      "layout_trace": ""
+     },
+     "fb_switch": {
+      "AffirmText": "",
+      "IsOpen": 0,
+      "Ops": []
+     },
+     "feedback_opt": 0,
+     "group": 0,
+     "group_top": 0,
+     "id": 203,
+     "miscellany": {},
+     "more": {
+      "abt": "",
+      "button_type": 0,
+      "extra_info": {},
+      "id": "",
+      "jumptype": 0,
+      "pingpong": "",
+      "scheme": "",
+      "title": "",
+      "tjreport": "21_54",
+      "trace": ""
+     },
+     "pingpong": "",
+     "refresh_param": {
+      "ExtraInfo": {},
+      "LayoutSeq": "",
+      "LayoutTrace": "",
+      "ModuleID": "",
+      "Page": 0,
+      "ShelfID": ""
+     },
+     "replaceOpt": 0,
+     "style": 0,
+     "style_detail": {
+      "is_big": "0"
+     },
+     "title_content": "",
+     "title_template": "",
+     "tjreport": "21_54",
+     "trace": "",
+     "v_niche": [
+      {
+       "abt": "",
+       "bgpic": "",
+       "extra_info": {},
+       "id": 203,
+       "miscellany": {},
+       "more": {
+        "abt": "",
+        "button_type": 0,
+        "extra_info": {},
+        "id": "",
+        "jumptype": 0,
+        "pingpong": "",
+        "scheme": "",
+        "title": "",
+        "tjreport": "",
+        "trace": ""
+       },
+       "pingpong": "",
+       "style": 7,
+       "sub_style": 0,
+       "title_content": "",
+       "title_template": "",
+       "tjreport": "21_54_1",
+       "trace": "",
+       "v_card": [
+        {
+         "abt": "",
+         "card_extra_info": {
+          "PlaylistExt": [],
+          "SongList": [],
+          "Tracks": [],
+          "VipUiShow": []
+         },
+         "cnt": 574717,
+         "cover": "http://y.gtimg.cn/music/photo_new/T023R750x750M000003CEuU82sUvfw.jpg",
+         "extra_info": {
+          "tf": ""
+         },
+         "fb_switch": {
+          "AffirmText": "",
+          "IsOpen": 0,
+          "Ops": []
+         },
+         "group": 0,
+         "id": "19092",
+         "jumptype": 10012,
+         "miscellany": {
+          "aspect_state": "0",
+          "dttype": "hot",
+          "duration": "231",
+          "rcmd_reason": "",
+          "video_icon_type": "0"
+         },
+         "overlap_card": [],
+         "pingpong": "",
+         "scheme": "",
+         "smallIcons": [],
+         "style": 0,
+         "subid": "010x8Yeb38ZeT1",
+         "subtitle": "蜜蜂哔哔哔",
+         "subtype": 311,
+         "tags": [],
+         "time": 1531821765,
+         "title": "火星哥热单《Finesse》配上超酷舞蹈，简直帅炸！！！",
+         "tjreport": "21_54_1_1_10048_19092_1216",
+         "trace": "",
+         "type": 300,
+         "v_user": []
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "abt": "",
+     "content_refresh": "",
+     "ding_switch": {
+      "Op": {
+       "CommInfo": {},
+       "Mid": "",
+       "Status": 0
+      },
+      "Status": 0
+     },
+     "expire": 604800,
+     "extra_base_info": {
+      "ExtSongIds": [],
+      "VipUiShow": {
+       "iconlist": [],
+       "nickname": {
+        "darkColor": "",
+        "lightColor": ""
+       }
+      },
+      "hippyConfig": {
+       "BundleID": "",
+       "Height": 0,
+       "Style": ""
+      }
+     },
+     "extra_info": {
+      "layout_seq": "",
+      "layout_trace": ""
+     },
+     "fb_switch": {
+      "AffirmText": "",
+      "IsOpen": 0,
+      "Ops": []
+     },
+     "feedback_opt": 0,
+     "group": 0,
+     "group_top": 0,
+     "id": 203,
+     "miscellany": {},
+     "more": {
+      "abt": "",
+      "button_type": 0,
+      "extra_info": {},
+      "id": "",
+      "jumptype": 0,
+      "pingpong": "",
+      "scheme": "",
+      "title": "",
+      "tjreport": "21_54",
+      "trace": ""
+     },
+     "pingpong": "",
+     "refresh_param": {
+      "ExtraInfo": {},
+      "LayoutSeq": "",
+      "LayoutTrace": "",
+      "ModuleID": "",
+      "Page": 0,
+      "ShelfID": ""
+     },
+     "replaceOpt": 0,
+     "style": 0,
+     "style_detail": {
+      "is_big": "0"
+     },
+     "title_content": "",
+     "title_template": "",
+     "tjreport": "21_54",
+     "trace": "",
+     "v_niche": [
+      {
+       "abt": "",
+       "bgpic": "",
+       "extra_info": {},
+       "id": 203,
+       "miscellany": {},
+       "more": {
+        "abt": "",
+        "button_type": 0,
+        "extra_info": {},
+        "id": "",
+        "jumptype": 0,
+        "pingpong": "",
+        "scheme": "",
+        "title": "",
+        "tjreport": "",
+        "trace": ""
+       },
+       "pingpong": "",
+       "style": 7,
+       "sub_style": 0,
+       "title_content": "",
+       "title_template": "",
+       "tjreport": "21_54_1",
+       "trace": "",
+       "v_card": [
+        {
+         "abt": "",
+         "card_extra_info": {
+          "PlaylistExt": [],
+          "SongList": [],
+          "Tracks": [],
+          "VipUiShow": []
+         },
+         "cnt": 708382,
+         "cover": "https://y.gtimg.cn/music/photo_new/T023R750x750M000002vbwbM3M2xAQ.jpg",
+         "extra_info": {
+          "tf": ""
+         },
+         "fb_switch": {
+          "AffirmText": "",
+          "IsOpen": 0,
+          "Ops": []
+         },
+         "group": 0,
+         "id": "6957813",
+         "jumptype": 10012,
+         "miscellany": {
+          "aspect_state": "0",
+          "dttype": "hot",
+          "duration": "242",
+          "rcmd_reason": "",
+          "video_icon_type": "0"
+         },
+         "overlap_card": [],
+         "pingpong": "",
+         "scheme": "",
+         "smallIcons": [],
+         "style": 0,
+         "subid": "013w1Xjp4NbuBy",
+         "subtitle": "木亦舟",
+         "subtype": 311,
+         "tags": [],
+         "time": 1554806232,
+         "title": "《伤离别》",
+         "tjreport": "21_54_1_1_10048_6957813_1216",
+         "trace": "",
+         "type": 300,
+         "v_user": []
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "abt": "",
+     "content_refresh": "",
+     "ding_switch": {
+      "Op": {
+       "CommInfo": {},
+       "Mid": "",
+       "Status": 0
+      },
+      "Status": 0
+     },
+     "expire": 30,
+     "extra_base_info": {
+      "ExtSongIds": [],
+      "VipUiShow": {
+       "iconlist": [],
+       "nickname": {
+        "darkColor": "",
+        "lightColor": ""
+       }
+      },
+      "hippyConfig": {
+       "BundleID": "",
+       "Height": 0,
+       "Style": ""
+      }
+     },
+     "extra_info": {},
+     "fb_switch": {
+      "AffirmText": "",
+      "IsOpen": 0,
+      "Ops": []
+     },
+     "feedback_opt": 0,
+     "group": 0,
+     "group_top": 0,
+     "id": 302,
+     "miscellany": {},
+     "more": {
+      "abt": "",
+      "button_type": 0,
+      "extra_info": {},
+      "id": "",
+      "jumptype": 0,
+      "pingpong": "",
+      "scheme": "",
+      "title": "",
+      "tjreport": "",
+      "trace": ""
+     },
+     "pingpong": "",
+     "refresh_param": {
+      "ExtraInfo": {},
+      "LayoutSeq": "",
+      "LayoutTrace": "",
+      "ModuleID": "",
+      "Page": 0,
+      "ShelfID": ""
+     },
+     "replaceOpt": 0,
+     "style": 0,
+     "style_detail": {},
+     "title_content": "",
+     "title_template": "",
+     "tjreport": "",
+     "trace": "",
+     "v_niche": [
+      {
+       "abt": "",
+       "bgpic": "",
+       "extra_info": {},
+       "id": 203,
+       "miscellany": {},
+       "more": {
+        "abt": "",
+        "button_type": 0,
+        "extra_info": {},
+        "id": "",
+        "jumptype": 0,
+        "pingpong": "",
+        "scheme": "",
+        "title": "",
+        "tjreport": "",
+        "trace": ""
+       },
+       "pingpong": "",
+       "style": 500,
+       "sub_style": 0,
+       "title_content": "",
+       "title_template": "",
+       "tjreport": "",
+       "trace": "",
+       "v_card": [
+        {
+         "abt": "",
+         "card_extra_info": {
+          "PlaylistExt": [],
+          "SongList": [],
+          "Tracks": [],
+          "VipUiShow": []
+         },
+         "cnt": 0,
+         "cover": "https://y.gtimg.cn/music/common/upload/t_cm3_photo_publish/1332591.png",
+         "extra_info": {
+          "abt": ""
+         },
+         "fb_switch": {
+          "AffirmText": "",
+          "IsOpen": 0,
+          "Ops": []
+         },
+         "group": 0,
+         "id": "https://y.qq.com/m/client/personal_fav_setting/index.html",
+         "jumptype": 3001,
+         "miscellany": {},
+         "overlap_card": [],
+         "pingpong": "",
+         "scheme": "",
+         "smallIcons": [],
+         "style": 0,
+         "subid": "https://y.qq.com/m/client/personal_fav_setting_cjs/index.html",
+         "subtitle": "",
+         "subtype": 950,
+         "tags": [],
+         "time": 0,
+         "title": "",
+         "tjreport": "",
+         "trace": "",
+         "type": -1,
+         "v_user": []
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

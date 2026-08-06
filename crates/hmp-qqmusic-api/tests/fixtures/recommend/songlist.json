@@ -1,0 +1,2037 @@
+{
+ "code": 0,
+ "ts": 1786030061408,
+ "start_ts": 1786030061190,
+ "traceid": "40e21d0e16527816",
+ "req_0": {
+  "code": 0,
+  "data": {
+   "Msg": "",
+   "List": [
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "511074779",
+        "encrypt_uin": "7K65oeSP7iSq",
+        "nick": "左耳先森",
+        "avatar": "https://pic6.y.qq.com/qqmusic/avatar/374b36356f65535037695371-1683271920/140",
+        "identity": 2,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312597.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9282300617,
+       "dirid": 141,
+       "title": "在耳机另一端，才是情歌的加分项",
+       "desc": "每次跟crush共同听歌时，总感觉每首歌都有了与平时不一样的味道，那是因为耳机另一端的那个ta，才是每首情歌的加分项啊.<br><br>在和你一起听歌的每个瞬间，时间都仿佛静止，整个世界只有你我，以及耳机中各自响起却又同频的音乐…",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "http://qpic.y.qq.com/music_cover/6zW492Pic3UYb3icTfZXgxQ9uEOUH8ibfGcxGicfF7SPKU7LDiaZxgGHdTA/300?n=1",
+        "medium_url": "http://qpic.y.qq.com/music_cover/6zW492Pic3UYb3icTfZXgxQ9uEOUH8ibfGcxGicfF7SPKU7LDiaZxgGHdTA/600?n=1",
+        "big_url": "http://qpic.y.qq.com/music_cover/6zW492Pic3UYb3icTfZXgxQ9uEOUH8ibfGcxGicfF7SPKU7LDiaZxgGHdTA/600?n=1",
+        "default_url": "http://qpic.y.qq.com/music_cover/6zW492Pic3UYb3icTfZXgxQ9uEOUH8ibfGcxGicfF7SPKU7LDiaZxgGHdTA/300?n=1",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 165,
+         "name": "国语"
+        },
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 148,
+         "name": "情歌"
+        }
+       ],
+       "fav_cnt": 24347,
+       "play_cnt": 13558387,
+       "create_time": 1721721222,
+       "censor_time": 0,
+       "modify_time": 1785502554,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 117,
+       "tjreport": "30_-1_2_0_10014_9282300617",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "干预",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "10055479",
+        "encrypt_uin": "oKnz7K4P7iE*",
+        "nick": "不梨🍐",
+        "avatar": "http://y.gtimg.cn/music/photo_new/T017R300x300M000000F33C93jtseO.jpg",
+        "identity": 2,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312597.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9480382160,
+       "dirid": 135,
+       "title": "你不碰爱情，哪懂白月光的杀伤力",
+       "desc": "得不到的是白月光，久了的是朱砂痣，腻了的是地上霜，后来我终于知道心头的白月光，照不见心里的朱砂痣，白月光照耀时，你才想起她的好…<br><br>你自以为的地上霜，也曾是别人的白月光",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "http://qpic.y.qq.com/music_cover/thfLhcllFYp1PPRzdD0S1MkK2hFl330EBN6WkQ2xcdxcnajwZmAkcg/300?n=1",
+        "medium_url": "http://qpic.y.qq.com/music_cover/thfLhcllFYp1PPRzdD0S1MkK2hFl330EBN6WkQ2xcdxcnajwZmAkcg/600?n=1",
+        "big_url": "http://qpic.y.qq.com/music_cover/thfLhcllFYp1PPRzdD0S1MkK2hFl330EBN6WkQ2xcdxcnajwZmAkcg/600?n=1",
+        "default_url": "http://qpic.y.qq.com/music_cover/thfLhcllFYp1PPRzdD0S1MkK2hFl330EBN6WkQ2xcdxcnajwZmAkcg/300?n=1",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 148,
+         "name": "情歌"
+        },
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 165,
+         "name": "国语"
+        }
+       ],
+       "fav_cnt": 34480,
+       "play_cnt": 19877674,
+       "create_time": 1745315692,
+       "censor_time": 0,
+       "modify_time": 1785764088,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 123,
+       "tjreport": "30_-1_2_1_10014_9480382160",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "干预",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "2551522411",
+        "encrypt_uin": "ow4koK4Aowv5ov**",
+        "nick": "Tiffany蒂芙尼",
+        "avatar": "http://y.gtimg.cn/music/common/upload/t_celebrity_certification/4438624.jpg",
+        "identity": 1,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312624.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9752093366,
+       "dirid": 2,
+       "title": "爱是火彩：致这样长大的我们",
+       "desc": "爱是火彩——这是Tiffany今年七夕给出的答案。而郑秀文用三十年，把这句话唱进了我们的人生里。\n钻石经由切割折射出火彩；生命历经岁月琢磨，因爱而璀璨。少女时懵懂看向世界的目光，天后时舞台上从容的自信，高山低谷中不曾退却的坚韧，到如今回望时一句“所有经历都是祝福”的坦然……时光打磨出了无数个人生的切面，当爱穿透其间，便绽放成了她生命的火彩。\n本期Billboard公告牌金耳朵品质私藏歌单，携手TIFFANY&CO.特别企划，跟随郑秀文的人生脉络，点亮生命的火彩。",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/ow4koK4Aowv5ov/20e15/d76b09e182cf9bee50ca07ae9a51cb02c7e78528_d5060.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/ow4koK4Aowv5ov/20e15/d76b09e182cf9bee50ca07ae9a51cb02c7e78528_d5060.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/ow4koK4Aowv5ov/20e15/d76b09e182cf9bee50ca07ae9a51cb02c7e78528_d5060.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/ow4koK4Aowv5ov/20e15/d76b09e182cf9bee50ca07ae9a51cb02c7e78528_d5060.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 166,
+         "name": "粤语"
+        }
+       ],
+       "fav_cnt": 2592,
+       "play_cnt": 3707826,
+       "create_time": 1784866642,
+       "censor_time": 0,
+       "modify_time": 1784873440,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 0,
+       "tjreport": "30_-1_2_2_10014_9752093366",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {},
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": false,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "干预",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "3434929024",
+        "encrypt_uin": "oivi7eEANKnA7n**",
+        "nick": "我觉得阔以啊",
+        "avatar": "http://thirdqq.qlogo.cn/g?b=sdk&k=nfUMhyzqSIu17PA6FDaJ9Q&s=140&t=1573631340",
+        "identity": 2,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312597.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 7286145031,
+       "dirid": 460,
+       "title": "就这样牵着你的手，慢慢往前走",
+       "desc": "就这样牵着你的手，<br><br>慢慢的往前走。<br><br>走过一春又一秋，<br><br>直到皱纹爬满额头。",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "http://qpic.y.qq.com/music_cover/bhGSB1hd97u4TgzeN2T7MRx7H0o8CJvsA0Q6mhNhjq6Duic5zIWWfvQ/300?n=1",
+        "medium_url": "http://qpic.y.qq.com/music_cover/bhGSB1hd97u4TgzeN2T7MRx7H0o8CJvsA0Q6mhNhjq6Duic5zIWWfvQ/600?n=1",
+        "big_url": "http://qpic.y.qq.com/music_cover/bhGSB1hd97u4TgzeN2T7MRx7H0o8CJvsA0Q6mhNhjq6Duic5zIWWfvQ/600?n=1",
+        "default_url": "http://qpic.y.qq.com/music_cover/bhGSB1hd97u4TgzeN2T7MRx7H0o8CJvsA0Q6mhNhjq6Duic5zIWWfvQ/300?n=1",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": true
+       },
+       "v_tag": [
+        {
+         "id": 148,
+         "name": "情歌"
+        },
+        {
+         "id": 165,
+         "name": "国语"
+        },
+        {
+         "id": 146,
+         "name": "网络歌曲"
+        }
+       ],
+       "fav_cnt": 438,
+       "play_cnt": 233299,
+       "create_time": 1572920672,
+       "censor_time": 0,
+       "modify_time": 1785489516,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 47,
+       "tjreport": "30_-1_2_3_10014_7286145031",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "1"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "干预",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "498877906",
+        "encrypt_uin": "7eEFNeSlNKns",
+        "nick": "今晚打老虎",
+        "avatar": "http://y.gtimg.cn/music/photo_new/T001R500x500M000000MSNk70EmoGs_6.jpg",
+        "identity": 3,
+        "icon": "https://y.qq.com/music/common/upload/t_user_profile/4064595.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 7523322917,
+       "dirid": 111,
+       "title": "抖音封神热歌｜火爆全网瞬间心动",
+       "desc": "抖音上超级热门的歌曲，每一首都很好听。精心收集整理,希望你会喜欢。\n    \n歌单会持续更新。",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/7eEFNeSlNKns/1bed9/7e30e96040467202c96282353d994a144ea6df02_9a620.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/7eEFNeSlNKns/1bed9/7e30e96040467202c96282353d994a144ea6df02_9a620.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/7eEFNeSlNKns/1bed9/7e30e96040467202c96282353d994a144ea6df02_9a620.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/7eEFNeSlNKns/1bed9/7e30e96040467202c96282353d994a144ea6df02_9a620.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 141,
+         "name": "KTV热歌"
+        },
+        {
+         "id": 85,
+         "name": "开车"
+        },
+        {
+         "id": 6,
+         "name": "流行"
+        }
+       ],
+       "fav_cnt": 38076,
+       "play_cnt": 49553270,
+       "create_time": 1586919059,
+       "censor_time": 0,
+       "modify_time": 1785514312,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 329,
+       "tjreport": "30_-1_2_4_10014_7523322917",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "干预",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "3434929024",
+        "encrypt_uin": "oivi7eEANKnA7n**",
+        "nick": "我觉得阔以啊",
+        "avatar": "http://thirdqq.qlogo.cn/g?b=sdk&k=nfUMhyzqSIu17PA6FDaJ9Q&s=140&t=1573631340",
+        "identity": 2,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312597.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 7286145311,
+       "dirid": 509,
+       "title": "伤感 · 点火燃烧这该死的爱情",
+       "desc": "伤心并没有用，如何让自己好好地生活才最重要。爱情虽美，却不是生活的全部：天长地久，海枯石烂的爱情微乎其微；属于你的，一定在某一个地方等着你的出现。",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "http://qpic.y.qq.com/music_cover/bhGSB1hd97u4TgzeN2T7MfBOTNhIKP63AhUlDfN5Z6icuAy9en9zkRw/300?n=1",
+        "medium_url": "http://qpic.y.qq.com/music_cover/bhGSB1hd97u4TgzeN2T7MfBOTNhIKP63AhUlDfN5Z6icuAy9en9zkRw/600?n=1",
+        "big_url": "http://qpic.y.qq.com/music_cover/bhGSB1hd97u4TgzeN2T7MfBOTNhIKP63AhUlDfN5Z6icuAy9en9zkRw/600?n=1",
+        "default_url": "http://qpic.y.qq.com/music_cover/bhGSB1hd97u4TgzeN2T7MfBOTNhIKP63AhUlDfN5Z6icuAy9en9zkRw/300?n=1",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": true
+       },
+       "v_tag": [
+        {
+         "id": 165,
+         "name": "国语"
+        },
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 52,
+         "name": "伤感"
+        }
+       ],
+       "fav_cnt": 1201,
+       "play_cnt": 742214,
+       "create_time": 1572920687,
+       "censor_time": 0,
+       "modify_time": 1785488980,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 57,
+       "tjreport": "30_-1_2_5_10014_7286145311",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "1"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "干预",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "1846484296",
+        "encrypt_uin": "oKcP7wvF7e-q7c**",
+        "nick": "燕尾蝶",
+        "avatar": "https://pic6.y.qq.com/qqmusic/avatar/6f4b63503777764637652d7137632a2a-1740561435/140",
+        "identity": 2,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312597.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9494498559,
+       "dirid": 23,
+       "title": "时代少年团「加冠礼」海口演唱会",
+       "desc": "2025年5月3日&4日 中国海口市五源河体育场<br>时隔两年，时代少年团再次来到了海口。彼时的少年们刚踏上「理想之途」，实现了与粉丝朋友们见面的盛大愿望。<br>TNT IN TWENTIES，作为TNT的最新注解，少年们进入了人生的新阶段。伴随成长而来的是更多的责任与担当，我们也在一次次的会面里实现着自我挑战与突破。<br>—— 在这「冠岁」之际，少年们会继续互相扶持，也将与我们携手共进。 ",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "http://qpic.y.qq.com/music_cover/f4NvHicb2uE6LWat7yAbpMYSqpibhAa5dD3xuNtV9QpdRH9XnmbO08hQ/300?n=1",
+        "medium_url": "http://qpic.y.qq.com/music_cover/f4NvHicb2uE6LWat7yAbpMYSqpibhAa5dD3xuNtV9QpdRH9XnmbO08hQ/600?n=1",
+        "big_url": "http://qpic.y.qq.com/music_cover/f4NvHicb2uE6LWat7yAbpMYSqpibhAa5dD3xuNtV9QpdRH9XnmbO08hQ/600?n=1",
+        "default_url": "http://qpic.y.qq.com/music_cover/f4NvHicb2uE6LWat7yAbpMYSqpibhAa5dD3xuNtV9QpdRH9XnmbO08hQ/300?n=1",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 197,
+         "name": "现场音乐"
+        },
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 165,
+         "name": "国语"
+        }
+       ],
+       "fav_cnt": 4425,
+       "play_cnt": 514478,
+       "create_time": 1747118569,
+       "censor_time": 0,
+       "modify_time": 1747622255,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 38,
+       "tjreport": "30_-1_2_6_10014_9494498559",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "3349235914",
+        "encrypt_uin": "oioPNK-i7KE57n**",
+        "nick": "音乐推",
+        "avatar": "http://thirdqq.qlogo.cn/g?b=sdk&k=wTDLbo8JSxQTtr2YicEYO3w&kti=aKW7shHyHcI&s=140&t=1755691725",
+        "identity": 0,
+        "icon": "",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9563730925,
+       "dirid": 1,
+       "title": "抖音歌曲最火的歌（全网热搜）",
+       "desc": "抖音歌曲最火的歌，没有之一，只有唯一。<br>本期歌单的所有歌曲，都为小编精挑细选后呈现给大家的。希望喜欢的小伙伴收藏聆听，多多留言！",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/oioPNK-i7KE57n/150f0/56a7825283073532641723e4550d348edbea4e52_2b624e.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/oioPNK-i7KE57n/150f0/56a7825283073532641723e4550d348edbea4e52_2b624e.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/oioPNK-i7KE57n/150f0/56a7825283073532641723e4550d348edbea4e52_2b624e.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/oioPNK-i7KE57n/150f0/56a7825283073532641723e4550d348edbea4e52_2b624e.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 199,
+         "name": "背景音乐"
+        },
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 165,
+         "name": "国语"
+        }
+       ],
+       "fav_cnt": 9504,
+       "play_cnt": 15541176,
+       "create_time": 1755821268,
+       "censor_time": 0,
+       "modify_time": 1781144538,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 411,
+       "tjreport": "30_-1_2_7_10014_9563730925",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "418704042",
+        "encrypt_uin": "7e6F7inPoevA",
+        "nick": "QQ音乐·助眠减压俱乐部",
+        "avatar": "http://y.gtimg.cn/music/common/upload/t_celebrity_certification/4505080.jpg",
+        "identity": 1,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312624.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9500362286,
+       "dirid": 131,
+       "title": "雨声助眠：白噪音哄睡，深度催眠",
+       "desc": "拯救失眠的温柔雨夜：春日细雨，夏日密雨，秋冬寒雨……闭上眼睛，让任雨水冲刷烦恼，让自然抚平焦虑，放松入睡",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/7e6F7inPoevA/1346f/a94c53c9b914bcc86b52e350b7e970b260535e8f_26c9d5.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/7e6F7inPoevA/1346f/a94c53c9b914bcc86b52e350b7e970b260535e8f_26c9d5.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/7e6F7inPoevA/1346f/a94c53c9b914bcc86b52e350b7e970b260535e8f_26c9d5.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/7e6F7inPoevA/1346f/a94c53c9b914bcc86b52e350b7e970b260535e8f_26c9d5.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 15,
+         "name": "轻音乐"
+        },
+        {
+         "id": 122,
+         "name": "安静"
+        },
+        {
+         "id": 116,
+         "name": "治愈"
+        }
+       ],
+       "fav_cnt": 13211,
+       "play_cnt": 18222734,
+       "create_time": 1747907412,
+       "censor_time": 0,
+       "modify_time": 1751510590,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 18,
+       "tjreport": "30_-1_2_8_10014_9500362286",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "1649239098",
+        "encrypt_uin": "oKCPNK-iNKnqNn**",
+        "nick": "MKMS",
+        "avatar": "http://y.gtimg.cn/music/photo_new/T001R500x500M000001IHUH4422GJh_33.jpg",
+        "identity": 3,
+        "icon": "https://y.qq.com/music/common/upload/t_user_profile/4064595.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9562579769,
+       "dirid": 717,
+       "title": "#越听越上头 FUNK发烧友集结地",
+       "desc": "越听越上头？不，是FUNK早已钻进骨头缝，把每个细胞都调成了同个频率。发烧友们，该回家了。",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/oKCPNK-iNKnqNn/14ff2/25d8e7009fc6bcc6108effbc82807a7aa43354eb_42bad1.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/oKCPNK-iNKnqNn/14ff2/25d8e7009fc6bcc6108effbc82807a7aa43354eb_42bad1.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/oKCPNK-iNKnqNn/14ff2/25d8e7009fc6bcc6108effbc82807a7aa43354eb_42bad1.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/oKCPNK-iNKnqNn/14ff2/25d8e7009fc6bcc6108effbc82807a7aa43354eb_42bad1.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 24,
+         "name": "电子"
+        },
+        {
+         "id": 167,
+         "name": "英语"
+        },
+        {
+         "id": 126,
+         "name": "宣泄"
+        }
+       ],
+       "fav_cnt": 58190,
+       "play_cnt": 10094050,
+       "create_time": 1755667984,
+       "censor_time": 0,
+       "modify_time": 1785840978,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 238,
+       "tjreport": "30_-1_2_9_10014_9562579769",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "3235152633",
+        "encrypt_uin": "oi-i7K6kowCioz**",
+        "nick": "新歌炖大鹅",
+        "avatar": "http://y.gtimg.cn/music/common/upload/t_celebrity_certification/4143535.png",
+        "identity": 1,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312624.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9537643599,
+       "dirid": 48,
+       "title": "K歌之王 | 陈奕迅0727生日快乐",
+       "desc": "他是“K歌之王”，是“浮夸”的舞台灵魂，更是唱透人心的“孤独患者”。30年音乐路，陈奕迅用一首首金曲刻下时代印记。",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/oi-i7K6kowCioz/20f61/bf6c7d87fc9a1926899c343f4799fc2aa3477691_36b2d.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/oi-i7K6kowCioz/20f61/bf6c7d87fc9a1926899c343f4799fc2aa3477691_36b2d.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/oi-i7K6kowCioz/20f61/bf6c7d87fc9a1926899c343f4799fc2aa3477691_36b2d.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/oi-i7K6kowCioz/20f61/bf6c7d87fc9a1926899c343f4799fc2aa3477691_36b2d.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 166,
+         "name": "粤语"
+        },
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 165,
+         "name": "国语"
+        }
+       ],
+       "fav_cnt": 6687,
+       "play_cnt": 2143108,
+       "create_time": 1752567907,
+       "censor_time": 0,
+       "modify_time": 1785073071,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 55,
+       "tjreport": "30_-1_2_10_10014_9537643599",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "1870692409",
+        "encrypt_uin": "oKcloeCqowvzNv**",
+        "nick": "Stereolab",
+        "avatar": "https://pic6.y.qq.com/qqmusic/avatar/6f4b636c6f6543716f77767a4e762a2a-1770630094/140",
+        "identity": 2,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312597.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9661629102,
+       "dirid": 144,
+       "title": "抖音热门歌曲：火爆全网的旋律",
+       "desc": "刷抖音总被BGM打动却不知道歌名？本歌单持续更新抖音最热门的歌曲，总有一首打动你的心❤️",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/oKcloeCqowvzNv/1b304/6806573cfcf9e77500def13fbb068896a23b619b_aad58.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/oKcloeCqowvzNv/1b304/6806573cfcf9e77500def13fbb068896a23b619b_aad58.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/oKcloeCqowvzNv/1b304/6806573cfcf9e77500def13fbb068896a23b619b_aad58.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/oKcloeCqowvzNv/1b304/6806573cfcf9e77500def13fbb068896a23b619b_aad58.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 165,
+         "name": "国语"
+        }
+       ],
+       "fav_cnt": 20618,
+       "play_cnt": 33047407,
+       "create_time": 1770650659,
+       "censor_time": 0,
+       "modify_time": 1786000740,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 121,
+       "tjreport": "30_-1_2_11_10014_9661629102",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "1152921504614495060",
+        "encrypt_uin": "oK6kowEAoK4z7eC57evq7Knson**",
+        "nick": "音乐能量站",
+        "avatar": "https://pic6.y.qq.com/qqmusic/avatar/6f4b366b6f7745416f4b347a3765433537657671374b6e736f6e2a2a-1721310541/140",
+        "identity": 1,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312624.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9575994634,
+       "dirid": 825,
+       "title": "纪念于朦胧｜朦胧之境的光影旋律",
+       "desc": "于朦胧（Alan Yu），1988年6月15日出生于新疆乌鲁木齐市，中国内地男歌手、演员、MV导演，毕业于北京演艺专修学院。他因2013年参加《快乐男声》获得全国第十名而正式进入演艺圈，此后逐渐将事业重心转向影视表演，凭借《太子妃升职记》、《三生三世十里桃花》等剧积累了大量人气。2025年9月11日，工作室发出官方通告确认于朦胧于北京意外坠楼去世，年仅37岁。<br>怀着沉痛的心情，我们在音乐中纪念这位独一无二的存在。愿逝者安息，生者坚强。<br>穿梭于演员与歌手的双重身份，于朦胧用声音勾勒角色灵魂，用旋律书写自我心境。这张歌集精选其音乐代表作，从古装剧集的深情OST到个人专辑的内心独白，编织一场贯穿光影的听觉之旅。每一曲都是他艺术宇宙的星辰，映照多面才华与温柔力量。<br>愿于朦胧在天堂安好。",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/oK6kowEAoK4z7eC57evq7Knson/15c71/db0312da8bc06ab65c2581d364c017822875cfb8_446b3.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/oK6kowEAoK4z7eC57evq7Knson/15c71/db0312da8bc06ab65c2581d364c017822875cfb8_446b3.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/oK6kowEAoK4z7eC57evq7Knson/15c71/db0312da8bc06ab65c2581d364c017822875cfb8_446b3.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/oK6kowEAoK4z7eC57evq7Knson/15c71/db0312da8bc06ab65c2581d364c017822875cfb8_446b3.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 165,
+         "name": "国语"
+        },
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 136,
+         "name": "经典"
+        }
+       ],
+       "fav_cnt": 4598,
+       "play_cnt": 438013,
+       "create_time": 1757562524,
+       "censor_time": 0,
+       "modify_time": 1760686817,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 33,
+       "tjreport": "30_-1_2_12_10014_9575994634",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "2183203808",
+        "encrypt_uin": "ow6Foi-zoiczNn**",
+        "nick": "热歌情报局",
+        "avatar": "http://thirdqq.qlogo.cn/g?b=sdk&k=ia0bp1yzK8sCNtx1fUZ85lQ&kti=aTJMPRHyHcA&s=140&t=1764821705",
+        "identity": 0,
+        "icon": "",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9634517813,
+       "dirid": 5,
+       "title": "2026抖音最火歌曲（热门推荐）",
+       "desc": "刷视频经常听到、却总是找不到歌名的，都在这个歌单里。涵盖持续更新正在起量、被大量使用的热门音乐，不乱加、不踩雷。劳烦大家先收藏，再关注，稍后还会继续更新哦！",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/ow6Foi-zoiczNn/197c9/3f843877ec5964669cd0b88cd8e824840acb9bee_10c078.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/ow6Foi-zoiczNn/197c9/3f843877ec5964669cd0b88cd8e824840acb9bee_10c078.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/ow6Foi-zoiczNn/197c9/3f843877ec5964669cd0b88cd8e824840acb9bee_10c078.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/ow6Foi-zoiczNn/197c9/3f843877ec5964669cd0b88cd8e824840acb9bee_10c078.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 199,
+         "name": "背景音乐"
+        }
+       ],
+       "fav_cnt": 19567,
+       "play_cnt": 29804180,
+       "create_time": 1766703216,
+       "censor_time": 0,
+       "modify_time": 1782431407,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 452,
+       "tjreport": "30_-1_2_13_10014_9634517813",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "418704042",
+        "encrypt_uin": "7e6F7inPoevA",
+        "nick": "QQ音乐·助眠减压俱乐部",
+        "avatar": "http://y.gtimg.cn/music/common/upload/t_celebrity_certification/4505080.jpg",
+        "identity": 1,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312624.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9511461415,
+       "dirid": 140,
+       "title": "钢琴纯音乐：收获好心情",
+       "desc": "当琴键落下，世界忽然安静了。精选舒缓治愈的钢琴独奏曲，每首都犹如剔透的水晶，在黑白键间隙给情绪呼吸的空间，自我疗愈",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/7e6F7inPoevA/125d9/7d952a9b76861b734de786c64d994a200b8500f1_4f48e.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/7e6F7inPoevA/125d9/7d952a9b76861b734de786c64d994a200b8500f1_4f48e.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/7e6F7inPoevA/125d9/7d952a9b76861b734de786c64d994a200b8500f1_4f48e.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/7e6F7inPoevA/125d9/7d952a9b76861b734de786c64d994a200b8500f1_4f48e.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 116,
+         "name": "治愈"
+        },
+        {
+         "id": 15,
+         "name": "轻音乐"
+        },
+        {
+         "id": 122,
+         "name": "安静"
+        }
+       ],
+       "fav_cnt": 4920,
+       "play_cnt": 16098200,
+       "create_time": 1749180241,
+       "censor_time": 0,
+       "modify_time": 1751352226,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 18,
+       "tjreport": "30_-1_2_14_10014_9511461415",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "635789293",
+        "encrypt_uin": "7wok7icqowEi",
+        "nick": "华语拾光机",
+        "avatar": "https://pic6.y.qq.com/qqmusic/avatar/37776f6b376963716f774569-1673314253/140",
+        "identity": 1,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312624.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9614737181,
+       "dirid": 198,
+       "title": "汪苏泷· 一小段一小段把歌唱完",
+       "desc": "💗与汪苏泷的相遇，于你而言，<br>是否是一场奇妙的际遇？<br><br>⚡️今天，QQ音乐为你布置了一场特别的展览。<br>八件记忆标本正在展出，<br>每件标本，也许代表一段旋律，也许是一则幕后故事。<br><br>💧请随心触碰，<br>唤醒那些被时光珍藏的声音与瞬间…<br><br>🔍前往QQ音乐搜索汪苏泷，即可打卡特别展览、还有机会解锁签名照哦~",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/7wok7icqowEi/18294/53fd8a68e0530c616eaa4bc9cdcbbb89d6023f42_1a320d.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/7wok7icqowEi/18294/53fd8a68e0530c616eaa4bc9cdcbbb89d6023f42_1a320d.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/7wok7icqowEi/18294/53fd8a68e0530c616eaa4bc9cdcbbb89d6023f42_1a320d.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/7wok7icqowEi/18294/53fd8a68e0530c616eaa4bc9cdcbbb89d6023f42_1a320d.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 165,
+         "name": "国语"
+        }
+       ],
+       "fav_cnt": 21310,
+       "play_cnt": 3229716,
+       "create_time": 1763434326,
+       "censor_time": 0,
+       "modify_time": 1763448300,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 130,
+       "tjreport": "30_-1_2_15_10014_9614737181",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "3896533121",
+        "encrypt_uin": "oicq7w4ioi6Aov**",
+        "nick": "音乐磁场",
+        "avatar": "https://pic6.y.qq.com/qqmusic/avatar/6f696371377734696f6936416f762a2a-1731567637/140",
+        "identity": 0,
+        "icon": "",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9515850830,
+       "dirid": 3,
+       "title": "2025抖音流行歌|全网最好听",
+       "desc": "时刻紧跟潮流，时刻关注热门歌曲动向。2025抖音热门又好听的流行歌曲，都在这张歌单里。",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/oicq7w4ioi6Aov/12949/d2659630f4f3e356d13ab1705fe95d2cbc77f702_2b3cc7.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/oicq7w4ioi6Aov/12949/d2659630f4f3e356d13ab1705fe95d2cbc77f702_2b3cc7.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/oicq7w4ioi6Aov/12949/d2659630f4f3e356d13ab1705fe95d2cbc77f702_2b3cc7.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/oicq7w4ioi6Aov/12949/d2659630f4f3e356d13ab1705fe95d2cbc77f702_2b3cc7.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 199,
+         "name": "背景音乐"
+        }
+       ],
+       "fav_cnt": 15027,
+       "play_cnt": 21618624,
+       "create_time": 1749730535,
+       "censor_time": 0,
+       "modify_time": 1781225603,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 284,
+       "tjreport": "30_-1_2_16_10014_9515850830",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "2914499382",
+        "encrypt_uin": "owE57evqNKoFoc**",
+        "nick": "贝乐虎",
+        "avatar": "http://y.gtimg.cn/music/common/upload/t_celebrity_certification/4531436.jpg",
+        "identity": 1,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312624.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9578478205,
+       "dirid": 73,
+       "title": "贝乐虎儿歌200首",
+       "desc": "贝乐虎儿歌大全，快收藏起来吧！",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/owE57evqNKoFoc/15e9a/3886d89159e9c0ce209ce7afae089b10158f2424_5aa5d.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/owE57evqNKoFoc/15e9a/3886d89159e9c0ce209ce7afae089b10158f2424_5aa5d.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/owE57evqNKoFoc/15e9a/3886d89159e9c0ce209ce7afae089b10158f2424_5aa5d.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/owE57evqNKoFoc/15e9a/3886d89159e9c0ce209ce7afae089b10158f2424_5aa5d.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 131,
+         "name": "儿歌"
+        }
+       ],
+       "fav_cnt": 33829,
+       "play_cnt": 25315853,
+       "create_time": 1757918921,
+       "censor_time": 0,
+       "modify_time": 1782201998,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 217,
+       "tjreport": "30_-1_2_17_10014_9578478205",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "3235152633",
+        "encrypt_uin": "oi-i7K6kowCioz**",
+        "nick": "新歌炖大鹅",
+        "avatar": "http://y.gtimg.cn/music/common/upload/t_celebrity_certification/4143535.png",
+        "identity": 1,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312624.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9548863161,
+       "dirid": 49,
+       "title": "爱神降临｜蔡徐坤0802生日快乐",
+       "desc": "🍃蝉鸣伴着夏风，新的一岁如约而至。从17年青涩的《I Wanna Get Love》到如今复古摇滚范儿十足、席卷各大榜单之首的《Deadman》，沉醉于《情人》、《Hug me》的浪漫氛围，感受你细腻温柔的情感表达，在《Home》的温暖光晕、《梦》的执着回响中，触摸那颗始终澄澈如初的少年心……<br>舞台上的你总是不遗余力向IKUN传达爱意，新岁之际，愿你的音乐王国永远闪耀，无论奔赴哪片山海，IKUN一起陪你把故事唱完，这一次希望与爱将会常伴身侧✨",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/oi-i7K6kowCioz/14531/76f26767fcfe0fa87d0c3a2fc3ea8a56aa9938f7_217ae4.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/oi-i7K6kowCioz/14531/76f26767fcfe0fa87d0c3a2fc3ea8a56aa9938f7_217ae4.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/oi-i7K6kowCioz/14531/76f26767fcfe0fa87d0c3a2fc3ea8a56aa9938f7_217ae4.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/oi-i7K6kowCioz/14531/76f26767fcfe0fa87d0c3a2fc3ea8a56aa9938f7_217ae4.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 165,
+         "name": "国语"
+        },
+        {
+         "id": 6,
+         "name": "流行"
+        }
+       ],
+       "fav_cnt": 2894,
+       "play_cnt": 70017,
+       "create_time": 1754016659,
+       "censor_time": 0,
+       "modify_time": 1755301371,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 26,
+       "tjreport": "30_-1_2_18_10014_9548863161",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "1359448253",
+        "encrypt_uin": "oKokNKvPNe-koz**",
+        "nick": "耳机里的海",
+        "avatar": "http://thirdqq.qlogo.cn/g?b=sdk&k=Txln4vvCJjy4IiaEEb1K0wA&kti=aXtWVBHyHcE&s=140&t=1769687384",
+        "identity": 0,
+        "icon": "",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9654832328,
+       "dirid": 1,
+       "title": "2026年抖音爆火歌曲（超好听）",
+       "desc": "这是一张围绕2026年爆火趋势整理的热门歌曲歌单。收录标准只有一个：好听、常被使用、热度真实在涨。不堆老歌，不用过气旋律，只保留真正能反复播放、适合各种场景的歌曲与背景音乐。<br><br>很多旋律你可能已经听过无数次，却一直没找到出处；也可能正在为选歌纠结，这份歌单可以直接解决。<br><br>内容会持续更新，根据热度变化动态调整，适合长期收藏、反复打开播放。如果你在意质量，这个歌单不会让你失望。",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/oKokNKvPNe-koz/1ab3c/62b15d7a8abaf6e42616d16e8e31b2a100c24458_439be8.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/oKokNKvPNe-koz/1ab3c/62b15d7a8abaf6e42616d16e8e31b2a100c24458_439be8.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/oKokNKvPNe-koz/1ab3c/62b15d7a8abaf6e42616d16e8e31b2a100c24458_439be8.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/oKokNKvPNe-koz/1ab3c/62b15d7a8abaf6e42616d16e8e31b2a100c24458_439be8.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 199,
+         "name": "背景音乐"
+        },
+        {
+         "id": 6,
+         "name": "流行"
+        }
+       ],
+       "fav_cnt": 14709,
+       "play_cnt": 20467935,
+       "create_time": 1769690869,
+       "censor_time": 0,
+       "modify_time": 1781086437,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 467,
+       "tjreport": "30_-1_2_19_10014_9654832328",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "3541296693",
+        "encrypt_uin": "oi4PoK-q7wCqoz**",
+        "nick": "袁一琦",
+        "avatar": "http://y.gtimg.cn/music/common/upload/t_celebrity_certification/6053742.jpg",
+        "identity": 1,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312624.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9483258130,
+       "dirid": 1,
+       "title": "袁一琦私藏｜假日悠闲生活",
+       "desc": "我的私藏旅行歌单，陪你度过快乐假期～",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/oi4PoK-q7wCqoz/10f35/01e40b248d5f4e9a86fc408779cd471afa3c44eb_bcee6.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/oi4PoK-q7wCqoz/10f35/01e40b248d5f4e9a86fc408779cd471afa3c44eb_bcee6.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/oi4PoK-q7wCqoz/10f35/01e40b248d5f4e9a86fc408779cd471afa3c44eb_bcee6.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/oi4PoK-q7wCqoz/10f35/01e40b248d5f4e9a86fc408779cd471afa3c44eb_bcee6.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 116,
+         "name": "治愈"
+        },
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 81,
+         "name": "旅行"
+        }
+       ],
+       "fav_cnt": 4515,
+       "play_cnt": 139704,
+       "create_time": 1745722674,
+       "censor_time": 0,
+       "modify_time": 1745832786,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 16,
+       "tjreport": "30_-1_2_20_10014_9483258130",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "3895570898",
+        "encrypt_uin": "oicq7K4loecqNn**",
+        "nick": "单依纯的听歌日常",
+        "avatar": "http://thirdqq.qlogo.cn/g?b=sdk&k=gWhQKb5tygurr0jmtiboicSA&kti=ZyNmvhHyHcE&s=140&t=1730372741",
+        "identity": 0,
+        "icon": "",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9481550790,
+       "dirid": 5,
+       "title": "2025抖音最火热歌（持续更新）",
+       "desc": "好听的歌曲很多，收集起来也挺麻烦的。为了大家有更好的试听感受，今天就把这些直到2025年依然火爆的歌曲，整理成歌单的模式，推荐给大家。<br><br>祝大家听歌愉快！",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/oicq7K4loecqNn/10dba/c9d39233518ba34147e0cea24cdc84d0a04fe49f_1d99d4.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/oicq7K4loecqNn/10dba/c9d39233518ba34147e0cea24cdc84d0a04fe49f_1d99d4.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/oicq7K4loecqNn/10dba/c9d39233518ba34147e0cea24cdc84d0a04fe49f_1d99d4.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/oicq7K4loecqNn/10dba/c9d39233518ba34147e0cea24cdc84d0a04fe49f_1d99d4.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 165,
+         "name": "国语"
+        },
+        {
+         "id": 199,
+         "name": "背景音乐"
+        }
+       ],
+       "fav_cnt": 14880,
+       "play_cnt": 27503376,
+       "create_time": 1745497518,
+       "censor_time": 0,
+       "modify_time": 1781225722,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 305,
+       "tjreport": "30_-1_2_21_10014_9481550790",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "3060516431",
+        "encrypt_uin": "oinsoe457wviov**",
+        "nick": "游戏补给站",
+        "avatar": "http://y.gtimg.cn/music/common/upload/t_celebrity_certification/4594393.png",
+        "identity": 1,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312624.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9746780492,
+       "dirid": 351,
+       "title": "崩坏星穹铁道神说要有笑（中篇）",
+       "desc": "崩坏星穹铁道神说要有笑（中篇）欢迎大家收藏",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "http://y.gtimg.cn/music/photo_new/T002R300x300M000003jTob903Cf6i.jpg?n=1",
+        "medium_url": "http://y.gtimg.cn/music/photo_new/T002R500x500M000003jTob903Cf6i.jpg?n=1",
+        "big_url": "http://y.gtimg.cn/music/photo_new/T002R500x500M000003jTob903Cf6i.jpg?n=1",
+        "default_url": "http://y.gtimg.cn/music/photo_new/T002R300x300M000003jTob903Cf6i.jpg?n=1",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 39,
+         "name": "ACG"
+        }
+       ],
+       "fav_cnt": 143347,
+       "play_cnt": 313016,
+       "create_time": 1784082773,
+       "censor_time": 0,
+       "modify_time": 1785292522,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 62,
+       "tjreport": "30_-1_2_22_10014_9746780492",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "1846484296",
+        "encrypt_uin": "oKcP7wvF7e-q7c**",
+        "nick": "燕尾蝶",
+        "avatar": "https://pic6.y.qq.com/qqmusic/avatar/6f4b63503777764637652d7137632a2a-1740561435/140",
+        "identity": 2,
+        "icon": "https://y.qq.com/music/common/upload/t_cm3_photo_publish/2312597.png",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9476364244,
+       "dirid": 21,
+       "title": "动感车载DJ🔥gogogo出发咯！",
+       "desc": "一听就上头！动感车载DJ🔥跟随音乐gogogo出发喽！",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "http://qpic.y.qq.com/music_cover/f4NvHicb2uE6LWat7yAbpMZZCziayfYmicMPB7RsLwKxDLDTXlvS9Xpjw/300?n=1",
+        "medium_url": "http://qpic.y.qq.com/music_cover/f4NvHicb2uE6LWat7yAbpMZZCziayfYmicMPB7RsLwKxDLDTXlvS9Xpjw/600?n=1",
+        "big_url": "http://qpic.y.qq.com/music_cover/f4NvHicb2uE6LWat7yAbpMZZCziayfYmicMPB7RsLwKxDLDTXlvS9Xpjw/600?n=1",
+        "default_url": "http://qpic.y.qq.com/music_cover/f4NvHicb2uE6LWat7yAbpMZZCziayfYmicMPB7RsLwKxDLDTXlvS9Xpjw/300?n=1",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 126,
+         "name": "宣泄"
+        },
+        {
+         "id": 14,
+         "name": "DJ"
+        },
+        {
+         "id": 85,
+         "name": "开车"
+        }
+       ],
+       "fav_cnt": 77657,
+       "play_cnt": 137458550,
+       "create_time": 1744770971,
+       "censor_time": 0,
+       "modify_time": 1785016846,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 416,
+       "tjreport": "30_-1_2_23_10014_9476364244",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    },
+    {
+     "Playlist": {
+      "basic": {
+       "creator": {
+        "uin": "3845985292",
+        "encrypt_uin": "oicP7KEF7K-qoc**",
+        "nick": "章若楠爱听歌",
+        "avatar": "http://thirdqq.qlogo.cn/g?b=sdk&k=xmPP6b0ZaP1oFVF0V3Ub8w&kti=ZxDFVRHyHcI&s=140&t=1729151984",
+        "identity": 0,
+        "icon": "",
+        "v_type": [],
+        "follow": 0
+       },
+       "tid": 9472897148,
+       "dirid": 6,
+       "title": "抖音热歌：全网爆火最流行",
+       "desc": "全网推荐的热门歌曲，小编收录到了歌单里，方便大家收藏起来一键循环播放。",
+       "cover": {
+        "id": 0,
+        "mid": "",
+        "small_url": "https://music-file.y.qq.com/songlist/u/oicP7KEF7K-qoc/105f0/8e229d37d25c53538a5a2993a7247b2e4d46bdfa_21b515.jpg?imageView2/4/w/300/h/300",
+        "medium_url": "https://music-file.y.qq.com/songlist/u/oicP7KEF7K-qoc/105f0/8e229d37d25c53538a5a2993a7247b2e4d46bdfa_21b515.jpg?imageView2/4/w/600/h/600",
+        "big_url": "https://music-file.y.qq.com/songlist/u/oicP7KEF7K-qoc/105f0/8e229d37d25c53538a5a2993a7247b2e4d46bdfa_21b515.jpg?imageView2/4/w/600/h/600",
+        "default_url": "https://music-file.y.qq.com/songlist/u/oicP7KEF7K-qoc/105f0/8e229d37d25c53538a5a2993a7247b2e4d46bdfa_21b515.jpg?imageView2/4/w/300/h/300",
+        "pic_url2": "",
+        "layerUrl": "",
+        "ext1": "",
+        "ext2": "",
+        "bHitDiyAbt": false
+       },
+       "v_tag": [
+        {
+         "id": 6,
+         "name": "流行"
+        },
+        {
+         "id": 199,
+         "name": "背景音乐"
+        }
+       ],
+       "fav_cnt": 4177,
+       "play_cnt": 11656585,
+       "create_time": 1744301130,
+       "censor_time": 0,
+       "modify_time": 1781225869,
+       "level": 0,
+       "status": 0,
+       "fav": 0,
+       "song_cnt": 251,
+       "tjreport": "30_-1_2_24_10014_9472897148",
+       "edge_mark": "",
+       "type": 0,
+       "subtype": 0,
+       "is_official": false,
+       "reddot_time": 0,
+       "read_time": 0,
+       "reddot_show": false,
+       "comment_cnt": 0,
+       "dirshow": 1,
+       "ext": {
+        "bHitDiyAbt": "0"
+       },
+       "expose": 0,
+       "bExpose": false,
+       "modemask": 0,
+       "ai_trace": ""
+      },
+      "content": {
+       "v_item": []
+      },
+      "bHit": true,
+      "diy": {
+       "tid": 0,
+       "diyInfo": {}
+      }
+     },
+     "WhereFrom": "热门",
+     "ext": null
+    }
+   ],
+   "HasMore": true,
+   "FromLimit": 400
+  }
+ }
+}
