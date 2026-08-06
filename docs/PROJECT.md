@@ -1364,17 +1364,17 @@ test(qqmusic): add vkey response fixture
 
 ### v0.1.0：最小可播放版本
 
-- [ ] QQ 扫码登录；
-- [ ] 凭据保存；
-- [ ] 搜索歌曲；
-- [ ] 获取播放 URL；
-- [ ] GStreamer 播放；
-- [ ] 播放 / 暂停；
-- [ ] Seek；
-- [ ] 封面；
-- [ ] 完整基础 MPRIS；
-- [ ] 最小搜索 UI；
-- [ ] 底部播放栏。
+- [x] QQ 扫码登录（`hmp login`，二维码轮询）；
+- [x] 凭据保存（keyring Secret Service / 显式文件回退）；
+- [x] 搜索歌曲（`hmp search` + UI 搜索页）；
+- [x] 获取播放 URL（音质回退链，加密取流 GetEVkey）；
+- [x] GStreamer 播放（hmp-player-gst）；
+- [x] 播放 / 暂停（PlayerCommand::TogglePlay）；
+- [x] Seek（UI 进度条 / MPRIS position）；
+- [~] 封面（占位渐变；远程封面下载待接入）；
+- [x] 完整基础 MPRIS（playerctl 实测）；
+- [x] 最小搜索 UI（Slint，Apple Music 风格）；
+- [x] 底部播放栏。
 
 验收定义：通过系统面板显示标题、歌手、封面和正确进度，并可拖动进度。
 
@@ -1427,16 +1427,16 @@ test(qqmusic): add vkey response fixture
 建议从以下顺序开始，不要先做完整 UI：
 
 ```text
-1. 确认工作区结构和许可证
-2. 建立 hmp-core
-3. 建立 hmp-qqmusic 的通用请求层
-4. 移植免登录搜索
-5. 建立 fixture 测试
-6. 移植 QQ 扫码登录
-7. 移植播放 URL
-8. 建立 GStreamer 播放原型
-9. 建立完整 MPRIS 原型
-10. 最后接 Slint 最小 UI
+1. ✅ 确认工作区结构和许可证
+2. ✅ 建立 hmp-core
+3. ✅ 建立 hmp-qqmusic 的通用请求层
+4. ✅ 移植免登录搜索
+5. ✅ 建立 fixture 测试
+6. ✅ 移植 QQ 扫码登录
+7. ✅ 移植播放 URL（含加密取流）
+8. ✅ 建立 GStreamer 播放原型
+9. ✅ 建立完整 MPRIS 原型
+10. ✅ 最后接 Slint 最小 UI（Apple Music 风格）
 ```
 
 第一个真正有意义的里程碑不是“窗口能打开”，而是以下命令行原型能够工作：
