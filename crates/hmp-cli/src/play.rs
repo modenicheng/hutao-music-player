@@ -12,9 +12,8 @@ use hmp_qqmusic_api::{
     QqMusicClient, SongFileType,
     song::{SongApi, SongFileInfo},
 };
+use hmp_storage::credential::store_from_env;
 use tokio::sync::watch;
-
-use crate::credential_store;
 
 /// `AudioQuality` → 取流文件类型映射（可用的子集）。
 fn quality_to_file_type(q: AudioQuality) -> Option<SongFileType> {
@@ -32,7 +31,8 @@ fn quality_to_file_type(q: AudioQuality) -> Option<SongFileType> {
 
 /// 播放主流程。
 pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let credential = credential_store::load()?.ok_or("未登录，请先运行 `hmp login`")?;
+    let store = store_from_env();
+    let credential = store.load()?.ok_or("未登录，请先运行 `hmp login`")?;
     if !credential.is_logged_in() {
         return Err("凭证无效或已过期，请重新运行 `hmp login`".into());
     }

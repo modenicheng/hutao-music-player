@@ -8,7 +8,6 @@
 
 use clap::{Parser, Subcommand};
 
-mod credential_store;
 mod login;
 mod play;
 mod search;

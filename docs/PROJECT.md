@@ -656,7 +656,7 @@ Expired / Refused / NetworkError / InvalidResponse
 4. Cookie 解析；
 5. 凭据刷新；
 6. 微信扫码；
-7. keyring 持久化；
+7. keyring 持久化（hmp-storage，Secret Service）；
 8. 重启恢复登录态。
 
 验收：重启 HMP 后不需要重新扫码，并能获取会员播放 URL。
