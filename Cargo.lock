@@ -1158,6 +1158,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hmp-mpris"
+version = "0.1.0"
+dependencies = [
+ "hmp-core",
+ "hmp-player-gst",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+ "zvariant",
+]
+
+[[package]]
 name = "hmp-player-gst"
 version = "0.1.0"
 dependencies = [

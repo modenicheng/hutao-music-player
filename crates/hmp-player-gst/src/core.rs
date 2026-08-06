@@ -6,7 +6,7 @@ use gstreamer::glib::prelude::*;
 use gstreamer_player::{
     Player, PlayerGMainContextSignalDispatcher, PlayerState, PlayerVideoOverlayVideoRenderer,
 };
-use hmp_core::{HmpError, LoopMode, PlaybackState, PlaybackStatus, Track};
+use hmp_core::{HmpError, LoopMode, PlaybackState, PlaybackStatus, PlayerCommand, Track};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::events::PlayerEvent;
@@ -22,15 +22,9 @@ pub struct LoadRequest {
     pub quality: hmp_core::AudioQuality,
 }
 
-/// 播放器内部命令（驱动循环消费）。
-enum InnerCommand {
+/// 加载请求（与命令分离：`Load` 携带 URI/元数据，命令经公共通道）。
+enum LoadCommand {
     Load(Box<LoadRequest>),
-    Play,
-    Pause,
-    Stop,
-    Seek(Duration),
-    SetVolume(f64),
-    SetLoopMode(LoopMode),
     Shutdown,
 }
 
@@ -39,7 +33,8 @@ enum InnerCommand {
 /// 单一播放状态源：状态经 `watch` 发布、离散事件经 `broadcast` 发布；
 /// 调用方（UI/MPRIS/CLI）通过方法发送命令，禁止自行推算进度。
 pub struct PlayerCore {
-    cmd_tx: mpsc::UnboundedSender<InnerCommand>,
+    cmd_tx: mpsc::UnboundedSender<PlayerCommand>,
+    load_tx: mpsc::UnboundedSender<LoadCommand>,
     state_rx: watch::Receiver<PlaybackState>,
     events_rx: broadcast::Receiver<PlayerEvent>,
 }
@@ -74,6 +69,7 @@ impl PlayerCore {
     /// 用现成的 `Player` 构造核心（测试/定制注入用）。
     pub fn from_player(player: Player) -> Result<Self, HmpError> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (load_tx, load_rx) = mpsc::unbounded_channel();
         let (state_tx, state_rx) = watch::channel(PlaybackState::default());
         let (events_tx, events_rx) = broadcast::channel(64);
 
@@ -109,51 +105,57 @@ impl PlayerCore {
 
         let core = PlayerCore {
             cmd_tx,
+            load_tx,
             state_rx,
             events_rx,
         };
-        tokio::spawn(drive(player, cmd_rx, state_tx, events_tx, bus_rx));
+        tokio::spawn(drive(player, cmd_rx, load_rx, state_tx, events_tx, bus_rx));
         Ok(core)
     }
 
-    /// 加载并准备播放 URI（进入 Loading，调用 `play` 后开始播放）。
+    /// 加载并播放 URI（进入 Loading → Playing）。
     pub fn load(&self, request: LoadRequest) {
-        let _ = self.cmd_tx.send(InnerCommand::Load(Box::new(request)));
+        let _ = self.load_tx.send(LoadCommand::Load(Box::new(request)));
     }
 
     /// 播放。
     pub fn play(&self) {
-        let _ = self.cmd_tx.send(InnerCommand::Play);
+        let _ = self.cmd_tx.send(PlayerCommand::Play);
     }
 
     /// 暂停。
     pub fn pause(&self) {
-        let _ = self.cmd_tx.send(InnerCommand::Pause);
+        let _ = self.cmd_tx.send(PlayerCommand::Pause);
     }
 
     /// 停止。
     pub fn stop(&self) {
-        let _ = self.cmd_tx.send(InnerCommand::Stop);
+        let _ = self.cmd_tx.send(PlayerCommand::Stop);
     }
 
     /// 跳转。
     pub fn seek(&self, position: Duration) {
-        let _ = self.cmd_tx.send(InnerCommand::Seek(position));
+        let _ = self.cmd_tx.send(PlayerCommand::Seek(position));
     }
 
     /// 设置音量（0.0..=1.0）。
     pub fn set_volume(&self, volume: f64) {
-        let _ = self.cmd_tx.send(InnerCommand::SetVolume(volume));
+        let _ = self.cmd_tx.send(PlayerCommand::SetVolume(volume));
     }
 
     /// 设置循环模式（记录于状态）。
     pub fn set_loop_mode(&self, mode: LoopMode) {
-        let _ = self.cmd_tx.send(InnerCommand::SetLoopMode(mode));
+        let _ = self.cmd_tx.send(PlayerCommand::SetLoopMode(mode));
     }
 
     /// 停止驱动循环并释放播放器。
     pub fn shutdown(&self) {
-        let _ = self.cmd_tx.send(InnerCommand::Shutdown);
+        let _ = self.load_tx.send(LoadCommand::Shutdown);
+    }
+
+    /// 播放器命令发送端（供 MPRIS/上层命令转发）。
+    pub fn command_sender(&self) -> mpsc::UnboundedSender<PlayerCommand> {
+        self.cmd_tx.clone()
     }
 
     /// 订阅播放状态（watch 通道）。
@@ -181,7 +183,8 @@ enum BusEvent {
 #[allow(clippy::too_many_arguments)]
 async fn drive(
     player: Player,
-    mut cmd_rx: mpsc::UnboundedReceiver<InnerCommand>,
+    mut cmd_rx: mpsc::UnboundedReceiver<PlayerCommand>,
+    mut load_rx: mpsc::UnboundedReceiver<LoadCommand>,
     state_tx: watch::Sender<PlaybackState>,
     events_tx: broadcast::Sender<PlayerEvent>,
     mut bus_rx: mpsc::UnboundedReceiver<BusEvent>,
@@ -192,10 +195,54 @@ async fn drive(
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => {
-                let Some(cmd) = cmd else { break };
+                let Some(cmd) = cmd else { continue };
                 match cmd {
-                    InnerCommand::Shutdown => break,
-                    InnerCommand::Load(req) => {
+                    PlayerCommand::Play => {
+                        player.play();
+                        state.status = PlaybackStatus::Playing;
+                        let _ = state_tx.send(state.clone());
+                    }
+                    PlayerCommand::Pause => {
+                        player.pause();
+                        state.status = PlaybackStatus::Paused;
+                        let _ = state_tx.send(state.clone());
+                    }
+                    PlayerCommand::Stop => {
+                        player.stop();
+                        state.status = PlaybackStatus::Stopped;
+                        state.position = Duration::ZERO;
+                        let _ = state_tx.send(state.clone());
+                    }
+                    PlayerCommand::Seek(pos) => {
+                        player.seek(gstreamer::ClockTime::from_nseconds(
+                            pos.as_nanos().min(u64::MAX as u128) as u64,
+                        ));
+                        state.position = pos;
+                        let _ = state_tx.send(state.clone());
+                    }
+                    PlayerCommand::SetVolume(vol) => {
+                        player.set_volume(vol.clamp(0.0, 1.0));
+                        state.volume = vol.clamp(0.0, 1.0);
+                        let _ = state_tx.send(state.clone());
+                    }
+                    PlayerCommand::SetLoopMode(mode) => {
+                        state.loop_mode = mode;
+                        let _ = state_tx.send(state.clone());
+                    }
+                    // Next/Previous/SetShuffle/LoadAndPlay：由上层应用核心消费，
+                    // 播放器核心不直接处理（无队列语义）
+                    PlayerCommand::Next
+                    | PlayerCommand::Previous
+                    | PlayerCommand::SetShuffle(_)
+                    | PlayerCommand::LoadAndPlay(_) => {}
+                }
+            }
+            load = load_rx.recv() => {
+                let Some(load_cmd) = load else { continue };
+                match load_cmd {
+                    LoadCommand::Shutdown => break,
+                    LoadCommand::Load(req) => {
+                        // 加载即播放（docs/PROJECT.md §8.2：设置 URI → Loading → Playing）
                         state.status = PlaybackStatus::Loading;
                         state.current = Some(req.track);
                         state.position = Duration::ZERO;
@@ -204,37 +251,8 @@ async fn drive(
                         player.set_uri(Some(req.uri.as_str()));
                         let _ = state_tx.send(state.clone());
                         let _ = events_tx.send(PlayerEvent::TrackChanged);
-                    }
-                    InnerCommand::Play => {
                         player.play();
                         state.status = PlaybackStatus::Playing;
-                        let _ = state_tx.send(state.clone());
-                    }
-                    InnerCommand::Pause => {
-                        player.pause();
-                        state.status = PlaybackStatus::Paused;
-                        let _ = state_tx.send(state.clone());
-                    }
-                    InnerCommand::Stop => {
-                        player.stop();
-                        state.status = PlaybackStatus::Stopped;
-                        state.position = Duration::ZERO;
-                        let _ = state_tx.send(state.clone());
-                    }
-                    InnerCommand::Seek(pos) => {
-                        player.seek(gstreamer::ClockTime::from_nseconds(
-                            pos.as_nanos().min(u64::MAX as u128) as u64,
-                        ));
-                        state.position = pos;
-                        let _ = state_tx.send(state.clone());
-                    }
-                    InnerCommand::SetVolume(vol) => {
-                        player.set_volume(vol.clamp(0.0, 1.0));
-                        state.volume = vol.clamp(0.0, 1.0);
-                        let _ = state_tx.send(state.clone());
-                    }
-                    InnerCommand::SetLoopMode(mode) => {
-                        state.loop_mode = mode;
                         let _ = state_tx.send(state.clone());
                     }
                 }

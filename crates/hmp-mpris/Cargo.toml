@@ -1,0 +1,20 @@
+[package]
+name = "hmp-mpris"
+description = "HMP MPRIS 服务：系统媒体控制（playerctl），PlayerCommand/PlaybackState 桥接"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hmp-core = { path = "../hmp-core" }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+zbus = { workspace = true }
+zvariant = "5"
+
+[dev-dependencies]
+hmp-player-gst = { path = "../hmp-player-gst" }
+tracing-subscriber = { workspace = true }
