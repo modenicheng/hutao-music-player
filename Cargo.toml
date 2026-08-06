@@ -6,7 +6,7 @@
 # - 暂不拆分独立 Git 仓库 / 不引入 submodule；
 #   当 API 出现外部使用者、发布节奏分化或独立维护需求时再拆仓迁移历史
 [workspace]
-members = ["crates/hmp-core", "crates/hmp-player-gst", "crates/hmp-qqmusic-api"]
+members = ["crates/hmp-cli", "crates/hmp-core", "crates/hmp-player-gst", "crates/hmp-qqmusic-api"]
 resolver = "3"
 
 [workspace.package]
@@ -18,6 +18,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
 bytes = "1"
 flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = [

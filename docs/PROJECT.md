@@ -3,7 +3,7 @@
 > 项目名：hutao-music-player
 > 缩写：HMP
 > 主程序命令：`hmp`
-> 当前阶段：工作区初始化 / 架构定型
+> 当前阶段：CLI 原型（login/search/play 闭环）/ 主项目 crate 骨架
 > 目标平台：Linux 桌面，优先 Wayland；首要适配 Arch Linux + Niri
 > 文档用途：作为仓库内的项目总纲、架构说明、开发路线和验收标准
 
