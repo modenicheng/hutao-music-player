@@ -135,6 +135,7 @@ async fn injects_credential_cookies() {
         refresh_key: None,
         login_type: hmp_qqmusic_api::credential::LoginType::Qq,
         raw_cookie: String::new(),
+        ..Default::default()
     };
     client
         .musicu_request(&search_request(), Some(&credential))
@@ -228,6 +229,7 @@ async fn require_login_accepts_valid_credential() {
         refresh_key: None,
         login_type: hmp_qqmusic_api::credential::LoginType::Qq,
         raw_cookie: String::new(),
+        ..Default::default()
     };
     client
         .musicu_request(&req, Some(&credential))

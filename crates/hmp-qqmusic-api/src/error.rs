@@ -41,6 +41,40 @@ pub enum QqMusicError {
         message: String,
     },
 
+    /// 登录域业务错误（上游 `LoginError`）。
+    #[error("login error {code}: {message}")]
+    Login {
+        /// 登录业务错误码。
+        code: i64,
+        /// 错误描述。
+        message: String,
+    },
+
+    /// 登录鉴权参数无效或已过期（上游 `LoginAuthExpiredError`，code 1000/104401/104400）。
+    #[error("login auth expired or invalid")]
+    LoginAuthExpired,
+
+    /// 登录设备数量超限（上游 `LoginDeviceLimitError`，code 20279）。
+    #[error("login device limit reached")]
+    LoginDeviceLimit,
+
+    /// 账号受限或已被封禁（上游 `LoginAccountRestrictedError`，code 20277/20278/20450）。
+    #[error("login account restricted or banned")]
+    LoginAccountRestricted,
+
+    /// 登录操作过于频繁（上游 `LoginRateLimitError`，code 104604）。
+    #[error("login rate limited")]
+    LoginRateLimit,
+
+    /// 凭证刷新失败（上游 `CredentialRefreshError`，包装登录错误）。
+    #[error("credential refresh failed: {code}: {message}")]
+    CredentialRefresh {
+        /// 原始登录错误码。
+        code: i64,
+        /// 错误描述。
+        message: String,
+    },
+
     /// 响应数据异常（上游 `ApiDataError`）。
     #[error("invalid response: {0}")]
     InvalidResponse(String),
@@ -71,6 +105,26 @@ mod tests {
             }
             .to_string(),
             "HTTP error 503: unavailable"
+        );
+        assert_eq!(
+            QqMusicError::LoginAuthExpired.to_string(),
+            "login auth expired or invalid"
+        );
+        assert_eq!(
+            QqMusicError::Login {
+                code: 20261,
+                message: "登录参数错误".into()
+            }
+            .to_string(),
+            "login error 20261: 登录参数错误"
+        );
+        assert_eq!(
+            QqMusicError::CredentialRefresh {
+                code: 20271,
+                message: "验证码错误".into()
+            }
+            .to_string(),
+            "credential refresh failed: 20271: 验证码错误"
         );
     }
 }

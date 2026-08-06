@@ -32,9 +32,11 @@ pub mod client;
 pub mod config;
 pub mod credential;
 pub mod error;
+pub mod login;
 pub mod protocol;
 
 pub use client::QqMusicClient;
 pub use config::ClientConfig;
 pub use credential::Credential;
 pub use error::QqMusicError;
+pub use login::{LoginApi, QR, QRCodeLoginEvents, QRLoginResult, QRLoginType};

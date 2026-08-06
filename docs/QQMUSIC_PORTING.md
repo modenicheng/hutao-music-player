@@ -25,11 +25,11 @@
 | `qqmusic_api/core/api_context.py` | `protocol/comm.rs` | ✅ 已移植 | comm 构造、Cookie 注入、UA |
 | `qqmusic_api/core/versioning.py` | `protocol/comm.rs` | ✅ 已移植 | Platform、VersionProfile、g_tk |
 | `qqmusic_api/algorithms/sign.py` | `protocol/sign.rs` | ✅ 已移植 | hash33、zzc_sign |
-| `qqmusic_api/core/client.py` | `client.rs` | 🔶 部分 | musicu 请求入口；无全局凭证状态、无 Android 会话/限流 |
-| `qqmusic_api/core/exceptions.py` | `error.rs` | ✅ 已移植 | 错误分类（§12 适配） |
-| `qqmusic_api/models/request.py` | `credential.rs` | ✅ 已移植 | Credential（脱敏 Debug，无全局持有） |
-| `qqmusic_api/modules/search.py` | （待移植） | ⬜ 未移植 | 阶段 A 验收后移植 |
-| `qqmusic_api/modules/login.py` | （待移植） | ⬜ 未移植 | 阶段 B |
+| `qqmusic_api/core/client.py` | `client.rs` | 🔶 部分 | musicu 请求入口 + HTTP 请求（登录用）；无全局凭证状态、无 Android 会话/限流 |
+| `qqmusic_api/core/exceptions.py` | `error.rs` | ✅ 已移植 | 错误分类（§12 适配），含登录域错误 |
+| `qqmusic_api/models/request.py` | `credential.rs` | ✅ 已移植 | Credential（脱敏 Debug，无全局持有，含登录响应解析） |
+| `qqmusic_api/modules/login.py` | `login.rs` | 🔶 部分 | QQ 扫码完整链路 + refresh/check_expired/logout；微信/手机扫码待移植 |
+| `qqmusic_api/modules/login_utils.py` | `login.rs` | 🔶 部分 | PollInterval + wait_qrcode_login（轮询/去重/退避/取消）；无 PhoneLoginSession |
 | `qqmusic_api/modules/song.py` | （待移植） | ⬜ 未移植 | 阶段 C |
 | `qqmusic_api/modules/lyric.py` | （待移植） | ⬜ 未移植 | 阶段 C |
 | `qqmusic_api/modules/songlist.py` | （待移植） | ⬜ 未移植 | 阶段 D |
@@ -52,12 +52,30 @@
 - [x] Cookie 注入（`uin`/`qqmusic_uin`/`qm_keyst`/`qqmusic_key`）
 - [x] 日志脱敏（Cookie、music key 不落日志）
 
+### 登录（阶段 B，docs/PROJECT.md §6.5）
+
+- [x] `LoginApi.get_qrcode(QQ)` → `login::LoginApi::get_qrcode`（ptqrshow → Set-Cookie qrsig + PNG）
+- [x] `LoginApi.check_qrcode` → `login::LoginApi::check_qrcode`（ptqrlogin → ptuiCB 解析 → 事件）
+- [x] `LoginApi._authorize_qq_qr` → `login::LoginApi::authorize_qq_qr`（check_sig → p_skey →
+      oauth authorize → code → QQLogin CGI）
+- [x] `LoginApi.refresh_credential` → `login::LoginApi::refresh_credential`（Login CGI，
+      按 login_type 分支，错误包装 CredentialRefresh）
+- [x] `LoginApi.check_expired` → `login::LoginApi::check_expired`（profile homepage fcg）
+- [x] `LoginApi.logout` → `login::LoginApi::logout`（Logout CGI）
+- [x] `QRCodeLoginSession.wait_qrcode_login` → `login::LoginApi::wait_qrcode_login`
+      （轮询/去重/指数退避/超时/取消 CancellationToken）
+- [x] `QR`/`QRCodeLoginEvents`/`QRLoginResult`/`PollInterval` → `login` 模块同名类型
+- [ ] `LoginApi.get_qrcode(WX/MOBILE)` + `check_qrcode` 对应分支 —— 待移植
+- [ ] `PhoneLoginSession`（短信验证码登录）—— 待移植
+
 ## 尚未移植
 
 - 登录（QQ 二维码 / 微信扫码 / 微信换取登录态）—— 阶段 B
 - 播放 URL 获取 —— 阶段 C
 - 歌词 —— 阶段 C
 - 歌单 / 专辑 / 歌手 / 每日推荐 —— 阶段 D
+- 微信扫码登录 / 手机客户端扫码（MQTT）—— 微信需 open.weixin.qq.com 页面解析，手机端依赖 MQTT
+- 短信验证码登录（`PhoneLoginSession`）—— 待移植
 - 写操作（收藏、歌单管理）—— 阶段 E
 - Android 平台会话（`ensure_session`/QIMEI/设备指纹）—— HMP 目标为 Linux 桌面，暂不移植
 

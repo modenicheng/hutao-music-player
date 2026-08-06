@@ -91,6 +91,7 @@ mod tests {
             refresh_key: None,
             login_type: crate::credential::LoginType::Qq,
             raw_cookie: String::new(),
+            ..Default::default()
         }
     }
 

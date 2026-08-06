@@ -626,6 +626,15 @@ Expired / Refused / NetworkError / InvalidResponse
 
 登录实现必须支持取消。用户关闭登录弹窗后，应停止轮询任务。
 
+实现要点（2026-08-06，阶段 B）：
+
+- `LoginApi::get_qrcode(QRLoginType::Qq)` → 扫码图片 + `identifier`（qrsig）；
+- `LoginApi::check_qrcode(&QR)` → 单次状态检查（`QRCodeLoginEvents`）；
+- `LoginApi::wait_qrcode_login(qrcode, PollInterval, timeout, Option<&CancellationToken>)`
+  内置轮询/去重/指数退避/超时，取消时立即返回错误；
+- 完整链路：ptqrshow → ptqrlogin → check_sig → oauth authorize → QQLogin CGI；
+- 登录/刷新均不产生全局状态，凭证由调用方显式传入并自行存储（§6.4）。
+
 ### 6.6 移植顺序
 
 #### 阶段 A：基础请求层

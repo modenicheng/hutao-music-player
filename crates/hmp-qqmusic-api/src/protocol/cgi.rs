@@ -14,6 +14,10 @@ pub struct CgiRequest {
     pub method: String,
     /// 业务参数。
     pub param: serde_json::Value,
+    /// 自定义公共参数（上游 `comm`），覆盖同名默认 comm 字段。
+    pub comm: Option<serde_json::Value>,
+    /// 完全用 `comm` 替代默认公共参数，不做合并（上游 `override_comm`）。
+    pub override_comm: bool,
     /// 允许的错误码集合；命中时不抛业务错误。
     pub allow_error_codes: Option<Vec<i64>>,
     /// 请求是否需要登录。
@@ -31,6 +35,8 @@ impl CgiRequest {
             module: module.into(),
             method: method.into(),
             param,
+            comm: None,
+            override_comm: false,
             allow_error_codes: None,
             require_login: false,
         }

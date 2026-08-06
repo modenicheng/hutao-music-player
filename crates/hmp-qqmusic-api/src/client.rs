@@ -24,6 +24,8 @@ use crate::protocol::search::QuickSearch;
 /// 无内部凭证状态：每次请求的凭证由调用方传入（见[模块文档](self)）。
 pub struct QqMusicClient {
     http: reqwest::Client,
+    // 登录流程需要读取 30x 的 Location/cookie，禁用自动重定向（上游 allow_redirects=False）
+    http_no_redirect: reqwest::Client,
     config: ClientConfig,
 }
 
@@ -48,7 +50,24 @@ impl QqMusicClient {
             .cookie_store(true)
             .build()
             .expect("valid reqwest client config");
-        Self { http, config }
+        #[allow(clippy::expect_used)]
+        let http_no_redirect = reqwest::Client::builder()
+            .timeout(config.timeout)
+            .user_agent(config.user_agent.clone())
+            .cookie_store(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("valid reqwest client config");
+        Self {
+            http,
+            http_no_redirect,
+            config,
+        }
+    }
+
+    /// 读取当前配置。
+    pub fn config(&self) -> ClientConfig {
+        self.config.clone()
     }
 
     /// 统一的 CGI 请求入口（docs/PROJECT.md §6.3 `musicu_request`）。
@@ -67,7 +86,28 @@ impl QqMusicClient {
             return Err(QqMusicError::AuthenticationRequired);
         }
 
-        let comm = build_web_comm(credential.unwrap_or(&Credential::default()));
+        // comm：默认 WEB comm 基础上合并请求级覆盖；override_comm 时完全替换
+        let comm = if request.override_comm {
+            request
+                .comm
+                .clone()
+                .unwrap_or_else(|| serde_json::Map::new().into())
+        } else {
+            let mut comm = build_web_comm(credential.unwrap_or(&Credential::default()));
+            if let Some(overrides) = &request.comm {
+                if let (Some(map), Some(overrides)) = (comm.as_object_mut(), overrides.as_object())
+                {
+                    for (k, v) in overrides {
+                        map.insert(k.clone(), v.clone());
+                    }
+                } else {
+                    return Err(QqMusicError::InvalidResponse(
+                        "comm override must be a JSON object".into(),
+                    ));
+                }
+            }
+            comm
+        };
         let payload = serde_json::json!({
             "comm": comm,
             "req_0": request.to_req_value(),
@@ -156,6 +196,52 @@ impl QqMusicClient {
             .map_err(|e| QqMusicError::InvalidResponse(e.to_string()))?;
 
         QuickSearch::from_value(&body)
+    }
+
+    /// 通用原始 HTTP 请求（`pub(crate)`，供登录等需要手动控制
+    /// Cookie / 重定向的流程使用，对应上游 `Client.execute(HttpRequest)`）。
+    ///
+    /// - `cookies` 以请求级 Cookie 注入（不依赖 cookie jar 的跨域自动携带）；
+    /// - `allow_redirects = false` 时不跟随重定向，由调用方读取 `Location`；
+    /// - 返回完整 `reqwest::Response`，调用方负责取 body / headers。
+    ///
+    /// 本方法不自动注入凭证 Cookie 与 UA（上游 `prepare_http_kwargs` 由调用方
+    /// 自行决定传入的 headers/cookies），保证与上游逐参数一致。
+    #[allow(clippy::too_many_arguments)] // 参数为上游 HttpRequest 字段的一一映射
+    pub(crate) async fn http_request(
+        &self,
+        method: reqwest::Method,
+        url: String,
+        params: &[(&str, String)],
+        headers: &[(&str, String)],
+        cookies: &[(String, String)],
+        form: Option<&[(&str, String)]>,
+        allow_redirects: bool,
+    ) -> Result<reqwest::Response, QqMusicError> {
+        let client = if allow_redirects {
+            &self.http
+        } else {
+            &self.http_no_redirect
+        };
+        let mut builder = client.request(method, url).query(params);
+        for (k, v) in headers {
+            builder = builder.header(*k, v);
+        }
+        if !cookies.is_empty() {
+            let joined = cookies
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            builder = builder.header(reqwest::header::COOKIE, joined);
+        }
+        if let Some(form) = form {
+            builder = builder.form(form);
+        }
+        builder
+            .send()
+            .await
+            .map_err(|e| QqMusicError::Network(e.to_string()))
     }
 }
 
