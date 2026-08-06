@@ -115,12 +115,7 @@ impl MprisPlayer {
 
     /// 播放/暂停切换。
     fn play_pause(&self) {
-        let cmd = if self.playback_status == "Playing" {
-            PlayerCommand::Pause
-        } else {
-            PlayerCommand::Play
-        };
-        let _ = self.cmd_tx.send(cmd);
+        let _ = self.cmd_tx.send(PlayerCommand::TogglePlay);
     }
 
     /// 停止。

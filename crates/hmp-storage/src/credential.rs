@@ -24,7 +24,7 @@ impl BackendKind {
 }
 
 /// 凭据存储抽象。
-pub trait CredentialStore {
+pub trait CredentialStore: Send + Sync {
     /// 保存凭证。
     fn save(&self, credential: &Credential) -> Result<(), HmpError>;
     /// 加载凭证（不存在返回 `Ok(None)`）。

@@ -213,6 +213,16 @@ async fn drive(
                         state.position = Duration::ZERO;
                         let _ = state_tx.send(state.clone());
                     }
+                    PlayerCommand::TogglePlay => {
+                        if state.status == PlaybackStatus::Playing {
+                            player.pause();
+                            state.status = PlaybackStatus::Paused;
+                        } else {
+                            player.play();
+                            state.status = PlaybackStatus::Playing;
+                        }
+                        let _ = state_tx.send(state.clone());
+                    }
                     PlayerCommand::Seek(pos) => {
                         player.seek(gstreamer::ClockTime::from_nseconds(
                             pos.as_nanos().min(u64::MAX as u128) as u64,

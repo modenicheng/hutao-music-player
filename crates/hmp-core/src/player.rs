@@ -106,6 +106,8 @@ pub enum PlayerCommand {
     Play,
     /// 暂停。
     Pause,
+    /// 播放/暂停切换。
+    TogglePlay,
     /// 停止。
     Stop,
     /// 跳转到指定位置（序列化为秒）。

@@ -1,0 +1,542 @@
+// HMP 主界面 —— Apple Music 风格深色主题
+// 主题：近黑背景、红色渐变强调（胡桃火系）、圆角卡片、毛玻璃播放栏
+
+import { ListView, Slider } from "std-widgets.slint";
+
+// ---- 数据 ----
+
+export struct UiSong {
+    title: string,
+    artist: string,
+    duration: string,
+}
+
+export struct UiPlayback {
+    title: string,
+    artist: string,
+    status: string,    // "playing" | "paused" | "stopped"
+    position: float,   // 秒
+    duration: float,   // 秒
+    volume: float,     // 0..1
+    position-text: string,
+    duration-text: string,
+}
+
+// ---- 主题 ----
+
+export global Theme {
+    in property <brush> background: #121214;
+    in property <brush> sidebar: #0d0d0f;
+    in property <brush> card: #1b1b1e;
+    in property <brush> card-hover: #242428;
+    in property <brush> text-primary: #f5f5f7;
+    in property <brush> text-secondary: #98989f;
+    in property <brush> accent: #ff2d55;
+    in property <brush> accent-glow: #ff5b7a;
+    in property <brush> divider: #26262a;
+}
+
+// ---- 圆形图标按钮 ----
+
+component IconButton inherits Rectangle {
+    in property <string> glyph: "▶";
+    in property <bool> emphasized: false;
+    in property <bool> disabled: false;
+    callback clicked;
+    width: 44px;
+    height: 44px;
+    border-radius: root.width / 2;
+    background: disabled ? transparent
+        : emphasized ? Theme.accent
+        : touch-area.has-hover ? #2a2a2f : transparent;
+    touch-area := TouchArea {
+        enabled: !disabled;
+        clicked => { root.clicked(); }
+    }
+    text := Text {
+        text: glyph;
+        color: disabled ? #4a4a50 : emphasized ? white : Theme.text-primary;
+        font-size: emphasized ? 18px : 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        x: (parent.width - text.width) / 2;
+        y: (parent.height - text.height) / 2;
+    }
+}
+
+// ---- 封面（圆角方块 + 渐变占位）----
+
+component CoverArt inherits Rectangle {
+    in property <image> image;
+    in property <length> radius: 8px;
+    width: 64px;
+    height: 64px;
+    border-radius: radius;
+    clip: true;
+    background: #232326;
+    // 渐变占位
+    gradient := Rectangle {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        background: @linear-gradient(135deg, #2a2a30 0%, #1a1a20 100%);
+        visible: !root.image-source-set;
+    }
+    img := Image {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        source: root.image;
+        image-fit: cover;
+        visible: root.image-source-set;
+    }
+    placeholder := Text {
+        text: "♪";
+        color: #4a4a55;
+        font-size: 26px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        x: (parent.width - placeholder.width) / 2;
+        y: (parent.height - placeholder.height) / 2;
+        visible: !root.image-source-set;
+    }
+    property <bool> image-source-set: image.width > 0 && image.height > 0;
+}
+
+// ---- 侧边栏 ----
+
+component SideBar inherits Rectangle {
+    callback login-start;
+    callback login-cancel;
+    in property <bool> logged-in;
+    in property <string> user-name;
+    in property <bool> show-login;
+    in property <image> qr-image;
+    in property <string> login-status;
+
+    background: Theme.sidebar;
+    width: 230px;
+
+    VerticalLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        padding-top: 24px;
+        padding-bottom: 20px;
+        spacing: 8px;
+
+        // Logo
+        HorizontalLayout {
+            spacing: 10px;
+            Rectangle {
+                width: 34px; height: 34px;
+                border-radius: 10px;
+                background: @linear-gradient(135deg, Theme.accent 0%, Theme.accent-glow 100%);
+                Text {
+                    text: "♪";
+                    color: white;
+                    font-size: 18px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            Text {
+                text: "胡桃音乐";
+                color: Theme.text-primary;
+                font-size: 19px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle { height: 1px; background: Theme.divider; }
+
+        // 导航
+        VerticalLayout {
+            spacing: 4px;
+            Rectangle {
+                height: 38px;
+                border-radius: 9px;
+                background: #1e1e22;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    spacing: 10px;
+                    Text { text: "🔍"; color: Theme.text-secondary; font-size: 15px; vertical-alignment: center; }
+                    Text { text: "搜索"; color: Theme.text-primary; font-size: 15px; font-weight: 600; vertical-alignment: center; }
+                }
+            }
+        }
+
+        Rectangle { height: 0px; }
+
+        // 登录区（底部推挤）
+        VerticalLayout {
+            alignment: start;
+            spacing: 8px;
+            visible: !root.logged-in && !root.show-login;
+            Rectangle {
+                height: 44px;
+                border-radius: 12px;
+                background: #1e1e22;
+                login-touch := TouchArea {
+                    clicked => { root.login-start(); }
+                }
+                HorizontalLayout {
+                    padding-left: 12px; padding-right: 12px;
+                    spacing: 10px;
+                    Text { text: "👤"; color: Theme.text-secondary; font-size: 16px; vertical-alignment: center; }
+                    Text {
+                        text: "登录 QQ 音乐";
+                        color: Theme.text-primary;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                    }
+                }
+            }
+        }
+        VerticalLayout {
+            spacing: 8px;
+            visible: root.logged-in;
+            Rectangle {
+                height: 44px;
+                border-radius: 12px;
+                background: #1e1e22;
+                HorizontalLayout {
+                    padding-left: 12px; padding-right: 12px;
+                    spacing: 10px;
+                    Text { text: "👤"; color: Theme.accent; font-size: 16px; vertical-alignment: center; }
+                    Text {
+                        text: root.user-name;
+                        color: Theme.text-primary;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+
+        // 登录覆盖（二维码）
+        VerticalLayout {
+            spacing: 10px;
+            visible: root.show-login;
+            Rectangle {
+                height: 200px;
+                border-radius: 14px;
+                background: Theme.card;
+                Image {
+                    source: root.qr-image;
+                    width: 180px; height: 180px;
+                    x: (parent.width - 180px) / 2;
+                    y: (parent.height - 180px) / 2;
+                }
+            }
+            Text {
+                text: root.login-status;
+                color: Theme.text-secondary;
+                font-size: 13px;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            Rectangle {
+                height: 36px;
+                border-radius: 10px;
+                background: #26262a;
+                cancel-touch := TouchArea {
+                    clicked => { root.login-cancel(); }
+                }
+                Text {
+                    text: "取消";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        Rectangle { height: 0px; }
+    }
+}
+
+// ---- 搜索页 ----
+
+component SearchPage inherits Rectangle {
+    in property <[UiSong]> songs;
+    in-out property <string> search-text;
+    callback search-requested(string);
+    callback play-requested(int);
+
+    VerticalLayout {
+        padding-left: 36px;
+        padding-right: 36px;
+        padding-top: 32px;
+        spacing: 18px;
+
+        Text {
+            text: "搜索";
+            color: Theme.text-primary;
+            font-size: 30px;
+            font-weight: 700;
+        }
+
+        // 搜索框
+        Rectangle {
+            height: 46px;
+            border-radius: 12px;
+            background: #1e1e22;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 8px;
+                spacing: 10px;
+                Text { text: "🔍"; color: Theme.text-secondary; font-size: 16px; vertical-alignment: center; }
+                placeholder := Text {
+                    text: "歌曲、歌手、专辑";
+                    color: #5a5a62;
+                    font-size: 15px;
+                    vertical-alignment: center;
+                    visible: root.search-text == "";
+                    touch-area := TouchArea {
+                        clicked => { search-input.focus(); }
+                    }
+                }
+                search-input := TextInput {
+                    text: root.search-text;
+                    color: Theme.text-primary;
+                    font-size: 15px;
+                    vertical-alignment: center;
+                    edited => {
+                        root.search-text = search-input.text;
+                    }
+                    accepted => {
+                        root.search-requested(search-input.text);
+                    }
+                }
+            }
+        }
+
+        // 结果列表
+        ListView {
+            viewport-height: parent.height - 10px;
+            for song[idx] in root.songs : HorizontalLayout {
+                height: 52px;
+                Rectangle {
+                    height: 44px;
+                    border-radius: 10px;
+                    background: row-touch.has-hover ? Theme.card-hover : transparent;
+                    row-touch := TouchArea {
+                        clicked => { root.play-requested(idx); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 14px;
+                        Text {
+                            text: (idx + 1) + ".";
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            width: 28px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: song.title;
+                            color: Theme.text-primary;
+                            font-size: 15px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Rectangle { width: 0px; }
+                        Text {
+                            text: song.artist;
+                            color: Theme.text-secondary;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: song.duration;
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            width: 50px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- 底部播放栏 ----
+
+component PlayerBar inherits Rectangle {
+    in property <UiPlayback> playback;
+    in property <image> cover-image;
+    callback play-pause;
+    callback next-requested;
+    callback prev-requested;
+    callback seek-requested(float);
+    callback volume-requested(float);
+
+    height: 92px;
+    background: #17171a;
+    Rectangle {
+        height: 1px;
+        background: Theme.divider;
+    }
+
+    HorizontalLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        padding-top: 14px;
+        padding-bottom: 14px;
+        spacing: 14px;
+
+        // 左侧：封面 + 信息
+        HorizontalLayout {
+            width: 280px;
+            spacing: 12px;
+            CoverArt {
+                image: root.cover-image;
+                width: 64px; height: 64px;
+                radius: 10px;
+            }
+            VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: root.playback.title != "" ? root.playback.title : "未在播放";
+                    color: Theme.text-primary;
+                    font-size: 15px;
+                    font-weight: 600;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.playback.artist != "" ? root.playback.artist : "—";
+                    color: Theme.text-secondary;
+                    font-size: 13px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // 中间：控制 + 进度
+        VerticalLayout {
+            spacing: 6px;
+            HorizontalLayout {
+                alignment: center;
+                spacing: 8px;
+                IconButton {
+                    glyph: "⏮";
+                    clicked => { root.prev-requested(); }
+                }
+                IconButton {
+                    glyph: root.playback.status == "playing" ? "❚❚" : "▶";
+                    emphasized: true;
+                    clicked => { root.play-pause(); }
+                }
+                IconButton {
+                    glyph: "⏭";
+                    clicked => { root.next-requested(); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: root.playback.position-text;
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                Slider {
+                    minimum: 0;
+                    maximum: root.playback.duration > 0 ? root.playback.duration : 1;
+                    value: root.playback.position;
+                    enabled: root.playback.duration > 0;
+                    changed(v) => { root.seek-requested(v); }
+                }
+                Text {
+                    text: root.playback.duration-text;
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // 右侧：音量
+        HorizontalLayout {
+            width: 160px;
+            spacing: 10px;
+            Text { text: "🔊"; color: Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
+            Slider {
+                minimum: 0;
+                maximum: 1;
+                value: root.playback.volume;
+                changed(v) => { root.volume-requested(v); }
+            }
+        }
+    }
+}
+
+// ---- 主窗口 ----
+
+export component AppWindow inherits Window {
+    title: "胡桃音乐";
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    background: Theme.background;
+
+    in-out property <[UiSong]> songs;
+    in property <UiPlayback> playback;
+    in property <bool> logged-in;
+    in property <string> user-name;
+    in property <bool> show-login;
+    in property <image> qr-image;
+    in property <string> login-status;
+    in property <image> cover-image;
+
+    callback search-requested(string);
+    callback play-requested(int);
+    callback play-pause;
+    callback next-requested;
+    callback prev-requested;
+    callback seek-requested(float);
+    callback volume-requested(float);
+    callback login-start;
+    callback login-cancel;
+
+    VerticalLayout {
+        spacing: 0;
+        HorizontalLayout {
+            SideBar {
+                logged-in: root.logged-in;
+                user-name: root.user-name;
+                show-login: root.show-login;
+                qr-image: root.qr-image;
+                login-status: root.login-status;
+                login-start => { root.login-start(); }
+                login-cancel => { root.login-cancel(); }
+            }
+            Rectangle {
+                width: 1px;
+                background: Theme.divider;
+            }
+            SearchPage {
+                songs: root.songs;
+                search-requested(text) => { root.search-requested(text); }
+                play-requested(idx) => { root.play-requested(idx); }
+            }
+        }
+        PlayerBar {
+            playback: root.playback;
+            cover-image: root.cover-image;
+            play-pause => { root.play-pause(); }
+            next-requested => { root.next-requested(); }
+            prev-requested => { root.prev-requested(); }
+            seek-requested(v) => { root.seek-requested(v); }
+            volume-requested(v) => { root.volume-requested(v); }
+        }
+    }
+}
