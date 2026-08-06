@@ -1,0 +1,19 @@
+[package]
+name = "hmp-player-gst"
+description = "HMP GStreamer 播放器核心（URI 加载/播放/暂停/Seek/音量/状态发布）"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+glib = "0.22"
+gstreamer = "0.25"
+gstreamer-player = "0.25"
+hmp-core = { path = "../hmp-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

@@ -6,7 +6,7 @@
 use thiserror::Error;
 
 /// HMP 核心错误。
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum HmpError {
     /// 网络错误。
     #[error("network error: {0}")]

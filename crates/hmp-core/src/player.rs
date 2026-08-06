@@ -56,6 +56,8 @@ pub struct PlaybackState {
     pub duration: Option<std::time::Duration>,
     /// 音量（0.0..=1.0）。
     pub volume: f64,
+    /// 循环模式。
+    pub loop_mode: LoopMode,
     /// 是否支持 Seek。
     pub can_seek: bool,
     /// 缓冲进度（0.0..=1.0，None=未缓冲）。
@@ -70,6 +72,7 @@ impl Default for PlaybackState {
             position: std::time::Duration::ZERO,
             duration: None,
             volume: 1.0,
+            loop_mode: LoopMode::None,
             can_seek: false,
             buffering: None,
         }
@@ -131,6 +134,7 @@ mod tests {
         assert!(s.current.is_none());
         assert_eq!(s.position, std::time::Duration::ZERO);
         assert_eq!(s.volume, 1.0);
+        assert_eq!(s.loop_mode, LoopMode::None);
         assert!(!s.can_seek);
         assert!(s.buffering.is_none());
     }
