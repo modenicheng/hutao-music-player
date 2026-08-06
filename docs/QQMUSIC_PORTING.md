@@ -30,7 +30,7 @@
 | `qqmusic_api/models/request.py` | `credential.rs` | ✅ 已移植 | Credential（脱敏 Debug，无全局持有，含登录响应解析） |
 | `qqmusic_api/modules/login.py` | `login.rs` | 🔶 部分 | QQ 扫码完整链路 + refresh/check_expired/logout；微信/手机扫码待移植 |
 | `qqmusic_api/modules/login_utils.py` | `login.rs` | 🔶 部分 | PollInterval + wait_qrcode_login（轮询/去重/退避/取消）；无 PhoneLoginSession |
-| `qqmusic_api/modules/song.py` | `song.rs` | ✅ 已移植 | 详情/批量查询/播放 URL（取流）；凭证解耦 |
+| `qqmusic_api/modules/song.py` | `song.rs` | ✅ 已移植 | 详情/批量查询/播放 URL + 加密取流（GetEVkey）；凭证解耦 |
 | `qqmusic_api/modules/lyric.py` | `lyric.rs` | ✅ 已移植 | 歌词（自动 QRC 解密） |
 | `qqmusic_api/models/base.py` | `models.rs` | ✅ 已移植 | Song/Singer/Album/File/Pay/MV + SongList |
 | `qqmusic_api/modules/songlist.py` | `songlist.rs` | ✅ 已移植 | 歌单详情（免登录）+ 创建/删除/加歌/收藏（需登录） |
@@ -95,6 +95,20 @@
 - 免登录：`RS02`（试听）返回 `purl`+`vkey`；`M500`/`C400` 等完整音质返回 `104003`（无权限，需登录态）；
 - 完整音质需调用方传入 `credential`（`str_musicid` 注入 `uin` 参数）。
 
+### 加密取流（阶段 D 补充，2026-08-06）
+
+- [x] `EncryptedSongFileType` → `song::SongFileType` 合并：`is_encrypted=true` 的常量
+  （`FLAC`=`F0M0.mflac`、`MASTER`=`AIM0.mflac`、`VINYL`=`V0M0.mflac`、`OGG_*`=`O8M*/O6M0/O4M0.mgg`、
+  `ATMOS_*`=`Q0M0/Q0M1/Q0M3/D0M4`、`DTS_X`=`DTM3.mmp4`、`NAC`=`TLM1.mnac`）；
+- [x] `get_song_urls` 按 `file_type.is_encrypted` 自动切换 `music.vkey.GetEVkey`/`CgiGetEVkey`；
+- [x] 响应 `ekey` 字段已解析（供播放器解密加密文件）；
+- 实测：免登录 FLAC 取流返回 `101404`（需登录）/`104003`（无权限）；VIP 登录后调用
+  `get_song_urls(&[info], SongFileType::FLAC, Some(&credential))` 取流；
+- 明文高音质变体（`F000`/`AI00` 等）服务端已停发，故不提供（上游保留但不可用）；
+- 上游普通组高音质常量（`MASTER`/`FLAC`/`OGG_*` 等）与加密组同名，Rust 合并为单一
+  `SongFileType`（高音质统一为加密版本）；
+- **待播放器阶段**：`.mflac`/`.mgg` 解密播放（上游仓库无解密算法，需社区方案如 unlock-music）。
+
 ### 歌单/专辑/歌手/排行榜/推荐（阶段 D，docs/PROJECT.md §6.6）
 
 - [x] `SonglistApi.get_detail` → `songlist::SonglistApi::get_detail`（`CgiGetDiss`）
@@ -122,8 +136,8 @@
 - 歌单 / 专辑 / 歌手 / 每日推荐 —— 阶段 D
 - 微信扫码登录 / 手机客户端扫码（MQTT）—— 微信需 open.weixin.qq.com 页面解析，手机端依赖 MQTT
 - 短信验证码登录（`PhoneLoginSession`）—— 待移植
-- 加密音质取流（`GetEVkey`/`CgiGetEVkey`）—— 待移植
-- MV 播放地址（`modules/mv.py`）—— 待移植
+- MV 播放地址（`modules/mv.py`）—— 用户明确暂不需要
+- 加密音频解密播放（mflac/mgg → 明文）—— 播放器阶段（hmp-player-gst）
 - 写操作（收藏、歌单管理）—— 阶段 E
 - Android 平台会话（`ensure_session`/QIMEI/设备指纹）—— HMP 目标为 Linux 桌面，暂不移植
 

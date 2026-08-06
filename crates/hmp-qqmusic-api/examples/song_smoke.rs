@@ -56,4 +56,27 @@ async fn main() {
         lyric.lyric.len(),
         lyric.lyric.lines().next().unwrap_or("")
     );
+
+    // 加密取流（FLAC 无损，免登录应返回 101404=需登录；VIP 登录后可用）
+    // 登录用法：SongApi::get_song_urls(&[file_info], SongFileType::FLAC, Some(&credential))
+    let ev = song_api
+        .get_song_urls(
+            &[SongFileInfo {
+                mid: detail.track.mid.clone(),
+                file_type: Some(SongFileType::FLAC),
+                song_type: 0,
+                media_mid: Some(detail.track.file.media_mid.clone()),
+            }],
+            SongFileType::FLAC,
+            None,
+        )
+        .await
+        .expect("get encrypted urls");
+    let item = &ev.data[0];
+    println!(
+        "encrypted(FLAC): filename={} result={} (101404=需登录) ekey={}",
+        item.filename,
+        item.result,
+        !item.ekey.is_empty()
+    );
 }

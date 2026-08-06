@@ -12,121 +12,78 @@ use crate::error::QqMusicError;
 use crate::models::Song;
 use crate::protocol::cgi::CgiRequest;
 
-/// 基础歌曲文件类型（上游 `BaseSongFileType`）。
+/// 歌曲文件类型（上游 `BaseSongFileType` / `SongFileType` /
+/// `EncryptedSongFileType` / `SpecialSongFileType` 合并）。
+///
+/// 服务端现实：高音质（无损 FLAC、臻品母带、全景声、高码率 OGG、DTS:X、
+/// AICodec）只提供**加密文件**（`.mflac`/`.mgg`/`.mnac`/`.mmp4`），
+/// `is_encrypted = true` 时取流自动走 `music.vkey.GetEVkey`（`CgiGetEVkey`）
+/// 并返回 `ekey` 供播放器解密。上游普通组的明文变体（`F000`/`AI00` 等）
+/// 服务端已停发，故不提供；低音质（MP3/AAC/试听）保持明文。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SongFileType {
     /// 文件编码前缀（如 `M500`）。
     pub s: &'static str,
     /// 文件后缀（如 `.mp3`）。
     pub e: &'static str,
+    /// 是否为加密文件（取流走 `CgiGetEVkey`）。
+    pub is_encrypted: bool,
 }
 
-/// 普通歌曲文件类型（上游 `SongFileType`）。
 impl SongFileType {
-    /// DTS:X 音效。
-    pub const DTS_X: Self = Self {
-        s: "DT03",
-        e: ".mp4",
-    };
-    /// 臻品母带。
-    pub const MASTER: Self = Self {
-        s: "AI00",
-        e: ".flac",
-    };
-    /// 臻品音质 2.0。
-    pub const ATMOS_2: Self = Self {
-        s: "Q000",
-        e: ".flac",
-    };
-    /// 臻品全景声 5.1。
-    pub const ATMOS_51: Self = Self {
-        s: "Q001",
-        e: ".flac",
-    };
-    /// 臻品全景声 7.1。
-    pub const ATMOS_71: Self = Self {
-        s: "Q003",
-        e: ".ogg",
-    };
-    /// 杜比全景声。
-    pub const ATMOS_DB: Self = Self {
-        s: "D004",
-        e: ".mp4",
-    };
-    /// 腾讯自研 AICodec。
-    pub const NAC: Self = Self {
-        s: "TL01",
-        e: ".nac",
-    };
-    /// SQ 无损音质。
-    pub const FLAC: Self = Self {
-        s: "F000",
-        e: ".flac",
-    };
-    /// SQ 无损（OGG 640k）。
-    pub const OGG_640: Self = Self {
-        s: "O801",
-        e: ".ogg",
-    };
-    /// HQ 高品质 OGG 320k。
-    pub const OGG_320: Self = Self {
-        s: "O800",
-        e: ".ogg",
-    };
-    /// HQ 高品质 OGG 192k。
-    pub const OGG_192: Self = Self {
-        s: "O600",
-        e: ".ogg",
-    };
-    /// 流畅音质 OGG 96k。
-    pub const OGG_96: Self = Self {
-        s: "O400",
-        e: ".ogg",
-    };
-    /// HQ 高品质 MP3 320k。
-    pub const MP3_320: Self = Self {
-        s: "M800",
-        e: ".mp3",
-    };
-    /// 标准音质 MP3 128k。
-    pub const MP3_128: Self = Self {
-        s: "M500",
-        e: ".mp3",
-    };
-    /// HQ 高品质 AAC 192k。
-    pub const AAC_192: Self = Self {
-        s: "C600",
-        e: ".m4a",
-    };
-    /// 流畅音质 AAC 96k。
-    pub const AAC_96: Self = Self {
-        s: "C400",
-        e: ".m4a",
-    };
-    /// 低品质 AAC 48k。
-    pub const AAC_48: Self = Self {
-        s: "C200",
-        e: ".m4a",
-    };
+    const fn new(s: &'static str, e: &'static str, is_encrypted: bool) -> Self {
+        Self { s, e, is_encrypted }
+    }
 }
 
-/// 特殊歌曲文件类型（上游 `SpecialSongFileType`）。
+/// 普通与加密歌曲文件类型（上游 `SongFileType` + `EncryptedSongFileType`）。
+impl SongFileType {
+    /// DTS:X 音效（加密，上游 `EncryptedSongFileType.DTS_X`）。
+    pub const DTS_X: Self = Self::new("DTM3", ".mmp4", true);
+    /// 黑胶（加密，上游 `EncryptedSongFileType.VINYL`）。
+    pub const VINYL: Self = Self::new("V0M0", ".mflac", true);
+    /// 臻品母带（加密）。
+    pub const MASTER: Self = Self::new("AIM0", ".mflac", true);
+    /// 臻品音质 2.0（加密）。
+    pub const ATMOS_2: Self = Self::new("Q0M0", ".mflac", true);
+    /// 臻品全景声 5.1（加密）。
+    pub const ATMOS_51: Self = Self::new("Q0M1", ".mflac", true);
+    /// 臻品全景声 7.1（加密）。
+    pub const ATMOS_71: Self = Self::new("Q0M3", ".mgg", true);
+    /// 杜比全景声（加密）。
+    pub const ATMOS_DB: Self = Self::new("D0M4", ".mmp4", true);
+    /// 腾讯自研 AICodec（加密）。
+    pub const NAC: Self = Self::new("TLM1", ".mnac", true);
+    /// SQ 无损音质（加密）。
+    pub const FLAC: Self = Self::new("F0M0", ".mflac", true);
+    /// SQ 无损（OGG 640k，加密）。
+    pub const OGG_640: Self = Self::new("O8M1", ".mgg", true);
+    /// HQ 高品质 OGG 320k（加密）。
+    pub const OGG_320: Self = Self::new("O8M0", ".mgg", true);
+    /// HQ 高品质 OGG 192k（加密）。
+    pub const OGG_192: Self = Self::new("O6M0", ".mgg", true);
+    /// 流畅音质 OGG 96k（加密）。
+    pub const OGG_96: Self = Self::new("O4M0", ".mgg", true);
+    /// HQ 高品质 MP3 320k（明文）。
+    pub const MP3_320: Self = Self::new("M800", ".mp3", false);
+    /// 标准音质 MP3 128k（明文）。
+    pub const MP3_128: Self = Self::new("M500", ".mp3", false);
+    /// HQ 高品质 AAC 192k（明文）。
+    pub const AAC_192: Self = Self::new("C600", ".m4a", false);
+    /// 流畅音质 AAC 96k（明文）。
+    pub const AAC_96: Self = Self::new("C400", ".m4a", false);
+    /// 低品质 AAC 48k（明文）。
+    pub const AAC_48: Self = Self::new("C200", ".m4a", false);
+}
+
+/// 特殊歌曲文件类型（上游 `SpecialSongFileType`，均明文）。
 impl SongFileType {
     /// 歌曲试听。
-    pub const TRY: Self = Self {
-        s: "RS02",
-        e: ".mp3",
-    };
+    pub const TRY: Self = Self::new("RS02", ".mp3", false);
     /// SQ 无损试听。
-    pub const TRY_OGG_640: Self = Self {
-        s: "O802",
-        e: ".ogg",
-    };
+    pub const TRY_OGG_640: Self = Self::new("O802", ".ogg", false);
     /// 纯人声/伴奏轨道。
-    pub const ACCOM: Self = Self {
-        s: "O801",
-        e: ".ogg",
-    };
+    pub const ACCOM: Self = Self::new("O801", ".ogg", false);
 }
 
 /// 歌曲文件信息（上游 `SongFileInfo`）。
@@ -341,6 +298,12 @@ impl<'a> SongApi<'a> {
         file_type: SongFileType,
         credential: Option<&Credential>,
     ) -> Result<GetSongUrlsResponse, QqMusicError> {
+        // 加密类型走 CgiGetEVkey（上游按请求级 file_type 判断，item 覆盖仅影响文件名）
+        let (module, method) = if file_type.is_encrypted {
+            ("music.vkey.GetEVkey", "CgiGetEVkey")
+        } else {
+            ("music.vkey.GetVkey", "UrlGetVkey")
+        };
         let mut songmid = Vec::new();
         let mut filename = Vec::new();
         let mut songtype = Vec::new();
@@ -358,8 +321,8 @@ impl<'a> SongApi<'a> {
         }
 
         let request = CgiRequest::new(
-            "music.vkey.GetVkey",
-            "UrlGetVkey",
+            module,
+            method,
             json!({
                 "uin": credential.map(|c| c.str_musicid.clone()).unwrap_or_default(),
                 "filename": filename,
@@ -400,12 +363,77 @@ fn uuid4_str() -> String {
 mod tests {
     use super::*;
 
+    #[allow(clippy::assertions_on_constants)] // 常量契约测试
     #[test]
-    fn file_type_constants_match_upstream() {
+    fn plain_file_type_constants_match_upstream() {
         assert_eq!(SongFileType::MP3_128.s, "M500");
         assert_eq!(SongFileType::MP3_128.e, ".mp3");
+        assert!(!SongFileType::MP3_128.is_encrypted);
+        assert_eq!(SongFileType::MP3_320.s, "M800");
+        assert_eq!(SongFileType::AAC_192.s, "C600");
         assert_eq!(SongFileType::TRY.s, "RS02");
-        assert_eq!(SongFileType::FLAC.s, "F000");
+        assert!(!SongFileType::TRY.is_encrypted);
+    }
+
+    #[allow(clippy::assertions_on_constants)] // 常量契约测试
+    #[test]
+    fn encrypted_file_type_constants_match_upstream() {
+        // 对齐上游 EncryptedSongFileType
+        assert_eq!(SongFileType::FLAC.s, "F0M0");
+        assert_eq!(SongFileType::FLAC.e, ".mflac");
+        assert!(SongFileType::FLAC.is_encrypted);
+        assert_eq!(SongFileType::MASTER.s, "AIM0");
+        assert_eq!(SongFileType::MASTER.e, ".mflac");
+        assert_eq!(SongFileType::VINYL.s, "V0M0");
+        assert_eq!(SongFileType::OGG_640.s, "O8M1");
+        assert_eq!(SongFileType::OGG_640.e, ".mgg");
+        assert_eq!(SongFileType::OGG_320.s, "O8M0");
+        assert_eq!(SongFileType::OGG_192.s, "O6M0");
+        assert_eq!(SongFileType::OGG_96.s, "O4M0");
+        assert_eq!(SongFileType::DTS_X.s, "DTM3");
+        assert_eq!(SongFileType::DTS_X.e, ".mmp4");
+        assert_eq!(SongFileType::ATMOS_2.s, "Q0M0");
+        assert_eq!(SongFileType::ATMOS_51.s, "Q0M1");
+        assert_eq!(SongFileType::ATMOS_71.s, "Q0M3");
+        assert_eq!(SongFileType::ATMOS_DB.s, "D0M4");
+        assert_eq!(SongFileType::NAC.s, "TLM1");
+        assert_eq!(SongFileType::NAC.e, ".mnac");
+        for t in [
+            SongFileType::FLAC,
+            SongFileType::MASTER,
+            SongFileType::VINYL,
+            SongFileType::OGG_640,
+            SongFileType::OGG_320,
+            SongFileType::OGG_192,
+            SongFileType::OGG_96,
+            SongFileType::DTS_X,
+            SongFileType::ATMOS_2,
+            SongFileType::ATMOS_51,
+            SongFileType::ATMOS_71,
+            SongFileType::ATMOS_DB,
+            SongFileType::NAC,
+        ] {
+            assert!(t.is_encrypted, "{} should be encrypted", t.s);
+        }
+    }
+
+    #[test]
+    fn song_urls_parses_real_evkey_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/song/evkey_encrypted.json"
+        );
+        let body: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let data = &body["req_0"]["data"];
+        let resp: GetSongUrlsResponse = serde_json::from_value(data.clone()).unwrap();
+
+        assert!(resp.expiration > 0);
+        assert_eq!(resp.data.len(), 1);
+        let item = &resp.data[0];
+        // 免登录加密取流：101404 = 需要登录
+        assert_eq!(item.result, 101404);
+        assert_eq!(item.filename, "F0M0003BEgWZ2eI1Qo003BEgWZ2eI1Qo.mflac");
+        assert!(item.filename.starts_with("F0M0"));
     }
 
     #[test]
