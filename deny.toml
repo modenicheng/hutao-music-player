@@ -1,0 +1,30 @@
+# cargo-deny 配置（CI 依赖审查）
+# 安装: cargo install cargo-deny
+
+[advisories]
+version = 2
+yanked = "warn"
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "GPL-3.0-or-later",
+]
+# GPL 项目自身许可
+private = { ignore = true }
+
+[bans]
+version = 2
+multiple-versions = "warn"
+
+[sources]
+version = 2
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,37 @@
+# hmp-qqmusic-api — QQ 音乐 API 的 Rust 移植（非官方）
+# 独立版本号、独立 crates.io 发布。移植行为以 L-1124/QQMusicApi 为 Oracle。
+[package]
+name = "hmp-qqmusic-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Unofficial QQ Music API client for Rust (ported from the Python QQMusicApi reference)"
+readme = "README.md"
+keywords = ["qqmusic", "qq-music", "music", "api", "client"]
+categories = ["api-bindings", "multimedia"]
+# 发布前补上文档链接（docs.rs 自动生成，可省略）
+
+[dependencies]
+base64.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "fs",
+    "io-util",
+    "net",
+] }
+wiremock.workspace = true

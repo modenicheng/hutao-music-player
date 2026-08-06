@@ -1,0 +1,26 @@
+# Rust
+/target
+**/target/
+
+# 本地工具产物
+*.swp
+*.swo
+.idea/
+.vscode/
+*.iml
+
+# 环境变量 / 凭据（严禁提交）
+.env
+.env.*
+
+# 测试与诊断产物
+*.log
+/perf.data*
+*.profraw
+
+# 本地 Python 参考源（差分测试按需拉取，不提交）
+third_party/
+.deps/
+
+# 临时文件
+/tmp/

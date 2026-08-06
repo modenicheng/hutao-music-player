@@ -1,0 +1,40 @@
+//! # hmp-qqmusic-api
+//!
+//! 非官方 QQ 音乐（QQ Music）API 的 Rust 客户端。
+//!
+//! 本 crate 是 [L-1124/QQMusicApi](https://github.com/L-1124/QQMusicApi)（Python,
+//! GPL-3.0-or-later）的 Rust 移植：以 Python 实现为行为规范与差分测试 Oracle，
+//! 在 Rust 侧重新定义模块边界、错误类型与并发模型。
+//!
+//! 分层（docs/PROJECT.md §6.2）：
+//!
+//! ```text
+//! QQ 原始请求/响应
+//!         │
+//!         ▼
+//! wire DTO / serde_json::Value
+//!         │
+//!         ▼ normalize
+//! 领域模型 Track / Album / Artist / Playlist
+//!         │
+//!         ▼
+//! 应用核心 / UI / MPRIS
+//! ```
+//!
+//! 本 crate 不依赖 UI、MPRIS 或播放器（docs/PROJECT.md §5.2）。
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+// 生产代码禁止 unwrap/expect（测试/示例中放行，属惯例用法）
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
+pub mod client;
+pub mod config;
+pub mod credential;
+pub mod error;
+pub mod protocol;
+
+pub use client::QqMusicClient;
+pub use config::ClientConfig;
+pub use credential::Credential;
+pub use error::QqMusicError;
