@@ -54,7 +54,10 @@ async fn sends_post_to_musicu_fcg_with_comm_and_req_0() {
         .await;
 
     let client = client_for(&mock_server.uri());
-    let result = client.musicu_request(&search_request()).await.unwrap();
+    let result = client
+        .musicu_request(&search_request(), None)
+        .await
+        .unwrap();
 
     assert_eq!(result["data"]["song"]["list"][0]["songname"], "晴天");
 }
@@ -84,7 +87,10 @@ async fn request_body_contains_default_web_comm() {
         .await;
 
     let client = client_for(&mock_server.uri());
-    client.musicu_request(&search_request()).await.unwrap();
+    client
+        .musicu_request(&search_request(), None)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -102,7 +108,10 @@ async fn injects_user_agent_header() {
         .await;
 
     let client = client_for(&mock_server.uri());
-    client.musicu_request(&search_request()).await.unwrap();
+    client
+        .musicu_request(&search_request(), None)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -127,8 +136,10 @@ async fn injects_credential_cookies() {
         login_type: hmp_qqmusic_api::credential::LoginType::Qq,
         raw_cookie: String::new(),
     };
-    client.set_credential(Some(credential)).await;
-    client.musicu_request(&search_request()).await.unwrap();
+    client
+        .musicu_request(&search_request(), Some(&credential))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -140,7 +151,10 @@ async fn maps_http_error_status() {
         .await;
 
     let client = client_for(&mock_server.uri());
-    let err = client.musicu_request(&search_request()).await.unwrap_err();
+    let err = client
+        .musicu_request(&search_request(), None)
+        .await
+        .unwrap_err();
     assert!(matches!(err, QqMusicError::Http { status: 503, .. }));
 }
 
@@ -155,7 +169,10 @@ async fn maps_global_error_code() {
         .await;
 
     let client = client_for(&mock_server.uri());
-    let err = client.musicu_request(&search_request()).await.unwrap_err();
+    let err = client
+        .musicu_request(&search_request(), None)
+        .await
+        .unwrap_err();
     match err {
         QqMusicError::QqApi { code, .. } => assert_eq!(code, 404),
         other => panic!("expected global QqApi error, got {other:?}"),
@@ -174,7 +191,10 @@ async fn maps_business_error_code() {
         .await;
 
     let client = client_for(&mock_server.uri());
-    let err = client.musicu_request(&search_request()).await.unwrap_err();
+    let err = client
+        .musicu_request(&search_request(), None)
+        .await
+        .unwrap_err();
     assert!(matches!(err, QqMusicError::CredentialExpired));
 }
 
@@ -185,6 +205,32 @@ async fn require_login_rejects_without_credential() {
     let client = client_for(&mock_server.uri());
     let mut req = search_request();
     req.require_login = true;
-    let err = client.musicu_request(&req).await.unwrap_err();
+    let err = client.musicu_request(&req, None).await.unwrap_err();
     assert!(matches!(err, QqMusicError::AuthenticationRequired));
+}
+
+#[tokio::test]
+async fn require_login_accepts_valid_credential() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_search_response()))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = client_for(&mock_server.uri());
+    let mut req = search_request();
+    req.require_login = true;
+    let credential = Credential {
+        uin: "1".into(),
+        music_id: "1".into(),
+        music_key: "k".into(),
+        refresh_key: None,
+        login_type: hmp_qqmusic_api::credential::LoginType::Qq,
+        raw_cookie: String::new(),
+    };
+    client
+        .musicu_request(&req, Some(&credential))
+        .await
+        .expect("valid credential passes require_login");
 }

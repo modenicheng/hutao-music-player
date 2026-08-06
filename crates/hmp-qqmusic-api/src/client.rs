@@ -1,4 +1,14 @@
 //! 客户端（对应上游 `qqmusic_api/core/client.py` 的 CGI 执行路径）。
+//!
+//! # 凭证模型（设计决策）
+//!
+//! 本 crate **不维护任何全局凭证状态，也不负责凭证轮换**：
+//!
+//! - 所有需要登录态的请求以 `credential: Option<&Credential>` 参数形式
+//!   由调用方显式传入；
+//! - 凭证刷新仅通过 `LoginApi::refresh_credential` 显式完成，调用方传入
+//!   需要刷新的凭证并自行管理返回的新凭证（支持多凭证场景）；
+//! - 调用方负责凭证的存储（keyring 等）与生命周期。
 
 use serde_json::Value;
 
@@ -10,9 +20,10 @@ use crate::protocol::comm::{build_web_comm, credential_cookies};
 use crate::protocol::search::QuickSearch;
 
 /// QQ 音乐 API 客户端。
+///
+/// 无内部凭证状态：每次请求的凭证由调用方传入（见[模块文档](self)）。
 pub struct QqMusicClient {
     http: reqwest::Client,
-    credential: tokio::sync::RwLock<Option<Credential>>,
     config: ClientConfig,
 }
 
@@ -37,35 +48,26 @@ impl QqMusicClient {
             .cookie_store(true)
             .build()
             .expect("valid reqwest client config");
-        Self {
-            http,
-            credential: tokio::sync::RwLock::new(None),
-            config,
-        }
-    }
-
-    /// 设置全局登录凭证。
-    pub async fn set_credential(&self, credential: Option<Credential>) {
-        let mut guard = self.credential.write().await;
-        *guard = credential;
-    }
-
-    /// 读取当前全局登录凭证。
-    pub async fn credential(&self) -> Option<Credential> {
-        self.credential.read().await.clone()
+        Self { http, config }
     }
 
     /// 统一的 CGI 请求入口（docs/PROJECT.md §6.3 `musicu_request`）。
     ///
     /// 负责：构造 `comm`、注入 Cookie 与 User-Agent、HTTP 状态检查、
     /// QQ 业务错误码映射、批量响应解包。返回 `req_0` 子响应 JSON。
-    pub async fn musicu_request(&self, request: &CgiRequest) -> Result<Value, QqMusicError> {
-        if request.require_login && !self.has_valid_credential().await {
+    ///
+    /// `credential` 为请求级凭证：`require_login` 请求必须传入有效凭证，
+    /// 否则返回 [`QqMusicError::AuthenticationRequired`]；免登录请求可传 `None`。
+    pub async fn musicu_request(
+        &self,
+        request: &CgiRequest,
+        credential: Option<&Credential>,
+    ) -> Result<Value, QqMusicError> {
+        if request.require_login && !credential.is_some_and(Credential::is_logged_in) {
             return Err(QqMusicError::AuthenticationRequired);
         }
 
-        let credential = self.credential().await;
-        let comm = build_web_comm(credential.as_ref().unwrap_or(&Credential::default()));
+        let comm = build_web_comm(credential.unwrap_or(&Credential::default()));
         let payload = serde_json::json!({
             "comm": comm,
             "req_0": request.to_req_value(),
@@ -78,7 +80,7 @@ impl QqMusicClient {
             .header("Referer", "https://y.qq.com/");
 
         // Cookie 注入（上游 prepare_http_kwargs）
-        if let Some(cred) = &credential {
+        if let Some(cred) = credential {
             let cookies = credential_cookies(cred);
             if !cookies.is_empty() {
                 let joined = cookies
@@ -154,13 +156,6 @@ impl QqMusicClient {
             .map_err(|e| QqMusicError::InvalidResponse(e.to_string()))?;
 
         QuickSearch::from_value(&body)
-    }
-
-    async fn has_valid_credential(&self) -> bool {
-        self.credential()
-            .await
-            .map(|c| c.is_logged_in())
-            .unwrap_or(false)
     }
 }
 

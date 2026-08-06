@@ -534,7 +534,6 @@ v_playlist
 ```rust
 pub struct QqMusicClient {
     http: reqwest::Client,
-    credential: tokio::sync::RwLock<Option<Credential>>,
     config: ClientConfig,
 }
 
@@ -551,7 +550,8 @@ pub struct ClientConfig {
 impl QqMusicClient {
     async fn musicu_request<T>(
         &self,
-        request: MusicuRequest,
+        request: CgiRequest,
+        credential: Option<&Credential>,
     ) -> Result<T, QqMusicError>
     where
         T: serde::de::DeserializeOwned,
@@ -564,7 +564,7 @@ impl QqMusicClient {
 该入口负责：
 
 - 构造 `comm`；
-- 注入 Cookie；
+- 注入 Cookie（来自请求级传入的 `credential`）；
 - 注入 Referer 和 User-Agent；
 - 超时；
 - HTTP 状态检查；
@@ -575,6 +575,8 @@ impl QqMusicClient {
 - 请求追踪 ID。
 
 ### 6.4 凭据模型
+
+**设计决策（2026-08-06）：凭证完全解耦，客户端无全局凭证状态。**
 
 ```rust
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -595,6 +597,18 @@ pub struct Credential {
 - UI 只接收 `LoggedInUser`，不接收 Credential；
 - keyring 中保存敏感信息；
 - SQLite 只保存非敏感账户摘要和缓存数据。
+
+凭证生命周期约定：
+
+- **本 crate 不负责任何凭证轮换**：不存在自动刷新任务、定时器或会话恢复逻辑；
+- **刷新只通过显式接口**：`LoginApi::refresh_credential(&self, credential: &Credential) -> Credential`，
+  调用方传入需要刷新的凭证，取回刷新后的新凭证；
+- **请求级传参**：需要登录态的请求由调用方逐次传入 `credential: Option<&Credential>`，
+  便于调用方同时管理多个账号凭证；
+- 调用方负责凭证的存储（keyring）与过期判断；客户端仅在响应中返回业务错误码
+  （如 `CredentialExpired`）供调用方决定是否刷新。
+
+> 实现参考：上游 `LoginApi.refresh_credential`。
 
 ### 6.5 登录状态机
 

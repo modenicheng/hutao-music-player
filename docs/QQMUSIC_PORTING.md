@@ -25,9 +25,9 @@
 | `qqmusic_api/core/api_context.py` | `protocol/comm.rs` | ✅ 已移植 | comm 构造、Cookie 注入、UA |
 | `qqmusic_api/core/versioning.py` | `protocol/comm.rs` | ✅ 已移植 | Platform、VersionProfile、g_tk |
 | `qqmusic_api/algorithms/sign.py` | `protocol/sign.rs` | ✅ 已移植 | hash33、zzc_sign |
-| `qqmusic_api/core/client.py` | `client.rs` | 🔶 部分 | 仅 musicu 请求入口（无 Android 会话/限流） |
+| `qqmusic_api/core/client.py` | `client.rs` | 🔶 部分 | musicu 请求入口；无全局凭证状态、无 Android 会话/限流 |
 | `qqmusic_api/core/exceptions.py` | `error.rs` | ✅ 已移植 | 错误分类（§12 适配） |
-| `qqmusic_api/models/request.py` | `credential.rs` | ✅ 已移植 | Credential（脱敏 Debug） |
+| `qqmusic_api/models/request.py` | `credential.rs` | ✅ 已移植 | Credential（脱敏 Debug，无全局持有） |
 | `qqmusic_api/modules/search.py` | （待移植） | ⬜ 未移植 | 阶段 A 验收后移植 |
 | `qqmusic_api/modules/login.py` | （待移植） | ⬜ 未移植 | 阶段 B |
 | `qqmusic_api/modules/song.py` | （待移植） | ⬜ 未移植 | 阶段 C |
@@ -91,6 +91,16 @@
 | Android 平台 | 完整支持（QIMEI/设备会话） | 不移植 | HMP 面向 Linux 桌面 |
 | 响应模型 | pydantic BaseModel | serde（DTO 起步允许 `serde_json::Value`） | 稳定后逐步强类型化 |
 | 布尔参数 | `bool_to_int` 自动转换 | 显式 int 转换 | 保持可读性 |
+| **凭证模型** | client 持有全局 `credential`，方法可选覆盖 | **无全局凭证状态** | 请求级传入；仅显式 `refresh_credential`；调用方管理多凭证 |
+
+## 设计决策记录
+
+### 凭证解耦（2026-08-06，docs/PROJECT.md §6.4）
+
+- 客户端不持有全局凭证，无自动轮换/定时刷新；
+- 需要登录态的请求由调用方传入 `Option<&Credential>`；
+- 刷新仅通过显式接口 `refresh_credential(&Credential) -> Credential`（阶段 B 实现）；
+- 调用方负责 keyring 存储与过期判断，客户端返回业务错误码供调用方决策。
 
 ## Live 测试
 
