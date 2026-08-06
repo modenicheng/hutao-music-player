@@ -28,15 +28,21 @@
 // 生产代码禁止 unwrap/expect（测试/示例中放行，属惯例用法）
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod algorithms;
 pub mod client;
 pub mod config;
 pub mod credential;
 pub mod error;
 pub mod login;
+pub mod lyric;
+pub mod models;
 pub mod protocol;
+pub mod song;
 
 pub use client::QqMusicClient;
 pub use config::ClientConfig;
 pub use credential::Credential;
 pub use error::QqMusicError;
 pub use login::{LoginApi, QR, QRCodeLoginEvents, QRLoginResult, QRLoginType};
+pub use lyric::{GetLyricResponse, LyricApi};
+pub use song::{GetSongDetailResponse, GetSongUrlsResponse, SongApi, SongFileInfo, SongFileType};

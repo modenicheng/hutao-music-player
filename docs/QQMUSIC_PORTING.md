@@ -30,6 +30,11 @@
 | `qqmusic_api/models/request.py` | `credential.rs` | ✅ 已移植 | Credential（脱敏 Debug，无全局持有，含登录响应解析） |
 | `qqmusic_api/modules/login.py` | `login.rs` | 🔶 部分 | QQ 扫码完整链路 + refresh/check_expired/logout；微信/手机扫码待移植 |
 | `qqmusic_api/modules/login_utils.py` | `login.rs` | 🔶 部分 | PollInterval + wait_qrcode_login（轮询/去重/退避/取消）；无 PhoneLoginSession |
+| `qqmusic_api/modules/song.py` | `song.rs` | ✅ 已移植 | 详情/批量查询/播放 URL（取流）；凭证解耦 |
+| `qqmusic_api/modules/lyric.py` | `lyric.rs` | ✅ 已移植 | 歌词（自动 QRC 解密） |
+| `qqmusic_api/models/base.py` | `models.rs` | ✅ 已移植 | Song/Singer/Album/File/Pay/MV |
+| `qqmusic_api/algorithms/__init__.py` | `algorithms/qrc.rs` | ✅ 已移植 | qrc_decrypt（3DES + zlib） |
+| `qqmusic_api/algorithms/tripledes.py` | `algorithms/tripledes.rs` | ✅ 已移植 | 自定义 3DES 变体（PC-2 偏移） |
 | `qqmusic_api/modules/song.py` | （待移植） | ⬜ 未移植 | 阶段 C |
 | `qqmusic_api/modules/lyric.py` | （待移植） | ⬜ 未移植 | 阶段 C |
 | `qqmusic_api/modules/songlist.py` | （待移植） | ⬜ 未移植 | 阶段 D |
@@ -68,6 +73,23 @@
 - [ ] `LoginApi.get_qrcode(WX/MOBILE)` + `check_qrcode` 对应分支 —— 待移植
 - [ ] `PhoneLoginSession`（短信验证码登录）—— 待移植
 
+### 歌曲与歌词（阶段 C，docs/PROJECT.md §6.6）
+
+- [x] `SongApi.get_detail` → `song::SongApi::get_detail`（`music.pf_song_detail_svr`，Web 平台）
+- [x] `SongApi.query_song` → `song::SongApi::query_song`（`CgiGetTrackInfo` 批量）
+- [x] `SongApi.get_song_urls` → `song::SongApi::get_song_urls`（`UrlGetVkey` 取流，含 guid/filename 拼接）
+- [x] `GetSongUrlsResponse.build_urls` → `song::GetSongUrlsResponse::build_urls`（sip + purl 拼接）
+- [x] `SongFileType`/`SpecialSongFileType` → `song::SongFileType` 常量
+- [x] `LyricApi.get_lyric` → `lyric::LyricApi::get_lyric`（含 QRC 自动解密）
+- [x] `qrc_decrypt` → `algorithms::qrc_decrypt`（自定义 3DES-ECB + zlib）
+- [x] `tripledes.py` → `algorithms::tripledes`（含 PC-2 偏移 Bug 的自定义变体）
+- [x] `Song`/`Singer`/`Album`/`File`/`Pay`/`MV` → `models` 模块
+
+### 取流实测记录（2026-08-06）
+
+- 免登录：`RS02`（试听）返回 `purl`+`vkey`；`M500`/`C400` 等完整音质返回 `104003`（无权限，需登录态）；
+- 完整音质需调用方传入 `credential`（`str_musicid` 注入 `uin` 参数）。
+
 ## 尚未移植
 
 - 登录（QQ 二维码 / 微信扫码 / 微信换取登录态）—— 阶段 B
@@ -76,6 +98,7 @@
 - 歌单 / 专辑 / 歌手 / 每日推荐 —— 阶段 D
 - 微信扫码登录 / 手机客户端扫码（MQTT）—— 微信需 open.weixin.qq.com 页面解析，手机端依赖 MQTT
 - 短信验证码登录（`PhoneLoginSession`）—— 待移植
+- 加密音质取流（`GetEVkey`/`CgiGetEVkey`）—— 待移植
 - 写操作（收藏、歌单管理）—— 阶段 E
 - Android 平台会话（`ensure_session`/QIMEI/设备指纹）—— HMP 目标为 Linux 桌面，暂不移植
 
@@ -91,7 +114,9 @@
 | 文件 | 来源 | 用途 |
 | --- | --- | --- |
 | `tests/fixtures/search/quick_song.json` | Live 录制（免登录 smartbox） | quick_search 解析测试 |
-| `tests/fixtures/cgi/error_code.json` | （预留） | 错误码映射 |
+| `tests/fixtures/song/detail_by_id.json` | Live 录制（song_id=186016） | get_detail 解析测试 |
+| `tests/fixtures/song/urls_try.json` | Live 录制（RS02 试听） | get_song_urls 解析测试 |
+| `tests/fixtures/lyric/encrypted.json` | Live 录制（crypt=1） | QRC 解密 + get_lyric 解析测试 |
 
 ### 搜索接口实测记录（2026-08-06）
 
