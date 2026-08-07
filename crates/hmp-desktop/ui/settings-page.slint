@@ -1,4 +1,4 @@
-import { ListView } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 import { FeatureRow } from "primitives.slint";
 import { Theme } from "theme.slint";
 
@@ -68,91 +68,97 @@ export component SettingsPage inherits Rectangle {
 
     background: Theme.background;
 
-    VerticalLayout {
-        padding-left: Theme.content-padding;
-        padding-right: Theme.content-padding;
-        padding-top: 28px;
-        padding-bottom: 22px;
-        spacing: 18px;
+    ScrollView {
+        width: parent.width;
+        height: parent.height;
+        viewport-width: self.visible-width;
+        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
-        Text {
-            text: "设置";
-            color: Theme.text-primary;
-            font-size: 28px;
-            font-weight: 700;
-        }
+        VerticalLayout {
+            width: parent.width;
+            padding-left: Theme.content-padding;
+            padding-right: Theme.content-padding;
+            padding-top: 28px;
+            padding-bottom: 22px;
+            spacing: 18px;
 
-        Rectangle {
-            height: 110px;
-            background: Theme.surface;
-            border-radius: 8px;
+            Text {
+                text: "设置";
+                color: Theme.text-primary;
+                font-size: 28px;
+                font-weight: 700;
+            }
 
-            VerticalLayout {
-                padding: 16px;
+            Rectangle {
+                height: 110px;
+                background: Theme.surface;
+                border-radius: 8px;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+
+                    Text {
+                        text: "外观";
+                        color: Theme.text-primary;
+                        font-size: 16px;
+                        font-weight: 700;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        ThemeOption {
+                            value: "system";
+                            label: "跟随系统";
+                            selected-value: root.theme-mode;
+                            selected(value) => { root.theme-requested(value); }
+                        }
+                        ThemeOption {
+                            value: "light";
+                            label: "浅色";
+                            selected-value: root.theme-mode;
+                            selected(value) => { root.theme-requested(value); }
+                        }
+                        ThemeOption {
+                            value: "dark";
+                            label: "深色";
+                            selected-value: root.theme-mode;
+                            selected(value) => { root.theme-requested(value); }
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                height: 32px;
                 spacing: 10px;
-
                 Text {
-                    text: "外观";
+                    text: "桌面 UI 功能状态";
                     color: Theme.text-primary;
                     font-size: 16px;
                     font-weight: 700;
+                    vertical-alignment: center;
                 }
-
-                HorizontalLayout {
-                    spacing: 6px;
-                    ThemeOption {
-                        value: "system";
-                        label: "跟随系统";
-                        selected-value: root.theme-mode;
-                        selected(value) => { root.theme-requested(value); }
-                    }
-                    ThemeOption {
-                        value: "light";
-                        label: "浅色";
-                        selected-value: root.theme-mode;
-                        selected(value) => { root.theme-requested(value); }
-                    }
-                    ThemeOption {
-                        value: "dark";
-                        label: "深色";
-                        selected-value: root.theme-mode;
-                        selected(value) => { root.theme-requested(value); }
-                    }
+                Text {
+                    text: "当前实现范围";
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                    vertical-alignment: center;
                 }
             }
-        }
 
-        HorizontalLayout {
-            height: 32px;
-            spacing: 10px;
-            Text {
-                text: "桌面 UI 功能状态";
-                color: Theme.text-primary;
-                font-size: 16px;
-                font-weight: 700;
-                vertical-alignment: center;
-            }
-            Text {
-                text: "当前实现范围";
-                color: Theme.text-secondary;
-                font-size: 12px;
-                vertical-alignment: center;
-            }
-        }
+            Rectangle {
+                background: Theme.surface;
+                border-radius: 8px;
 
-        Rectangle {
-            vertical-stretch: 1;
-            min-height: 300px;
-            background: Theme.surface;
-            border-radius: 8px;
+                VerticalLayout {
+                    spacing: 0px;
 
-            ListView {
-                width: parent.width;
-                height: parent.height;
-                for item in root.feature-statuses : FeatureRow {
-                    name: item.name;
-                    status: item.status;
-                    detail: item.detail;
+                    for item in root.feature-statuses : FeatureRow {
+                        name: item.name;
+                        status: item.status;
+                        detail: item.detail;
+                    }
                 }
             }
         }

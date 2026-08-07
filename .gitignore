@@ -24,3 +24,4 @@ third_party/
 
 # 临时文件
 /tmp/
+.superpowers/sdd/
