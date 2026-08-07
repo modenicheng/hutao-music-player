@@ -33,62 +33,70 @@ export component RecommendPage inherits Rectangle {
             text: "开发中 · 当前页面使用本地演示数据";
         }
 
-        ListView {
-            for item in root.recommend-items : Rectangle {
-                height: 116px;
-                border-radius: 6px;
-                background: item-touch.has-hover ? Theme.surface-hover : transparent;
-                accessible-role: list-item;
-                accessible-label: item.kind + ", " + item.title + ", " + item.subtitle;
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 260px;
+            background: transparent;
 
-                item-touch := TouchArea { }
+            ListView {
+                width: parent.width;
+                height: parent.height;
+                for item in root.recommend-items : Rectangle {
+                    height: 116px;
+                    border-radius: 6px;
+                    background: item-touch.has-hover ? Theme.surface-hover : transparent;
+                    accessible-role: list-item;
+                    accessible-label: item.kind + ", " + item.title + ", " + item.subtitle;
 
-                HorizontalLayout {
-                    padding: 12px;
-                    spacing: 16px;
+                    item-touch := TouchArea { }
 
-                    CoverArt { source: item.cover; size: 92px; }
+                    HorizontalLayout {
+                        padding: 12px;
+                        spacing: 16px;
 
-                    VerticalLayout {
-                        spacing: 5px;
-                        alignment: center;
+                        CoverArt { source: item.cover; size: 92px; }
 
-                        Text {
-                            text: item.kind;
-                            color: Theme.accent;
-                            font-size: 12px;
-                            font-weight: 600;
-                            overflow: elide;
+                        VerticalLayout {
+                            spacing: 5px;
+                            alignment: center;
+
+                            Text {
+                                text: item.kind;
+                                color: Theme.accent;
+                                font-size: 12px;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: item.title;
+                                color: Theme.text-primary;
+                                font-size: 18px;
+                                font-weight: 700;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: item.subtitle;
+                                color: Theme.text-secondary;
+                                font-size: 13px;
+                                overflow: elide;
+                            }
                         }
+
                         Text {
-                            text: item.title;
-                            color: Theme.text-primary;
-                            font-size: 18px;
-                            font-weight: 700;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: item.subtitle;
+                            width: 74px;
+                            text: "演示内容";
                             color: Theme.text-secondary;
-                            font-size: 13px;
-                            overflow: elide;
+                            font-size: 12px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
                         }
                     }
 
-                    Text {
-                        width: 74px;
-                        text: "演示内容";
-                        color: Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.divider;
                     }
-                }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    height: 1px;
-                    background: Theme.divider;
                 }
             }
         }

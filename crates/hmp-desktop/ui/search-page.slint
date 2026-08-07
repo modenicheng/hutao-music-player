@@ -44,6 +44,8 @@ export component SearchPage inherits Rectangle {
             spacing: 10px;
 
             Rectangle {
+                horizontal-stretch: 1;
+                min-width: 0px;
                 background: Theme.surface;
                 border-radius: 6px;
 
@@ -61,6 +63,8 @@ export component SearchPage inherits Rectangle {
                     }
 
                     search-input := TextInput {
+                        horizontal-stretch: 1;
+                        min-width: 0px;
                         text: root.search-text;
                         color: Theme.text-primary;
                         font-size: 15px;
