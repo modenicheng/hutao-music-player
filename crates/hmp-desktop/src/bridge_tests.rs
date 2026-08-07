@@ -210,6 +210,19 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert!(img.size().width > 0 && img.size().height > 0);
         handle_event(&weak, AppEvent::LoginQr(png));
         assert!(ui.get_show_login(), "login panel should show");
+
+        // The modal backdrop absorbs outside clicks without cancelling the session.
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                position: slint::LogicalPosition::new(10.0, 10.0),
+                button: slint::platform::PointerEventButton::Left,
+            });
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                position: slint::LogicalPosition::new(10.0, 10.0),
+                button: slint::platform::PointerEventButton::Left,
+            });
+        assert!(ui.get_show_login(), "backdrop click must not cancel login");
     }
 
     // 6) 登录完成事件 → 更新用户

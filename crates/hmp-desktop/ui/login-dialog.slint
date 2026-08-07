@@ -11,12 +11,21 @@ export component LoginDialog inherits Rectangle {
 
     visible: root.show-login;
     background: #00000088;
+
+    // Capture backdrop clicks without changing modal state.
+    TouchArea {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+    }
+
     accessible-role: groupbox;
     accessible-label: "QQ 音乐登录";
 
     Rectangle {
         width: 360px;
-        height: 430px;
+        height: 450px;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         border-radius: 8px;
@@ -25,11 +34,11 @@ export component LoginDialog inherits Rectangle {
         border-color: Theme.divider;
 
         VerticalLayout {
-            padding: 24px;
-            spacing: 14px;
+            padding: 20px;
+            spacing: 10px;
 
             HorizontalLayout {
-                height: 44px;
+                height: 40px;
                 Text {
                     text: "登录 QQ 音乐";
                     color: Theme.text-primary;
@@ -47,6 +56,7 @@ export component LoginDialog inherits Rectangle {
             Rectangle {
                 width: 260px;
                 height: 260px;
+                vertical-stretch: 0;
                 horizontal-stretch: 0;
                 background: Theme.surface;
                 border-radius: 6px;
@@ -60,18 +70,25 @@ export component LoginDialog inherits Rectangle {
                 }
             }
 
-            Text {
-                text: root.login-status;
-                color: Theme.text-secondary;
-                font-size: 13px;
-                horizontal-alignment: center;
-                wrap: word-wrap;
+            Rectangle {
+                height: 28px;
+                vertical-stretch: 0;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.login-status;
+                    color: Theme.text-secondary;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
             }
 
             HorizontalLayout {
                 spacing: 10px;
                 Rectangle {
-                    height: 38px;
+                    height: 36px;
                     border-radius: 6px;
                     background: retry-touch.has-hover ? Theme.accent-muted : Theme.surface;
                     accessible-role: button;
@@ -81,7 +98,7 @@ export component LoginDialog inherits Rectangle {
                     retry-touch := TouchArea { clicked => { root.login-start(); } }
                 }
                 Rectangle {
-                    height: 38px;
+                    height: 36px;
                     border-radius: 6px;
                     background: cancel-touch.has-hover ? Theme.surface-hover : Theme.surface;
                     accessible-role: button;

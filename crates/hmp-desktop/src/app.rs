@@ -220,6 +220,33 @@ struct LoginResult {
     result: Result<Credential, String>,
 }
 
+#[derive(Debug)]
+enum LoginUpdatePayload {
+    Qr(Vec<u8>),
+    Status(String),
+}
+
+#[derive(Debug)]
+struct LoginUpdate {
+    generation: u64,
+    payload: LoginUpdatePayload,
+}
+
+fn forward_login_update(
+    events_tx: &mpsc::UnboundedSender<AppEvent>,
+    session: &LoginSessionState,
+    update: LoginUpdate,
+) {
+    if !session.accepts(update.generation) {
+        return;
+    }
+    let event = match update.payload {
+        LoginUpdatePayload::Qr(png) => AppEvent::LoginQr(png),
+        LoginUpdatePayload::Status(status) => AppEvent::LoginStatus(status),
+    };
+    let _ = events_tx.send(event);
+}
+
 /// 应用核心。
 pub struct AppCore {
     pub client: QqMusicClient,
@@ -237,6 +264,8 @@ pub struct AppCore {
     last_queue_state: Option<(String, bool)>,
     login_results_tx: mpsc::UnboundedSender<LoginResult>,
     login_results_rx: mpsc::UnboundedReceiver<LoginResult>,
+    login_updates_tx: mpsc::UnboundedSender<LoginUpdate>,
+    login_updates_rx: mpsc::UnboundedReceiver<LoginUpdate>,
     login_generation: u64,
     login_cancel: Option<CancellationToken>,
     _mpris: Option<MprisService>,
@@ -260,6 +289,7 @@ impl AppCore {
             }
         };
         let (login_results_tx, login_results_rx) = mpsc::unbounded_channel();
+        let (login_updates_tx, login_updates_rx) = mpsc::unbounded_channel();
         let mpris = tokio::runtime::Handle::current()
             .block_on(MprisService::start(
                 player.command_sender(),
@@ -282,6 +312,8 @@ impl AppCore {
             last_queue_state: None,
             login_results_tx,
             login_results_rx,
+            login_updates_tx,
+            login_updates_rx,
             login_generation: 0,
             login_cancel: None,
             _mpris: mpris,
@@ -360,6 +392,11 @@ impl AppCore {
                 result = self.login_results_rx.recv() => {
                     if let Some(result) = result {
                         self.finish_login(result);
+                    }
+                }
+                update = self.login_updates_rx.recv() => {
+                    if let Some(update) = update {
+                        self.forward_login_update(update);
                     }
                 }
             }
@@ -605,7 +642,7 @@ impl AppCore {
     fn start_login(&mut self) {
         let (generation, cancel) = self.begin_login_session();
         let client = QqMusicClient::with_config(self.client.config());
-        let events_tx = self.events_tx.clone();
+        let updates_tx = self.login_updates_tx.clone();
         let results_tx = self.login_results_tx.clone();
 
         tokio::spawn(async move {
@@ -617,8 +654,14 @@ impl AppCore {
                         result.map_err(|error| format!("获取二维码失败: {error}"))?
                     }
                 };
-                let _ = events_tx.send(AppEvent::LoginQr(qr.data.clone()));
-                let _ = events_tx.send(AppEvent::LoginStatus("请用 QQ 手机版扫码并确认".into()));
+                let _ = updates_tx.send(LoginUpdate {
+                    generation,
+                    payload: LoginUpdatePayload::Qr(qr.data.clone()),
+                });
+                let _ = updates_tx.send(LoginUpdate {
+                    generation,
+                    payload: LoginUpdatePayload::Status("请用 QQ 手机版扫码并确认".into()),
+                });
                 login
                     .wait_qrcode_login(
                         &qr,
@@ -655,12 +698,19 @@ impl AppCore {
         self.login_cancel = session.cancel;
     }
 
-    fn accepts_login_result(&self, generation: u64) -> bool {
+    fn login_session(&self) -> LoginSessionState {
         LoginSessionState {
             generation: self.login_generation,
             cancel: self.login_cancel.clone(),
         }
-        .accepts(generation)
+    }
+
+    fn accepts_login_result(&self, generation: u64) -> bool {
+        self.login_session().accepts(generation)
+    }
+
+    fn forward_login_update(&self, update: LoginUpdate) {
+        forward_login_update(&self.events_tx, &self.login_session(), update);
     }
 
     fn cancel_login(&mut self) {
@@ -774,5 +824,47 @@ mod tests {
         assert!(first_token.is_cancelled());
         state.cancel();
         assert!(!state.accepts(second_generation));
+    }
+
+    #[test]
+    fn login_updates_drop_stale_generations_and_forward_current_updates() {
+        let mut state = LoginSessionState::default();
+        let (first_generation, _) = state.begin();
+        let (second_generation, _) = state.begin();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+
+        forward_login_update(
+            &events_tx,
+            &state,
+            LoginUpdate {
+                generation: first_generation,
+                payload: LoginUpdatePayload::Qr(vec![1, 2, 3]),
+            },
+        );
+        assert!(events_rx.try_recv().is_err());
+
+        forward_login_update(
+            &events_tx,
+            &state,
+            LoginUpdate {
+                generation: second_generation,
+                payload: LoginUpdatePayload::Status("扫码".into()),
+            },
+        );
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(AppEvent::LoginStatus(status)) if status == "扫码"
+        ));
+
+        state.cancel();
+        forward_login_update(
+            &events_tx,
+            &state,
+            LoginUpdate {
+                generation: second_generation,
+                payload: LoginUpdatePayload::Qr(vec![4, 5, 6]),
+            },
+        );
+        assert!(events_rx.try_recv().is_err());
     }
 }
