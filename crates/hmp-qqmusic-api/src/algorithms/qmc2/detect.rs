@@ -10,7 +10,7 @@ pub enum Footer {
         /// 加密音频的字节数。
         audio_len: u32,
     },
-    /// V1 格式：audio_len 为加密音频的字节数。
+    /// V1 格式：audio_len 为加密音频的字节数（文件总长 − 4 − key_size）。
     V1 {
         /// 加密音频的字节数。
         audio_len: u32,
@@ -58,11 +58,11 @@ pub fn detect_footer(total_len: usize, tail: &[u8]) -> Option<Footer> {
 
     // 尝试 V1 格式：最后 4 字节为小端序 key_size
     let key_size = eof_magic as usize;
-    if key_size > 0 && key_size <= MAX_V1_KEY_SIZE {
-        // V1 的 audio_len 表示 ekey 长度（与 QTag 语义不同）
-        return Some(Footer::V1 {
-            audio_len: key_size as u32,
-        });
+    // 保证尾部不会延伸到文件起始位置之前
+    if key_size > 0 && key_size <= MAX_V1_KEY_SIZE && key_size + 4 <= total_len {
+        // 音频长度 = 文件总长 − 4（尾部长度值） − key_size
+        let audio_len = total_len.saturating_sub(4 + key_size) as u32;
+        return Some(Footer::V1 { audio_len });
     }
 
     // eof_magic == 0 或无法识别 → None
@@ -99,15 +99,17 @@ mod tests {
     #[test]
     fn detect_v1_layout() {
         // V1 尾部：[key_data "aaaa", key_size 4u32 LE]
+        // total 8 bytes, key_size=4 → audio_len = 8 − 4 − 4 = 0
         let tail: Vec<u8> = [b"aaaa".as_slice(), &4u32.to_le_bytes()].concat();
         let len = tail.len();
         let result = detect_footer(len, &tail);
-        assert_eq!(result, Some(Footer::V1 { audio_len: 4 }));
+        assert_eq!(result, Some(Footer::V1 { audio_len: 0 }));
     }
 
     #[test]
     fn detect_v1_key_size_upper_bound() {
         // key_size = 0x400 (1024)，应通过
+        // tail: 0x400 key bytes + 4-byte length → total=0x404, guard passes, audio_len=0
         let mut tail = vec![0x41u8; 0x400];
         tail.extend_from_slice(&(0x400u32).to_le_bytes());
         let len = tail.len();
@@ -121,6 +123,14 @@ mod tests {
     }
 
     #[test]
+    fn detect_v1_key_size_exceeds_file() {
+        // key_size + 4 > total_len → None
+        // 4-byte tail with key_size=1, but total_len=3 → guard fails
+        let tail = 1u32.to_le_bytes();
+        assert!(detect_footer(3, &tail).is_none());
+    }
+
+    #[test]
     fn detect_rejects_tiny_and_zero() {
         // 不足 8 字节 → None
         assert!(detect_footer(7, &[0u8; 7]).is_none());
@@ -131,12 +141,13 @@ mod tests {
 
     #[test]
     fn detect_v1_with_audio_prefix() {
-        // 在 V1 尾部前添加 16 字节音频（V1 的 audio_len 返回 key_size）
+        // 16 音频字节 + key_data + key_size:
+        // total=24, key_size=4 → audio_len = 24 − 4 − 4 = 16
         let mut data = vec![0u8; 16];
         data.extend_from_slice(b"aaaa");
         data.extend_from_slice(&4u32.to_le_bytes());
         let total = data.len();
         let result = detect_footer(total, &data);
-        assert_eq!(result, Some(Footer::V1 { audio_len: 4 }));
+        assert_eq!(result, Some(Footer::V1 { audio_len: 16 }));
     }
 }
