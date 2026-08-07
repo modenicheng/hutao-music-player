@@ -56,6 +56,10 @@ pub fn parse_ekey(ekey: &str) -> Result<Vec<u8>, Qmc2Error> {
         ekey_decoded
     };
 
+    if ekey_decoded.len() < 8 {
+        return Err(Qmc2Error::EKeyParse);
+    }
+
     let (header, body) = ekey_decoded.split_at(8);
     let tea_key = derive_tea_key(header);
     let body = tea_cbc_decrypt(body, &tea_key).ok_or(Qmc2Error::KeyDerive)?;
@@ -111,6 +115,25 @@ mod tests {
     fn parse_ekey_rejects_short() {
         // "aGk=" 解码为 "hi"（2 字节，不足 8）
         assert!(matches!(parse_ekey("aGk="), Err(Qmc2Error::EKeyParse)));
+    }
+
+    #[test]
+    fn parse_ekey_encv2_empty_blob_does_not_panic() {
+        // "QQMusic EncV2,Key:" with empty blob — stage1 TEA fails, no panic.
+        let ekey = "UVFNdXNpYyBFbmNWMixLZXk6";
+        assert!(matches!(parse_ekey(ekey), Err(Qmc2Error::KeyDerive)));
+    }
+
+    #[test]
+    fn parse_ekey_encv2_short_final_decode_rejected() {
+        // Encrypt a 1-byte base64 string through both TEA layers. After
+        // double-decryption the final base64 decodes to 1 byte < 8 → EKeyParse.
+        let inner = b"AQ==";
+        let stage2 = tea_cbc_encrypt(inner, ENCV2_STAGE2_KEY);
+        let stage1 = tea_cbc_encrypt(&stage2, ENCV2_STAGE1_KEY);
+        let payload = [ENCV2_PREFIX, &stage1].concat();
+        let ekey = base64::engine::general_purpose::STANDARD.encode(&payload);
+        assert!(matches!(parse_ekey(&ekey), Err(Qmc2Error::EKeyParse)));
     }
 
     #[test]
