@@ -57,6 +57,7 @@ export component AppWindow inherits Window {
     callback search-query-edited(string);
     callback search-requested(string);
     callback play-requested(int);
+    callback play-queue-requested(int);
     callback play-pause;
     callback next-requested;
     callback prev-requested;
@@ -119,7 +120,7 @@ export component AppWindow inherits Window {
             QueuePage {
                 visible: root.current-page == "queue";
                 queue: root.queue;
-                play-requested(idx) => { root.play-requested(idx); }
+                play-requested(idx) => { root.play-queue-requested(idx); }
                 navigate-to-search => { root.navigate-requested("search"); }
             }
 

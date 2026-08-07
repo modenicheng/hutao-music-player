@@ -156,6 +156,8 @@ pub enum AppCommand {
     Search(String),
     /// 播放队列第 idx 首（搜索结果）。
     PlayIndex(usize),
+    /// 播放队列第 idx 首（真实播放队列）。
+    PlayQueueIndex(usize),
     /// 播放/暂停。
     TogglePlay,
     /// 下一首。
@@ -229,6 +231,41 @@ struct LoginResult {
     result: Result<Credential, String>,
 }
 
+struct LyricResult {
+    generation: u64,
+    mid: String,
+    result: Result<Vec<UiLyricData>, String>,
+}
+
+#[derive(Default)]
+struct LyricRequestState {
+    generation: u64,
+    mid: Option<String>,
+    cancel: Option<CancellationToken>,
+}
+
+impl LyricRequestState {
+    fn begin(&mut self, mid: String) -> (u64, CancellationToken) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let cancel = CancellationToken::new();
+        self.mid = Some(mid);
+        self.cancel = Some(cancel.clone());
+        (self.generation, cancel)
+    }
+
+    fn accepts(&self, generation: u64, mid: &str) -> bool {
+        self.generation == generation
+            && self.mid.as_deref() == Some(mid)
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|cancel| !cancel.is_cancelled())
+    }
+}
+
 #[derive(Debug)]
 enum LoginUpdatePayload {
     Qr(Vec<u8>),
@@ -272,6 +309,9 @@ pub struct AppCore {
     shuffle: bool,
     last_queue_state: Option<(String, bool)>,
     current_lyrics: Option<(String, i64)>,
+    lyric_requests: LyricRequestState,
+    lyric_results_tx: mpsc::UnboundedSender<LyricResult>,
+    lyric_results_rx: mpsc::UnboundedReceiver<LyricResult>,
     login_results_tx: mpsc::UnboundedSender<LoginResult>,
     login_results_rx: mpsc::UnboundedReceiver<LoginResult>,
     login_updates_tx: mpsc::UnboundedSender<LoginUpdate>,
@@ -289,6 +329,7 @@ impl AppCore {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let player = Arc::new(PlayerCore::new()?);
         let state_rx = player.subscribe_state();
+        let initial_queue_state = queue_state_key(&state_rx.borrow());
         let store = store_from_env();
         // 密钥环不可用不阻塞启动：降级为未登录，凭据保存时再报错
         let credential = match store.load() {
@@ -300,6 +341,7 @@ impl AppCore {
         };
         let (login_results_tx, login_results_rx) = mpsc::unbounded_channel();
         let (login_updates_tx, login_updates_rx) = mpsc::unbounded_channel();
+        let (lyric_results_tx, lyric_results_rx) = mpsc::unbounded_channel();
         let mpris = tokio::runtime::Handle::current()
             .block_on(MprisService::start(
                 player.command_sender(),
@@ -319,8 +361,11 @@ impl AppCore {
             queue_index: 0,
             loop_mode: LoopMode::None,
             shuffle: false,
-            last_queue_state: None,
+            last_queue_state: Some(initial_queue_state),
             current_lyrics: None,
+            lyric_requests: LyricRequestState::default(),
+            lyric_results_tx,
+            lyric_results_rx,
             login_results_tx,
             login_results_rx,
             login_updates_tx,
@@ -387,6 +432,7 @@ impl AppCore {
                     match command {
                         AppCommand::Search(keyword) => self.search(&keyword).await,
                         AppCommand::PlayIndex(idx) => self.play_index(idx).await,
+                        AppCommand::PlayQueueIndex(idx) => self.play_queue_index(idx).await,
                         AppCommand::TogglePlay => self.toggle_play(),
                         AppCommand::Next => self.play_relative(1).await,
                         AppCommand::Previous => self.play_relative(-1).await,
@@ -410,15 +456,17 @@ impl AppCore {
                         self.forward_login_update(update);
                     }
                 }
+                lyric_result = self.lyric_results_rx.recv() => {
+                    if let Some(result) = lyric_result {
+                        self.finish_lyric_result(result);
+                    }
+                }
                 changed = self.state_rx.changed() => {
                     if changed.is_err() {
                         break;
                     }
                     let key = queue_state_key(&self.state_rx.borrow());
-                    if self.last_queue_state.as_ref() != Some(&key) {
-                        self.last_queue_state = Some(key);
-                        let _ = self.events_tx.send(AppEvent::QueueUpdated(self.queue_snapshot()));
-                    }
+                    self.publish_queue_if_changed(key);
                 }
             }
         }
@@ -517,10 +565,16 @@ impl AppCore {
         });
         self.current_lyrics = Some((mid.clone(), detail.song_type));
         self.start_lyrics_load(mid.clone(), detail.song_type);
-        let _ = self
-            .events_tx
-            .send(AppEvent::QueueUpdated(self.queue_snapshot()));
+        self.publish_queue_snapshot();
         tracing::info!(mid, title, "playing");
+    }
+
+    async fn play_queue_index(&mut self, idx: usize) {
+        let Some(item) = queue_item_at(&self.queue, idx) else {
+            tracing::warn!("queue index out of range: {idx}");
+            return;
+        };
+        self.play_queue_item(idx, item).await;
     }
 
     async fn play_relative(&mut self, delta: isize) {
@@ -542,9 +596,11 @@ impl AppCore {
         } else {
             (self.queue_index as isize + delta).rem_euclid(self.queue.len() as isize) as usize
         };
+        let item = self.queue[next].clone();
+        self.play_queue_item(next, item).await;
+    }
 
-        let queue_index_changed = next != self.queue_index;
-        let mut item = self.queue[next].clone();
+    async fn play_queue_item(&mut self, next: usize, mut item: QueueItem) {
         if item.media_mid.is_empty() {
             let detail = match self.client_music_detail(&item.mid).await {
                 Ok(detail) => detail,
@@ -574,11 +630,7 @@ impl AppCore {
         });
         self.current_lyrics = Some((item.mid.clone(), item.song_type));
         self.start_lyrics_load(item.mid, item.song_type);
-        if queue_index_changed {
-            let _ = self
-                .events_tx
-                .send(AppEvent::QueueUpdated(self.queue_snapshot()));
-        }
+        self.publish_queue_snapshot();
     }
 
     fn toggle_play(&self) {
@@ -642,36 +694,58 @@ impl AppCore {
         None
     }
 
-    fn reload_lyrics(&self) {
+    fn reload_lyrics(&mut self) {
         if let Some((mid, song_type)) = &self.current_lyrics {
             self.start_lyrics_load(mid.clone(), *song_type);
         }
     }
 
-    fn start_lyrics_load(&self, mid: String, song_type: i64) {
+    fn start_lyrics_load(&mut self, mid: String, song_type: i64) {
         if mid.is_empty() {
             return;
         }
+        let (generation, cancel) = self.lyric_requests.begin(mid.clone());
         let _ = self.events_tx.send(AppEvent::LyricsLoading(mid.clone()));
         let client = QqMusicClient::with_config(self.client.config());
-        let events_tx = self.events_tx.clone();
+        let results_tx = self.lyric_results_tx.clone();
         tokio::spawn(async move {
-            match LyricApi::new(&client)
-                .get_lyric(&mid, song_type, false, true, false, false)
-                .await
-            {
-                Ok(response) => {
-                    let lines = parse_lrc(&response.lyric, &response.trans);
-                    let _ = events_tx.send(AppEvent::LyricsLoaded { mid, lines });
-                }
-                Err(error) => {
-                    let _ = events_tx.send(AppEvent::LyricsFailed {
-                        mid,
-                        message: error.to_string(),
-                    });
-                }
-            }
+            let result = tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = async {
+                    LyricApi::new(&client)
+                        .get_lyric(&mid, song_type, false, true, false, false)
+                        .await
+                        .map(|response| parse_lrc(&response.lyric, &response.trans))
+                        .map_err(|error| error.to_string())
+                } => result,
+            };
+            let _ = results_tx.send(LyricResult {
+                generation,
+                mid,
+                result,
+            });
         });
+    }
+
+    fn finish_lyric_result(&self, result: LyricResult) {
+        forward_lyric_result(&self.events_tx, &self.lyric_requests, result);
+    }
+
+    fn publish_queue_if_changed(&mut self, key: (String, bool)) {
+        if !queue_publication_changed(&mut self.last_queue_state, key) {
+            return;
+        }
+        let _ = self
+            .events_tx
+            .send(AppEvent::QueueUpdated(self.queue_snapshot()));
+    }
+
+    fn publish_queue_snapshot(&mut self) {
+        let key = queue_state_key(&self.state_rx.borrow());
+        self.last_queue_state = Some(key);
+        let _ = self
+            .events_tx
+            .send(AppEvent::QueueUpdated(self.queue_snapshot()));
     }
 
     // -----------------------------------------------------------------
@@ -785,6 +859,42 @@ impl AppCore {
     }
 }
 
+fn queue_item_at(queue: &[QueueItem], index: usize) -> Option<QueueItem> {
+    queue.get(index).cloned()
+}
+
+fn queue_publication_changed(
+    last_queue_state: &mut Option<(String, bool)>,
+    key: (String, bool),
+) -> bool {
+    if last_queue_state.as_ref() == Some(&key) {
+        return false;
+    }
+    *last_queue_state = Some(key);
+    true
+}
+
+fn forward_lyric_result(
+    events_tx: &mpsc::UnboundedSender<AppEvent>,
+    requests: &LyricRequestState,
+    result: LyricResult,
+) {
+    if !requests.accepts(result.generation, &result.mid) {
+        return;
+    }
+    let event = match result.result {
+        Ok(lines) => AppEvent::LyricsLoaded {
+            mid: result.mid,
+            lines,
+        },
+        Err(message) => AppEvent::LyricsFailed {
+            mid: result.mid,
+            message,
+        },
+    };
+    let _ = events_tx.send(event);
+}
+
 fn queue_state_key(state: &PlaybackState) -> (String, bool) {
     let current_id = state
         .current
@@ -875,6 +985,39 @@ mod tests {
     }
 
     #[test]
+    fn queue_selection_uses_queue_items_when_search_results_diverge() {
+        let search_mids = ["search-mid-a", "search-mid-b"];
+        let queue = ["queue-mid-a", "queue-mid-b"]
+            .into_iter()
+            .map(|mid| QueueItem {
+                track: Track::new(TrackId::new(mid.to_owned()), mid),
+                mid: mid.to_owned(),
+                media_mid: format!("media-{mid}"),
+                song_type: 0,
+            })
+            .collect::<Vec<_>>();
+
+        let selected = queue_item_at(&queue, 1).expect("queue index should resolve");
+        assert_eq!(selected.mid, "queue-mid-b");
+        assert_ne!(selected.mid, search_mids[1]);
+        assert!(queue_item_at(&queue, queue.len()).is_none());
+    }
+
+    #[test]
+    fn queue_publication_baseline_and_direct_update_suppress_duplicates() {
+        let baseline = (String::new(), false);
+        let mut last_queue_state = Some(baseline.clone());
+        assert!(!queue_publication_changed(&mut last_queue_state, baseline));
+
+        let direct_update = ("queue-mid-b".to_owned(), true);
+        last_queue_state = Some(direct_update.clone());
+        assert!(!queue_publication_changed(
+            &mut last_queue_state,
+            direct_update
+        ));
+    }
+
+    #[test]
     fn queue_state_changes_only_for_track_or_playing_status() {
         let mut state = PlaybackState {
             status: PlaybackStatus::Playing,
@@ -934,5 +1077,22 @@ mod tests {
             },
         );
         assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn lyric_generations_drop_same_mid_reload_and_a_b_a_results() {
+        let mut state = LyricRequestState::default();
+        let (first, first_token) = state.begin("mid-a".into());
+        let (reload, _) = state.begin("mid-a".into());
+        assert!(first_token.is_cancelled());
+        assert!(!state.accepts(first, "mid-a"));
+        assert!(state.accepts(reload, "mid-a"));
+
+        let (mid_b, mid_b_token) = state.begin("mid-b".into());
+        let (mid_a_again, _) = state.begin("mid-a".into());
+        assert!(mid_b_token.is_cancelled());
+        assert!(!state.accepts(mid_b, "mid-b"));
+        assert!(state.accepts(mid_a_again, "mid-a"));
+        assert!(!state.accepts(reload, "mid-a"));
     }
 }

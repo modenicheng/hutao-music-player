@@ -35,6 +35,10 @@ pub fn bind_callbacks(
         let _ = tx.send(AppCommand::PlayIndex(idx as usize));
     });
     let tx = cmd_tx.clone();
+    ui.on_play_queue_requested(move |idx| {
+        let _ = tx.send(AppCommand::PlayQueueIndex(idx as usize));
+    });
+    let tx = cmd_tx.clone();
     ui.on_play_pause(move || {
         let _ = tx.send(AppCommand::TogglePlay);
     });
@@ -223,6 +227,7 @@ pub fn decode_png(png: &[u8]) -> Result<slint::Image, Box<dyn std::error::Error>
 /// 满足 tokio 任务 `Send` 约束。
 pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
     let Some(ui) = ui.upgrade() else { return false };
+    let position_ms = ui.get_playback().position.max(0.0) * 1000.0;
     match evt {
         AppEvent::SearchDone(songs) => {
             ui.set_songs(songs_model(songs));
@@ -251,7 +256,7 @@ pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
             if !lyric_mid_matches(ui.get_lyrics_request_mid().as_str(), &mid) {
                 return true;
             }
-            ui.set_lyrics(lyrics_model(lines, 0.0));
+            ui.set_lyrics(lyrics_model(lines, position_ms));
             ui.set_lyrics_error_text("".into());
             ui.set_lyrics_state(
                 if ui.get_lyrics().row_count() == 0 {

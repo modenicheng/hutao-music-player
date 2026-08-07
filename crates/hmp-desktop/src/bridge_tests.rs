@@ -134,6 +134,11 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert!(rx.try_recv().is_err(), "blank search must be ignored");
         ui.invoke_play_requested(2);
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::PlayIndex(2)));
+        ui.invoke_play_queue_requested(1);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AppCommand::PlayQueueIndex(1)
+        ));
         ui.invoke_play_pause();
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::TogglePlay));
         ui.invoke_next_requested();

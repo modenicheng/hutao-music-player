@@ -4,12 +4,14 @@ use crate::app::UiLyricData;
 
 /// Parse LRC lyric and translation text into timestamped UI rows.
 pub fn parse_lrc(lyric: &str, translation: &str) -> Vec<UiLyricData> {
-    let translations = parse_lines(translation)
+    let (_, translation_lines) = parse_source(translation);
+    let translations = translation_lines
         .into_iter()
         .map(|line| (line.timestamp_ms, line.text))
         .collect::<HashMap<_, _>>();
 
-    let mut lines = parse_lines(lyric)
+    let (_, lyric_lines) = parse_source(lyric);
+    let mut lines = lyric_lines
         .into_iter()
         .map(|line| UiLyricData {
             timestamp_ms: line.timestamp_ms,
@@ -31,19 +33,31 @@ struct ParsedLine {
     text: String,
 }
 
-fn parse_lines(source: &str) -> Vec<ParsedLine> {
+fn parse_source(source: &str) -> (i64, Vec<ParsedLine>) {
+    let mut offset_ms = 0i64;
     let mut parsed = Vec::new();
     for raw_line in source.lines() {
         let mut rest = raw_line.trim();
         let mut timestamps = Vec::new();
-        while rest.starts_with('[') {
-            let Some(end) = rest.find(']') else { break };
-            let tag = &rest[1..end];
+        loop {
+            let Some(end) = rest.strip_prefix('[').and_then(|value| value.find(']')) else {
+                break;
+            };
+            let tag_end = end + 1;
+            let tag = &rest[1..tag_end];
+            if let Some(offset) = tag
+                .strip_prefix("offset:")
+                .and_then(|value| value.parse::<i64>().ok())
+            {
+                offset_ms = offset;
+                rest = rest[tag_end + 1..].trim_start();
+                continue;
+            }
             let Some(timestamp_ms) = parse_timestamp(tag) else {
                 break;
             };
             timestamps.push(timestamp_ms);
-            rest = rest[end + 1..].trim_start();
+            rest = rest[tag_end + 1..].trim_start();
         }
         let text = rest.trim();
         if text.is_empty() {
@@ -56,13 +70,26 @@ fn parse_lines(source: &str) -> Vec<ParsedLine> {
             });
         }
     }
-    parsed
+    for line in &mut parsed {
+        line.timestamp_ms = apply_offset(line.timestamp_ms, offset_ms);
+    }
+    (offset_ms, parsed)
+}
+
+fn apply_offset(timestamp_ms: u64, offset_ms: i64) -> u64 {
+    if offset_ms >= 0 {
+        timestamp_ms.saturating_add(offset_ms as u64)
+    } else {
+        timestamp_ms.saturating_sub(offset_ms.unsigned_abs())
+    }
 }
 
 fn parse_timestamp(value: &str) -> Option<u64> {
     let (minutes, seconds) = value.split_once(':')?;
     let minutes = minutes.parse::<u64>().ok()?;
-    let (seconds, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
+    let (seconds, fraction) = seconds
+        .split_once(|separator| separator == '.' || separator == ',')
+        .unwrap_or((seconds, ""));
     let seconds = seconds.parse::<u64>().ok()?;
     if seconds >= 60 {
         return None;
@@ -103,5 +130,19 @@ mod tests {
         let lines = parse_lrc("[ar:Artist]\nnot-a-line\n[00:02]Valid\n", "");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].time, "00:02");
+    }
+
+    #[test]
+    fn parses_comma_fractions_and_applies_lrc_offset() {
+        let lines = parse_lrc(
+            "[offset:-1500]\n[00:01,50]Before\n[00:02.500]After\n",
+            "[offset:-500]\n[00:00,50]译文\n[00:01.500]另一个译文\n",
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].timestamp_ms, 0);
+        assert_eq!(lines[0].text, "Before");
+        assert_eq!(lines[0].translation, "译文");
+        assert_eq!(lines[1].timestamp_ms, 1_000);
+        assert_eq!(lines[1].translation, "另一个译文");
     }
 }
