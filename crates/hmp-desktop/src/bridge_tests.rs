@@ -6,7 +6,8 @@ use slint::{ComponentHandle, Model};
 use crate::AppWindow;
 use crate::app::{AppCommand, AppEvent, ThemeMode, UiLyricData, UiPage, UiQueueData, UiSongData};
 use crate::bridge::{
-    bind_callbacks, bind_ui_state_callbacks, decode_png, handle_event, songs_model,
+    bind_callbacks, bind_ui_state_callbacks, decode_png, handle_event, lyric_mid_matches,
+    lyrics_model, lyrics_model_at_position, queue_model, songs_model,
 };
 use crate::demo::{demo_recommendations, feature_matrix};
 
@@ -149,6 +150,8 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::LoginStart));
         ui.invoke_login_cancel();
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::LoginCancel));
+        ui.invoke_load_lyrics_requested();
+        assert!(matches!(rx.try_recv().unwrap(), AppCommand::ReloadLyrics));
     }
 
     // 3) 加载期间，旧搜索结果行的指针操作不能发出播放命令。
@@ -238,31 +241,118 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert_eq!(ui.get_search_error_text(), "network error");
     }
 
-    // 5) Task 1 contract-only events are accepted until later UI mappings land.
+    // 5) Queue and lyric events map all identity/state fields; stale lyrics are ignored.
     {
         let ui = init_ui();
         let weak = ui.as_weak();
-        let events = [
-            AppEvent::SearchFailed("network error".into()),
-            AppEvent::QueueUpdated(Vec::new()),
-            AppEvent::LyricsLoading("mid-1".into()),
+        handle_event(
+            &weak,
+            AppEvent::QueueUpdated(vec![
+                UiQueueData {
+                    track_id: "mid-current".into(),
+                    title: "晴天".into(),
+                    artist: "周杰伦".into(),
+                    duration: "04:29".into(),
+                    is_current: true,
+                    is_playing: true,
+                },
+                UiQueueData {
+                    track_id: "mid-next".into(),
+                    title: "开始懂了".into(),
+                    artist: "孙燕姿".into(),
+                    duration: "04:30".into(),
+                    is_current: false,
+                    is_playing: false,
+                },
+            ]),
+        );
+        assert_eq!(ui.get_queue().row_count(), 2);
+        let current = ui.get_queue().row_data(0).unwrap();
+        assert_eq!(current.track_id, "mid-current");
+        assert!(current.is_current);
+        assert!(current.is_playing);
+        let next = ui.get_queue().row_data(1).unwrap();
+        assert!(!next.is_current);
+        assert!(!next.is_playing);
+
+        ui.set_search_error_text("search error remains isolated".into());
+        handle_event(&weak, AppEvent::LyricsLoading("mid-current".into()));
+        assert_eq!(ui.get_lyrics_request_mid(), "mid-current");
+        assert_eq!(ui.get_lyrics_state(), "loading");
+        handle_event(
+            &weak,
             AppEvent::LyricsLoaded {
-                mid: "mid-1".into(),
+                mid: "stale-mid".into(),
                 lines: vec![UiLyricData {
-                    timestamp_ms: 0,
+                    timestamp_ms: 500,
                     time: "00:00".into(),
-                    text: "line".into(),
+                    text: "stale".into(),
                     translation: String::new(),
                 }],
             },
-            AppEvent::LyricsFailed {
-                mid: "mid-1".into(),
-                message: "network error".into(),
+        );
+        assert_eq!(ui.get_lyrics().row_count(), 0, "stale MID must be ignored");
+        assert_eq!(ui.get_lyrics_state(), "loading");
+
+        handle_event(
+            &weak,
+            AppEvent::LyricsLoaded {
+                mid: "mid-current".into(),
+                lines: vec![
+                    UiLyricData {
+                        timestamp_ms: 1_000,
+                        time: "00:01".into(),
+                        text: "first".into(),
+                        translation: "第一句".into(),
+                    },
+                    UiLyricData {
+                        timestamp_ms: 3_000,
+                        time: "00:03".into(),
+                        text: "second".into(),
+                        translation: String::new(),
+                    },
+                ],
             },
-        ];
-        for event in events {
-            assert!(handle_event(&weak, event));
-        }
+        );
+        assert_eq!(ui.get_lyrics_state(), "ready");
+        assert_eq!(ui.get_lyrics().row_count(), 2);
+        assert_eq!(ui.get_lyrics().row_data(0).unwrap().translation, "第一句");
+        let updated = lyrics_model_at_position(&ui.get_lyrics(), 3_500.0);
+        assert!(!updated.row_data(0).unwrap().is_active);
+        assert!(updated.row_data(1).unwrap().is_active);
+
+        handle_event(
+            &weak,
+            AppEvent::LyricsFailed {
+                mid: "stale-mid".into(),
+                message: "stale failure".into(),
+            },
+        );
+        assert_eq!(ui.get_lyrics_state(), "ready");
+
+        handle_event(&weak, AppEvent::LyricsLoading("mid-current".into()));
+        handle_event(
+            &weak,
+            AppEvent::LyricsFailed {
+                mid: "mid-current".into(),
+                message: "lyric failure".into(),
+            },
+        );
+        assert_eq!(ui.get_lyrics_state(), "error");
+        assert_eq!(ui.get_lyrics_error_text(), "lyric failure");
+        assert_eq!(ui.get_search_error_text(), "search error remains isolated");
+
+        handle_event(&weak, AppEvent::LyricsLoading("mid-current".into()));
+        handle_event(
+            &weak,
+            AppEvent::LyricsLoaded {
+                mid: "mid-current".into(),
+                lines: Vec::new(),
+            },
+        );
+        assert_eq!(ui.get_lyrics_state(), "empty");
+        assert_eq!(ui.get_lyrics().row_count(), 0, "no fallback lyrics allowed");
+        assert_eq!(ui.get_lyrics_error_text(), "");
     }
 
     // 6) 登录二维码事件 → 显示登录面板
@@ -309,6 +399,47 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert_eq!(ui.get_user_name(), "10001");
         assert!(!ui.get_show_login());
     }
+}
+
+#[test]
+fn queue_event_updates_slint_model() {
+    let model = queue_model(vec![UiQueueData {
+        track_id: "mid-current".into(),
+        title: "晴天".into(),
+        artist: "周杰伦".into(),
+        duration: "04:29".into(),
+        is_current: true,
+        is_playing: true,
+    }]);
+
+    assert_eq!(model.row_count(), 1);
+    let current = model.row_data(0).unwrap();
+    assert_eq!(current.track_id, "mid-current");
+    assert!(current.is_current);
+    assert!(current.is_playing);
+}
+
+#[test]
+fn lyric_event_updates_slint_model() {
+    assert!(lyric_mid_matches("mid-current", "mid-current"));
+    assert!(!lyric_mid_matches("mid-current", "stale-mid"));
+    assert!(!lyric_mid_matches("", ""));
+
+    let model = lyrics_model(
+        vec![UiLyricData {
+            timestamp_ms: 1_000,
+            time: "00:01".into(),
+            text: "first".into(),
+            translation: "第一句".into(),
+        }],
+        1_000.0,
+    );
+    assert_eq!(model.row_count(), 1);
+    let line = model.row_data(0).unwrap();
+    assert_eq!(line.translation, "第一句");
+    assert!(line.is_active);
+
+    assert_eq!(lyrics_model(Vec::new(), 0.0).row_count(), 0);
 }
 
 #[test]

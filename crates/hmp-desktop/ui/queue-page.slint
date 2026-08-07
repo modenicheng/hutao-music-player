@@ -1,0 +1,94 @@
+import { ListView } from "std-widgets.slint";
+import { EmptyState } from "primitives.slint";
+import { Theme } from "theme.slint";
+
+export struct UiQueue {
+    track-id: string,
+    title: string,
+    artist: string,
+    duration: string,
+    is-current: bool,
+    is-playing: bool,
+}
+
+export component QueuePage inherits Rectangle {
+    in property <[UiQueue]> queue;
+    callback play-requested(int);
+    callback navigate-to-search;
+
+    background: Theme.background;
+
+    VerticalLayout {
+        padding-left: Theme.content-padding;
+        padding-right: Theme.content-padding;
+        padding-top: 28px;
+        padding-bottom: 22px;
+        spacing: 14px;
+
+        Text {
+            text: "播放队列";
+            color: Theme.text-primary;
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        Text {
+            text: root.queue.length > 0 ? root.queue.length + " 首歌曲" : "";
+            color: Theme.text-secondary;
+            font-size: 13px;
+            height: 22px;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 260px;
+            background: transparent;
+
+            ListView {
+                width: parent.width;
+                height: parent.height;
+                visible: root.queue.length > 0;
+
+                for item[index] in root.queue : Rectangle {
+                    height: 58px;
+                    background: item.is-current ? Theme.accent-muted : row-touch.has-hover ? Theme.surface-hover : transparent;
+                    accessible-role: button;
+                    accessible-label: "播放 " + item.title + ", " + item.artist;
+                    accessible-action-default => { root.play-requested(index); }
+                    row-touch := TouchArea { clicked => { root.play-requested(index); } }
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 12px;
+                        Text {
+                            width: 24px;
+                            text: item.is-playing ? "▶" : (index + 1) + ".";
+                            color: item.is-current ? Theme.accent : Theme.text-secondary;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text { text: item.title; color: Theme.text-primary; font-size: 14px; font-weight: 600; overflow: elide; }
+                            Text { text: item.artist; color: Theme.text-secondary; font-size: 12px; overflow: elide; }
+                        }
+                        Text { width: 58px; text: item.duration; color: Theme.text-secondary; font-size: 12px; horizontal-alignment: right; vertical-alignment: center; }
+                    }
+                    Rectangle { y: parent.height - 1px; height: 1px; background: Theme.divider; }
+                }
+            }
+
+            EmptyState {
+                width: parent.width;
+                height: parent.height;
+                visible: root.queue.length == 0;
+                title: "播放队列为空";
+                detail: "从搜索页选择一首歌曲开始播放。";
+                action-label: "前往搜索";
+                action-clicked => { root.navigate-to-search(); }
+            }
+        }
+    }
+}

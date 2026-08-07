@@ -48,6 +48,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_search_query_valid(false);
     ui.set_search_loading(false);
     ui.set_search_error_text("".into());
+    ui.set_queue(bridge::queue_model(core.queue_snapshot()));
+    ui.set_lyrics(bridge::lyrics_model(Vec::new(), 0.0));
+    ui.set_lyrics_state("idle".into());
+    ui.set_lyrics_request_mid("".into());
+    ui.set_lyrics_error_text("".into());
 
     // 播放状态订阅（core 随后 move 进事件循环）
     let state_rx = core.player.subscribe_state();
@@ -71,7 +76,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime.spawn(async move {
         let mut state_rx = state_rx;
         loop {
-            let _ = state_rx.changed().await;
+            if state_rx.changed().await.is_err() {
+                break;
+            }
             let s = state_rx.borrow().clone();
             let Some(ui) = state_ui.upgrade() else { break };
             let (title, artist, status, pos, dur, pos_text, dur_text) = app::playback_snapshot(&s);
@@ -85,6 +92,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 position_text: pos_text.into(),
                 duration_text: dur_text.into(),
             });
+            ui.set_lyrics(bridge::lyrics_model_at_position(
+                &ui.get_lyrics(),
+                s.position.as_secs_f32() * 1000.0,
+            ));
         }
     });
 

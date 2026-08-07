@@ -1,8 +1,8 @@
 //! UI 桥接：Slint 回调 ↔ 应用命令 / 事件。
 
-use slint::{ComponentHandle, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
-use crate::app::{AppCommand, AppEvent, ThemeMode, UiPage, UiSongData};
+use crate::app::{AppCommand, AppEvent, ThemeMode, UiLyricData, UiPage, UiQueueData, UiSongData};
 
 /// 绑定 UI 回调 → 应用命令通道。
 pub fn bind_callbacks(
@@ -58,8 +58,13 @@ pub fn bind_callbacks(
     ui.on_login_start(move || {
         let _ = tx.send(AppCommand::LoginStart);
     });
+    let tx = cmd_tx.clone();
     ui.on_login_cancel(move || {
-        let _ = cmd_tx.send(AppCommand::LoginCancel);
+        let _ = tx.send(AppCommand::LoginCancel);
+    });
+    let tx = cmd_tx.clone();
+    ui.on_load_lyrics_requested(move || {
+        let _ = tx.send(AppCommand::ReloadLyrics);
     });
 }
 
@@ -100,6 +105,76 @@ pub fn songs_model(songs: Vec<UiSongData>) -> ModelRc<crate::UiSong> {
     let model: VecModel<crate::UiSong> =
         VecModel::from(songs.into_iter().map(to_ui_song).collect::<Vec<_>>());
     ModelRc::new(model)
+}
+
+pub fn queue_model(items: Vec<UiQueueData>) -> ModelRc<crate::UiQueue> {
+    ModelRc::new(VecModel::from(
+        items
+            .into_iter()
+            .map(|item| crate::UiQueue {
+                track_id: item.track_id.into(),
+                title: item.title.into(),
+                artist: item.artist.into(),
+                duration: item.duration.into(),
+                is_current: item.is_current,
+                is_playing: item.is_playing,
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn to_ui_lyric(line: UiLyricData, active: bool) -> crate::UiLyric {
+    crate::UiLyric {
+        time: line.time.into(),
+        timestamp_ms: line.timestamp_ms as f32,
+        text: line.text.into(),
+        translation: line.translation.into(),
+        is_active: active,
+    }
+}
+
+pub fn lyrics_model(lines: Vec<UiLyricData>, position_ms: f32) -> ModelRc<crate::UiLyric> {
+    let active_index = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.timestamp_ms as f32 <= position_ms)
+        .map(|(index, _)| index)
+        .last();
+    ModelRc::new(VecModel::from(
+        lines
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| to_ui_lyric(line, Some(index) == active_index))
+            .collect::<Vec<_>>(),
+    ))
+}
+
+pub fn lyrics_model_at_position(
+    model: &ModelRc<crate::UiLyric>,
+    position_ms: f32,
+) -> ModelRc<crate::UiLyric> {
+    let rows = (0..model.row_count())
+        .filter_map(|index| model.row_data(index))
+        .collect::<Vec<_>>();
+    let active_index = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.timestamp_ms <= position_ms)
+        .map(|(index, _)| index)
+        .last();
+    ModelRc::new(VecModel::from(
+        rows.into_iter()
+            .enumerate()
+            .map(|(index, mut line)| {
+                line.is_active = Some(index) == active_index;
+                line
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+pub(crate) fn lyric_mid_matches(request_mid: &str, event_mid: &str) -> bool {
+    !request_mid.is_empty() && request_mid == event_mid
 }
 
 /// Library/recommendation data -> Slint model.
@@ -160,11 +235,39 @@ pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
             ui.set_search_completed(true);
             ui.set_search_error_text(message.into());
         }
-        AppEvent::QueueUpdated(_)
-        | AppEvent::LyricsLoading(_)
-        | AppEvent::LyricsLoaded { .. }
-        | AppEvent::LyricsFailed { .. } => {
-            // Task 1 defines these contracts; later tasks map them to UI state.
+        AppEvent::QueueUpdated(items) => {
+            ui.set_queue(queue_model(items));
+        }
+        AppEvent::LyricsLoading(mid) => {
+            if mid.is_empty() {
+                return true;
+            }
+            ui.set_lyrics_request_mid(mid.into());
+            ui.set_lyrics_state("loading".into());
+            ui.set_lyrics_error_text("".into());
+            ui.set_lyrics(lyrics_model(Vec::new(), 0.0));
+        }
+        AppEvent::LyricsLoaded { mid, lines } => {
+            if !lyric_mid_matches(ui.get_lyrics_request_mid().as_str(), &mid) {
+                return true;
+            }
+            ui.set_lyrics(lyrics_model(lines, 0.0));
+            ui.set_lyrics_error_text("".into());
+            ui.set_lyrics_state(
+                if ui.get_lyrics().row_count() == 0 {
+                    "empty"
+                } else {
+                    "ready"
+                }
+                .into(),
+            );
+        }
+        AppEvent::LyricsFailed { mid, message } => {
+            if !lyric_mid_matches(ui.get_lyrics_request_mid().as_str(), &mid) {
+                return true;
+            }
+            ui.set_lyrics_state("error".into());
+            ui.set_lyrics_error_text(message.into());
         }
         AppEvent::LoginQr(png) => match decode_png(&png) {
             Ok(img) => {

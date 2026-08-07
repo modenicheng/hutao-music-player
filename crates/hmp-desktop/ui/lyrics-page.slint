@@ -1,0 +1,90 @@
+import { ListView } from "std-widgets.slint";
+import { EmptyState } from "primitives.slint";
+import { Theme } from "theme.slint";
+
+export struct UiLyric {
+    time: string,
+    timestamp-ms: float,
+    text: string,
+    translation: string,
+    is-active: bool,
+}
+
+export component LyricsPage inherits Rectangle {
+    in property <[UiLyric]> lyrics;
+    in property <string> lyrics-state;
+    in property <string> current-title;
+    in property <string> current-artist;
+    in property <string> error-text;
+    callback load-lyrics-requested;
+
+    background: Theme.background;
+
+    VerticalLayout {
+        padding-left: Theme.content-padding;
+        padding-right: Theme.content-padding;
+        padding-top: 28px;
+        padding-bottom: 22px;
+        spacing: 14px;
+
+        Text { text: "歌词"; color: Theme.text-primary; font-size: 28px; font-weight: 700; }
+        Text {
+            text: root.current-title != "" ? root.current-title + " · " + root.current-artist : "未在播放";
+            color: Theme.text-secondary;
+            font-size: 13px;
+            height: 22px;
+            overflow: elide;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 280px;
+            background: transparent;
+            ListView {
+                width: parent.width;
+                height: parent.height;
+                visible: root.lyrics-state == "ready" && root.lyrics.length > 0;
+                for line in root.lyrics : Rectangle {
+                    height: line.translation != "" ? 62px : 48px;
+                    background: line.is-active ? Theme.accent-muted : transparent;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 14px;
+                        Text { width: 48px; text: line.time; color: line.is-active ? Theme.accent : Theme.text-secondary; font-size: 12px; vertical-alignment: center; }
+                        VerticalLayout {
+                            spacing: 3px;
+                            alignment: center;
+                            Text { text: line.text; color: line.is-active ? Theme.text-primary : Theme.text-secondary; font-size: line.is-active ? 16px : 14px; font-weight: line.is-active ? 700 : 400; overflow: elide; }
+                            Text { text: line.translation; color: Theme.text-secondary; font-size: 12px; visible: line.translation != ""; overflow: elide; }
+                        }
+                    }
+                }
+            }
+
+            EmptyState {
+                width: parent.width;
+                height: parent.height;
+                visible: root.lyrics-state == "idle" || root.lyrics-state == "empty";
+                title: root.lyrics-state == "idle" ? "未在播放" : "暂无歌词";
+                detail: root.lyrics-state == "idle" ? "播放歌曲后，歌词会显示在这里。" : "当前歌曲没有可用的歌词。";
+            }
+            EmptyState {
+                width: parent.width;
+                height: parent.height;
+                visible: root.lyrics-state == "loading";
+                title: "正在加载歌词";
+                detail: "正在从 QQ 音乐获取歌词。";
+            }
+            EmptyState {
+                width: parent.width;
+                height: parent.height;
+                visible: root.lyrics-state == "error";
+                title: "歌词加载失败";
+                detail: root.error-text;
+                action-label: "重新加载";
+                action-clicked => { root.load-lyrics-requested(); }
+            }
+        }
+    }
+}

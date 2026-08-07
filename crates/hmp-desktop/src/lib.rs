@@ -5,12 +5,14 @@ slint::include_modules!();
 pub mod app;
 pub mod bridge;
 pub mod demo;
+pub mod lyrics;
 
 pub use app::{
     AppCommand, AppCore, AppEvent, ThemeMode, UiFeatureData, UiLyricData, UiPage, UiQueueData,
     UiSongData,
 };
 pub use demo::UiLibraryData;
+pub use lyrics::parse_lrc;
 
 #[cfg(test)]
 #[path = "bridge_tests.rs"]

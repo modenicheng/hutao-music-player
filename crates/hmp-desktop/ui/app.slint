@@ -6,8 +6,10 @@ import { LoginDialog } from "login-dialog.slint";
 import { LibraryPage } from "library-page.slint";
 import { RecommendPage, UiLibrary } from "recommend-page.slint";
 import { SearchPage, UiSong } from "search-page.slint";
+import { QueuePage, UiQueue } from "queue-page.slint";
+import { LyricsPage, UiLyric } from "lyrics-page.slint";
 
-export { UiLibrary, UiPlayback, UiSong }
+export { UiLibrary, UiPlayback, UiSong, UiQueue, UiLyric }
 
 export struct UiFeature {
     name: string,
@@ -30,6 +32,11 @@ export component AppWindow inherits Window {
     in-out property <[UiLibrary]> library-items;
     in-out property <[UiLibrary]> recommend-items;
     in-out property <[UiFeature]> feature-statuses;
+    in-out property <[UiQueue]> queue;
+    in-out property <[UiLyric]> lyrics;
+    in-out property <string> lyrics-state: "idle";
+    in-out property <string> lyrics-request-mid;
+    in-out property <string> lyrics-error-text;
     in-out property <string> search-text;
     in-out property <bool> search-query-valid: false;
     in-out property <bool> search-loading: false;
@@ -57,6 +64,7 @@ export component AppWindow inherits Window {
     callback volume-requested(float);
     callback login-start;
     callback login-cancel;
+    callback load-lyrics-requested;
 
     init => { root.palette-color-scheme = ColorScheme.unknown; }
     changed theme-mode => {
@@ -108,10 +116,25 @@ export component AppWindow inherits Window {
                 play-requested(idx) => { root.play-requested(idx); }
             }
 
+            QueuePage {
+                visible: root.current-page == "queue";
+                queue: root.queue;
+                play-requested(idx) => { root.play-requested(idx); }
+                navigate-to-search => { root.navigate-requested("search"); }
+            }
+
+            LyricsPage {
+                visible: root.current-page == "lyrics";
+                lyrics: root.lyrics;
+                lyrics-state: root.lyrics-state;
+                current-title: root.playback.title;
+                current-artist: root.playback.artist;
+                error-text: root.lyrics-error-text;
+                load-lyrics-requested => { root.load-lyrics-requested(); }
+            }
+
             Rectangle {
-                visible: root.current-page != "library"
-                    && root.current-page != "recommend"
-                    && root.current-page != "search";
+                visible: root.current-page == "settings";
                 background: Theme.background;
             }
         }

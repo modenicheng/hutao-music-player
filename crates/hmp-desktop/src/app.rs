@@ -15,9 +15,11 @@ use hmp_core::{
 use hmp_mpris::MprisService;
 use hmp_player_gst::{LoadRequest, PlayerCore};
 use hmp_qqmusic_api::{
-    Credential, LoginApi, QRLoginType, QqMusicClient, SongFileType,
+    Credential, LoginApi, LyricApi, QRLoginType, QqMusicClient, SongFileType,
     song::{SongApi, SongFileInfo},
 };
+
+use crate::lyrics::parse_lrc;
 use hmp_storage::credential::{CredentialStore, store_from_env};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -180,6 +182,13 @@ pub struct QueueItem {
     pub track: Track,
     pub mid: String,
     pub media_mid: String,
+    pub song_type: i64,
+}
+
+struct ResolvedSongDetail {
+    media_mid: String,
+    duration: Option<u64>,
+    song_type: i64,
 }
 
 #[derive(Default)]
@@ -262,6 +271,7 @@ pub struct AppCore {
     loop_mode: LoopMode,
     shuffle: bool,
     last_queue_state: Option<(String, bool)>,
+    current_lyrics: Option<(String, i64)>,
     login_results_tx: mpsc::UnboundedSender<LoginResult>,
     login_results_rx: mpsc::UnboundedReceiver<LoginResult>,
     login_updates_tx: mpsc::UnboundedSender<LoginUpdate>,
@@ -310,6 +320,7 @@ impl AppCore {
             loop_mode: LoopMode::None,
             shuffle: false,
             last_queue_state: None,
+            current_lyrics: None,
             login_results_tx,
             login_results_rx,
             login_updates_tx,
@@ -385,7 +396,7 @@ impl AppCore {
                         AppCommand::SetVolume(v) => self.player.set_volume(v.clamp(0.0, 1.0) as f64),
                         AppCommand::LoginStart => self.start_login(),
                         AppCommand::LoginCancel => self.cancel_login(),
-                        AppCommand::ReloadLyrics => {}
+                        AppCommand::ReloadLyrics => self.reload_lyrics(),
                         AppCommand::Quit => break,
                     }
                 }
@@ -397,6 +408,16 @@ impl AppCore {
                 update = self.login_updates_rx.recv() => {
                     if let Some(update) = update {
                         self.forward_login_update(update);
+                    }
+                }
+                changed = self.state_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let key = queue_state_key(&self.state_rx.borrow());
+                    if self.last_queue_state.as_ref() != Some(&key) {
+                        self.last_queue_state = Some(key);
+                        let _ = self.events_tx.send(AppEvent::QueueUpdated(self.queue_snapshot()));
                     }
                 }
             }
@@ -438,77 +459,67 @@ impl AppCore {
         };
         let mid = song.mid.clone();
         let title = song.name.clone();
-        let artist = song.singer.clone();
 
-        // 歌曲详情（media_mid）
-        let (media_mid, interval) = match self.client_music_detail(&mid).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!("detail failed: {e}");
+        let detail = match self.client_music_detail(&mid).await {
+            Ok(detail) => detail,
+            Err(error) => {
+                tracing::error!("detail failed: {error}");
                 return;
             }
         };
-        if media_mid.is_empty() {
+        if detail.media_mid.is_empty() {
             tracing::error!("no media_mid for {mid}");
             return;
         }
-
-        // 音质回退取流
-        let (file_type, uri) = match self.resolve_stream(&mid, &media_mid).await {
-            Some(v) => v,
+        let (file_type, uri) = match self
+            .resolve_stream(&mid, &detail.media_mid, detail.song_type)
+            .await
+        {
+            Some(value) => value,
             None => {
                 tracing::error!("all qualities unavailable for {mid}");
                 return;
             }
         };
 
-        let track = Track {
-            id: TrackId::new(mid.clone()),
-            title: title.clone(),
-            artists: vec![hmp_core::ArtistRef {
-                id: hmp_core::ArtistId::new(mid.clone()),
-                name: artist.clone(),
-            }],
-            album: None,
-            duration: interval.map(Duration::from_secs),
-            cover: None,
-            qualities: vec![quality_from_file_type(file_type)],
-        };
-
-        // 组装队列（搜索结果 → 队列）
-        self.queue.clear();
-        for s in &self.songs {
-            self.queue.push(QueueItem {
+        self.queue = self
+            .songs
+            .iter()
+            .map(|song| QueueItem {
                 track: Track {
-                    id: TrackId::new(s.mid.clone()),
-                    title: s.name.clone(),
+                    id: TrackId::new(song.mid.clone()),
+                    title: song.name.clone(),
                     artists: vec![hmp_core::ArtistRef {
-                        id: hmp_core::ArtistId::new(s.mid.clone()),
-                        name: s.singer.clone(),
+                        id: hmp_core::ArtistId::new(song.mid.clone()),
+                        name: song.singer.clone(),
                     }],
                     album: None,
                     duration: None,
                     cover: None,
-                    qualities: vec![],
+                    qualities: Vec::new(),
                 },
-                mid: s.mid.clone(),
+                mid: song.mid.clone(),
                 media_mid: String::new(),
-            });
-        }
+                song_type: 0,
+            })
+            .collect();
         self.queue_index = idx;
-        if let Some(item) = self.queue.get_mut(idx) {
-            item.media_mid = media_mid.clone();
-            item.track.duration = interval.map(Duration::from_secs);
-            item.track.qualities = vec![quality_from_file_type(file_type)];
-            item.track.cover = None;
-        }
-        let _ = track;
+        let item = &mut self.queue[idx];
+        item.media_mid = detail.media_mid;
+        item.song_type = detail.song_type;
+        item.track.duration = detail.duration.map(Duration::from_secs);
+        item.track.qualities = vec![quality_from_file_type(file_type)];
 
         self.player.load(LoadRequest {
             uri,
-            track: self.queue[self.queue_index].track.clone(),
+            track: item.track.clone(),
             quality: quality_from_file_type(file_type),
         });
+        self.current_lyrics = Some((mid.clone(), detail.song_type));
+        self.start_lyrics_load(mid.clone(), detail.song_type);
+        let _ = self
+            .events_tx
+            .send(AppEvent::QueueUpdated(self.queue_snapshot()));
         tracing::info!(mid, title, "playing");
     }
 
@@ -516,61 +527,57 @@ impl AppCore {
         if self.queue.is_empty() {
             return;
         }
-        // 单曲循环：next/prev 重播当前曲目
-        if self.loop_mode == LoopMode::Track {
-            let item = self.queue[self.queue_index].clone();
-            if !item.media_mid.is_empty() {
-                let mid = item.mid.clone();
-                let media_mid = item.media_mid.clone();
-                if let Some((file_type, uri)) = self.resolve_stream(&mid, &media_mid).await {
-                    self.player.load(LoadRequest {
-                        uri,
-                        track: item.track,
-                        quality: quality_from_file_type(file_type),
-                    });
-                }
-            }
-            return;
-        }
-        // 随机播放：next 随机选一首（避免与当前相同）
-        let next = if self.shuffle && delta > 0 && self.queue.len() > 1 {
+        let next = if self.loop_mode == LoopMode::Track {
+            self.queue_index
+        } else if self.shuffle && delta > 0 && self.queue.len() > 1 {
             let seed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as usize)
+                .map(|duration| duration.as_nanos() as usize)
                 .unwrap_or(0);
-            let mut idx = (self.queue_index * 31 + seed + self.queue.len()) % self.queue.len();
-            if idx == self.queue_index {
-                idx = (idx + 1) % self.queue.len();
+            let mut index = (self.queue_index * 31 + seed + self.queue.len()) % self.queue.len();
+            if index == self.queue_index {
+                index = (index + 1) % self.queue.len();
             }
-            idx
+            index
         } else {
-            // 顺序/列表循环：列表末尾回绕
             (self.queue_index as isize + delta).rem_euclid(self.queue.len() as isize) as usize
         };
-        self.queue_index = next;
-        let item = self.queue[next].clone();
+
+        let queue_index_changed = next != self.queue_index;
+        let mut item = self.queue[next].clone();
         if item.media_mid.is_empty() {
-            // 队列里未解析的项需重新取流
-            let mid = item.mid.clone();
-            let (media_mid, _) = match self.client_music_detail(&mid).await {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!("detail failed for queue: {e}");
+            let detail = match self.client_music_detail(&item.mid).await {
+                Ok(detail) => detail,
+                Err(error) => {
+                    tracing::error!("detail failed for queue: {error}");
                     return;
                 }
             };
-            let (file_type, uri) = match self.resolve_stream(&mid, &media_mid).await {
-                Some(v) => v,
-                None => return,
-            };
-            let mut item = item;
-            item.media_mid = media_mid;
-            self.queue[next] = item.clone();
-            self.player.load(LoadRequest {
-                uri,
-                track: item.track,
-                quality: quality_from_file_type(file_type),
-            });
+            item.media_mid = detail.media_mid;
+            item.song_type = detail.song_type;
+            item.track.duration = detail.duration.map(Duration::from_secs);
+        }
+        let (file_type, uri) = match self
+            .resolve_stream(&item.mid, &item.media_mid, item.song_type)
+            .await
+        {
+            Some(value) => value,
+            None => return,
+        };
+        item.track.qualities = vec![quality_from_file_type(file_type)];
+        self.queue_index = next;
+        self.queue[next] = item.clone();
+        self.player.load(LoadRequest {
+            uri,
+            track: item.track,
+            quality: quality_from_file_type(file_type),
+        });
+        self.current_lyrics = Some((item.mid.clone(), item.song_type));
+        self.start_lyrics_load(item.mid, item.song_type);
+        if queue_index_changed {
+            let _ = self
+                .events_tx
+                .send(AppEvent::QueueUpdated(self.queue_snapshot()));
         }
     }
 
@@ -588,28 +595,28 @@ impl AppCore {
     async fn client_music_detail(
         &self,
         mid: &str,
-    ) -> Result<(String, Option<u64>), hmp_qqmusic_api::QqMusicError> {
+    ) -> Result<ResolvedSongDetail, hmp_qqmusic_api::QqMusicError> {
         let song_api = SongApi::new(&self.client);
         let detail = song_api.get_detail(mid).await?;
-        Ok((
-            detail.track.file.media_mid.clone(),
-            detail
-                .track
-                .interval
-                .checked_mul(1000)
-                .and_then(|v| u64::try_from(v).ok())
-                .map(Duration::from_millis)
-                .map(|d| d.as_secs()),
-        ))
+        Ok(ResolvedSongDetail {
+            media_mid: detail.track.file.media_mid.clone(),
+            duration: u64::try_from(detail.track.interval).ok(),
+            song_type: detail.track.type_,
+        })
     }
 
     /// 音质回退取流：Master → HiRes → Atmos → FLAC → AAC → 320 → 128。
-    async fn resolve_stream(&self, mid: &str, media_mid: &str) -> Option<(SongFileType, String)> {
+    async fn resolve_stream(
+        &self,
+        mid: &str,
+        media_mid: &str,
+        song_type: i64,
+    ) -> Option<(SongFileType, String)> {
         let song_api = SongApi::new(&self.client);
         let info = SongFileInfo {
             mid: mid.to_owned(),
             file_type: None,
-            song_type: 0,
+            song_type,
             media_mid: Some(media_mid.to_owned()),
         };
         for quality in AudioQuality::Master.fallback_chain() {
@@ -633,6 +640,38 @@ impl AppCore {
             }
         }
         None
+    }
+
+    fn reload_lyrics(&self) {
+        if let Some((mid, song_type)) = &self.current_lyrics {
+            self.start_lyrics_load(mid.clone(), *song_type);
+        }
+    }
+
+    fn start_lyrics_load(&self, mid: String, song_type: i64) {
+        if mid.is_empty() {
+            return;
+        }
+        let _ = self.events_tx.send(AppEvent::LyricsLoading(mid.clone()));
+        let client = QqMusicClient::with_config(self.client.config());
+        let events_tx = self.events_tx.clone();
+        tokio::spawn(async move {
+            match LyricApi::new(&client)
+                .get_lyric(&mid, song_type, false, true, false, false)
+                .await
+            {
+                Ok(response) => {
+                    let lines = parse_lrc(&response.lyric, &response.trans);
+                    let _ = events_tx.send(AppEvent::LyricsLoaded { mid, lines });
+                }
+                Err(error) => {
+                    let _ = events_tx.send(AppEvent::LyricsFailed {
+                        mid,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        });
     }
 
     // -----------------------------------------------------------------
@@ -746,6 +785,15 @@ impl AppCore {
     }
 }
 
+fn queue_state_key(state: &PlaybackState) -> (String, bool) {
+    let current_id = state
+        .current
+        .as_ref()
+        .map(|track| track.id.to_string())
+        .unwrap_or_default();
+    (current_id, state.status == PlaybackStatus::Playing)
+}
+
 /// `AudioQuality` → 取流文件类型。
 pub fn quality_to_file_type(q: AudioQuality) -> Option<SongFileType> {
     match q {
@@ -824,6 +872,26 @@ mod tests {
         assert!(first_token.is_cancelled());
         state.cancel();
         assert!(!state.accepts(second_generation));
+    }
+
+    #[test]
+    fn queue_state_changes_only_for_track_or_playing_status() {
+        let mut state = PlaybackState {
+            status: PlaybackStatus::Playing,
+            current: Some(Track::new(TrackId::new("mid-1"), "First")),
+            ..PlaybackState::default()
+        };
+        let playing_key = queue_state_key(&state);
+
+        state.position = Duration::from_secs(30);
+        assert_eq!(queue_state_key(&state), playing_key);
+
+        state.status = PlaybackStatus::Paused;
+        assert_ne!(queue_state_key(&state), playing_key);
+
+        let paused_key = queue_state_key(&state);
+        state.current = Some(Track::new(TrackId::new("mid-2"), "Second"));
+        assert_ne!(queue_state_key(&state), paused_key);
     }
 
     #[test]
