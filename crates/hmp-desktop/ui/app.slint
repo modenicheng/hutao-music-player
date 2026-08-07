@@ -2,6 +2,7 @@
 // 主题：近黑背景、红色渐变强调（胡桃火系）、圆角卡片、毛玻璃播放栏
 
 import { ListView, Slider } from "std-widgets.slint";
+import { LineEditBase } from "vendor/lineedit-base.slint";
 
 // ---- 数据 ----
 
@@ -163,59 +164,12 @@ component SideBar inherits Rectangle {
             }
         }
 
-        Rectangle { height: 0px; }
+        // 弹性空白：把底部区域推到窗口底部（不遮挡任何内容）
+        Rectangle { vertical-stretch: 1; height: 0px; }
 
-        // 登录区（底部推挤）
-        VerticalLayout {
-            alignment: start;
-            spacing: 8px;
-            visible: !root.logged-in && !root.show-login;
-            Rectangle {
-                height: 44px;
-                border-radius: 12px;
-                background: #1e1e22;
-                login-touch := TouchArea {
-                    clicked => { root.login-start(); }
-                }
-                HorizontalLayout {
-                    padding-left: 12px; padding-right: 12px;
-                    spacing: 10px;
-                    Text { text: "👤"; color: Theme.text-secondary; font-size: 16px; vertical-alignment: center; }
-                    Text {
-                        text: "登录 QQ 音乐";
-                        color: Theme.text-primary;
-                        font-size: 14px;
-                        vertical-alignment: center;
-                        horizontal-alignment: left;
-                    }
-                }
-            }
-        }
+        // 登录区（底部）
         VerticalLayout {
             spacing: 8px;
-            visible: root.logged-in;
-            Rectangle {
-                height: 44px;
-                border-radius: 12px;
-                background: #1e1e22;
-                HorizontalLayout {
-                    padding-left: 12px; padding-right: 12px;
-                    spacing: 10px;
-                    Text { text: "👤"; color: Theme.accent; font-size: 16px; vertical-alignment: center; }
-                    Text {
-                        text: root.user-name;
-                        color: Theme.text-primary;
-                        font-size: 14px;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                }
-            }
-        }
-
-        // 登录覆盖（二维码）
-        VerticalLayout {
-            spacing: 10px;
             visible: root.show-login;
             Rectangle {
                 height: 200px;
@@ -252,7 +206,48 @@ component SideBar inherits Rectangle {
             }
         }
 
-        Rectangle { height: 0px; }
+        // 登录区（未登录）
+        Rectangle {
+            height: 44px;
+            border-radius: 12px;
+            background: #1e1e22;
+            visible: !root.logged-in && !root.show-login;
+            login-touch := TouchArea {
+                clicked => { root.login-start(); }
+            }
+            HorizontalLayout {
+                padding-left: 12px; padding-right: 12px;
+                spacing: 10px;
+                Text { text: "👤"; color: Theme.text-secondary; font-size: 16px; vertical-alignment: center; }
+                Text {
+                    text: "登录 QQ 音乐";
+                    color: Theme.text-primary;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                }
+            }
+        }
+
+        // 用户区（已登录）
+        Rectangle {
+            height: 44px;
+            border-radius: 12px;
+            background: #1e1e22;
+            visible: root.logged-in;
+            HorizontalLayout {
+                padding-left: 12px; padding-right: 12px;
+                spacing: 10px;
+                Text { text: "👤"; color: Theme.accent; font-size: 16px; vertical-alignment: center; }
+                Text {
+                    text: root.user-name;
+                    color: Theme.text-primary;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
     }
 }
 

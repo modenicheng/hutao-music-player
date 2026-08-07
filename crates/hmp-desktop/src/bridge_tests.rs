@@ -19,6 +19,39 @@ fn init_ui() -> AppWindow {
 /// 全部窗口场景（testing backend 进程内单次初始化，官方建议单一 #[test]）。
 #[test]
 fn ui_bridge_integration() {
+    // 0) 登录按钮可点击（覆盖"登录无法点击"反馈）：扫描侧边栏底部注入点击
+    {
+        let ui = init_ui();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        bind_callbacks(&ui, tx);
+        assert!(!ui.get_logged_in());
+        assert!(!ui.get_show_login());
+        let mut hit = None;
+        'scan: for y in (400..=700).step_by(20) {
+            for x in (20..=200).step_by(30) {
+                let pos = slint::LogicalPosition::new(x as f32, y as f32);
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                        position: pos,
+                        button: slint::platform::PointerEventButton::Left,
+                    });
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                        position: pos,
+                        button: slint::platform::PointerEventButton::Left,
+                    });
+                if let Ok(cmd) = rx.try_recv() {
+                    assert!(matches!(cmd, AppCommand::LoginStart));
+                    hit = Some((x, y));
+                    break 'scan;
+                }
+            }
+        }
+        assert!(
+            hit.is_some(),
+            "login button not clickable at any scanned position"
+        );
+    }
     // 1) 回调 → 命令
     {
         let ui = init_ui();
