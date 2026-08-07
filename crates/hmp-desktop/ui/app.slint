@@ -55,7 +55,7 @@ component SideBar inherits Rectangle {
                 background: Theme.accent;
                 Text {
                     text: "♪";
-                    color: white;
+                    color: Theme.accent-foreground;
                     font-size: 18px;
                     font-weight: 700;
                     horizontal-alignment: center;
@@ -348,15 +348,18 @@ component PlayerBar inherits Rectangle {
                 spacing: 8px;
                 IconButton {
                     glyph: "⏮";
+                    accessible-name: "上一首";
                     clicked => { root.prev-requested(); }
                 }
                 IconButton {
                     glyph: root.playback.status == "playing" ? "❚❚" : "▶";
+                    accessible-name: "播放或暂停";
                     emphasized: true;
                     clicked => { root.play-pause(); }
                 }
                 IconButton {
                     glyph: "⏭";
+                    accessible-name: "下一首";
                     clicked => { root.next-requested(); }
                 }
             }

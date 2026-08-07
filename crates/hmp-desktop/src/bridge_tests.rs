@@ -55,7 +55,7 @@ fn reload_lyrics_command_is_distinct_from_playback_commands() {
 /// 全部窗口场景（testing backend 进程内单次初始化，官方建议单一 #[test]）。
 #[test]
 #[serial]
-fn ui_bridge_integration() {
+fn app_starts_in_library_and_accepts_theme_modes() {
     // 0) 初始路由和主题模式可由生成的 UI 属性读取和修改。
     {
         let ui = init_ui();

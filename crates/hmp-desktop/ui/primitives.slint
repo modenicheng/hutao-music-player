@@ -2,6 +2,7 @@ import { Theme } from "theme.slint";
 
 export component IconButton inherits Rectangle {
     in property <string> glyph;
+    in property <string> accessible-name;
     in property <bool> emphasized: false;
     in property <bool> enabled: true;
     callback clicked;
@@ -14,7 +15,7 @@ export component IconButton inherits Rectangle {
         : touch-area.has-hover ? Theme.surface-hover : transparent;
     opacity: root.enabled ? 1 : 0.42;
     accessible-role: button;
-    accessible-label: root.glyph;
+    accessible-label: root.accessible-name;
     accessible-enabled: root.enabled;
     accessible-action-default => {
         if (root.enabled) {
@@ -22,11 +23,15 @@ export component IconButton inherits Rectangle {
         }
     }
 
-    Tooltip { text: @markdown("\{root.glyph}"); }
+    Tooltip { text: @markdown("\{root.accessible-name}"); }
 
     Text {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
         text: root.glyph;
-        color: root.emphasized ? white : Theme.text-primary;
+        color: root.emphasized ? Theme.accent-foreground : Theme.text-primary;
         font-size: root.emphasized ? 18px : 16px;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -52,11 +57,19 @@ export component CoverArt inherits Rectangle {
     accessible-label: root.has-source ? "Album cover" : "Album cover placeholder";
 
     Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
         background: @linear-gradient(135deg, Theme.surface-hover 0%, Theme.surface 100%);
         visible: !root.has-source;
     }
 
     Image {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
         source: root.source;
         image-fit: cover;
         visible: root.has-source;
