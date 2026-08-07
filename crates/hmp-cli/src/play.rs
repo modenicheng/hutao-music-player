@@ -128,6 +128,7 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
             let prepared = hmp_media::prepare_playable(&remote_uri, Some(key), Some(&progress_tx))
                 .await
                 .map_err(|e| e.to_string())?;
+            drop(progress_tx); // 发送方全部释放后 rx.changed() 返回 Err，读取任务退出
             let _ = progress_handle.await;
             println!("\r解密完成，播放本地缓存: {prepared}");
             prepared
