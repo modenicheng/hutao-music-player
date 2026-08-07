@@ -983,6 +983,12 @@ async fn resolve_stream(
         let Some(file_type) = quality_to_file_type(quality.clone()) else {
             continue;
         };
+        // 加密格式（.mflac/.mgg/.mmp4 等）需客户端解密，当前播放器不支持，
+        // 视为不可用继续回退（docs/PROJECT.md §7.3 质量回退）。
+        if file_type.is_encrypted {
+            tracing::debug!(quality = ?quality, "skip encrypted format (not playable)");
+            continue;
+        }
         match song_api
             .get_song_urls(std::slice::from_ref(&info), file_type, credential)
             .await

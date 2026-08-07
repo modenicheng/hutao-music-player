@@ -70,6 +70,12 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let Some(file_type) = quality_to_file_type(quality.clone()) else {
             continue;
         };
+        // 加密格式（.mflac/.mgg/.mmp4 等）需客户端解密，当前播放器不支持，
+        // 视为不可用继续回退（docs/PROJECT.md §7.3 质量回退）。
+        if file_type.is_encrypted {
+            tracing::info!(quality = ?quality, "跳过加密音质（暂不支持解密）");
+            continue;
+        }
         let urls = song_api
             .get_song_urls(
                 std::slice::from_ref(&file_info),
