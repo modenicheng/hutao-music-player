@@ -396,7 +396,11 @@ impl AppCore {
 
     /// 当前播放队列的 UI 快照。
     pub fn queue_snapshot(&self) -> Vec<UiQueueData> {
-        let state = self.state_rx.borrow();
+        let state = self.state_rx.borrow().clone();
+        self.queue_snapshot_for_state(&state)
+    }
+
+    fn queue_snapshot_for_state(&self, state: &PlaybackState) -> Vec<UiQueueData> {
         let current_track_id = state.current.as_ref().map(|track| track.id.as_ref());
 
         self.queue
@@ -465,8 +469,8 @@ impl AppCore {
                     if changed.is_err() {
                         break;
                     }
-                    let key = queue_state_key(&self.state_rx.borrow());
-                    self.publish_queue_if_changed(key);
+                    let state = self.state_rx.borrow().clone();
+                    self.publish_queue_if_changed(state);
                 }
             }
         }
@@ -632,12 +636,11 @@ impl AppCore {
         });
         self.current_lyrics = Some((item.mid.clone(), item.song_type));
         self.start_lyrics_load(item.mid, item.song_type);
-        let key = queue_state_key(&self.state_rx.borrow());
-        self.last_queue_state = Some(key.clone());
+        let state = self.state_rx.borrow().clone();
+        self.last_queue_state = Some(queue_state_key(&state));
         if queue_direct_publication_needed(current_index, next, was_unresolved) {
-            let _ = self
-                .events_tx
-                .send(AppEvent::QueueUpdated(self.queue_snapshot()));
+            let snapshot = self.queue_snapshot_for_state(&state);
+            let _ = self.events_tx.send(AppEvent::QueueUpdated(snapshot));
         }
     }
 
@@ -739,21 +742,20 @@ impl AppCore {
         forward_lyric_result(&self.events_tx, &self.lyric_requests, result);
     }
 
-    fn publish_queue_if_changed(&mut self, key: (String, bool)) {
+    fn publish_queue_if_changed(&mut self, state: PlaybackState) {
+        let key = queue_state_key(&state);
         if !queue_publication_changed(&mut self.last_queue_state, key) {
             return;
         }
-        let _ = self
-            .events_tx
-            .send(AppEvent::QueueUpdated(self.queue_snapshot()));
+        let snapshot = self.queue_snapshot_for_state(&state);
+        let _ = self.events_tx.send(AppEvent::QueueUpdated(snapshot));
     }
 
     fn publish_queue_snapshot(&mut self) {
-        let key = queue_state_key(&self.state_rx.borrow());
-        self.last_queue_state = Some(key);
-        let _ = self
-            .events_tx
-            .send(AppEvent::QueueUpdated(self.queue_snapshot()));
+        let state = self.state_rx.borrow().clone();
+        self.last_queue_state = Some(queue_state_key(&state));
+        let snapshot = self.queue_snapshot_for_state(&state);
+        let _ = self.events_tx.send(AppEvent::QueueUpdated(snapshot));
     }
 
     // -----------------------------------------------------------------
