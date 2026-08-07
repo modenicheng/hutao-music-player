@@ -601,7 +601,9 @@ impl AppCore {
     }
 
     async fn play_queue_item(&mut self, next: usize, mut item: QueueItem) {
-        if item.media_mid.is_empty() {
+        let current_index = self.queue_index;
+        let was_unresolved = item.media_mid.is_empty();
+        if was_unresolved {
             let detail = match self.client_music_detail(&item.mid).await {
                 Ok(detail) => detail,
                 Err(error) => {
@@ -630,7 +632,13 @@ impl AppCore {
         });
         self.current_lyrics = Some((item.mid.clone(), item.song_type));
         self.start_lyrics_load(item.mid, item.song_type);
-        self.publish_queue_snapshot();
+        let key = queue_state_key(&self.state_rx.borrow());
+        self.last_queue_state = Some(key.clone());
+        if queue_direct_publication_needed(current_index, next, was_unresolved) {
+            let _ = self
+                .events_tx
+                .send(AppEvent::QueueUpdated(self.queue_snapshot()));
+        }
     }
 
     fn toggle_play(&self) {
@@ -863,6 +871,14 @@ fn queue_item_at(queue: &[QueueItem], index: usize) -> Option<QueueItem> {
     queue.get(index).cloned()
 }
 
+fn queue_direct_publication_needed(
+    current_index: usize,
+    next_index: usize,
+    was_unresolved: bool,
+) -> bool {
+    current_index != next_index || was_unresolved
+}
+
 fn queue_publication_changed(
     last_queue_state: &mut Option<(String, bool)>,
     key: (String, bool),
@@ -1001,6 +1017,13 @@ mod tests {
         assert_eq!(selected.mid, "queue-mid-b");
         assert_ne!(selected.mid, search_mids[1]);
         assert!(queue_item_at(&queue, queue.len()).is_none());
+    }
+
+    #[test]
+    fn queue_direct_publication_needed_for_index_or_resolution_changes() {
+        assert!(queue_direct_publication_needed(0, 1, false));
+        assert!(queue_direct_publication_needed(0, 0, true));
+        assert!(!queue_direct_publication_needed(0, 0, false));
     }
 
     #[test]
