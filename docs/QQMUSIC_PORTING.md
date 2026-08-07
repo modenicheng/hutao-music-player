@@ -46,6 +46,8 @@
 | `qqmusic_api/utils/device.py` | （待移植） | ⬜ 未移植 | 仅 Android 平台需要 |
 | `qqmusic_api/utils/qimei.py` | （待移植） | ⬜ 未移植 | 仅 Android 平台需要 |
 | `qqmusic_api/utils/mqtt.py` | — | ⬜ 不移植 | HMP 非目标功能 |
+| （无上游对应；独立实现） | `algorithms/qmc2` | ✅ 已移植 | QMC2 解密：TEA-CBC、ekey 派生（EncV1/EncV2）、map/RC4 流密码、STag/QTag 尾部检测 |
+| （无上游对应；独立实现） | `crates/hmp-media` | ✅ 已移植 | 加密流下载→解密→XDG 缓存→file URI（CLI/桌面共用） |
 
 ## 已移植接口
 
@@ -108,6 +110,7 @@
 - 上游普通组高音质常量（`MASTER`/`FLAC`/`OGG_*` 等）与加密组同名，Rust 合并为单一
   `SongFileType`（高音质统一为加密版本）；
 - **待播放器阶段**：`.mflac`/`.mgg` 解密播放（上游仓库无解密算法，需社区方案如 unlock-music）。
+- **实测记录（2026-08-08）**：`CgiGetEVkey` 返回 `ekey` 后解密播放链路已接线（Task 3/4），QMC2 解密播放完整闭环已验证。
 
 ### 歌单/专辑/歌手/排行榜/推荐（阶段 D，docs/PROJECT.md §6.6）
 

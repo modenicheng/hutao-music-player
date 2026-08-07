@@ -37,6 +37,16 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
+## 鸣谢 / Acknowledgements
+
+HMP 的 QMC2 加密音质解密实现基于以下开源项目的研究与代码（许可证均与 GPL-3.0-or-later 兼容）：
+
+- [jixunmoe/qmc2-rust](https://github.com/jixunmoe/qmc2-rust)（MIT）——ekey 派生（含 EncV2 两段 TEA）与 map/RC4 流密码的 Rust 参考实现及测试向量；
+- [bczhc/qmc-decode](https://github.com/bczhc/qmc-decode)（GPL-3.0）——QMC2 文件尾部（QTag/STag）检测与格式研究；
+- [bczhc/qmc-decrypt](https://github.com/bczhc/qmc-decrypt)（GPL-3.0）——STag 解密流程与 ekey 用法；
+- TarsCpp [`tc_tea`](https://github.com/TarsCloud/TarsCpp)（BSD-3-Clause）——TEA-CBC 加解密变体（`oi_symmetry_encrypt2/decrypt2`）；
+- [unlock-music](https://github.com/ix64/unlock-music) 研究（GPL-3.0-or-later）——QMC 格式的早期研究与文档（仓库现因 DMCA 不可访问，本实现基于上述维护中的衍生项目）。
+
 ## 许可证
 
 GPL-3.0-or-later。参考实现 L-1124/QQMusicApi 同样以 GPL-3.0-or-later 发布。

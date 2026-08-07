@@ -803,7 +803,7 @@ pub enum AudioQuality {
 
 是否自动回退由设置控制。发生回退时 UI 应提示一次，不应静默让用户误以为正在播放目标音质。
 
-> **加密音质**：QQ 音乐的无损及以上音质（FLAC/HiRes/Atmos/Master，即 `.mflac`/`.mgg`/`.mmp4` 等）为加密文件，需要客户端用接口返回的 `ekey` 解密后才能播放；当前播放器尚未实现解密，取流时将这些格式视为不可用并直接回退到可播放的明文音质（MP3/AAC）。实现 QMC 解密后应恢复无损链。
+> **加密音质**：QQ 音乐的无损及以上音质（FLAC/HiRes/Atmos/Master，即 `.mflac`/`.mgg`/`.mmp4` 等）为加密文件，需要客户端用接口返回的 `ekey` 解密后才能播放。HMP 已实现 QMC2 解密（`hmp-qqmusic-api::algorithms::qmc2` + `hmp-media` 下载/解密/缓存），取流后解密为本地缓存文件播放，无损链已恢复（`Master → HiRes → Atmos → Flac → Mp3_320 → Mp3_128`）；OGG 系列（`.mgg`，`O8M1` 等）尚未纳入回退链，属后续项。
 
 ---
 
@@ -1465,9 +1465,10 @@ test(qqmusic): add vkey response fixture
 5. ✅ 建立 fixture 测试
 6. ✅ 移植 QQ 扫码登录
 7. ✅ 移植播放 URL（含加密取流）
-8. ✅ 建立 GStreamer 播放原型
-9. ✅ 建立完整 MPRIS 原型
-10. ✅ 最后接 Slint 最小 UI（Apple Music 风格）
+8. ✅ 实现 QMC2 加密音质解密播放（CLI + 桌面）
+9. ✅ 建立 GStreamer 播放原型
+10. ✅ 建立完整 MPRIS 原型
+11. ✅ 最后接 Slint 最小 UI（Apple Music 风格）
 ```
 
 第一个真正有意义的里程碑不是“窗口能打开”，而是以下命令行原型能够工作：
