@@ -194,6 +194,69 @@ struct ResolvedSongDetail {
 }
 
 #[derive(Default)]
+struct NetworkRequestState {
+    generation: u64,
+    cancel: Option<CancellationToken>,
+}
+
+impl NetworkRequestState {
+    fn begin(&mut self) -> (u64, CancellationToken) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+        (self.generation, cancel)
+    }
+
+    fn cancel(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+    }
+
+    fn accepts(&self, generation: u64) -> bool {
+        self.generation == generation
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|cancel| !cancel.is_cancelled())
+    }
+}
+
+struct SearchResult {
+    generation: u64,
+    keyword: String,
+    result: Result<Vec<hmp_qqmusic_api::protocol::search::QuickSong>, String>,
+}
+
+enum PlayRequest {
+    Search {
+        index: usize,
+        songs: Vec<hmp_qqmusic_api::protocol::search::QuickSong>,
+    },
+    Queue {
+        index: usize,
+        item: QueueItem,
+    },
+}
+
+struct ResolvedPlayback {
+    index: usize,
+    songs: Option<Vec<hmp_qqmusic_api::protocol::search::QuickSong>>,
+    item: QueueItem,
+    file_type: SongFileType,
+    uri: String,
+}
+
+struct PlayResult {
+    generation: u64,
+    result: Result<ResolvedPlayback, String>,
+}
+
+#[derive(Default)]
 struct LoginSessionState {
     generation: u64,
     cancel: Option<CancellationToken>,
@@ -309,6 +372,13 @@ pub struct AppCore {
     shuffle: bool,
     last_queue_state: Option<(String, bool)>,
     current_lyrics: Option<(String, i64)>,
+    search_requests: NetworkRequestState,
+    search_results_tx: mpsc::UnboundedSender<SearchResult>,
+    search_results_rx: mpsc::UnboundedReceiver<SearchResult>,
+    play_requests: NetworkRequestState,
+    pending_queue_index: Option<usize>,
+    play_results_tx: mpsc::UnboundedSender<PlayResult>,
+    play_results_rx: mpsc::UnboundedReceiver<PlayResult>,
     lyric_requests: LyricRequestState,
     lyric_results_tx: mpsc::UnboundedSender<LyricResult>,
     lyric_results_rx: mpsc::UnboundedReceiver<LyricResult>,
@@ -342,6 +412,8 @@ impl AppCore {
         let (login_results_tx, login_results_rx) = mpsc::unbounded_channel();
         let (login_updates_tx, login_updates_rx) = mpsc::unbounded_channel();
         let (lyric_results_tx, lyric_results_rx) = mpsc::unbounded_channel();
+        let (search_results_tx, search_results_rx) = mpsc::unbounded_channel();
+        let (play_results_tx, play_results_rx) = mpsc::unbounded_channel();
         let mpris = tokio::runtime::Handle::current()
             .block_on(MprisService::start(
                 player.command_sender(),
@@ -363,6 +435,13 @@ impl AppCore {
             shuffle: false,
             last_queue_state: Some(initial_queue_state),
             current_lyrics: None,
+            search_requests: NetworkRequestState::default(),
+            search_results_tx,
+            search_results_rx,
+            play_requests: NetworkRequestState::default(),
+            pending_queue_index: None,
+            play_results_tx,
+            play_results_rx,
             lyric_requests: LyricRequestState::default(),
             lyric_results_tx,
             lyric_results_rx,
@@ -442,12 +521,12 @@ impl AppCore {
                 command = self.cmd_rx.recv() => {
                     let Some(command) = command else { break };
                     match command {
-                        AppCommand::Search(keyword) => self.search(&keyword).await,
-                        AppCommand::PlayIndex(idx) => self.play_index(idx).await,
-                        AppCommand::PlayQueueIndex(idx) => self.play_queue_index(idx).await,
+                        AppCommand::Search(keyword) => self.start_search(keyword),
+                        AppCommand::PlayIndex(idx) => self.start_play_index(idx),
+                        AppCommand::PlayQueueIndex(idx) => self.start_play_queue_index(idx),
                         AppCommand::TogglePlay => self.toggle_play(),
-                        AppCommand::Next => self.play_relative(1).await,
-                        AppCommand::Previous => self.play_relative(-1).await,
+                        AppCommand::Next => self.start_play_relative(1),
+                        AppCommand::Previous => self.start_play_relative(-1),
                         AppCommand::Seek(secs) => {
                             self.player.seek(Duration::from_secs_f32(secs.max(0.0)));
                         }
@@ -456,6 +535,16 @@ impl AppCore {
                         AppCommand::LoginCancel => self.cancel_login(),
                         AppCommand::ReloadLyrics => self.reload_lyrics(),
                         AppCommand::Quit => break,
+                    }
+                }
+                result = self.search_results_rx.recv() => {
+                    if let Some(result) = result {
+                        self.finish_search(result);
+                    }
+                }
+                result = self.play_results_rx.recv() => {
+                    if let Some(result) = result {
+                        self.finish_play(result);
                     }
                 }
                 result = self.login_results_rx.recv() => {
@@ -482,6 +571,8 @@ impl AppCore {
                 }
             }
         }
+        self.search_requests.cancel();
+        self.play_requests.cancel();
         self.cancel_login_session();
     }
 
@@ -489,165 +580,148 @@ impl AppCore {
     // 搜索 / 播放
     // -----------------------------------------------------------------
 
-    async fn search(&mut self, keyword: &str) {
-        match self.client.quick_search(keyword).await {
-            Ok(result) => {
-                let songs = result.songs;
+    fn start_search(&mut self, keyword: String) {
+        let (generation, cancel) = self.search_requests.begin();
+        let client = QqMusicClient::with_config(self.client.config());
+        let results_tx = self.search_results_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = client.quick_search(&keyword) => {
+                    result.map(|response| response.songs).map_err(|error| error.to_string())
+                }
+            };
+            let _ = results_tx.send(SearchResult {
+                generation,
+                keyword,
+                result,
+            });
+        });
+    }
+
+    fn finish_search(&mut self, result: SearchResult) {
+        if !self.search_requests.accepts(result.generation) {
+            return;
+        }
+        match result.result {
+            Ok(songs) => {
                 let data = songs
                     .iter()
-                    .map(|s| UiSongData {
-                        title: s.name.clone(),
-                        artist: s.singer.clone(),
+                    .map(|song| UiSongData {
+                        title: song.name.clone(),
+                        artist: song.singer.clone(),
                         duration: "—".into(),
                     })
                     .collect();
                 self.songs = songs;
                 let _ = self.events_tx.send(AppEvent::SearchDone(data));
-                tracing::info!(count = self.songs.len(), keyword, "search done");
+                tracing::info!(
+                    count = self.songs.len(),
+                    keyword = result.keyword,
+                    "search done"
+                );
             }
-            Err(e) => {
-                let _ = self.events_tx.send(AppEvent::SearchFailed(e.to_string()));
-                tracing::error!("search failed: {e}");
+            Err(message) => {
+                let _ = self.events_tx.send(AppEvent::SearchFailed(message.clone()));
+                tracing::error!(keyword = result.keyword, "search failed: {message}");
             }
         }
     }
 
-    async fn play_index(&mut self, idx: usize) {
-        let Some(song) = self.songs.get(idx) else {
-            tracing::warn!("play index out of range: {idx}");
-            return;
-        };
-        let mid = song.mid.clone();
-        let title = song.name.clone();
-
-        let detail = match self.client_music_detail(&mid).await {
-            Ok(detail) => detail,
-            Err(error) => {
-                tracing::error!("detail failed: {error}");
-                return;
-            }
-        };
-        if detail.media_mid.is_empty() {
-            tracing::error!("no media_mid for {mid}");
+    fn start_play_index(&mut self, index: usize) {
+        if index >= self.songs.len() {
+            tracing::warn!("play index out of range: {index}");
             return;
         }
-        let (file_type, uri) = match self
-            .resolve_stream(&mid, &detail.media_mid, detail.song_type)
-            .await
-        {
-            Some(value) => value,
-            None => {
-                tracing::error!("all qualities unavailable for {mid}");
-                return;
-            }
-        };
-
-        self.queue = self
-            .songs
-            .iter()
-            .map(|song| QueueItem {
-                track: Track {
-                    id: TrackId::new(song.mid.clone()),
-                    title: song.name.clone(),
-                    artists: vec![hmp_core::ArtistRef {
-                        id: hmp_core::ArtistId::new(song.mid.clone()),
-                        name: song.singer.clone(),
-                    }],
-                    album: None,
-                    duration: None,
-                    cover: None,
-                    qualities: Vec::new(),
-                },
-                mid: song.mid.clone(),
-                media_mid: String::new(),
-                song_type: 0,
-            })
-            .collect();
-        self.queue_index = idx;
-        let item = &mut self.queue[idx];
-        item.media_mid = detail.media_mid;
-        item.song_type = detail.song_type;
-        item.track.duration = detail.duration.map(Duration::from_secs);
-        item.track.qualities = vec![quality_from_file_type(file_type)];
-
-        self.player.load(LoadRequest {
-            uri,
-            track: item.track.clone(),
-            quality: quality_from_file_type(file_type),
+        self.pending_queue_index = None;
+        self.start_play_request(PlayRequest::Search {
+            index,
+            songs: self.songs.clone(),
         });
-        self.current_lyrics = Some((mid.clone(), detail.song_type));
-        self.start_lyrics_load(mid.clone(), detail.song_type);
-        self.publish_queue_snapshot();
-        tracing::info!(mid, title, "playing");
     }
 
-    async fn play_queue_index(&mut self, idx: usize) {
-        let Some(item) = queue_item_at(&self.queue, idx) else {
-            tracing::warn!("queue index out of range: {idx}");
+    fn start_play_queue_index(&mut self, index: usize) {
+        let Some(item) = queue_item_at(&self.queue, index) else {
+            tracing::warn!("queue index out of range: {index}");
             return;
         };
-        self.play_queue_item(idx, item).await;
+        self.pending_queue_index = Some(index);
+        self.start_play_request(PlayRequest::Queue { index, item });
     }
 
-    async fn play_relative(&mut self, delta: isize) {
+    fn start_play_relative(&mut self, delta: isize) {
         if self.queue.is_empty() {
             return;
         }
+        let current = self.pending_queue_index.unwrap_or(self.queue_index);
         let next = if self.loop_mode == LoopMode::Track {
-            self.queue_index
+            current
         } else if self.shuffle && delta > 0 && self.queue.len() > 1 {
             let seed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_nanos() as usize)
                 .unwrap_or(0);
-            let mut index = (self.queue_index * 31 + seed + self.queue.len()) % self.queue.len();
-            if index == self.queue_index {
+            let mut index = (current * 31 + seed + self.queue.len()) % self.queue.len();
+            if index == current {
                 index = (index + 1) % self.queue.len();
             }
             index
         } else {
-            (self.queue_index as isize + delta).rem_euclid(self.queue.len() as isize) as usize
+            (current as isize + delta).rem_euclid(self.queue.len() as isize) as usize
         };
-        let item = self.queue[next].clone();
-        self.play_queue_item(next, item).await;
+        self.pending_queue_index = Some(next);
+        self.start_play_request(PlayRequest::Queue {
+            index: next,
+            item: self.queue[next].clone(),
+        });
     }
 
-    async fn play_queue_item(&mut self, next: usize, mut item: QueueItem) {
-        let current_index = self.queue_index;
-        let was_unresolved = item.media_mid.is_empty();
-        if was_unresolved {
-            let detail = match self.client_music_detail(&item.mid).await {
-                Ok(detail) => detail,
-                Err(error) => {
-                    tracing::error!("detail failed for queue: {error}");
-                    return;
-                }
+    fn start_play_request(&mut self, request: PlayRequest) {
+        let (generation, cancel) = self.play_requests.begin();
+        let client = QqMusicClient::with_config(self.client.config());
+        let credential = self.credential.clone();
+        let results_tx = self.play_results_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = resolve_play_request(&client, credential.as_ref(), request) => result,
             };
-            item.media_mid = detail.media_mid;
-            item.song_type = detail.song_type;
-            item.track.duration = detail.duration.map(Duration::from_secs);
+            let _ = results_tx.send(PlayResult { generation, result });
+        });
+    }
+
+    fn finish_play(&mut self, result: PlayResult) {
+        if !self.play_requests.accepts(result.generation) {
+            return;
         }
-        let (file_type, uri) = match self
-            .resolve_stream(&item.mid, &item.media_mid, item.song_type)
-            .await
-        {
-            Some(value) => value,
-            None => return,
+        self.pending_queue_index = None;
+        let resolved = match result.result {
+            Ok(resolved) => resolved,
+            Err(message) => {
+                tracing::error!("playback resolution failed: {message}");
+                return;
+            }
         };
-        item.track.qualities = vec![quality_from_file_type(file_type)];
-        self.queue_index = next;
-        self.queue[next] = item.clone();
+        if let Some(songs) = resolved.songs {
+            self.queue = songs.iter().map(queue_item_from_search_song).collect();
+        }
+        let Some(queue_item) = self.queue.get_mut(resolved.index) else {
+            tracing::warn!("resolved queue index out of range: {}", resolved.index);
+            return;
+        };
+        self.queue_index = resolved.index;
+        *queue_item = resolved.item;
+        let item = queue_item.clone();
+        let quality = quality_from_file_type(resolved.file_type);
         self.player.load(LoadRequest {
-            uri,
-            track: item.track,
-            quality: quality_from_file_type(file_type),
+            uri: resolved.uri,
+            track: item.track.clone(),
+            quality,
         });
         self.current_lyrics = Some((item.mid.clone(), item.song_type));
-        self.start_lyrics_load(item.mid, item.song_type);
-        if queue_direct_publication_needed(current_index, next, was_unresolved) {
-            let snapshot = self.queue_content_snapshot();
-            let _ = self.events_tx.send(AppEvent::QueueUpdated(snapshot));
-        }
+        self.start_lyrics_load(item.mid.clone(), item.song_type);
+        self.publish_queue_snapshot();
+        tracing::info!(mid = item.mid, title = item.track.title, "playing");
     }
 
     fn toggle_play(&self) {
@@ -655,60 +729,6 @@ impl AppCore {
             .command_sender()
             .send(PlayerCommand::TogglePlay)
             .ok();
-    }
-
-    // -----------------------------------------------------------------
-    // 取流
-    // -----------------------------------------------------------------
-
-    async fn client_music_detail(
-        &self,
-        mid: &str,
-    ) -> Result<ResolvedSongDetail, hmp_qqmusic_api::QqMusicError> {
-        let song_api = SongApi::new(&self.client);
-        let detail = song_api.get_detail(mid).await?;
-        Ok(ResolvedSongDetail {
-            media_mid: detail.track.file.media_mid.clone(),
-            duration: u64::try_from(detail.track.interval).ok(),
-            song_type: detail.track.type_,
-        })
-    }
-
-    /// 音质回退取流：Master → HiRes → Atmos → FLAC → AAC → 320 → 128。
-    async fn resolve_stream(
-        &self,
-        mid: &str,
-        media_mid: &str,
-        song_type: i64,
-    ) -> Option<(SongFileType, String)> {
-        let song_api = SongApi::new(&self.client);
-        let info = SongFileInfo {
-            mid: mid.to_owned(),
-            file_type: None,
-            song_type,
-            media_mid: Some(media_mid.to_owned()),
-        };
-        for quality in AudioQuality::Master.fallback_chain() {
-            let Some(ft) = quality_to_file_type(quality.clone()) else {
-                continue;
-            };
-            let resp = song_api
-                .get_song_urls(std::slice::from_ref(&info), ft, self.credential.as_ref())
-                .await;
-            match resp {
-                Ok(resp) => {
-                    for item in &resp.data {
-                        if item.result == 0 && !item.purl.is_empty() {
-                            let uri = format!("https://isure.stream.qqmusic.qq.com/{}", item.purl);
-                            tracing::info!(quality = ?quality, "stream resolved");
-                            return Some((ft, uri));
-                        }
-                    }
-                }
-                Err(e) => tracing::debug!("quality {quality:?} failed: {e}"),
-            }
-        }
-        None
     }
 
     fn reload_lyrics(&mut self) {
@@ -873,16 +893,147 @@ impl AppCore {
     }
 }
 
-fn queue_item_at(queue: &[QueueItem], index: usize) -> Option<QueueItem> {
-    queue.get(index).cloned()
+async fn resolve_play_request(
+    client: &QqMusicClient,
+    credential: Option<&Credential>,
+    request: PlayRequest,
+) -> Result<ResolvedPlayback, String> {
+    match request {
+        PlayRequest::Search { index, songs } => {
+            let song = songs
+                .get(index)
+                .ok_or_else(|| format!("search index out of range: {index}"))?;
+            let mut item = queue_item_from_search_song(song);
+            resolve_queue_item(client, &mut item).await?;
+            let (file_type, uri) = resolve_stream(
+                client,
+                credential,
+                &item.mid,
+                &item.media_mid,
+                item.song_type,
+            )
+            .await
+            .ok_or_else(|| format!("all qualities unavailable for {}", item.mid))?;
+            item.track.qualities = vec![quality_from_file_type(file_type)];
+            Ok(ResolvedPlayback {
+                index,
+                songs: Some(songs),
+                item,
+                file_type,
+                uri,
+            })
+        }
+        PlayRequest::Queue { index, mut item } => {
+            resolve_queue_item(client, &mut item).await?;
+            let (file_type, uri) = resolve_stream(
+                client,
+                credential,
+                &item.mid,
+                &item.media_mid,
+                item.song_type,
+            )
+            .await
+            .ok_or_else(|| format!("all qualities unavailable for {}", item.mid))?;
+            item.track.qualities = vec![quality_from_file_type(file_type)];
+            Ok(ResolvedPlayback {
+                index,
+                songs: None,
+                item,
+                file_type,
+                uri,
+            })
+        }
+    }
 }
 
-fn queue_direct_publication_needed(
-    current_index: usize,
-    next_index: usize,
-    was_unresolved: bool,
-) -> bool {
-    current_index != next_index || was_unresolved
+fn queue_item_from_search_song(song: &hmp_qqmusic_api::protocol::search::QuickSong) -> QueueItem {
+    QueueItem {
+        track: Track {
+            id: TrackId::new(song.mid.clone()),
+            title: song.name.clone(),
+            artists: vec![hmp_core::ArtistRef {
+                id: hmp_core::ArtistId::new(song.mid.clone()),
+                name: song.singer.clone(),
+            }],
+            album: None,
+            duration: None,
+            cover: None,
+            qualities: Vec::new(),
+        },
+        mid: song.mid.clone(),
+        media_mid: String::new(),
+        song_type: 0,
+    }
+}
+
+async fn resolve_queue_item(client: &QqMusicClient, item: &mut QueueItem) -> Result<(), String> {
+    if item.media_mid.is_empty() {
+        let detail = client_music_detail(client, &item.mid)
+            .await
+            .map_err(|error| format!("detail failed for {}: {error}", item.mid))?;
+        if detail.media_mid.is_empty() {
+            return Err(format!("no media_mid for {}", item.mid));
+        }
+        item.media_mid = detail.media_mid;
+        item.song_type = detail.song_type;
+        item.track.duration = detail.duration.map(Duration::from_secs);
+    }
+    Ok(())
+}
+
+async fn client_music_detail(
+    client: &QqMusicClient,
+    mid: &str,
+) -> Result<ResolvedSongDetail, hmp_qqmusic_api::QqMusicError> {
+    let song_api = SongApi::new(client);
+    let detail = song_api.get_detail(mid).await?;
+    Ok(ResolvedSongDetail {
+        media_mid: detail.track.file.media_mid.clone(),
+        duration: u64::try_from(detail.track.interval).ok(),
+        song_type: detail.track.type_,
+    })
+}
+
+/// 音质回退取流：Master → HiRes → Atmos → FLAC → AAC → 320 → 128。
+async fn resolve_stream(
+    client: &QqMusicClient,
+    credential: Option<&Credential>,
+    mid: &str,
+    media_mid: &str,
+    song_type: i64,
+) -> Option<(SongFileType, String)> {
+    let song_api = SongApi::new(client);
+    let info = SongFileInfo {
+        mid: mid.to_owned(),
+        file_type: None,
+        song_type,
+        media_mid: Some(media_mid.to_owned()),
+    };
+    for quality in AudioQuality::Master.fallback_chain() {
+        let Some(file_type) = quality_to_file_type(quality.clone()) else {
+            continue;
+        };
+        match song_api
+            .get_song_urls(std::slice::from_ref(&info), file_type, credential)
+            .await
+        {
+            Ok(response) => {
+                for item in &response.data {
+                    if item.result == 0 && !item.purl.is_empty() {
+                        let uri = format!("https://isure.stream.qqmusic.qq.com/{}", item.purl);
+                        tracing::info!(quality = ?quality, "stream resolved");
+                        return Some((file_type, uri));
+                    }
+                }
+            }
+            Err(error) => tracing::debug!("quality {quality:?} failed: {error}"),
+        }
+    }
+    None
+}
+
+fn queue_item_at(queue: &[QueueItem], index: usize) -> Option<QueueItem> {
+    queue.get(index).cloned()
 }
 
 fn queue_publication_changed(
@@ -1007,6 +1158,21 @@ mod tests {
     }
 
     #[test]
+    fn newer_network_requests_cancel_and_invalidate_older_results() {
+        let mut state = NetworkRequestState::default();
+        let (first_generation, first_token) = state.begin();
+        let (second_generation, second_token) = state.begin();
+
+        assert!(first_token.is_cancelled());
+        assert!(!state.accepts(first_generation));
+        assert!(state.accepts(second_generation));
+
+        state.cancel();
+        assert!(second_token.is_cancelled());
+        assert!(!state.accepts(second_generation));
+    }
+
+    #[test]
     fn queue_selection_uses_queue_items_when_search_results_diverge() {
         let search_mids = ["search-mid-a", "search-mid-b"];
         let queue = ["queue-mid-a", "queue-mid-b"]
@@ -1023,13 +1189,6 @@ mod tests {
         assert_eq!(selected.mid, "queue-mid-b");
         assert_ne!(selected.mid, search_mids[1]);
         assert!(queue_item_at(&queue, queue.len()).is_none());
-    }
-
-    #[test]
-    fn queue_direct_publication_needed_for_index_or_resolution_changes() {
-        assert!(queue_direct_publication_needed(0, 1, false));
-        assert!(queue_direct_publication_needed(0, 0, true));
-        assert!(!queue_direct_publication_needed(0, 0, false));
     }
 
     #[test]

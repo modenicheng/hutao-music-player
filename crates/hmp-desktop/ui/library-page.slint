@@ -2,12 +2,13 @@ import { ScrollView } from "std-widgets.slint";
 import { CoverArt, DevelopmentBanner, EmptyState } from "primitives.slint";
 import { Theme } from "theme.slint";
 import { UiPlayback } from "player-bar.slint";
-import { UiLibrary } from "recommend-page.slint";
+import { UiQueue } from "queue-page.slint";
 
 export component LibraryPage inherits Rectangle {
-    in property <[UiLibrary]> library-items;
+    in property <[UiQueue]> queue;
     in property <UiPlayback> playback;
     in property <image> cover-image;
+    callback play-requested(int);
     callback navigate-to-search;
 
     background: Theme.background;
@@ -87,16 +88,18 @@ export component LibraryPage inherits Rectangle {
             }
 
             VerticalLayout {
-                visible: root.library-items.length > 0;
+                visible: root.queue.length > 0;
                 spacing: 0px;
 
-                for item in root.library-items : Rectangle {
+                for item[index] in root.queue : Rectangle {
                     height: 56px;
-                    background: row-touch.has-hover ? Theme.surface-hover : transparent;
+                    background: item.is-current ? Theme.accent-muted : row-touch.has-hover ? Theme.surface-hover : transparent;
                     accessible-role: list-item;
-                    accessible-label: item.title + ", " + item.subtitle;
+                    accessible-label: item.title + ", " + item.artist;
 
-                    row-touch := TouchArea { }
+                    row-touch := TouchArea {
+                        clicked => { root.play-requested(index); }
+                    }
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -104,8 +107,8 @@ export component LibraryPage inherits Rectangle {
                         spacing: 14px;
                         Text {
                             width: 72px;
-                            text: item.kind;
-                            color: Theme.text-secondary;
+                            text: item.is-playing ? "正在播放" : item.is-current ? "当前" : "队列";
+                            color: item.is-playing ? Theme.accent : Theme.text-secondary;
                             font-size: 12px;
                             vertical-alignment: center;
                             overflow: elide;
@@ -119,12 +122,20 @@ export component LibraryPage inherits Rectangle {
                             overflow: elide;
                         }
                         Text {
-                            text: item.subtitle;
+                            text: item.artist;
                             color: Theme.text-secondary;
                             font-size: 13px;
                             horizontal-alignment: right;
                             vertical-alignment: center;
                             overflow: elide;
+                        }
+                        Text {
+                            width: 48px;
+                            text: item.duration;
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
                         }
                     }
 
@@ -137,7 +148,7 @@ export component LibraryPage inherits Rectangle {
             }
 
             EmptyState {
-                visible: root.library-items.length == 0;
+                visible: root.queue.length == 0;
                 title: "资料库还是空的";
                 detail: "开始搜索并播放歌曲后，真实队列会显示在这里。";
                 action-label: "前往搜索";

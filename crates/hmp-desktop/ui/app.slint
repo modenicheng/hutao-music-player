@@ -27,6 +27,7 @@ export component AppWindow inherits Window {
     in-out property <[UiLibrary]> library-items;
     in-out property <[UiLibrary]> recommend-items;
     in-out property <[UiFeature]> feature-statuses;
+    in-out property <[UiQueue]> library-queue;
     in-out property <[UiQueue]> queue;
     in-out property <[UiLyric]> lyrics;
     in-out property <string> lyrics-state: "idle";
@@ -93,9 +94,10 @@ export component AppWindow inherits Window {
                 if root.current-page == "library": LibraryPage {
                     width: parent.width;
                     height: parent.height;
-                    library-items: root.library-items;
+                    queue: root.library-queue;
                     playback: root.playback;
                     cover-image: root.cover-image;
+                    play-requested(idx) => { root.play-queue-requested(idx); }
                     navigate-to-search => { root.navigate-requested("search"); }
                 }
 

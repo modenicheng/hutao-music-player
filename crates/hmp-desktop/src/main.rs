@@ -52,13 +52,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_search_query_valid(false);
     ui.set_search_loading(false);
     ui.set_search_error_text("".into());
+    ui.set_library_queue(bridge::queue_model(Vec::new()));
     ui.set_queue(bridge::queue_model(Vec::new()));
     ui.set_lyrics(bridge::lyrics_model(Vec::new(), 0.0));
     ui.set_lyrics_state("idle".into());
     ui.set_lyrics_request_mid("".into());
     ui.set_lyrics_error_text("".into());
     // Publish the real initial queue before AppCore is moved into its task.
-    ui.set_queue(bridge::queue_model(core.queue_snapshot()));
+    let initial_queue = core.queue_snapshot();
+    ui.set_library_queue(bridge::queue_model(initial_queue.clone()));
+    ui.set_queue(bridge::queue_model(initial_queue));
 
     // 播放状态订阅（core 随后 move 进事件循环）
     let state_rx = core.player.subscribe_state();
@@ -71,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime.spawn(async move {
         let mut event_rx = event_rx;
         while let Some(evt) = event_rx.recv().await {
-            if !bridge::handle_event(&event_ui, evt) {
+            if !bridge::handle_event(&event_ui, evt).await {
                 break;
             }
         }
@@ -86,26 +89,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             let s = state_rx.borrow().clone();
-            let Some(ui) = state_ui.upgrade() else { break };
             let (title, artist, status, pos, dur, pos_text, dur_text) = app::playback_snapshot(&s);
-            ui.set_playback(UiPlayback {
-                title: title.into(),
-                artist: artist.into(),
-                status: status.into(),
-                position: pos,
-                duration: dur,
-                volume: s.volume as f32,
-                position_text: pos_text.into(),
-                duration_text: dur_text.into(),
-            });
-            ui.set_current_track_id(
-                s.current
-                    .as_ref()
-                    .map(|track| track.id.to_string())
-                    .unwrap_or_default()
-                    .into(),
-            );
-            bridge::update_lyrics_active_line(&ui.get_lyrics(), s.position.as_secs_f32() * 1000.0);
+            let current_track_id = s
+                .current
+                .as_ref()
+                .map(|track| track.id.to_string())
+                .unwrap_or_default();
+            let volume = s.volume as f32;
+            let position_ms = s.position.as_secs_f32() * 1000.0;
+            let (applied_tx, applied_rx) = tokio::sync::oneshot::channel();
+            let scheduled_ui = state_ui.clone();
+            if slint::invoke_from_event_loop(move || {
+                let applied = if let Some(ui) = scheduled_ui.upgrade() {
+                    ui.set_playback(UiPlayback {
+                        title: title.into(),
+                        artist: artist.into(),
+                        status: status.into(),
+                        position: pos,
+                        duration: dur,
+                        volume,
+                        position_text: pos_text.into(),
+                        duration_text: dur_text.into(),
+                    });
+                    ui.set_current_track_id(current_track_id.into());
+                    bridge::update_lyrics_active_line(&ui.get_lyrics(), position_ms);
+                    true
+                } else {
+                    false
+                };
+                let _ = applied_tx.send(applied);
+            })
+            .is_err()
+                || !applied_rx.await.unwrap_or(false)
+            {
+                break;
+            }
         }
     });
 

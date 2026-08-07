@@ -6,7 +6,7 @@ use slint::{ComponentHandle, Model};
 use crate::AppWindow;
 use crate::app::{AppCommand, AppEvent, ThemeMode, UiLyricData, UiPage, UiQueueData, UiSongData};
 use crate::bridge::{
-    bind_callbacks, bind_ui_state_callbacks, decode_png, handle_event, lyric_mid_matches,
+    apply_event, bind_callbacks, bind_ui_state_callbacks, decode_png, lyric_mid_matches,
     lyrics_model, lyrics_model_at_position, queue_model, songs_model, valid_model_index,
 };
 use crate::demo::{demo_recommendations, feature_matrix};
@@ -20,6 +20,12 @@ fn init_ui() -> AppWindow {
     let ui = AppWindow::new().expect("create window");
     ui.set_feature_statuses(crate::bridge::feature_model(feature_matrix()));
     ui
+}
+
+fn handle_event(ui: &slint::Weak<AppWindow>, event: AppEvent) -> bool {
+    let Some(ui) = ui.upgrade() else { return false };
+    apply_event(&ui, event);
+    true
 }
 
 #[test]
@@ -384,6 +390,7 @@ fn app_starts_in_library_and_accepts_theme_modes() {
             ]),
         );
         assert_eq!(ui.get_queue().row_count(), 2);
+        assert_eq!(ui.get_library_queue().row_count(), 2);
         assert!(ui.get_logged_in());
         assert_eq!(ui.get_user_name(), "account sentinel");
         assert_eq!(ui.get_songs().row_data(0).unwrap().title, "search sentinel");
@@ -395,6 +402,10 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         let next = ui.get_queue().row_data(1).unwrap();
         assert!(!next.is_current);
         assert!(!next.is_playing);
+        let library_current = ui.get_library_queue().row_data(0).unwrap();
+        assert_eq!(library_current.track_id, current.track_id);
+        assert!(library_current.is_current);
+        assert!(library_current.is_playing);
 
         ui.set_search_error_text("search error remains isolated".into());
         handle_event(&weak, AppEvent::LyricsLoading("".into()));

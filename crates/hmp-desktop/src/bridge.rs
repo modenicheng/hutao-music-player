@@ -252,12 +252,28 @@ pub fn decode_png(png: &[u8]) -> Result<slint::Image, Box<dyn std::error::Error>
     Ok(slint::Image::from_rgba8(buffer))
 }
 
-/// 应用事件 → UI 更新（AppCore 事件接收任务）。
-///
-/// 同步实现：内部短暂持有 `Weak::upgrade()` 的组件（不跨 await），
-/// 满足 tokio 任务 `Send` 约束。
-pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
-    let Some(ui) = ui.upgrade() else { return false };
+/// 从后台任务把应用事件调度到 Slint 事件循环线程。
+pub async fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
+    let (applied_tx, applied_rx) = tokio::sync::oneshot::channel();
+    if slint::invoke_from_event_loop({
+        let ui = ui.clone();
+        move || {
+            let applied = ui.upgrade().is_some();
+            if let Some(ui) = ui.upgrade() {
+                apply_event(&ui, evt);
+            }
+            let _ = applied_tx.send(applied);
+        }
+    })
+    .is_err()
+    {
+        return false;
+    }
+    applied_rx.await.unwrap_or(false)
+}
+
+/// 在 Slint 事件循环线程应用一个事件。
+pub(crate) fn apply_event(ui: &crate::AppWindow, evt: AppEvent) {
     let position_ms = ui.get_playback().position.max(0.0) * 1000.0;
     match evt {
         AppEvent::SearchDone(songs) => {
@@ -272,11 +288,12 @@ pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
             ui.set_search_error_text(message.into());
         }
         AppEvent::QueueUpdated(items) => {
+            ui.set_library_queue(queue_model(items.clone()));
             ui.set_queue(queue_model(items));
         }
         AppEvent::LyricsLoading(mid) => {
             if mid.trim().is_empty() {
-                return true;
+                return;
             }
             ui.set_lyrics_request_mid(mid.into());
             ui.set_lyrics_state("loading".into());
@@ -285,7 +302,7 @@ pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
         }
         AppEvent::LyricsLoaded { mid, lines } => {
             if !lyric_mid_matches(ui.get_lyrics_request_mid().as_str(), &mid) {
-                return true;
+                return;
             }
             ui.set_lyrics(lyrics_model(lines, position_ms));
             ui.set_lyrics_error_text("".into());
@@ -300,7 +317,7 @@ pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
         }
         AppEvent::LyricsFailed { mid, message } => {
             if !lyric_mid_matches(ui.get_lyrics_request_mid().as_str(), &mid) {
-                return true;
+                return;
             }
             ui.set_lyrics_state("error".into());
             ui.set_lyrics_error_text(message.into());
@@ -323,5 +340,4 @@ pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
             ui.set_show_login(false);
         }
     }
-    true
 }
