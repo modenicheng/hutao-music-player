@@ -1,0 +1,218 @@
+import { Theme } from "theme.slint";
+
+export component IconButton inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> emphasized: false;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    width: Theme.control-size;
+    height: Theme.control-size;
+    border-radius: root.width / 2;
+    background: !root.enabled ? transparent
+        : root.emphasized ? Theme.accent
+        : touch-area.has-hover ? Theme.surface-hover : transparent;
+    opacity: root.enabled ? 1 : 0.42;
+    accessible-role: button;
+    accessible-label: root.glyph;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+
+    Tooltip { text: @markdown("\{root.glyph}"); }
+
+    Text {
+        text: root.glyph;
+        color: root.emphasized ? white : Theme.text-primary;
+        font-size: root.emphasized ? 18px : 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch-area := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component CoverArt inherits Rectangle {
+    in property <image> source;
+    in property <length> size: 64px;
+    property <bool> has-source: root.source.width > 0 && root.source.height > 0;
+
+    width: root.size;
+    height: root.size;
+    border-radius: Theme.cover-radius;
+    clip: true;
+    background: Theme.surface;
+    accessible-role: image;
+    accessible-label: root.has-source ? "Album cover" : "Album cover placeholder";
+
+    Rectangle {
+        background: @linear-gradient(135deg, Theme.surface-hover 0%, Theme.surface 100%);
+        visible: !root.has-source;
+    }
+
+    Image {
+        source: root.source;
+        image-fit: cover;
+        visible: root.has-source;
+    }
+
+    Text {
+        text: "♪";
+        color: Theme.text-secondary;
+        font-size: root.size * 0.4;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        visible: !root.has-source;
+    }
+}
+
+export component DevelopmentBanner inherits Rectangle {
+    in property <string> text;
+
+    height: 36px;
+    border-radius: 6px;
+    background: Theme.banner-background;
+    accessible-role: groupbox;
+    accessible-label: root.text;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+
+        Text {
+            text: "●";
+            color: Theme.accent;
+            font-size: 9px;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.text;
+            color: Theme.text-primary;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+export component EmptyState inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    in property <string> action-label;
+    callback action-clicked;
+
+    min-height: 220px;
+    background: transparent;
+    accessible-role: groupbox;
+    accessible-label: root.title + ". " + root.detail;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 10px;
+
+        Text {
+            text: root.title;
+            color: Theme.text-primary;
+            font-size: 20px;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: root.detail;
+            color: Theme.text-secondary;
+            font-size: 14px;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            width: 132px;
+            height: 36px;
+            border-radius: 6px;
+            background: action-touch.has-hover ? Theme.accent-muted : transparent;
+            border-width: 1px;
+            border-color: Theme.accent;
+            visible: root.action-label != "";
+            accessible-role: button;
+            accessible-label: root.action-label;
+            accessible-action-default => { root.action-clicked(); }
+
+            Text {
+                text: root.action-label;
+                color: Theme.accent;
+                font-size: 13px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            action-touch := TouchArea {
+                clicked => { root.action-clicked(); }
+            }
+        }
+    }
+}
+
+export component FeatureRow inherits Rectangle {
+    in property <string> name;
+    in property <string> status;
+    in property <string> detail;
+
+    height: 58px;
+    background: row-touch.has-hover ? Theme.surface-hover : transparent;
+    accessible-role: list-item;
+    accessible-label: root.name + ", " + root.status + ". " + root.detail;
+
+    row-touch := TouchArea { }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 16px;
+
+        VerticalLayout {
+            spacing: 2px;
+
+            Text {
+                text: root.name;
+                color: Theme.text-primary;
+                font-size: 14px;
+                font-weight: 600;
+                overflow: elide;
+            }
+
+            Text {
+                text: root.detail;
+                color: Theme.text-secondary;
+                font-size: 12px;
+                overflow: elide;
+            }
+        }
+
+        Text {
+            width: 150px;
+            text: root.status;
+            color: root.status == "已接入" ? Theme.accent : Theme.text-secondary;
+            font-size: 12px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.divider;
+    }
+}

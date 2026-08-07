@@ -26,6 +26,18 @@ fn page_and_theme_values_use_stable_wire_names() {
 }
 
 #[test]
+#[serial]
+fn app_starts_in_library_and_accepts_theme_modes() {
+    let ui = init_ui();
+    assert_eq!(ui.get_current_page(), "library");
+    assert_eq!(ui.get_theme_mode(), "system");
+    ui.set_theme_mode("light".into());
+    assert_eq!(ui.get_theme_mode(), "light");
+    ui.set_theme_mode("dark".into());
+    assert_eq!(ui.get_theme_mode(), "dark");
+}
+
+#[test]
 fn queue_event_contains_current_playing_flags() {
     let event = AppEvent::QueueUpdated(vec![UiQueueData {
         track_id: "mid-1".into(),
@@ -54,6 +66,7 @@ fn reload_lyrics_command_is_distinct_from_playback_commands() {
 
 /// 全部窗口场景（testing backend 进程内单次初始化，官方建议单一 #[test]）。
 #[test]
+#[serial]
 fn ui_bridge_integration() {
     // 0) 登录按钮可点击（覆盖"登录无法点击"反馈）：扫描侧边栏底部注入点击
     {

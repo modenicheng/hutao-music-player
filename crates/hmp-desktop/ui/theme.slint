@@ -1,0 +1,22 @@
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    in property <string> mode: "system";
+
+    out property <brush> background: Palette.background;
+    out property <brush> sidebar: Palette.alternate-background;
+    out property <brush> surface: Palette.alternate-background;
+    out property <brush> surface-hover: Palette.border;
+    out property <brush> text-primary: Palette.foreground;
+    out property <brush> text-secondary: Palette.foreground.transparentize(0.38);
+    out property <brush> divider: Palette.border;
+    out property <brush> accent: #ff2d55;
+    out property <brush> accent-muted: #ff2d55.transparentize(0.82);
+    out property <brush> banner-background: #ff2d55.transparentize(0.9);
+
+    out property <length> sidebar-width: 230px;
+    out property <length> player-height: 92px;
+    out property <length> content-padding: 36px;
+    out property <length> control-size: 44px;
+    out property <length> cover-radius: 10px;
+}

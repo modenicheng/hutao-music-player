@@ -1,8 +1,10 @@
 // HMP 主界面 —— Apple Music 风格深色主题
 // 主题：近黑背景、红色渐变强调（胡桃火系）、圆角卡片、毛玻璃播放栏
 
-import { ListView, Slider } from "std-widgets.slint";
+import { ListView, Palette, Slider } from "std-widgets.slint";
 import { LineEditBase } from "vendor/lineedit-base.slint";
+import { Theme } from "theme.slint";
+import { CoverArt, IconButton } from "primitives.slint";
 
 // ---- 数据 ----
 
@@ -23,83 +25,6 @@ export struct UiPlayback {
     duration-text: string,
 }
 
-// ---- 主题 ----
-
-export global Theme {
-    in property <brush> background: #121214;
-    in property <brush> sidebar: #0d0d0f;
-    in property <brush> card: #1b1b1e;
-    in property <brush> card-hover: #242428;
-    in property <brush> text-primary: #f5f5f7;
-    in property <brush> text-secondary: #98989f;
-    in property <brush> accent: #ff2d55;
-    in property <brush> accent-glow: #ff5b7a;
-    in property <brush> divider: #26262a;
-}
-
-// ---- 圆形图标按钮 ----
-
-component IconButton inherits Rectangle {
-    in property <string> glyph: "▶";
-    in property <bool> emphasized: false;
-    in property <bool> disabled: false;
-    callback clicked;
-    width: 44px;
-    height: 44px;
-    border-radius: root.width / 2;
-    background: disabled ? transparent
-        : emphasized ? Theme.accent
-        : touch-area.has-hover ? #2a2a2f : transparent;
-    touch-area := TouchArea {
-        enabled: !disabled;
-        clicked => { root.clicked(); }
-    }
-    text := Text {
-        text: glyph;
-        color: disabled ? #4a4a50 : emphasized ? white : Theme.text-primary;
-        font-size: emphasized ? 18px : 16px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        x: (parent.width - text.width) / 2;
-        y: (parent.height - text.height) / 2;
-    }
-}
-
-// ---- 封面（圆角方块 + 渐变占位）----
-
-component CoverArt inherits Rectangle {
-    in property <image> image;
-    in property <length> radius: 8px;
-    width: 64px;
-    height: 64px;
-    border-radius: radius;
-    clip: true;
-    background: #232326;
-    // 渐变占位
-    gradient := Rectangle {
-        x: 0; y: 0; width: parent.width; height: parent.height;
-        background: @linear-gradient(135deg, #2a2a30 0%, #1a1a20 100%);
-        visible: !root.image-source-set;
-    }
-    img := Image {
-        x: 0; y: 0; width: parent.width; height: parent.height;
-        source: root.image;
-        image-fit: cover;
-        visible: root.image-source-set;
-    }
-    placeholder := Text {
-        text: "♪";
-        color: #4a4a55;
-        font-size: 26px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        x: (parent.width - placeholder.width) / 2;
-        y: (parent.height - placeholder.height) / 2;
-        visible: !root.image-source-set;
-    }
-    property <bool> image-source-set: image.width > 0 && image.height > 0;
-}
-
 // ---- 侧边栏 ----
 
 component SideBar inherits Rectangle {
@@ -112,7 +37,7 @@ component SideBar inherits Rectangle {
     in property <string> login-status;
 
     background: Theme.sidebar;
-    width: 230px;
+    width: Theme.sidebar-width;
 
     VerticalLayout {
         padding-left: 18px;
@@ -127,7 +52,7 @@ component SideBar inherits Rectangle {
             Rectangle {
                 width: 34px; height: 34px;
                 border-radius: 10px;
-                background: @linear-gradient(135deg, Theme.accent 0%, Theme.accent-glow 100%);
+                background: Theme.accent;
                 Text {
                     text: "♪";
                     color: white;
@@ -154,7 +79,7 @@ component SideBar inherits Rectangle {
             Rectangle {
                 height: 38px;
                 border-radius: 9px;
-                background: #1e1e22;
+                background: Theme.surface;
                 HorizontalLayout {
                     padding-left: 12px;
                     spacing: 10px;
@@ -174,7 +99,7 @@ component SideBar inherits Rectangle {
             Rectangle {
                 height: 200px;
                 border-radius: 14px;
-                background: Theme.card;
+                background: Theme.surface;
                 Image {
                     source: root.qr-image;
                     width: 180px; height: 180px;
@@ -192,7 +117,7 @@ component SideBar inherits Rectangle {
             Rectangle {
                 height: 36px;
                 border-radius: 10px;
-                background: #26262a;
+                background: Theme.surface-hover;
                 cancel-touch := TouchArea {
                     clicked => { root.login-cancel(); }
                 }
@@ -210,7 +135,7 @@ component SideBar inherits Rectangle {
         Rectangle {
             height: 44px;
             border-radius: 12px;
-            background: #1e1e22;
+            background: Theme.surface;
             visible: !root.logged-in && !root.show-login;
             login-touch := TouchArea {
                 clicked => { root.login-start(); }
@@ -233,7 +158,7 @@ component SideBar inherits Rectangle {
         Rectangle {
             height: 44px;
             border-radius: 12px;
-            background: #1e1e22;
+            background: Theme.surface;
             visible: root.logged-in;
             HorizontalLayout {
                 padding-left: 12px; padding-right: 12px;
@@ -260,8 +185,8 @@ component SearchPage inherits Rectangle {
     callback play-requested(int);
 
     VerticalLayout {
-        padding-left: 36px;
-        padding-right: 36px;
+        padding-left: Theme.content-padding;
+        padding-right: Theme.content-padding;
         padding-top: 32px;
         spacing: 18px;
 
@@ -276,7 +201,7 @@ component SearchPage inherits Rectangle {
         Rectangle {
             height: 46px;
             border-radius: 12px;
-            background: #1e1e22;
+            background: Theme.surface;
             HorizontalLayout {
                 padding-left: 14px;
                 padding-right: 8px;
@@ -284,7 +209,7 @@ component SearchPage inherits Rectangle {
                 Text { text: "🔍"; color: Theme.text-secondary; font-size: 16px; vertical-alignment: center; }
                 placeholder := Text {
                     text: "歌曲、歌手、专辑";
-                    color: #5a5a62;
+                    color: Theme.text-secondary;
                     font-size: 15px;
                     vertical-alignment: center;
                     visible: root.search-text == "";
@@ -315,7 +240,7 @@ component SearchPage inherits Rectangle {
                 Rectangle {
                     height: 44px;
                     border-radius: 10px;
-                    background: row-touch.has-hover ? Theme.card-hover : transparent;
+                    background: row-touch.has-hover ? Theme.surface-hover : transparent;
                     row-touch := TouchArea {
                         clicked => { root.play-requested(idx); }
                     }
@@ -373,8 +298,8 @@ component PlayerBar inherits Rectangle {
     callback seek-requested(float);
     callback volume-requested(float);
 
-    height: 92px;
-    background: #17171a;
+    height: Theme.player-height;
+    background: Theme.surface;
     Rectangle {
         height: 1px;
         background: Theme.divider;
@@ -392,9 +317,8 @@ component PlayerBar inherits Rectangle {
             width: 280px;
             spacing: 12px;
             CoverArt {
-                image: root.cover-image;
-                width: 64px; height: 64px;
-                radius: 10px;
+                source: root.cover-image;
+                size: 64px;
             }
             VerticalLayout {
                 spacing: 4px;
@@ -483,6 +407,9 @@ export component AppWindow inherits Window {
     preferred-height: 720px;
     background: Theme.background;
 
+    in-out property <string> current-page: "library";
+    in-out property <string> theme-mode <=> Theme.mode;
+    private property <ColorScheme> palette-color-scheme <=> Palette.color-scheme;
     in-out property <[UiSong]> songs;
     in property <UiPlayback> playback;
     in property <bool> logged-in;
@@ -501,6 +428,15 @@ export component AppWindow inherits Window {
     callback volume-requested(float);
     callback login-start;
     callback login-cancel;
+
+    init => {
+        root.palette-color-scheme = ColorScheme.unknown;
+    }
+    changed theme-mode => {
+        root.palette-color-scheme = root.theme-mode == "light" ? ColorScheme.light
+            : root.theme-mode == "dark" ? ColorScheme.dark
+            : ColorScheme.unknown;
+    }
 
     VerticalLayout {
         spacing: 0;
