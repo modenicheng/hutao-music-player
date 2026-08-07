@@ -34,11 +34,14 @@ const ENCV2_STAGE2_KEY: &[u8; 16] = b"**#!(#$%&^a1cZ,T";
 pub fn parse_ekey(ekey: &str) -> Result<Vec<u8>, Qmc2Error> {
     // 去除末尾 NUL 填充
     let ekey = ekey.trim_end_matches('\0');
-
     let ekey_decoded = base64::engine::general_purpose::STANDARD
         .decode(ekey)
         .map_err(|_| Qmc2Error::EKeyParse)?;
+    parse_ekey_decoded(&ekey_decoded)
+}
 
+/// 从已解码的 ekey 字节解析出原始密钥。
+pub fn parse_ekey_decoded(ekey_decoded: &[u8]) -> Result<Vec<u8>, Qmc2Error> {
     if ekey_decoded.len() < 8 {
         return Err(Qmc2Error::EKeyParse);
     }
@@ -53,7 +56,7 @@ pub fn parse_ekey(ekey: &str) -> Result<Vec<u8>, Qmc2Error> {
             .decode(stage2)
             .map_err(|_| Qmc2Error::EKeyParse)?
     } else {
-        ekey_decoded
+        ekey_decoded.to_vec()
     };
 
     if ekey_decoded.len() < 8 {
@@ -109,6 +112,16 @@ mod tests {
             parse_ekey("!!!not-valid-base64!!!"),
             Err(Qmc2Error::EKeyParse)
         ));
+    }
+
+    #[test]
+    fn parse_ekey_decoded_roundtrip() {
+        let original = b"12345678...test data by Jixun".to_vec();
+        let ekey = generate_ekey(&original);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(ekey)
+            .unwrap();
+        assert_eq!(parse_ekey_decoded(&decoded).unwrap(), original);
     }
 
     #[test]

@@ -946,7 +946,7 @@ async fn resolve_play_request(
                 .ok_or_else(|| format!("search index out of range: {index}"))?;
             let mut item = queue_item_from_search_song(song);
             resolve_queue_item(client, &mut item).await?;
-            let (file_type, uri, ekey) = resolve_stream(
+            let (file_type, uri) = resolve_stream(
                 client,
                 credential,
                 &item.mid,
@@ -955,12 +955,6 @@ async fn resolve_play_request(
             )
             .await
             .ok_or_else(|| format!("all qualities unavailable for {}", item.mid))?;
-            let uri = match &ekey {
-                Some(key) => hmp_media::prepare_playable(&uri, Some(key), None)
-                    .await
-                    .map_err(|e| format!("QMC2 decrypt failed for {}: {e}", item.mid))?,
-                None => uri,
-            };
             item.track.qualities = vec![quality_from_file_type(file_type)];
             Ok(ResolvedPlayback {
                 index,
@@ -972,7 +966,7 @@ async fn resolve_play_request(
         }
         PlayRequest::Queue { index, mut item } => {
             resolve_queue_item(client, &mut item).await?;
-            let (file_type, uri, ekey) = resolve_stream(
+            let (file_type, uri) = resolve_stream(
                 client,
                 credential,
                 &item.mid,
@@ -981,12 +975,6 @@ async fn resolve_play_request(
             )
             .await
             .ok_or_else(|| format!("all qualities unavailable for {}", item.mid))?;
-            let uri = match &ekey {
-                Some(key) => hmp_media::prepare_playable(&uri, Some(key), None)
-                    .await
-                    .map_err(|e| format!("QMC2 decrypt failed for {}: {e}", item.mid))?,
-                None => uri,
-            };
             item.track.qualities = vec![quality_from_file_type(file_type)];
             Ok(ResolvedPlayback {
                 index,
@@ -1095,14 +1083,14 @@ async fn client_music_detail(
 }
 
 /// 音质回退取流：Master → HiRes → Atmos → FLAC → AAC → 320 → 128。
-/// 返回 `(file_type, https_uri, optional_ekey)`；加密格式携带 ekey 供解密。
+/// 返回 `(file_type, playable_uri)`；加密格式在回退循环中解密。
 async fn resolve_stream(
     client: &QqMusicClient,
     credential: Option<&Credential>,
     mid: &str,
     media_mid: &str,
     song_type: i64,
-) -> Option<(SongFileType, String, Option<String>)> {
+) -> Option<(SongFileType, String)> {
     let song_api = SongApi::new(client);
     let info = SongFileInfo {
         mid: mid.to_owned(),
@@ -1121,17 +1109,27 @@ async fn resolve_stream(
             Ok(response) => {
                 for item in &response.data {
                     if item.result == 0 && !item.purl.is_empty() {
-                        let ekey = file_type
-                            .is_encrypted
-                            .then(|| item.ekey.clone())
-                            .filter(|k| !k.is_empty());
-                        if file_type.is_encrypted && ekey.as_deref().map_or(true, str::is_empty) {
-                            tracing::debug!(quality = ?quality, "encrypted stream without ekey");
-                            continue;
-                        }
-                        let uri = format!("https://isure.stream.qqmusic.qq.com/{}", item.purl);
+                        let remote_uri =
+                            format!("https://isure.stream.qqmusic.qq.com/{}", item.purl);
+                        let uri = if file_type.is_encrypted {
+                            let result = if item.ekey.is_empty() {
+                                hmp_media::prepare_playable_embedded(&remote_uri, None).await
+                            } else {
+                                hmp_media::prepare_playable(&remote_uri, Some(&item.ekey), None)
+                                    .await
+                            };
+                            match result {
+                                Ok(uri) => uri,
+                                Err(error) => {
+                                    tracing::debug!(quality = ?quality, "QMC2 decrypt failed: {error}");
+                                    continue;
+                                }
+                            }
+                        } else {
+                            remote_uri
+                        };
                         tracing::info!(quality = ?quality, "stream resolved");
-                        return Some((file_type, uri, ekey));
+                        return Some((file_type, uri));
                     }
                 }
             }

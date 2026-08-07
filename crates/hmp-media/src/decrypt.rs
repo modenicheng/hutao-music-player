@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use hmp_qqmusic_api::algorithms::qmc2::{decrypt_factory, detect_footer};
+use hmp_qqmusic_api::algorithms::qmc2::{
+    Footer, decrypt_factory, detect_footer, parse_ekey, parse_ekey_decoded,
+};
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
 
@@ -37,7 +39,11 @@ pub async fn prepare_playable_at(
 
     let cached = final_path(cache_root, &key, ext_guess);
     if cached.exists() {
-        return file_uri(&cached);
+        let head = read_first_bytes(&cached, 8)?;
+        if !head.is_empty() && extension_from_magic(&head).is_some() {
+            return file_uri(&cached);
+        }
+        let _ = std::fs::remove_file(&cached);
     }
 
     // ---- 3. 下载 + 尾部检测 ----
@@ -53,78 +59,128 @@ pub async fn prepare_playable_at(
         }
     };
 
-    // ---- 4. 解密 + 写入 ----
-    let final_base = final_path(cache_root, &key, ext_guess);
-    let result = decrypt_and_write(&tmp, &final_base, ekey, strip_len).await;
+    finish_download(cache_root, &key, ext_guess, &tmp, ekey, strip_len).await
+}
 
+/// 下载加密流并尝试使用文件内嵌 ekey（STag/QTag 尾部）解密。
+pub async fn prepare_playable_embedded_at(
+    cache_root: &Path,
+    url: &str,
+    progress: Option<&tokio::sync::watch::Sender<Option<f64>>>,
+) -> Result<String> {
+    let key = cache::cache_key(url, "");
+    let ext_guess = ext_guess_from_url(url);
+    let cached = final_path(cache_root, &key, ext_guess);
+    if cached.exists() {
+        let head = read_first_bytes(&cached, 8)?;
+        if !head.is_empty() && extension_from_magic(&head).is_some() {
+            return file_uri(&cached);
+        }
+        let _ = std::fs::remove_file(&cached);
+    }
+    let tmp = tmp_path(cache_root, &key);
+    let _ = std::fs::remove_file(&tmp);
+
+    let strip_len = match download_and_detect_strip(url, &tmp, progress).await {
+        Ok(Some(strip_len)) => strip_len,
+        Ok(None) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(MediaError::Unsupported(
+                "文件不含内嵌 ekey 尾部".to_string(),
+            ));
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+    };
+
+    let ekey = match embedded_ekey(&tmp, strip_len) {
+        Ok(ekey) => ekey,
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+    };
+    finish_download(cache_root, &key, ext_guess, &tmp, &ekey, Some(strip_len)).await
+}
+
+async fn finish_download(
+    cache_root: &Path,
+    key: &str,
+    ext_guess: &str,
+    tmp: &Path,
+    ekey: &str,
+    strip_len: Option<usize>,
+) -> Result<String> {
+    let final_base = final_path(cache_root, key, ext_guess);
+    let result = decrypt_and_write(tmp, &final_base, ekey, strip_len).await;
     match result {
-        Ok(actual_ext) => {
-            // ---- 6. 魔数校验通过 ----
-            let _ = std::fs::remove_file(&tmp);
-            let _ = cache::evict_if_needed(cache_root);
-
-            // 若实际扩展名与猜测不同，重命名文件
-            let final_path = if actual_ext != ext_guess {
-                let new_path = final_path(cache_root, &key, actual_ext);
-                let _ = std::fs::rename(&final_base, &new_path);
-                new_path
-            } else {
-                final_base
-            };
-
-            file_uri(&final_path)
-        }
-        Err(DecryptError::MagicMismatch) => {
-            // 若 strip_len 存在 → 不带剥离重试一次
-            if strip_len.is_some() {
-                debug!("QMC2 解密后魔数不匹配，重试不剥离尾部");
-                let _ = std::fs::remove_file(&final_base);
-
-                match decrypt_and_write(&tmp, &final_base, ekey, None).await {
-                    Ok(actual_ext) => {
-                        let _ = std::fs::remove_file(&tmp);
-                        let _ = cache::evict_if_needed(cache_root);
-
-                        let final_path = if actual_ext != ext_guess {
-                            let new_path = final_path(cache_root, &key, actual_ext);
-                            let _ = std::fs::rename(&final_base, &new_path);
-                            new_path
-                        } else {
-                            final_base
-                        };
-
-                        return file_uri(&final_path);
-                    }
-                    Err(DecryptError::MagicMismatch) => {
-                        let _ = std::fs::remove_file(&tmp);
-                        let _ = std::fs::remove_file(&final_base);
-                        let head_hex = read_first_8_hex(&final_base);
-                        return Err(MediaError::Unsupported(format!(
-                            "无法识别音频格式（前 8 字节: {head_hex}）"
-                        )));
-                    }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&tmp);
-                        let _ = std::fs::remove_file(&final_base);
-                        return Err(e.into_media_error());
-                    }
+        Ok(actual_ext) => finish_success(cache_root, key, ext_guess, tmp, final_base, actual_ext),
+        Err(DecryptError::MagicMismatch) if strip_len.is_some() => {
+            debug!("QMC2 解密后魔数不匹配，重试不剥离尾部");
+            let _ = std::fs::remove_file(&final_base);
+            match decrypt_and_write(tmp, &final_base, ekey, None).await {
+                Ok(actual_ext) => {
+                    finish_success(cache_root, key, ext_guess, tmp, final_base, actual_ext)
                 }
+                Err(error) => finish_error(tmp, &final_base, error),
             }
-
-            // 无 strip_len 且魔数不匹配 → Unsupported
-            let _ = std::fs::remove_file(&tmp);
-            let _ = std::fs::remove_file(&final_base);
-            let head_hex = read_first_8_hex(&final_base);
-            Err(MediaError::Unsupported(format!(
-                "无法识别音频格式（前 8 字节: {head_hex}）"
-            )))
         }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            let _ = std::fs::remove_file(&final_base);
-            Err(e.into_media_error())
+        Err(error) => finish_error(tmp, &final_base, error),
+    }
+}
+
+fn finish_success(
+    cache_root: &Path,
+    key: &str,
+    ext_guess: &str,
+    tmp: &Path,
+    final_base: std::path::PathBuf,
+    actual_ext: &str,
+) -> Result<String> {
+    let _ = std::fs::remove_file(tmp);
+    let final_path = if actual_ext != ext_guess {
+        let new_path = final_path(cache_root, key, actual_ext);
+        std::fs::rename(&final_base, &new_path)?;
+        new_path
+    } else {
+        final_base
+    };
+    file_uri(&final_path)
+}
+
+fn finish_error(tmp: &Path, final_base: &Path, error: DecryptError) -> Result<String> {
+    let head_hex = read_first_8_hex(final_base);
+    let _ = std::fs::remove_file(tmp);
+    let _ = std::fs::remove_file(final_base);
+    match error {
+        DecryptError::MagicMismatch => Err(MediaError::Unsupported(format!(
+            "无法识别音频格式（前 8 字节: {head_hex}）"
+        ))),
+        error => Err(error.into_media_error()),
+    }
+}
+
+fn embedded_ekey(path: &Path, audio_len: usize) -> Result<String> {
+    let bytes = std::fs::read(path)?;
+    let footer = detect_footer(bytes.len(), &bytes[bytes.len().saturating_sub(0x40)..])
+        .ok_or_else(|| MediaError::Unsupported("文件不含内嵌 ekey 尾部".to_string()))?;
+    let key_bytes = match footer {
+        Footer::QTag { .. } => bytes[audio_len..bytes.len() - 8]
+            .split(|byte| *byte == b',')
+            .next()
+            .unwrap_or_default(),
+        Footer::V1 { .. } => &bytes[audio_len..bytes.len() - 4],
+    };
+    if let Ok(text) = std::str::from_utf8(key_bytes) {
+        if parse_ekey(text).is_ok() {
+            return Ok(text.to_owned());
         }
     }
+    let key = parse_ekey_decoded(key_bytes)
+        .map_err(|_| MediaError::Unsupported("内嵌 ekey 无法解析".to_string()))?;
+    Ok(hmp_qqmusic_api::algorithms::qmc2::generate_ekey(&key))
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +209,9 @@ fn ext_guess_from_url(url: &str) -> &'static str {
 /// 将文件路径转换为 `file://` URI。
 fn file_uri(path: &Path) -> Result<String> {
     let abs = std::fs::canonicalize(path)?;
-    Ok(format!("file://{}", abs.display()))
+    url::Url::from_file_path(&abs)
+        .map(|url| url.to_string())
+        .map_err(|_| MediaError::Cache(format!("无法生成文件 URI: {}", abs.display())))
 }
 
 /// 下载文件并检测尾部，返回 strip_len。
@@ -177,8 +235,7 @@ async fn download_and_detect_strip(
     }
 
     Ok(detect_footer(total_len, &tail).map(|f| match f {
-        hmp_qqmusic_api::algorithms::qmc2::Footer::QTag { audio_len } => audio_len as usize,
-        hmp_qqmusic_api::algorithms::qmc2::Footer::V1 { audio_len } => audio_len as usize,
+        Footer::QTag { audio_len } | Footer::V1 { audio_len } => audio_len,
     }))
 }
 
@@ -494,6 +551,108 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, url);
+    }
+
+    #[tokio::test]
+    async fn prepare_embedded_uses_qtag_ekey() {
+        let root = test_cache_root().join("embedded_qtag");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let plaintext = b"fLaC embedded qtag";
+        let key = b"0123456789abcdefghij";
+        let (mut encrypted, ekey) = make_encrypted(plaintext, key, false);
+        let metadata = format!("{ekey},123,2,");
+        encrypted.extend_from_slice(metadata.as_bytes());
+        encrypted.extend_from_slice(&(metadata.len() as u32).to_be_bytes());
+        encrypted.extend_from_slice(b"QTag");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(encrypted))
+            .mount(&server)
+            .await;
+        let result = prepare_playable_embedded_at(&root, &server.uri(), None)
+            .await
+            .unwrap();
+        let path = url::Url::parse(&result).unwrap().to_file_path().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), plaintext);
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn prepare_embedded_uses_stag_ekey() {
+        let root = test_cache_root().join("embedded_stag");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let plaintext = b"OggS embedded stag";
+        let key = b"0123456789abcdefghij";
+        let (mut encrypted, ekey) = make_encrypted(plaintext, key, false);
+        encrypted.extend_from_slice(ekey.as_bytes());
+        encrypted.extend_from_slice(&(ekey.len() as u32).to_le_bytes());
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(encrypted))
+            .mount(&server)
+            .await;
+        let result = prepare_playable_embedded_at(&root, &server.uri(), None)
+            .await
+            .unwrap();
+        let path = url::Url::parse(&result).unwrap().to_file_path().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), plaintext);
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn prepare_embedded_fails_without_footer() {
+        let root = test_cache_root().join("embedded_no_footer");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not encrypted"))
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            prepare_playable_embedded_at(&root, &server.uri(), None).await,
+            Err(MediaError::Unsupported(_))
+        ));
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn prepare_replaces_stale_cache_file() {
+        let root = test_cache_root().join("stale_cache");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let plaintext = b"fLaC fresh";
+        let (encrypted, ekey) = make_encrypted(plaintext, b"0123456789abcdefghij", false);
+        let server = MockServer::start().await;
+        let url = format!("{}/test.mflac", server.uri());
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(encrypted))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let key = cache::cache_key(&url, &ekey);
+        std::fs::write(final_path(&root, &key, "flac"), []).unwrap();
+        let result = prepare_playable_at(&root, &url, Some(&ekey), None)
+            .await
+            .unwrap();
+        let path = url::Url::parse(&result).unwrap().to_file_path().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), plaintext);
+        cleanup(&root);
+    }
+
+    #[test]
+    fn file_uri_percent_encodes_paths() {
+        let root = test_cache_root().join("with space").join("sub dir");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("file.flac");
+        std::fs::write(&path, b"fLaC").unwrap();
+        let uri = file_uri(&path).unwrap();
+        assert!(uri.starts_with("file://"));
+        assert!(uri.contains("%20"));
+        cleanup(root.parent().unwrap());
     }
 
     #[tokio::test]

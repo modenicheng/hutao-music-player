@@ -219,6 +219,10 @@ pub fn decrypt_factory(ekey: &str) -> Result<Box<dyn Qmc2Cipher>, Qmc2Error> {
     let key = parse_ekey(ekey)?;
     let key = key_from_ref(&key);
     if key.len() > 300 {
+        if key.len() < 512 {
+            // 参考实现按 seg_id & 0x1FF 索引，短 RC4 密钥会越界；拒绝畸形输入。
+            return Err(Qmc2Error::KeyDerive);
+        }
         Ok(Box::new(QmcRc4Cipher::new(&key)))
     } else {
         Ok(Box::new(QmcMapCipher::new(&key)))
@@ -357,6 +361,11 @@ mod tests {
         // 简单烟雾测试：解密一段零数据不 panic
         let mut buf = [0u8; 16];
         cipher.decrypt(0, &mut buf);
+
+        // 400 字节密钥属于不会触发 RC4 索引越界的畸形区间
+        let malformed_key = vec![0u8; 400];
+        let ekey = generate_ekey(&malformed_key);
+        assert!(matches!(decrypt_factory(&ekey), Err(Qmc2Error::KeyDerive)));
 
         // 700 字节密钥 → RC4
         let large_key = vec![0u8; 700];

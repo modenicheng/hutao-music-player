@@ -76,10 +76,7 @@ pub(crate) fn tea_cbc_decrypt(data: &[u8], key: &[u8; 16]) -> Option<Vec<u8>> {
     let pad_len = (dest_buf[0] & 0x7) as usize;
 
     // 计算明文长度：总长 - 1 (PadLen) - PadLen - SALT_LEN - ZERO_LEN
-    let body_len = n - 1 - pad_len - SALT_LEN - ZERO_LEN;
-    if body_len > n {
-        return None;
-    }
+    let body_len = n.checked_sub(1 + pad_len + SALT_LEN + ZERO_LEN)?;
     let mut out = Vec::with_capacity(body_len);
 
     // 跳过 PadLen 字节
@@ -345,6 +342,15 @@ mod tests {
         assert!(tea_cbc_decrypt(&[0u8; 8], &key).is_none());
         // 长度非 8 倍数
         assert!(tea_cbc_decrypt(&[0u8; 17], &key).is_none());
+    }
+
+    #[test]
+    fn tea_cbc_rejects_truncated_padding_without_panicking() {
+        let key = [0x01u8; 16];
+        // 7-byte body produces pad_len=7 and 24 bytes; truncating to 16 used to underflow.
+        let ciphertext = tea_cbc_encrypt(&[0u8; 7], &key);
+        assert_eq!(ciphertext.len(), 24);
+        assert!(tea_cbc_decrypt(&ciphertext[..16], &key).is_none());
     }
 
     #[test]

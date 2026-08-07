@@ -4,7 +4,7 @@
 //! 依次取流，首个成功（`result == 0` 且有 `purl`）的音质用于播放
 //! （docs/PROJECT.md §7.3 质量回退）。
 
-use std::time::Duration;
+use std::{io::Write, time::Duration};
 
 use hmp_core::{
     AlbumId, AlbumRef, ArtistId, ArtistRef, AudioQuality, CoverRef, HmpError, PlaybackState,
@@ -66,7 +66,7 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         song_type: 0,
         media_mid: Some(media_mid),
     };
-    let mut chosen: Option<(SongFileType, String, Option<String>)> = None;
+    let mut chosen: Option<(SongFileType, String)> = None;
     let mut last_error: Option<String> = None;
 
     'quality: for quality in AudioQuality::Master.fallback_chain() {
@@ -84,14 +84,59 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
             Ok(resp) => {
                 for item in &resp.data {
                     if item.result == 0 && !item.purl.is_empty() {
-                        let ekey = file_type.is_encrypted.then(|| item.ekey.clone());
-                        // 加密音质必须有 ekey，否则视为不可用继续回退
-                        if file_type.is_encrypted && ekey.as_deref().is_none_or(str::is_empty) {
-                            last_error =
-                                Some(format!("encrypted but no ekey (result={})", item.result));
-                            continue;
-                        }
-                        chosen = Some((file_type, item.purl.clone(), ekey));
+                        let remote_uri =
+                            format!("https://isure.stream.qqmusic.qq.com/{}", item.purl);
+                        let uri = if file_type.is_encrypted {
+                            let ekey = (!item.ekey.is_empty()).then_some(item.ekey.as_str());
+                            match ekey {
+                                Some(key) => {
+                                    println!("解密中…（QMC2）");
+                                    let (progress_tx, progress_rx) =
+                                        tokio::sync::watch::channel(Some(0.0f64));
+                                    let progress_handle = tokio::spawn(async move {
+                                        let mut rx = progress_rx;
+                                        while rx.changed().await.is_ok() {
+                                            if let Some(p) = *rx.borrow() {
+                                                print!("\r解密进度: {:.0}%", p * 100.0);
+                                                let _ = std::io::stdout().flush();
+                                            }
+                                        }
+                                    });
+                                    let prepared = hmp_media::prepare_playable(
+                                        &remote_uri,
+                                        Some(key),
+                                        Some(&progress_tx),
+                                    )
+                                    .await;
+                                    drop(progress_tx);
+                                    let _ = progress_handle.await;
+                                    match prepared {
+                                        Ok(prepared) => prepared,
+                                        Err(error) => {
+                                            last_error =
+                                                Some(format!("QMC2 decrypt failed: {error}"));
+                                            continue;
+                                        }
+                                    }
+                                }
+                                None => {
+                                    match hmp_media::prepare_playable_embedded(&remote_uri, None)
+                                        .await
+                                    {
+                                        Ok(prepared) => prepared,
+                                        Err(error) => {
+                                            last_error = Some(format!(
+                                                "embedded QMC2 decrypt failed: {error}"
+                                            ));
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            remote_uri
+                        };
+                        chosen = Some((file_type, uri));
                         println!("音质: {quality:?} ({}{})", file_type.s, file_type.e);
                         break 'quality;
                     }
@@ -104,37 +149,12 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let (file_type, purl, ekey) = chosen.ok_or_else(|| {
+    let (file_type, uri) = chosen.ok_or_else(|| {
         HmpError::QualityUnavailable.to_string().replace(
             "quality is unavailable",
             &format!("所有音质均不可用 (最后错误: {:?})", last_error),
         )
     })?;
-    let remote_uri = format!("https://isure.stream.qqmusic.qq.com/{purl}");
-    let uri = match &ekey {
-        Some(key) => {
-            println!("解密中…（QMC2）");
-            let (progress_tx, progress_rx) = tokio::sync::watch::channel(Some(0.0f64));
-            let progress_handle = {
-                let mut rx = progress_rx;
-                tokio::spawn(async move {
-                    while rx.changed().await.is_ok() {
-                        if let Some(p) = *rx.borrow() {
-                            print!("\r解密进度: {:.0}%", p * 100.0);
-                        }
-                    }
-                })
-            };
-            let prepared = hmp_media::prepare_playable(&remote_uri, Some(key), Some(&progress_tx))
-                .await
-                .map_err(|e| e.to_string())?;
-            drop(progress_tx); // 发送方全部释放后 rx.changed() 返回 Err，读取任务退出
-            let _ = progress_handle.await;
-            println!("\r解密完成，播放本地缓存: {prepared}");
-            prepared
-        }
-        None => remote_uri,
-    };
 
     // 组装领域曲目（详情含多歌手/专辑/封面，供 MPRIS metadata 使用）
     let singers = detail

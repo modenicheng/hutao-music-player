@@ -12,4 +12,4 @@ pub mod tea;
 
 pub use cipher::{Qmc2Cipher, decrypt_factory};
 pub use detect::{Footer, detect_footer};
-pub use key::{Qmc2Error, generate_ekey, parse_ekey};
+pub use key::{Qmc2Error, generate_ekey, parse_ekey, parse_ekey_decoded};

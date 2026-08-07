@@ -8,12 +8,12 @@ pub enum Footer {
     /// QTag 格式（v2）：audio_len 为加密音频的字节数。
     QTag {
         /// 加密音频的字节数。
-        audio_len: u32,
+        audio_len: usize,
     },
     /// V1 格式：audio_len 为加密音频的字节数（文件总长 − 4 − key_size）。
     V1 {
         /// 加密音频的字节数。
-        audio_len: u32,
+        audio_len: usize,
     },
 }
 
@@ -52,8 +52,12 @@ pub fn detect_footer(total_len: usize, tail: &[u8]) -> Option<Footer> {
         ]) as usize;
 
         // 音频长度 = 文件总长 - 8 (QTag+size) - payload_size
-        let audio_len = total_len.saturating_sub(8 + payload_size) as u32;
-        return Some(Footer::QTag { audio_len });
+        if payload_size + 8 <= total_len {
+            return Some(Footer::QTag {
+                audio_len: total_len - 8 - payload_size,
+            });
+        }
+        return None;
     }
 
     // 尝试 V1 格式：最后 4 字节为小端序 key_size
@@ -61,7 +65,7 @@ pub fn detect_footer(total_len: usize, tail: &[u8]) -> Option<Footer> {
     // 保证尾部不会延伸到文件起始位置之前
     if key_size > 0 && key_size <= MAX_V1_KEY_SIZE && key_size + 4 <= total_len {
         // 音频长度 = 文件总长 − 4（尾部长度值） − key_size
-        let audio_len = total_len.saturating_sub(4 + key_size) as u32;
+        let audio_len = total_len - 4 - key_size;
         return Some(Footer::V1 { audio_len });
     }
 
@@ -94,6 +98,12 @@ mod tests {
         let total = with_audio.len();
         let result = detect_footer(total, &with_audio);
         assert_eq!(result, Some(Footer::QTag { audio_len: 16 }));
+    }
+
+    #[test]
+    fn detect_qtag_rejects_oversized_metadata() {
+        let tail = [&20u32.to_be_bytes()[..], &b"QTag"[..]].concat();
+        assert!(detect_footer(8, &tail).is_none());
     }
 
     #[test]

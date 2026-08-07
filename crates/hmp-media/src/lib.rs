@@ -43,8 +43,22 @@ pub async fn prepare_playable(
     ekey: Option<&str>,
     progress: Option<&tokio::sync::watch::Sender<Option<f64>>>,
 ) -> Result<String, MediaError> {
+    let root = default_cache_root()?;
+    decrypt::prepare_playable_at(&root, url, ekey, progress).await
+}
+
+/// 下载加密流并尝试使用文件内嵌 ekey（STag/QTag 尾部）解密。
+pub async fn prepare_playable_embedded(
+    url: &str,
+    progress: Option<&tokio::sync::watch::Sender<Option<f64>>>,
+) -> Result<String, MediaError> {
+    let root = default_cache_root()?;
+    decrypt::prepare_playable_embedded_at(&root, url, progress).await
+}
+
+fn default_cache_root() -> Result<std::path::PathBuf, MediaError> {
     let root = hmp_storage::cache_dir().join("decrypted");
     std::fs::create_dir_all(&root)
         .map_err(|e| MediaError::Cache(format!("无法创建缓存目录: {e}")))?;
-    decrypt::prepare_playable_at(&root, url, ekey, progress).await
+    Ok(root)
 }
