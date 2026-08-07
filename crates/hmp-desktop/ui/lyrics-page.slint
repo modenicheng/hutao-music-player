@@ -45,7 +45,8 @@ export component LyricsPage inherits Rectangle {
                 height: parent.height;
                 visible: root.lyrics-state == "ready" && root.lyrics.length > 0;
                 for line in root.lyrics : Rectangle {
-                    height: line.translation != "" ? 62px : 48px;
+                    height: 62px;
+                    clip: true;
                     background: line.is-active ? Theme.accent-muted : transparent;
                     HorizontalLayout {
                         padding-left: 14px;
@@ -53,10 +54,12 @@ export component LyricsPage inherits Rectangle {
                         spacing: 14px;
                         Text { width: 48px; text: line.time; color: line.is-active ? Theme.accent : Theme.text-secondary; font-size: 12px; vertical-alignment: center; }
                         VerticalLayout {
+                            horizontal-stretch: 1;
+                            min-width: 0px;
                             spacing: 3px;
                             alignment: center;
-                            Text { text: line.text; color: line.is-active ? Theme.text-primary : Theme.text-secondary; font-size: line.is-active ? 16px : 14px; font-weight: line.is-active ? 700 : 400; overflow: elide; }
-                            Text { text: line.translation; color: Theme.text-secondary; font-size: 12px; visible: line.translation != ""; overflow: elide; }
+                            Text { horizontal-stretch: 1; min-width: 0px; text: line.text; color: line.is-active ? Theme.text-primary : Theme.text-secondary; font-size: line.is-active ? 16px : 14px; font-weight: line.is-active ? 700 : 400; overflow: elide; }
+                            Text { horizontal-stretch: 1; min-width: 0px; text: line.translation; color: Theme.text-secondary; font-size: 12px; visible: line.translation != ""; overflow: elide; }
                         }
                     }
                 }

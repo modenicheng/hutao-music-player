@@ -47,6 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_library_items(bridge::library_model(Vec::new()));
     ui.set_recommend_items(bridge::library_model(demo::demo_recommendations()));
     ui.set_feature_statuses(bridge::feature_model(demo::feature_matrix()));
+    ui.set_songs(bridge::songs_model(Vec::new()));
     ui.set_search_text("".into());
     ui.set_search_query_valid(false);
     ui.set_search_loading(false);
