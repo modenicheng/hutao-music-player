@@ -51,10 +51,10 @@ pub fn detect_footer(total_len: usize, tail: &[u8]) -> Option<Footer> {
             tail[tail.len() - 5],
         ]) as usize;
 
-        // 音频长度 = 文件总长 - 8 (QTag+size) - payload_size
-        if payload_size + 8 <= total_len {
+        let footer_len = payload_size.checked_add(8)?;
+        if footer_len <= total_len {
             return Some(Footer::QTag {
-                audio_len: total_len - 8 - payload_size,
+                audio_len: total_len - footer_len,
             });
         }
         return None;
@@ -103,6 +103,14 @@ mod tests {
     #[test]
     fn detect_qtag_rejects_oversized_metadata() {
         let tail = [&20u32.to_be_bytes()[..], &b"QTag"[..]].concat();
+        assert!(detect_footer(8, &tail).is_none());
+    }
+
+    #[test]
+    fn detect_qtag_rejects_u32_max_payload() {
+        // payload_size = u32::MAX (0xFFFFFFFF) 会导致 checked_add(8) 溢出，
+        // 应返回 None 而不是 panic（防御 32 位目标）。
+        let tail = [&u32::MAX.to_be_bytes()[..], b"QTag"].concat();
         assert!(detect_footer(8, &tail).is_none());
     }
 
