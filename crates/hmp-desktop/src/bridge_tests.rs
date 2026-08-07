@@ -8,6 +8,7 @@ use crate::app::{AppCommand, AppEvent, ThemeMode, UiLyricData, UiPage, UiQueueDa
 use crate::bridge::{
     bind_callbacks, bind_ui_state_callbacks, decode_png, handle_event, songs_model,
 };
+use crate::demo::{demo_recommendations, feature_matrix};
 
 /// 初始化 testing backend（进程内仅一次）。
 fn init_ui() -> AppWindow {
@@ -57,7 +58,7 @@ fn reload_lyrics_command_is_distinct_from_playback_commands() {
 /// 全部窗口场景（testing backend 进程内单次初始化，官方建议单一 #[test]）。
 #[test]
 #[serial]
-fn app_starts_in_library_and_accepts_theme_modes() {
+fn app_starts_in_library_and_search_done_replaces_results_without_touching_login_state() {
     // 0) 初始路由和主题模式可由生成的 UI 属性读取和修改。
     {
         let ui = init_ui();
@@ -117,8 +118,16 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         let ui = init_ui();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         bind_callbacks(&ui, tx);
-        ui.invoke_search_requested("开始懂了".into());
+        ui.invoke_search_query_edited("  开始懂了  ".into());
+        assert!(ui.get_search_query_valid());
+        ui.invoke_search_requested("  开始懂了  ".into());
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::Search(k) if k == "开始懂了"));
+        assert!(ui.get_search_loading());
+        assert_eq!(ui.get_search_error_text(), "");
+        ui.invoke_search_query_edited(" \t\n ".into());
+        assert!(!ui.get_search_query_valid());
+        ui.invoke_search_requested(" \t\n ".into());
+        assert!(rx.try_recv().is_err(), "blank search must be ignored");
         ui.invoke_play_requested(2);
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::PlayIndex(2)));
         ui.invoke_play_pause();
@@ -142,6 +151,9 @@ fn app_starts_in_library_and_accepts_theme_modes() {
     // 3) 搜索结果事件 → 列表
     {
         let ui = init_ui();
+        ui.set_logged_in(true);
+        ui.set_search_loading(true);
+        ui.set_search_error_text("old error".into());
         let weak = ui.as_weak();
         handle_event(
             &weak,
@@ -161,6 +173,14 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert_eq!(ui.get_songs().row_count(), 2);
         assert_eq!(ui.get_songs().row_data(0).unwrap().title, "开始懂了");
         assert_eq!(ui.get_songs().row_data(1).unwrap().artist, "周杰伦");
+        assert!(ui.get_logged_in());
+        assert!(!ui.get_search_loading());
+        assert_eq!(ui.get_search_error_text(), "");
+
+        handle_event(&weak, AppEvent::SearchFailed("network error".into()));
+        assert_eq!(ui.get_songs().row_count(), 2, "failure preserves results");
+        assert!(!ui.get_search_loading());
+        assert_eq!(ui.get_search_error_text(), "network error");
     }
 
     // 4) Task 1 contract-only events are accepted until later UI mappings land.
@@ -234,6 +254,39 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert_eq!(ui.get_user_name(), "10001");
         assert!(!ui.get_show_login());
     }
+}
+
+#[test]
+fn demo_recommendations_are_local_and_marked_as_demo() {
+    let items = demo_recommendations();
+    assert!(!items.is_empty());
+    assert!(items.iter().all(|item| item.status == "demo"));
+    assert!(
+        items
+            .iter()
+            .all(|item| item.cover.size().width == 320 && item.cover.size().height == 320)
+    );
+}
+
+#[test]
+fn feature_matrix_uses_approved_statuses() {
+    let statuses = feature_matrix()
+        .into_iter()
+        .map(|item| (item.name, item.status))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        [
+            ("登录", "已接入"),
+            ("搜索", "已接入"),
+            ("播放", "已接入"),
+            ("队列展示", "已接入"),
+            ("歌词展示", "部分接入"),
+            ("推荐内容", "开发中 / 演示数据"),
+            ("收藏与资料库同步", "开发中"),
+        ]
+        .map(|(name, status)| (name.into(), status.into()))
+    );
 }
 
 #[test]

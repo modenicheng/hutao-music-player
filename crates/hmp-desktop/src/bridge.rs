@@ -9,9 +9,25 @@ pub fn bind_callbacks(
     ui: &crate::AppWindow,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
 ) {
+    let weak = ui.as_weak();
+    ui.on_search_query_edited(move |text| {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_search_query_valid(!text.trim().is_empty());
+        }
+    });
+
+    let weak = ui.as_weak();
     let tx = cmd_tx.clone();
     ui.on_search_requested(move |text| {
-        let _ = tx.send(AppCommand::Search(text.into()));
+        let query = text.trim();
+        if query.is_empty() {
+            return;
+        }
+        if let Some(ui) = weak.upgrade() {
+            ui.set_search_loading(true);
+            ui.set_search_error_text("".into());
+        }
+        let _ = tx.send(AppCommand::Search(query.to_owned()));
     });
     let tx = cmd_tx.clone();
     ui.on_play_requested(move |idx| {
@@ -85,6 +101,38 @@ pub fn songs_model(songs: Vec<UiSongData>) -> ModelRc<crate::UiSong> {
     ModelRc::new(model)
 }
 
+/// Library/recommendation data -> Slint model.
+pub fn library_model(items: Vec<crate::demo::UiLibraryData>) -> ModelRc<crate::UiLibrary> {
+    let model = VecModel::from(
+        items
+            .into_iter()
+            .map(|item| crate::UiLibrary {
+                kind: item.kind.into(),
+                title: item.title.into(),
+                subtitle: item.subtitle.into(),
+                status: item.status.into(),
+                cover: item.cover,
+            })
+            .collect::<Vec<_>>(),
+    );
+    ModelRc::new(model)
+}
+
+/// Feature status data -> Slint model.
+pub fn feature_model(items: Vec<crate::UiFeatureData>) -> ModelRc<crate::UiFeature> {
+    let model = VecModel::from(
+        items
+            .into_iter()
+            .map(|item| crate::UiFeature {
+                name: item.name.into(),
+                status: item.status.into(),
+                detail: item.detail.into(),
+            })
+            .collect::<Vec<_>>(),
+    );
+    ModelRc::new(model)
+}
+
 /// PNG 字节 → Slint Image（RGBA）。
 pub fn decode_png(png: &[u8]) -> Result<slint::Image, Box<dyn std::error::Error>> {
     let img = image::load_from_memory(png)?.to_rgba8();
@@ -102,9 +150,14 @@ pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
     match evt {
         AppEvent::SearchDone(songs) => {
             ui.set_songs(songs_model(songs));
+            ui.set_search_loading(false);
+            ui.set_search_error_text("".into());
         }
-        AppEvent::SearchFailed(_)
-        | AppEvent::QueueUpdated(_)
+        AppEvent::SearchFailed(message) => {
+            ui.set_search_loading(false);
+            ui.set_search_error_text(message.into());
+        }
+        AppEvent::QueueUpdated(_)
         | AppEvent::LyricsLoading(_)
         | AppEvent::LyricsLoaded { .. }
         | AppEvent::LyricsFailed { .. } => {

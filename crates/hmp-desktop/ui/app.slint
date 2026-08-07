@@ -1,65 +1,18 @@
-import { ListView, Palette } from "std-widgets.slint";
+import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { SideBar } from "sidebar.slint";
 import { PlayerBar, UiPlayback } from "player-bar.slint";
 import { LoginDialog } from "login-dialog.slint";
+import { LibraryPage } from "library-page.slint";
+import { RecommendPage, UiLibrary } from "recommend-page.slint";
+import { SearchPage, UiSong } from "search-page.slint";
 
-export { UiPlayback }
+export { UiLibrary, UiPlayback, UiSong }
 
-export struct UiSong {
-    title: string,
-    artist: string,
-    duration: string,
-}
-
-component SearchPage inherits Rectangle {
-    in property <[UiSong]> songs;
-    in-out property <string> search-text;
-    callback search-requested(string);
-    callback play-requested(int);
-
-    VerticalLayout {
-        padding-left: Theme.content-padding;
-        padding-right: Theme.content-padding;
-        padding-top: 28px;
-        spacing: 16px;
-        Text { text: "搜索"; color: Theme.text-primary; font-size: 28px; font-weight: 700; }
-        Rectangle {
-            height: 44px;
-            border-radius: 6px;
-            background: Theme.surface;
-            HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 14px;
-                spacing: 10px;
-                Text { text: "⌕"; color: Theme.text-secondary; font-size: 18px; vertical-alignment: center; }
-                search-input := TextInput {
-                    text: root.search-text;
-                    color: Theme.text-primary;
-                    font-size: 15px;
-                    vertical-alignment: center;
-                    edited => { root.search-text = self.text; }
-                    accepted => { root.search-requested(self.text); }
-                }
-            }
-        }
-        ListView {
-            for song[idx] in root.songs : Rectangle {
-                height: 52px;
-                background: row-touch.has-hover ? Theme.surface-hover : transparent;
-                row-touch := TouchArea { clicked => { root.play-requested(idx); } }
-                HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    spacing: 14px;
-                    Text { text: (idx + 1) + "."; color: Theme.text-secondary; font-size: 13px; width: 28px; vertical-alignment: center; }
-                    Text { text: song.title; color: Theme.text-primary; font-size: 15px; font-weight: 600; vertical-alignment: center; overflow: elide; }
-                    Text { text: song.artist; color: Theme.text-secondary; font-size: 14px; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
-                    Text { text: song.duration; color: Theme.text-secondary; font-size: 13px; width: 50px; horizontal-alignment: right; vertical-alignment: center; }
-                }
-            }
-        }
-    }
+export struct UiFeature {
+    name: string,
+    status: string,
+    detail: string,
 }
 
 export component AppWindow inherits Window {
@@ -74,6 +27,13 @@ export component AppWindow inherits Window {
     in-out property <string> theme-mode <=> Theme.mode;
     private property <ColorScheme> palette-color-scheme <=> Palette.color-scheme;
     in-out property <[UiSong]> songs;
+    in-out property <[UiLibrary]> library-items;
+    in-out property <[UiLibrary]> recommend-items;
+    in-out property <[UiFeature]> feature-statuses;
+    in-out property <string> search-text;
+    in-out property <bool> search-query-valid: false;
+    in-out property <bool> search-loading: false;
+    in-out property <string> search-error-text;
     in property <UiPlayback> playback;
     in property <bool> logged-in;
     in property <string> user-name;
@@ -86,6 +46,7 @@ export component AppWindow inherits Window {
     callback queue-requested;
     callback lyrics-requested;
     callback theme-requested(string);
+    callback search-query-edited(string);
     callback search-requested(string);
     callback play-requested(int);
     callback play-pause;
@@ -105,8 +66,10 @@ export component AppWindow inherits Window {
 
     VerticalLayout {
         spacing: 0;
+
         HorizontalLayout {
             spacing: 0;
+
             SideBar {
                 current-page: root.current-page;
                 logged-in: root.logged-in;
@@ -114,18 +77,43 @@ export component AppWindow inherits Window {
                 navigate-requested(page) => { root.navigate-requested(page); }
                 login-start => { root.show-login = true; root.login-start(); }
             }
+
             Rectangle { width: 1px; background: Theme.divider; }
+
+            LibraryPage {
+                visible: root.current-page == "library";
+                library-items: root.library-items;
+                playback: root.playback;
+                cover-image: root.cover-image;
+                navigate-to-search => { root.navigate-requested("search"); }
+            }
+
+            RecommendPage {
+                visible: root.current-page == "recommend";
+                recommend-items: root.recommend-items;
+            }
+
             SearchPage {
                 visible: root.current-page == "search";
                 songs: root.songs;
+                search-text <=> root.search-text;
+                loading: root.search-loading;
+                error-text: root.search-error-text;
+                query-valid: root.search-query-valid;
+                query-edited(text) => { root.search-query-edited(text); }
                 search-requested(text) => { root.search-requested(text); }
+                retry-requested => { root.search-requested(root.search-text); }
                 play-requested(idx) => { root.play-requested(idx); }
             }
+
             Rectangle {
-                visible: root.current-page != "search";
+                visible: root.current-page != "library"
+                    && root.current-page != "recommend"
+                    && root.current-page != "search";
                 background: Theme.background;
             }
         }
+
         PlayerBar {
             playback: root.playback;
             cover-image: root.cover-image;

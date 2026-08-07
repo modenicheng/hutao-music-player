@@ -1,6 +1,6 @@
 //! HMP 桌面应用入口：Slint UI + 应用核心编排（docs/PROJECT.md §4.1）。
 
-use hmp_desktop::{AppCore, AppWindow, UiPlayback, app, bridge};
+use hmp_desktop::{AppCore, AppWindow, UiPlayback, app, bridge, demo};
 use slint::ComponentHandle;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,6 +41,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_user_name(core.user_name().into());
     ui.set_login_status("".into());
     ui.set_playback(playback_default());
+    ui.set_library_items(bridge::library_model(Vec::new()));
+    ui.set_recommend_items(bridge::library_model(demo::demo_recommendations()));
+    ui.set_feature_statuses(bridge::feature_model(demo::feature_matrix()));
+    ui.set_search_text("".into());
+    ui.set_search_query_valid(false);
+    ui.set_search_loading(false);
+    ui.set_search_error_text("".into());
 
     // 播放状态订阅（core 随后 move 进事件循环）
     let state_rx = core.player.subscribe_state();

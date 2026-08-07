@@ -1,0 +1,199 @@
+import { Button, ListView } from "std-widgets.slint";
+import { EmptyState } from "primitives.slint";
+import { Theme } from "theme.slint";
+
+export struct UiSong {
+    title: string,
+    artist: string,
+    duration: string,
+}
+
+export component SearchPage inherits Rectangle {
+    in property <[UiSong]> songs;
+    in-out property <string> search-text;
+    in property <bool> loading;
+    in property <string> error-text;
+    in property <bool> query-valid;
+    callback query-edited(string);
+    callback search-requested(string);
+    callback play-requested(int);
+    callback retry-requested;
+
+    private property <bool> has-query: root.query-valid;
+    private property <bool> show-results: root.songs.length > 0;
+
+    background: Theme.background;
+
+    VerticalLayout {
+        padding-left: Theme.content-padding;
+        padding-right: Theme.content-padding;
+        padding-top: 28px;
+        padding-bottom: 22px;
+        spacing: 16px;
+
+        Text {
+            text: "搜索";
+            color: Theme.text-primary;
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        HorizontalLayout {
+            height: 44px;
+            spacing: 10px;
+
+            Rectangle {
+                background: Theme.surface;
+                border-radius: 6px;
+
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 10px;
+
+                    Text {
+                        width: 18px;
+                        text: "⌕";
+                        color: Theme.text-secondary;
+                        font-size: 18px;
+                        vertical-alignment: center;
+                    }
+
+                    search-input := TextInput {
+                        text: root.search-text;
+                        color: Theme.text-primary;
+                        font-size: 15px;
+                        vertical-alignment: center;
+                        enabled: !root.loading;
+                        edited => {
+                            root.search-text = self.text;
+                            root.query-edited(self.text);
+                        }
+                        accepted => {
+                            if (root.has-query && !root.loading) {
+                                root.search-requested(self.text);
+                            }
+                        }
+                    }
+                }
+            }
+
+            Button {
+                width: 92px;
+                text: root.loading ? "搜索中" : "搜索";
+                enabled: root.has-query && !root.loading;
+                clicked => { root.search-requested(root.search-text); }
+            }
+        }
+
+        Rectangle {
+            height: 34px;
+            background: transparent;
+
+            Text {
+                text: root.loading ? "正在搜索 QQ 音乐…"
+                    : root.error-text != "" ? root.error-text
+                    : root.show-results ? root.songs.length + " 个结果"
+                    : "";
+                color: root.error-text != "" ? Theme.accent : Theme.text-secondary;
+                font-size: 13px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            Button {
+                x: parent.width - 82px;
+                y: 0px;
+                width: 82px;
+                height: 34px;
+                visible: root.error-text != "" && root.has-query && !root.loading;
+                text: "重试";
+                clicked => { root.retry-requested(); }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 260px;
+            background: transparent;
+
+            ListView {
+                width: parent.width;
+                height: parent.height;
+                visible: root.show-results;
+
+                for song[idx] in root.songs : Rectangle {
+                    height: 54px;
+                    background: row-touch.has-hover ? Theme.surface-hover : transparent;
+                    accessible-role: button;
+                    accessible-label: "播放 " + song.title + ", " + song.artist;
+                    accessible-action-default => { root.play-requested(idx); }
+
+                    row-touch := TouchArea { clicked => { root.play-requested(idx); } }
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 14px;
+                        Text {
+                            width: 30px;
+                            text: (idx + 1) + ".";
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: song.title;
+                            color: Theme.text-primary;
+                            font-size: 15px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: song.artist;
+                            color: Theme.text-secondary;
+                            font-size: 14px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            width: 52px;
+                            text: song.duration;
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.divider;
+                    }
+                }
+            }
+
+            EmptyState {
+                width: parent.width;
+                height: parent.height;
+                visible: !root.show-results && !root.loading && root.error-text == "";
+                title: root.has-query ? "没有找到结果" : "搜索 QQ 音乐";
+                detail: root.has-query ? "换一个关键词再试一次。" : "输入歌曲、歌手或专辑名称。";
+                action-label: "";
+            }
+
+            EmptyState {
+                width: parent.width;
+                height: parent.height;
+                visible: !root.show-results && !root.loading && root.error-text != "";
+                title: "搜索失败";
+                detail: root.error-text;
+                action-label: root.has-query ? "重新搜索" : "";
+                action-clicked => { root.retry-requested(); }
+            }
+        }
+    }
+}

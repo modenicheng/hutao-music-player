@@ -1,0 +1,96 @@
+import { ListView } from "std-widgets.slint";
+import { CoverArt, DevelopmentBanner } from "primitives.slint";
+import { Theme } from "theme.slint";
+
+export struct UiLibrary {
+    kind: string,
+    title: string,
+    subtitle: string,
+    status: string,
+    cover: image,
+}
+
+export component RecommendPage inherits Rectangle {
+    in property <[UiLibrary]> recommend-items;
+
+    background: Theme.background;
+
+    VerticalLayout {
+        padding-left: Theme.content-padding;
+        padding-right: Theme.content-padding;
+        padding-top: 28px;
+        padding-bottom: 22px;
+        spacing: 16px;
+
+        Text {
+            text: "为你推荐";
+            color: Theme.text-primary;
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        DevelopmentBanner {
+            text: "开发中 · 当前页面使用本地演示数据";
+        }
+
+        ListView {
+            for item in root.recommend-items : Rectangle {
+                height: 116px;
+                border-radius: 6px;
+                background: item-touch.has-hover ? Theme.surface-hover : transparent;
+                accessible-role: list-item;
+                accessible-label: item.kind + ", " + item.title + ", " + item.subtitle;
+
+                item-touch := TouchArea { }
+
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 16px;
+
+                    CoverArt { source: item.cover; size: 92px; }
+
+                    VerticalLayout {
+                        spacing: 5px;
+                        alignment: center;
+
+                        Text {
+                            text: item.kind;
+                            color: Theme.accent;
+                            font-size: 12px;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: item.title;
+                            color: Theme.text-primary;
+                            font-size: 18px;
+                            font-weight: 700;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: item.subtitle;
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            overflow: elide;
+                        }
+                    }
+
+                    Text {
+                        width: 74px;
+                        text: "演示内容";
+                        color: Theme.text-secondary;
+                        font-size: 12px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Theme.divider;
+                }
+            }
+        }
+    }
+}
