@@ -40,9 +40,15 @@ pub fn tmp_path(root: &Path, key: &str) -> PathBuf {
 /// 容量驱逐：若根目录内（不含 `*.tmp`）总大小超过上限则按 mtime 升序删除最旧文件直至达标。
 ///
 /// 上限由环境变量 `HMP_DECRYPT_CACHE_MIB` 控制（默认 2048 MiB）。
+/// 委托给 [`evict_if_needed_with_cap`]。
 pub fn evict_if_needed(root: &Path) -> Result<(), std::io::Error> {
-    let cap_bytes = cache_cap_bytes();
+    evict_if_needed_with_cap(root, cache_cap_bytes())
+}
 
+/// 容量驱逐（可注入上限，供测试使用）。
+///
+/// 若根目录内（不含 `*.tmp`）总大小超过 `cap_bytes` 则按 mtime 升序删除最旧文件直至达标。
+pub fn evict_if_needed_with_cap(root: &Path, cap_bytes: u64) -> Result<(), std::io::Error> {
     // 收集非 .tmp 文件及元数据
     let mut files: Vec<(PathBuf, std::fs::Metadata)> = Vec::new();
     let mut total_size: u64 = 0;
@@ -160,7 +166,9 @@ mod tests {
 
     #[test]
     fn evict_keeps_under_cap() {
-        let root = std::env::temp_dir().join(format!("hmp-media-test-{}", std::process::id()));
+        // 独占子目录，避免与 decrypt.rs 的并发测试冲突。
+        let root =
+            std::env::temp_dir().join(format!("hmp-media-test-{}-evict", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
@@ -177,11 +185,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(&f3, &chunk).unwrap();
 
-        unsafe {
-            std::env::set_var("HMP_DECRYPT_CACHE_MIB", "1");
-        }
-
-        evict_if_needed(&root).unwrap();
+        // 通过注入 cap 参数避免进程级环境变量竞争。
+        evict_if_needed_with_cap(&root, 1024 * 1024).unwrap();
 
         // 验证目录总大小 <= 1024 * 1024
         let mut remaining: u64 = 0;
@@ -204,10 +209,6 @@ mod tests {
         assert!(names.contains(&"b.bin".to_string()));
         assert!(names.contains(&"c.bin".to_string()));
 
-        // cleanup
-        unsafe {
-            std::env::remove_var("HMP_DECRYPT_CACHE_MIB");
-        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }
