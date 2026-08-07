@@ -1,0 +1,625 @@
+//! 下载、解密、缓存命中与文件 URI 生成。
+
+use std::path::Path;
+
+use hmp_qqmusic_api::algorithms::qmc2::{decrypt_factory, detect_footer};
+use tokio::io::AsyncWriteExt;
+use tracing::{debug, warn};
+
+use super::MediaError;
+use crate::cache::{self, extension_from_magic, final_path, tmp_path};
+
+/// 结果类型别名。
+type Result<T> = std::result::Result<T, MediaError>;
+
+/// 下载-解密-缓存的主流程（显式缓存根目录，测试用）。
+///
+/// - `url`：QQ 音乐加密音频流 URL
+/// - `ekey`：API 返回的 ekey（`None` 或空串表示明文音质，不下载不解密）
+/// - `progress`：可选的下载进度通道（`0.0..=1.0` 或 `None`）
+///
+/// 返回 `file://` URI（已解密缓存文件）或原 https URL。
+pub async fn prepare_playable_at(
+    cache_root: &Path,
+    url: &str,
+    ekey: Option<&str>,
+    progress: Option<&tokio::sync::watch::Sender<Option<f64>>>,
+) -> Result<String> {
+    // ---- 1. 明文音质：直接返回原 url ----
+    let ekey = ekey.filter(|e| !e.is_empty());
+    let Some(ekey) = ekey else {
+        return Ok(url.to_owned());
+    };
+
+    // ---- 2. 缓存命中检查 ----
+    let key = cache::cache_key(url, ekey);
+    let ext_guess = ext_guess_from_url(url);
+
+    let cached = final_path(cache_root, &key, ext_guess);
+    if cached.exists() {
+        return file_uri(&cached);
+    }
+
+    // ---- 3. 下载 ----
+    let tmp = tmp_path(cache_root, &key);
+    // 清理可能残留的临时文件
+    let _ = std::fs::remove_file(&tmp);
+
+    download_to_file(url, &tmp, progress).await?;
+
+    // ---- 4. 尾部检测 ----
+    let total_len = std::fs::metadata(&tmp)?.len() as usize;
+    let strip_len = {
+        let tail_size = 0x40.min(total_len);
+        let mut tail = vec![0u8; tail_size];
+        let file = std::fs::File::open(&tmp)?;
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::io::BufReader::new(file);
+        file.seek(SeekFrom::End(-(tail_size as i64)))?;
+        file.read_exact(&mut tail)?;
+        detect_footer(total_len, &tail).map(|f| match f {
+            hmp_qqmusic_api::algorithms::qmc2::Footer::QTag { audio_len } => audio_len as usize,
+            hmp_qqmusic_api::algorithms::qmc2::Footer::V1 { audio_len } => audio_len as usize,
+        })
+    };
+
+    // ---- 5. 解密 + 写入 ----
+    let final_base = final_path(cache_root, &key, ext_guess);
+    let result = decrypt_and_write(&tmp, &final_base, ekey, strip_len).await;
+
+    match result {
+        Ok(actual_ext) => {
+            // ---- 6. 魔数校验通过 ----
+            let _ = std::fs::remove_file(&tmp);
+            let _ = cache::evict_if_needed(cache_root);
+
+            // 若实际扩展名与猜测不同，重命名文件
+            let final_path = if actual_ext != ext_guess {
+                let new_path = final_path(cache_root, &key, actual_ext);
+                let _ = std::fs::rename(&final_base, &new_path);
+                new_path
+            } else {
+                final_base
+            };
+
+            file_uri(&final_path)
+        }
+        Err(DecryptError::MagicMismatch) => {
+            // 若 strip_len 存在 → 不带剥离重试一次
+            if strip_len.is_some() {
+                debug!("QMC2 解密后魔数不匹配，重试不剥离尾部");
+                let _ = std::fs::remove_file(&final_base);
+
+                match decrypt_and_write(&tmp, &final_base, ekey, None).await {
+                    Ok(actual_ext) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        let _ = cache::evict_if_needed(cache_root);
+
+                        let final_path = if actual_ext != ext_guess {
+                            let new_path = final_path(cache_root, &key, actual_ext);
+                            let _ = std::fs::rename(&final_base, &new_path);
+                            new_path
+                        } else {
+                            final_base
+                        };
+
+                        return file_uri(&final_path);
+                    }
+                    Err(DecryptError::MagicMismatch) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        let _ = std::fs::remove_file(&final_base);
+                        let head_hex = read_first_8_hex(&final_base);
+                        return Err(MediaError::Unsupported(format!(
+                            "无法识别音频格式（前 8 字节: {head_hex}）"
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        let _ = std::fs::remove_file(&final_base);
+                        return Err(e.into_media_error());
+                    }
+                }
+            }
+
+            // 无 strip_len 且魔数不匹配 → Unsupported
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&final_base);
+            let head_hex = read_first_8_hex(&final_base);
+            Err(MediaError::Unsupported(format!(
+                "无法识别音频格式（前 8 字节: {head_hex}）"
+            )))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&final_base);
+            Err(e.into_media_error())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 内部辅助
+// ---------------------------------------------------------------------------
+
+/// 根据 URL 后缀猜测音频扩展名。
+fn ext_guess_from_url(url: &str) -> &'static str {
+    let lower = url.to_lowercase();
+    for (suffix, ext) in [
+        (".mflac", "flac"),
+        (".mgg", "ogg"),
+        (".mmp4", "m4a"),
+        (".mnac", "m4a"),
+    ] {
+        if lower.contains(suffix) {
+            return ext;
+        }
+    }
+    "bin"
+}
+
+/// 将文件路径转换为 `file://` URI。
+fn file_uri(path: &Path) -> Result<String> {
+    let abs = std::fs::canonicalize(path)?;
+    Ok(format!("file://{}", abs.display()))
+}
+
+/// 下载文件到临时路径，支持进度报告。
+async fn download_to_file(
+    url: &str,
+    tmp: &Path,
+    progress: Option<&tokio::sync::watch::Sender<Option<f64>>>,
+) -> Result<()> {
+    let response = reqwest::get(url)
+        .await
+        .map_err(|e| MediaError::Network(format!("下载请求失败: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(MediaError::HttpStatus(status.as_u16()));
+    }
+
+    let content_length = response.content_length();
+
+    let mut file = tokio::fs::File::create(tmp).await.map_err(MediaError::Io)?;
+
+    let mut downloaded: u64 = 0;
+    let mut stream = response.bytes_stream();
+
+    use futures_util::StreamExt;
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|e| MediaError::Network(format!("下载流错误: {e}")))?;
+
+        file.write_all(&chunk).await.map_err(MediaError::Io)?;
+
+        downloaded += chunk.len() as u64;
+
+        if let Some(tx) = progress {
+            if let Some(total) = content_length {
+                let p = downloaded as f64 / total as f64;
+                let _ = tx.send(Some(p.clamp(0.0, 1.0)));
+            } else {
+                let _ = tx.send(None);
+            }
+        }
+    }
+
+    file.flush().await.map_err(MediaError::Io)?;
+
+    // 最终进度 1.0
+    if let Some(tx) = progress {
+        let _ = tx.send(Some(1.0));
+    }
+
+    Ok(())
+}
+
+/// 内部解密错误：区分魔数不匹配与其他 IO 错误。
+enum DecryptError {
+    MagicMismatch,
+    Other(MediaError),
+}
+
+impl DecryptError {
+    fn into_media_error(self) -> MediaError {
+        match self {
+            DecryptError::MagicMismatch => MediaError::Unsupported("魔数不匹配".to_string()),
+            DecryptError::Other(e) => e,
+        }
+    }
+}
+
+impl From<std::io::Error> for DecryptError {
+    fn from(e: std::io::Error) -> Self {
+        DecryptError::Other(MediaError::Io(e))
+    }
+}
+
+impl From<MediaError> for DecryptError {
+    fn from(e: MediaError) -> Self {
+        DecryptError::Other(e)
+    }
+}
+
+/// 解密临时文件到最终路径。
+///
+/// 返回解密后的实际扩展名，或 `DecryptError::MagicMismatch`。
+async fn decrypt_and_write(
+    src: &Path,
+    dst: &Path,
+    ekey: &str,
+    strip_len: Option<usize>,
+) -> std::result::Result<&'static str, DecryptError> {
+    let cipher = decrypt_factory(ekey).map_err(|e| DecryptError::Other(MediaError::Key(e)))?;
+
+    let total_len = std::fs::metadata(src)?.len() as usize;
+
+    let mut reader = tokio::fs::File::open(src).await?;
+    let mut writer = tokio::fs::File::create(dst).await?;
+
+    let mut offset: usize = 0;
+    let mut written: usize = 0;
+    let mut buf = vec![0u8; 256 * 1024]; // 256 KiB
+
+    use tokio::io::AsyncReadExt;
+
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+
+        let chunk = &mut buf[..n];
+        cipher.decrypt(offset, chunk);
+
+        // 尾部裁剪：若 strip_len 存在且本次写入会超出
+        let to_write = if let Some(sl) = strip_len {
+            if written + n > sl {
+                sl.saturating_sub(written)
+            } else {
+                n
+            }
+        } else {
+            n
+        };
+
+        if to_write > 0 {
+            writer.write_all(&chunk[..to_write]).await?;
+            written += to_write;
+        }
+
+        offset += n;
+
+        // 已达到 strip_len → 停止读取
+        if strip_len.is_some_and(|sl| written >= sl) {
+            break;
+        }
+    }
+
+    writer.flush().await?;
+    drop(writer);
+
+    // 魔数校验
+    let head = read_first_bytes(dst, 8)?;
+    match extension_from_magic(&head) {
+        Some(ext) => Ok(ext),
+        None => {
+            warn!(
+                "QMC2 解密后魔数无法识别（前 8 字节: {}），total={total_len}, strip_len={strip_len:?}",
+                hex_str(&head)
+            );
+            Err(DecryptError::MagicMismatch)
+        }
+    }
+}
+
+/// 读取文件前 `n` 字节。
+fn read_first_bytes(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; n];
+    let actual = file.read(&mut buf)?;
+    buf.truncate(actual);
+    Ok(buf)
+}
+
+/// 读取文件前 8 字节的十六进制表示（用于错误信息）。
+fn read_first_8_hex(path: &Path) -> String {
+    match read_first_bytes(path, 8) {
+        Ok(b) => hex_str(&b),
+        Err(_) => "<无法读取>".to_string(),
+    }
+}
+
+fn hex_str(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+// ---------------------------------------------------------------------------
+// 测试
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use hmp_qqmusic_api::algorithms::qmc2::key::generate_ekey;
+    use tokio::sync::watch;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// 构造 QMC2 加密测试数据。
+    ///
+    /// - `plaintext`：明文音频数据（应以已知魔数开头，如 `b"fLaC"`）
+    /// - `with_footer`：是否在末尾附加 V1 尾部 `[raw_key_bytes][key_len LE u32]`
+    ///
+    /// 返回 `(encrypted_data, ekey)`。
+    fn make_encrypted(plaintext: &[u8], key: &[u8], with_footer: bool) -> (Vec<u8>, String) {
+        let ekey = generate_ekey(key);
+        let cipher = decrypt_factory(&ekey).unwrap();
+
+        let mut encrypted = plaintext.to_vec();
+        cipher.decrypt(0, &mut encrypted);
+
+        if with_footer {
+            let key_len = key.len() as u32;
+            encrypted.extend_from_slice(key);
+            encrypted.extend_from_slice(&key_len.to_le_bytes());
+        }
+
+        (encrypted, ekey)
+    }
+
+    fn test_cache_root() -> PathBuf {
+        std::env::temp_dir().join(format!("hmp-media-test-{}", std::process::id()))
+    }
+
+    fn cleanup(root: &Path) {
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn prepare_decrypts_plain_stream() {
+        let root = test_cache_root().join("decrypts_plain");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let key = b"0123456789abcdefghij"; // 20 bytes → map cipher
+        let plaintext = {
+            let mut v = b"fLaC".to_vec();
+            v.extend((0..2048).map(|i| (i % 256) as u8));
+            v
+        };
+        let (encrypted, ekey) = make_encrypted(&plaintext, key, false);
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(encrypted))
+            .mount(&server)
+            .await;
+
+        let url = server.uri();
+
+        let result = prepare_playable_at(&root, &url, Some(&ekey), None)
+            .await
+            .unwrap();
+
+        // 检查返回的是 file:// URI
+        assert!(
+            result.starts_with("file://"),
+            "expected file:// URI, got {result}"
+        );
+
+        // 读取文件内容，比对明文
+        let path = result.strip_prefix("file://").unwrap();
+        let decoded = std::fs::read(path).unwrap();
+        assert_eq!(decoded, plaintext, "decrypted content must match plaintext");
+
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn prepare_strips_stag_footer() {
+        let root = test_cache_root().join("strips_footer");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let key = b"0123456789ABCDEFGHIJ"; // 20 bytes → map cipher
+        let plaintext = {
+            let mut v = b"OggS".to_vec();
+            v.extend((0..2048).map(|i| (i % 256) as u8));
+            v
+        };
+        let (encrypted, ekey) = make_encrypted(&plaintext, key, true);
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(encrypted))
+            .mount(&server)
+            .await;
+
+        let result = prepare_playable_at(&root, &server.uri(), Some(&ekey), None)
+            .await
+            .unwrap();
+
+        assert!(result.starts_with("file://"));
+        let path = result.strip_prefix("file://").unwrap();
+        let decoded = std::fs::read(path).unwrap();
+
+        // 尾部已被剥离，内容 == 明文
+        assert_eq!(decoded, plaintext, "stripped content must match plaintext");
+
+        // 确认文件扩展名正确
+        assert!(
+            path.ends_with(".ogg"),
+            "expected .ogg extension, got {path}"
+        );
+
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn prepare_returns_url_when_no_ekey() {
+        let url = "https://isure.stream.qqmusic.qq.com/something.mflac";
+        let result = prepare_playable_at(Path::new("/nonexistent"), url, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result, url);
+
+        // 空 ekey 同效
+        let result = prepare_playable_at(Path::new("/nonexistent"), url, Some(""), None)
+            .await
+            .unwrap();
+        assert_eq!(result, url);
+    }
+
+    #[tokio::test]
+    async fn prepare_cache_hit_skips_download() {
+        let root = test_cache_root().join("cache_hit");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let key = b"0123456789abcdefghij";
+        let plaintext = b"fLaC".to_vec();
+        let (encrypted, ekey) = make_encrypted(&plaintext, key, false);
+
+        let server = MockServer::start().await;
+        // 使用含后缀的 URL 以便 ext_guess 能推断为 "flac"
+        let url = format!("{}/test.mflac", server.uri());
+        let _mock_guard = Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(encrypted.clone()))
+            .expect(1) // 仅应被命中一次
+            .mount_as_scoped(&server)
+            .await;
+
+        // 首次调用：下载并缓存
+        let r1 = prepare_playable_at(&root, &url, Some(&ekey), None)
+            .await
+            .unwrap();
+        assert!(r1.starts_with("file://"));
+
+        // 第二次调用：缓存命中（Mock expect(1) 确保不重新请求）
+        let r2 = prepare_playable_at(&root, &url, Some(&ekey), None)
+            .await
+            .unwrap();
+
+        assert_eq!(r1, r2, "cache hit must return same file URI");
+
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn prepare_retries_without_strip_on_magic_mismatch() {
+        let root = test_cache_root().join("retry_nostrip");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let key = b"0123456789abcdefghij"; // 20 bytes → map cipher
+
+        // 构造 plaintext 使得加密后尾部 4 字节为 [64, 0, 0, 0]（V1 key_size=64），
+        // 导致 detect_footer 误判 V1: audio_len = 68 - 4 - 64 = 0。
+        // 首次 strip_len=0 → 解密为空 → magic None → 触发无剥离重试 → 成功。
+        //
+        // 加密公式: encrypted[i] = plaintext[i] XOR cipher_byte(i)
+        // 因此 plaintext[i] = desired_encrypted[i] XOR cipher_byte(i)
+        let ekey = generate_ekey(key);
+        let cipher = decrypt_factory(&ekey).unwrap();
+
+        // 获得位置 64-67 的密钥流
+        let mut key_stream = [0u8; 4];
+        cipher.decrypt(64, &mut key_stream);
+
+        let desired_tail: [u8; 4] = 64u32.to_le_bytes(); // key_size = 64
+        let mut plaintext = vec![0u8; 68];
+        plaintext[0..4].copy_from_slice(b"fLaC");
+        for i in 0..64 {
+            plaintext[4 + i] = (i % 256) as u8;
+        }
+        // 调整尾部 4 字节使加密后尾部 = desired_tail
+        for i in 0..4 {
+            plaintext[64 + i] = desired_tail[i] ^ key_stream[i];
+        }
+
+        let (encrypted, _ekey) = make_encrypted(&plaintext, key, false);
+        // 验证尾部确实为目标值
+        assert_eq!(
+            &encrypted[encrypted.len() - 4..],
+            &desired_tail,
+            "encrypted tail must match desired key_size"
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(encrypted))
+            .mount(&server)
+            .await;
+
+        let result = prepare_playable_at(&root, &server.uri(), Some(&ekey), None)
+            .await
+            .unwrap();
+
+        // 重试成功，返回 file:// URI，内容 == 明文
+        assert!(result.starts_with("file://"));
+        let path = result.strip_prefix("file://").unwrap();
+        let decoded = std::fs::read(path).unwrap();
+        assert_eq!(
+            decoded, plaintext,
+            "retry without strip must recover plaintext"
+        );
+
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn prepare_reports_progress() {
+        let root = test_cache_root().join("progress");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let key = b"0123456789abcdefghij";
+        let plaintext = {
+            let mut v = b"fLaC".to_vec();
+            v.extend((0..2048).map(|i| (i % 256) as u8));
+            v
+        };
+        let (encrypted, ekey) = make_encrypted(&plaintext, key, false);
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(encrypted))
+            .mount(&server)
+            .await;
+
+        let (tx, mut rx) = watch::channel(None);
+
+        let result = prepare_playable_at(&root, &server.uri(), Some(&ekey), Some(&tx))
+            .await
+            .unwrap();
+
+        assert!(result.starts_with("file://"));
+
+        // 收集所有进度值
+        let mut values: Vec<Option<f64>> = Vec::new();
+        while let Ok(()) = rx.changed().await {
+            let v = *rx.borrow();
+            values.push(v);
+            if v == Some(1.0) {
+                break;
+            }
+        }
+
+        // 至少收到过 Some(p) 的值
+        assert!(
+            values.iter().any(|v| v.is_some()),
+            "should have received at least one Some(p) progress value"
+        );
+        // 最终值为 Some(1.0)
+        assert_eq!(values.last(), Some(&Some(1.0)), "should end with Some(1.0)");
+
+        cleanup(&root);
+    }
+}

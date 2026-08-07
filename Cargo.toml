@@ -6,7 +6,7 @@
 # - 暂不拆分独立 Git 仓库 / 不引入 submodule；
 #   当 API 出现外部使用者、发布节奏分化或独立维护需求时再拆仓迁移历史
 [workspace]
-members = ["crates/hmp-cli", "crates/hmp-core", "crates/hmp-desktop", "crates/hmp-mpris", "crates/hmp-player-gst", "crates/hmp-qqmusic-api", "crates/hmp-storage"]
+members = ["crates/hmp-cli", "crates/hmp-core", "crates/hmp-desktop", "crates/hmp-media", "crates/hmp-mpris", "crates/hmp-player-gst", "crates/hmp-qqmusic-api", "crates/hmp-storage"]
 resolver = "3"
 
 [workspace.package]
@@ -32,6 +32,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "brotli",
     "deflate",
     "rustls-tls",
+    "stream",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -48,6 +49,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 url = "2"
+hmp-core = { path = "crates/hmp-core" }
+hmp-storage = { path = "crates/hmp-storage" }
 
 # 仅测试用
 wiremock = "0.6"
