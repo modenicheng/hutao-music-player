@@ -26,18 +26,6 @@ fn page_and_theme_values_use_stable_wire_names() {
 }
 
 #[test]
-#[serial]
-fn app_starts_in_library_and_accepts_theme_modes() {
-    let ui = init_ui();
-    assert_eq!(ui.get_current_page(), "library");
-    assert_eq!(ui.get_theme_mode(), "system");
-    ui.set_theme_mode("light".into());
-    assert_eq!(ui.get_theme_mode(), "light");
-    ui.set_theme_mode("dark".into());
-    assert_eq!(ui.get_theme_mode(), "dark");
-}
-
-#[test]
 fn queue_event_contains_current_playing_flags() {
     let event = AppEvent::QueueUpdated(vec![UiQueueData {
         track_id: "mid-1".into(),
@@ -68,7 +56,18 @@ fn reload_lyrics_command_is_distinct_from_playback_commands() {
 #[test]
 #[serial]
 fn ui_bridge_integration() {
-    // 0) 登录按钮可点击（覆盖"登录无法点击"反馈）：扫描侧边栏底部注入点击
+    // 0) 初始路由和主题模式可由生成的 UI 属性读取和修改。
+    {
+        let ui = init_ui();
+        assert_eq!(ui.get_current_page(), "library");
+        assert_eq!(ui.get_theme_mode(), "system");
+        ui.set_theme_mode("light".into());
+        assert_eq!(ui.get_theme_mode(), "light");
+        ui.set_theme_mode("dark".into());
+        assert_eq!(ui.get_theme_mode(), "dark");
+    }
+
+    // 1) 登录按钮可点击（覆盖"登录无法点击"反馈）：扫描侧边栏底部注入点击
     {
         let ui = init_ui();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -101,7 +100,7 @@ fn ui_bridge_integration() {
             "login button not clickable at any scanned position"
         );
     }
-    // 1) 回调 → 命令
+    // 2) 回调 → 命令
     {
         let ui = init_ui();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -126,7 +125,7 @@ fn ui_bridge_integration() {
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::LoginStart));
     }
 
-    // 2) 搜索结果事件 → 列表
+    // 3) 搜索结果事件 → 列表
     {
         let ui = init_ui();
         let weak = ui.as_weak();
@@ -150,7 +149,7 @@ fn ui_bridge_integration() {
         assert_eq!(ui.get_songs().row_data(1).unwrap().artist, "周杰伦");
     }
 
-    // 3) Task 1 contract-only events are accepted until later UI mappings land.
+    // 4) Task 1 contract-only events are accepted until later UI mappings land.
     {
         let ui = init_ui();
         let weak = ui.as_weak();
@@ -177,7 +176,7 @@ fn ui_bridge_integration() {
         }
     }
 
-    // 4) 登录二维码事件 → 显示登录面板
+    // 5) 登录二维码事件 → 显示登录面板
     {
         let ui = init_ui();
         let weak = ui.as_weak();
@@ -199,7 +198,7 @@ fn ui_bridge_integration() {
         assert!(ui.get_show_login(), "login panel should show");
     }
 
-    // 5) 登录完成事件 → 更新用户
+    // 6) 登录完成事件 → 更新用户
     {
         let ui = init_ui();
         let weak = ui.as_weak();
