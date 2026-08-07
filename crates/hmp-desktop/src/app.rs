@@ -402,27 +402,35 @@ impl AppCore {
 
     fn queue_snapshot_for_state(&self, state: &PlaybackState) -> Vec<UiQueueData> {
         let current_track_id = state.current.as_ref().map(|track| track.id.as_ref());
+        self.queue_snapshot_with_playing(|index, item| {
+            index == self.queue_index
+                && current_track_id == Some(item.track.id.as_ref())
+                && state.status == PlaybackStatus::Playing
+        })
+    }
 
+    fn queue_content_snapshot(&self) -> Vec<UiQueueData> {
+        self.queue_snapshot_with_playing(|_, _| false)
+    }
+
+    fn queue_snapshot_with_playing(
+        &self,
+        is_playing: impl Fn(usize, &QueueItem) -> bool,
+    ) -> Vec<UiQueueData> {
         self.queue
             .iter()
             .enumerate()
-            .map(|(index, item)| {
-                let is_current = index == self.queue_index;
-                let matches_playback = current_track_id == Some(item.track.id.as_ref());
-                UiQueueData {
-                    track_id: item.track.id.to_string(),
-                    title: item.track.title.clone(),
-                    artist: item.track.artist_names(),
-                    duration: item
-                        .track
-                        .duration
-                        .map(|duration| format_secs(duration.as_secs_f32()))
-                        .unwrap_or_else(|| "--:--".into()),
-                    is_current,
-                    is_playing: is_current
-                        && matches_playback
-                        && state.status == PlaybackStatus::Playing,
-                }
+            .map(|(index, item)| UiQueueData {
+                track_id: item.track.id.to_string(),
+                title: item.track.title.clone(),
+                artist: item.track.artist_names(),
+                duration: item
+                    .track
+                    .duration
+                    .map(|duration| format_secs(duration.as_secs_f32()))
+                    .unwrap_or_else(|| "--:--".into()),
+                is_current: index == self.queue_index,
+                is_playing: is_playing(index, item),
             })
             .collect()
     }
@@ -636,10 +644,8 @@ impl AppCore {
         });
         self.current_lyrics = Some((item.mid.clone(), item.song_type));
         self.start_lyrics_load(item.mid, item.song_type);
-        let state = self.state_rx.borrow().clone();
-        self.last_queue_state = Some(queue_state_key(&state));
         if queue_direct_publication_needed(current_index, next, was_unresolved) {
-            let snapshot = self.queue_snapshot_for_state(&state);
+            let snapshot = self.queue_content_snapshot();
             let _ = self.events_tx.send(AppEvent::QueueUpdated(snapshot));
         }
     }
@@ -751,10 +757,8 @@ impl AppCore {
         let _ = self.events_tx.send(AppEvent::QueueUpdated(snapshot));
     }
 
-    fn publish_queue_snapshot(&mut self) {
-        let state = self.state_rx.borrow().clone();
-        self.last_queue_state = Some(queue_state_key(&state));
-        let snapshot = self.queue_snapshot_for_state(&state);
+    fn publish_queue_snapshot(&self) {
+        let snapshot = self.queue_content_snapshot();
         let _ = self.events_tx.send(AppEvent::QueueUpdated(snapshot));
     }
 

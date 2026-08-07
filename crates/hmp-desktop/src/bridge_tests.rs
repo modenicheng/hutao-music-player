@@ -7,7 +7,7 @@ use crate::AppWindow;
 use crate::app::{AppCommand, AppEvent, ThemeMode, UiLyricData, UiPage, UiQueueData, UiSongData};
 use crate::bridge::{
     bind_callbacks, bind_ui_state_callbacks, decode_png, handle_event, lyric_mid_matches,
-    lyrics_model, lyrics_model_at_position, queue_model, songs_model,
+    lyrics_model, lyrics_model_at_position, queue_model, songs_model, valid_model_index,
 };
 use crate::demo::{demo_recommendations, feature_matrix};
 
@@ -56,6 +56,13 @@ fn reload_lyrics_command_is_distinct_from_playback_commands() {
     ] {
         assert!(!matches!(playback_command, AppCommand::ReloadLyrics));
     }
+}
+
+#[test]
+fn generated_model_indices_are_validated_before_conversion() {
+    assert_eq!(valid_model_index(-1, 3), None);
+    assert_eq!(valid_model_index(3, 3), None);
+    assert_eq!(valid_model_index(2, 3), Some(2));
 }
 
 /// 全部窗口场景（testing backend 进程内单次初始化，官方建议单一 #[test]）。
@@ -145,13 +152,61 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert!(!ui.get_search_query_valid());
         ui.invoke_search_requested(" \t\n ".into());
         assert!(rx.try_recv().is_err(), "blank search must be ignored");
+        ui.set_songs(songs_model(vec![
+            UiSongData {
+                title: "one".into(),
+                artist: "artist".into(),
+                duration: "01:00".into(),
+            },
+            UiSongData {
+                title: "two".into(),
+                artist: "artist".into(),
+                duration: "02:00".into(),
+            },
+            UiSongData {
+                title: "three".into(),
+                artist: "artist".into(),
+                duration: "03:00".into(),
+            },
+        ]));
         ui.invoke_play_requested(2);
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::PlayIndex(2)));
+        ui.invoke_play_requested(-1);
+        ui.invoke_play_requested(3);
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid song indices must be ignored"
+        );
+
+        ui.set_queue(queue_model(vec![
+            UiQueueData {
+                track_id: "queue-0".into(),
+                title: "one".into(),
+                artist: "artist".into(),
+                duration: "01:00".into(),
+                is_current: true,
+                is_playing: false,
+            },
+            UiQueueData {
+                track_id: "queue-1".into(),
+                title: "two".into(),
+                artist: "artist".into(),
+                duration: "02:00".into(),
+                is_current: false,
+                is_playing: false,
+            },
+        ]));
         ui.invoke_play_queue_requested(1);
         assert!(matches!(
             rx.try_recv().unwrap(),
             AppCommand::PlayQueueIndex(1)
         ));
+        ui.invoke_play_queue_requested(-1);
+        ui.invoke_play_queue_requested(2);
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid queue indices must be ignored"
+        );
         ui.invoke_play_pause();
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::TogglePlay));
         ui.invoke_next_requested();
@@ -168,6 +223,12 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::LoginStart));
         ui.invoke_login_cancel();
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::LoginCancel));
+        ui.invoke_load_lyrics_requested();
+        assert!(
+            rx.try_recv().is_err(),
+            "empty lyric context must be ignored"
+        );
+        ui.set_current_track_id("queue-0".into());
         ui.invoke_load_lyrics_requested();
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::ReloadLyrics));
     }
@@ -225,6 +286,26 @@ fn app_starts_in_library_and_accepts_theme_modes() {
     {
         let ui = init_ui();
         ui.set_logged_in(true);
+        ui.set_user_name("account sentinel".into());
+        ui.set_queue(queue_model(vec![UiQueueData {
+            track_id: "queue sentinel".into(),
+            title: "queue title".into(),
+            artist: "queue artist".into(),
+            duration: "01:00".into(),
+            is_current: true,
+            is_playing: false,
+        }]));
+        ui.set_lyrics(lyrics_model(
+            vec![UiLyricData {
+                timestamp_ms: 1_000,
+                time: "00:01".into(),
+                text: "lyrics sentinel".into(),
+                translation: String::new(),
+            }],
+            0.0,
+        ));
+        ui.set_lyrics_state("error".into());
+        ui.set_lyrics_error_text("lyrics sentinel".into());
         ui.set_search_loading(true);
         ui.set_search_error_text("old error".into());
         let weak = ui.as_weak();
@@ -247,6 +328,14 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert_eq!(ui.get_songs().row_data(0).unwrap().title, "开始懂了");
         assert_eq!(ui.get_songs().row_data(1).unwrap().artist, "周杰伦");
         assert!(ui.get_logged_in());
+        assert_eq!(ui.get_user_name(), "account sentinel");
+        assert_eq!(
+            ui.get_queue().row_data(0).unwrap().track_id,
+            "queue sentinel"
+        );
+        assert_eq!(ui.get_lyrics().row_data(0).unwrap().text, "lyrics sentinel");
+        assert_eq!(ui.get_lyrics_state(), "error");
+        assert_eq!(ui.get_lyrics_error_text(), "lyrics sentinel");
         assert!(!ui.get_search_loading());
         assert!(ui.get_search_completed());
         assert_eq!(ui.get_search_error_text(), "");
@@ -263,6 +352,16 @@ fn app_starts_in_library_and_accepts_theme_modes() {
     {
         let ui = init_ui();
         let weak = ui.as_weak();
+        ui.set_logged_in(true);
+        ui.set_user_name("account sentinel".into());
+        ui.set_songs(songs_model(vec![UiSongData {
+            title: "search sentinel".into(),
+            artist: "artist".into(),
+            duration: "01:00".into(),
+        }]));
+        ui.set_lyrics_state("idle".into());
+        ui.set_current_page("library".into());
+        assert_eq!(ui.get_current_page(), "library");
         handle_event(
             &weak,
             AppEvent::QueueUpdated(vec![
@@ -285,6 +384,10 @@ fn app_starts_in_library_and_accepts_theme_modes() {
             ]),
         );
         assert_eq!(ui.get_queue().row_count(), 2);
+        assert!(ui.get_logged_in());
+        assert_eq!(ui.get_user_name(), "account sentinel");
+        assert_eq!(ui.get_songs().row_data(0).unwrap().title, "search sentinel");
+        assert_eq!(ui.get_lyrics_state(), "idle");
         let current = ui.get_queue().row_data(0).unwrap();
         assert_eq!(current.track_id, "mid-current");
         assert!(current.is_current);
@@ -294,6 +397,8 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert!(!next.is_playing);
 
         ui.set_search_error_text("search error remains isolated".into());
+        handle_event(&weak, AppEvent::LyricsLoading("".into()));
+        assert_eq!(ui.get_lyrics_state(), "idle");
         handle_event(&weak, AppEvent::LyricsLoading("mid-current".into()));
         assert_eq!(ui.get_lyrics_request_mid(), "mid-current");
         assert_eq!(ui.get_lyrics_state(), "loading");
@@ -371,6 +476,10 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert_eq!(ui.get_lyrics_state(), "empty");
         assert_eq!(ui.get_lyrics().row_count(), 0, "no fallback lyrics allowed");
         assert_eq!(ui.get_lyrics_error_text(), "");
+        assert!(ui.get_logged_in());
+        assert_eq!(ui.get_user_name(), "account sentinel");
+        assert_eq!(ui.get_songs().row_data(0).unwrap().title, "search sentinel");
+        assert_eq!(ui.get_queue().row_data(0).unwrap().track_id, "mid-current");
     }
 
     // 6) 登录二维码事件 → 显示登录面板
@@ -411,11 +520,54 @@ fn app_starts_in_library_and_accepts_theme_modes() {
     // 7) 登录完成事件 → 更新用户
     {
         let ui = init_ui();
+        ui.set_songs(songs_model(vec![UiSongData {
+            title: "search sentinel".into(),
+            artist: "artist".into(),
+            duration: "01:00".into(),
+        }]));
+        ui.set_search_error_text("search sentinel".into());
+        ui.set_queue(queue_model(vec![UiQueueData {
+            track_id: "queue sentinel".into(),
+            title: "queue".into(),
+            artist: "artist".into(),
+            duration: "01:00".into(),
+            is_current: true,
+            is_playing: false,
+        }]));
+        ui.set_lyrics(lyrics_model(
+            vec![UiLyricData {
+                timestamp_ms: 1_000,
+                time: "00:01".into(),
+                text: "lyric sentinel".into(),
+                translation: String::new(),
+            }],
+            0.0,
+        ));
+        ui.set_lyrics_state("loading".into());
+        ui.set_lyrics_request_mid("lyric sentinel".into());
         let weak = ui.as_weak();
         handle_event(&weak, AppEvent::LoginDone("10001".into()));
         assert!(ui.get_logged_in());
         assert_eq!(ui.get_user_name(), "10001");
         assert!(!ui.get_show_login());
+        assert_eq!(ui.get_songs().row_data(0).unwrap().title, "search sentinel");
+        assert_eq!(ui.get_search_error_text(), "search sentinel");
+        assert_eq!(
+            ui.get_queue().row_data(0).unwrap().track_id,
+            "queue sentinel"
+        );
+        assert_eq!(ui.get_lyrics().row_data(0).unwrap().text, "lyric sentinel");
+        assert_eq!(ui.get_lyrics_state(), "loading");
+        assert_eq!(ui.get_lyrics_request_mid(), "lyric sentinel");
+    }
+
+    // 8) AppCore events stop cleanly once the UI weak handle is stale.
+    {
+        let weak = {
+            let ui = init_ui();
+            ui.as_weak()
+        };
+        assert!(!handle_event(&weak, AppEvent::QueueUpdated(Vec::new())));
     }
 }
 

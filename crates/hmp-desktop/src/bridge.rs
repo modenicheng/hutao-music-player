@@ -23,20 +23,35 @@ pub fn bind_callbacks(
         if query.is_empty() {
             return;
         }
-        if let Some(ui) = weak.upgrade() {
-            ui.set_search_loading(true);
-            ui.set_search_completed(false);
-            ui.set_search_error_text("".into());
-        }
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        ui.set_search_loading(true);
+        ui.set_search_completed(false);
+        ui.set_search_error_text("".into());
         let _ = tx.send(AppCommand::Search(query.to_owned()));
     });
+    let weak = ui.as_weak();
     let tx = cmd_tx.clone();
     ui.on_play_requested(move |idx| {
-        let _ = tx.send(AppCommand::PlayIndex(idx as usize));
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let Some(index) = valid_model_index(idx, ui.get_songs().row_count()) else {
+            return;
+        };
+        let _ = tx.send(AppCommand::PlayIndex(index));
     });
+    let weak = ui.as_weak();
     let tx = cmd_tx.clone();
     ui.on_play_queue_requested(move |idx| {
-        let _ = tx.send(AppCommand::PlayQueueIndex(idx as usize));
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let Some(index) = valid_model_index(idx, ui.get_queue().row_count()) else {
+            return;
+        };
+        let _ = tx.send(AppCommand::PlayQueueIndex(index));
     });
     let tx = cmd_tx.clone();
     ui.on_play_pause(move || {
@@ -66,10 +81,22 @@ pub fn bind_callbacks(
     ui.on_login_cancel(move || {
         let _ = tx.send(AppCommand::LoginCancel);
     });
+    let weak = ui.as_weak();
     let tx = cmd_tx.clone();
     ui.on_load_lyrics_requested(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if ui.get_current_track_id().trim().is_empty() {
+            return;
+        }
         let _ = tx.send(AppCommand::ReloadLyrics);
     });
+}
+
+pub(crate) fn valid_model_index(index: i32, row_count: usize) -> Option<usize> {
+    let index = usize::try_from(index).ok()?;
+    (index < row_count).then_some(index)
 }
 
 /// 绑定仅影响本地 UI 状态的回调。
@@ -153,32 +180,36 @@ pub fn lyrics_model(lines: Vec<UiLyricData>, position_ms: f32) -> ModelRc<crate:
     ))
 }
 
+pub fn update_lyrics_active_line(model: &ModelRc<crate::UiLyric>, position_ms: f32) {
+    let active_index = (0..model.row_count())
+        .filter_map(|index| model.row_data(index).map(|line| (index, line)))
+        .filter(|(_, line)| line.timestamp_ms <= position_ms)
+        .map(|(index, _)| index)
+        .last();
+    for index in 0..model.row_count() {
+        let Some(mut line) = model.row_data(index) else {
+            continue;
+        };
+        line.is_active = Some(index) == active_index;
+        model.set_row_data(index, line);
+    }
+}
+
 pub fn lyrics_model_at_position(
     model: &ModelRc<crate::UiLyric>,
     position_ms: f32,
 ) -> ModelRc<crate::UiLyric> {
-    let rows = (0..model.row_count())
-        .filter_map(|index| model.row_data(index))
-        .collect::<Vec<_>>();
-    let active_index = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line.timestamp_ms <= position_ms)
-        .map(|(index, _)| index)
-        .last();
-    ModelRc::new(VecModel::from(
-        rows.into_iter()
-            .enumerate()
-            .map(|(index, mut line)| {
-                line.is_active = Some(index) == active_index;
-                line
-            })
+    let updated = ModelRc::new(VecModel::from(
+        (0..model.row_count())
+            .filter_map(|index| model.row_data(index))
             .collect::<Vec<_>>(),
-    ))
+    ));
+    update_lyrics_active_line(&updated, position_ms);
+    updated
 }
 
 pub(crate) fn lyric_mid_matches(request_mid: &str, event_mid: &str) -> bool {
-    !request_mid.is_empty() && request_mid == event_mid
+    !request_mid.trim().is_empty() && !event_mid.trim().is_empty() && request_mid == event_mid
 }
 
 /// Library/recommendation data -> Slint model.
@@ -244,7 +275,7 @@ pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
             ui.set_queue(queue_model(items));
         }
         AppEvent::LyricsLoading(mid) => {
-            if mid.is_empty() {
+            if mid.trim().is_empty() {
                 return true;
             }
             ui.set_lyrics_request_mid(mid.into());

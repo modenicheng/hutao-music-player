@@ -36,11 +36,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 初始登录状态
+    // Root state defaults are explicit so startup does not depend on generated properties.
+    ui.set_current_page("library".into());
+    ui.set_theme_mode("system".into());
     ui.set_logged_in(core.logged_in());
     ui.set_user_name(core.user_name().into());
     ui.set_login_status("".into());
     ui.set_playback(playback_default());
+    ui.set_current_track_id("".into());
     ui.set_library_items(bridge::library_model(Vec::new()));
     ui.set_recommend_items(bridge::library_model(demo::demo_recommendations()));
     ui.set_feature_statuses(bridge::feature_model(demo::feature_matrix()));
@@ -48,11 +51,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_search_query_valid(false);
     ui.set_search_loading(false);
     ui.set_search_error_text("".into());
-    ui.set_queue(bridge::queue_model(core.queue_snapshot()));
+    ui.set_queue(bridge::queue_model(Vec::new()));
     ui.set_lyrics(bridge::lyrics_model(Vec::new(), 0.0));
     ui.set_lyrics_state("idle".into());
     ui.set_lyrics_request_mid("".into());
     ui.set_lyrics_error_text("".into());
+    // Publish the real initial queue before AppCore is moved into its task.
+    ui.set_queue(bridge::queue_model(core.queue_snapshot()));
 
     // 播放状态订阅（core 随后 move 进事件循环）
     let state_rx = core.player.subscribe_state();
@@ -92,10 +97,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 position_text: pos_text.into(),
                 duration_text: dur_text.into(),
             });
-            ui.set_lyrics(bridge::lyrics_model_at_position(
-                &ui.get_lyrics(),
-                s.position.as_secs_f32() * 1000.0,
-            ));
+            ui.set_current_track_id(
+                s.current
+                    .as_ref()
+                    .map(|track| track.id.to_string())
+                    .unwrap_or_default()
+                    .into(),
+            );
+            bridge::update_lyrics_active_line(&ui.get_lyrics(), s.position.as_secs_f32() * 1000.0);
         }
     });
 

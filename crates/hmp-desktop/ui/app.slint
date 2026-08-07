@@ -38,6 +38,7 @@ export component AppWindow inherits Window {
     in-out property <bool> search-completed: false;
     in-out property <string> search-error-text;
     in property <UiPlayback> playback;
+    in property <string> current-track-id;
     in property <bool> logged-in;
     in property <string> user-name;
     in-out property <bool> show-login;
@@ -85,55 +86,66 @@ export component AppWindow inherits Window {
 
             Rectangle { width: 1px; background: Theme.divider; }
 
-            LibraryPage {
-                visible: root.current-page == "library";
-                library-items: root.library-items;
-                playback: root.playback;
-                cover-image: root.cover-image;
-                navigate-to-search => { root.navigate-requested("search"); }
-            }
+            Rectangle {
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
 
-            RecommendPage {
-                visible: root.current-page == "recommend";
-                recommend-items: root.recommend-items;
-            }
+                if root.current-page == "library": LibraryPage {
+                    width: parent.width;
+                    height: parent.height;
+                    library-items: root.library-items;
+                    playback: root.playback;
+                    cover-image: root.cover-image;
+                    navigate-to-search => { root.navigate-requested("search"); }
+                }
 
-            SearchPage {
-                visible: root.current-page == "search";
-                songs: root.songs;
-                search-text <=> root.search-text;
-                loading: root.search-loading;
-                completed: root.search-completed;
-                error-text: root.search-error-text;
-                query-valid: root.search-query-valid;
-                query-edited(text) => { root.search-query-edited(text); }
-                search-requested(text) => { root.search-requested(text); }
-                retry-requested => { root.search-requested(root.search-text); }
-                play-requested(idx) => { root.play-requested(idx); }
-            }
+                if root.current-page == "recommend": RecommendPage {
+                    width: parent.width;
+                    height: parent.height;
+                    recommend-items: root.recommend-items;
+                }
 
-            QueuePage {
-                visible: root.current-page == "queue";
-                queue: root.queue;
-                play-requested(idx) => { root.play-queue-requested(idx); }
-                navigate-to-search => { root.navigate-requested("search"); }
-            }
+                if root.current-page == "search": SearchPage {
+                    width: parent.width;
+                    height: parent.height;
+                    songs: root.songs;
+                    search-text <=> root.search-text;
+                    loading: root.search-loading;
+                    completed: root.search-completed;
+                    error-text: root.search-error-text;
+                    query-valid: root.search-query-valid;
+                    query-edited(text) => { root.search-query-edited(text); }
+                    search-requested(text) => { root.search-requested(text); }
+                    retry-requested => { root.search-requested(root.search-text); }
+                    play-requested(idx) => { root.play-requested(idx); }
+                }
 
-            LyricsPage {
-                visible: root.current-page == "lyrics";
-                lyrics: root.lyrics;
-                lyrics-state: root.lyrics-state;
-                current-title: root.playback.title;
-                current-artist: root.playback.artist;
-                error-text: root.lyrics-error-text;
-                load-lyrics-requested => { root.load-lyrics-requested(); }
-            }
+                if root.current-page == "queue": QueuePage {
+                    width: parent.width;
+                    height: parent.height;
+                    queue: root.queue;
+                    play-requested(idx) => { root.play-queue-requested(idx); }
+                    navigate-to-search => { root.navigate-requested("search"); }
+                }
 
-            SettingsPage {
-                visible: root.current-page == "settings";
-                feature-statuses: root.feature-statuses;
-                theme-mode: root.theme-mode;
-                theme-requested(mode) => { root.theme-requested(mode); }
+                if root.current-page == "lyrics": LyricsPage {
+                    width: parent.width;
+                    height: parent.height;
+                    lyrics: root.lyrics;
+                    lyrics-state: root.lyrics-state;
+                    current-title: root.playback.title;
+                    current-artist: root.playback.artist;
+                    error-text: root.lyrics-error-text;
+                    load-lyrics-requested => { root.load-lyrics-requested(); }
+                }
+
+                if root.current-page == "settings": SettingsPage {
+                    width: parent.width;
+                    height: parent.height;
+                    feature-statuses: root.feature-statuses;
+                    theme-mode: root.theme-mode;
+                    theme-requested(mode) => { root.theme-requested(mode); }
+                }
             }
         }
 
