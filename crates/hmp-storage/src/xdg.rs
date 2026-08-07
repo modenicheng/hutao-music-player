@@ -30,9 +30,11 @@ pub fn cache_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_ENV_LOCK;
 
     #[test]
     fn dirs_follow_env_override() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         let guard = TempGuard::new();
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", "/tmp/hmp-test-config");
@@ -47,6 +49,7 @@ mod tests {
 
     #[test]
     fn dirs_fallback_to_home() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
         let guard = TempGuard::new();
         unsafe {
             std::env::remove_var("XDG_CONFIG_HOME");

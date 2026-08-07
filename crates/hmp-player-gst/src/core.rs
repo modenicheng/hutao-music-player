@@ -239,11 +239,14 @@ async fn drive(
                         state.loop_mode = mode;
                         let _ = state_tx.send(state.clone());
                     }
-                    // Next/Previous/SetShuffle/LoadAndPlay：由上层应用核心消费，
+                    PlayerCommand::SetShuffle(val) => {
+                        state.shuffle = val;
+                        let _ = state_tx.send(state.clone());
+                    }
+                    // Next/Previous/LoadAndPlay：由上层应用核心消费，
                     // 播放器核心不直接处理（无队列语义）
                     PlayerCommand::Next
                     | PlayerCommand::Previous
-                    | PlayerCommand::SetShuffle(_)
                     | PlayerCommand::LoadAndPlay(_) => {}
                 }
             }
@@ -284,7 +287,15 @@ async fn drive(
                                 }
                             }
                             PlayerState::Playing => PlaybackStatus::Playing,
-                            PlayerState::Paused => PlaybackStatus::Paused,
+                            PlayerState::Paused => {
+                                // GStreamer 播放器初始即为 Paused；未加载内容时
+                                // 应按 MPRIS 语义报告 Stopped，而非 Paused。
+                                if state.current.is_some() {
+                                    PlaybackStatus::Paused
+                                } else {
+                                    PlaybackStatus::Stopped
+                                }
+                            }
                             PlayerState::Buffering => PlaybackStatus::Buffering,
                             _ => state.status,
                         };
@@ -394,6 +405,38 @@ mod tests {
         core.set_loop_mode(LoopMode::Track);
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(rx.borrow().loop_mode, LoopMode::Track);
+        core.shutdown();
+    }
+
+    #[tokio::test]
+    async fn shuffle_is_published() {
+        let core = PlayerCore::new_with_sink(Some("fakeaudiosink")).expect("init");
+        let rx = core.subscribe_state();
+        core.command_sender()
+            .send(PlayerCommand::SetShuffle(true))
+            .ok();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(rx.borrow().shuffle);
+        core.command_sender()
+            .send(PlayerCommand::SetShuffle(false))
+            .ok();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!rx.borrow().shuffle);
+        core.shutdown();
+    }
+
+    #[tokio::test]
+    async fn idle_state_is_not_paused() {
+        // GStreamer 初始状态为 Paused，但未加载内容时必须报告 Stopped/Empty，
+        // 否则 MPRIS 启动即显示 Paused。
+        let core = PlayerCore::new_with_sink(Some("fakeaudiosink")).expect("init");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let s = core.subscribe_state().borrow().clone();
+        assert!(
+            matches!(s.status, PlaybackStatus::Empty | PlaybackStatus::Stopped),
+            "idle status must not be Paused, got {:?}",
+            s.status
+        );
         core.shutdown();
     }
 

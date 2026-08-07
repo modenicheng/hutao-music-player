@@ -41,13 +41,17 @@ pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedValue)> {
         ));
     }
     if !track.artists.is_empty() {
-        let artists: Vec<Value> = track
-            .artists
-            .iter()
-            .map(|a| Value::from(a.name.clone()))
-            .collect();
+        // 必须为 as（字符串数组）：Vec<String> 签名 s；
+        // Vec<Value> 会产生 av（变体数组），部分客户端（Quickshell/DMS）无法解析。
+        let artists: Vec<String> = track.artists.iter().map(|a| a.name.clone()).collect();
         meta.push((
             "xesam:artist",
+            OwnedValue::try_from(Value::from(artists.clone())).expect("arr"),
+        ));
+        // xesam:albumArtist —— 数据源无独立专辑歌手时回退为歌曲歌手
+        // （QQ 音乐详情不提供专辑歌手字段，多数 MPRIS 客户端依赖该键展示）。
+        meta.push((
+            "xesam:albumArtist",
             OwnedValue::try_from(Value::from(artists)).expect("arr"),
         ));
     }
@@ -61,6 +65,12 @@ pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedValue)> {
         meta.push((
             "mpris:artUrl",
             OwnedValue::try_from(Value::from(cover.url.clone())).expect("str"),
+        ));
+    }
+    if let Some(url) = &track.url {
+        meta.push((
+            "xesam:url",
+            OwnedValue::try_from(Value::from(url.clone())).expect("str"),
         ));
     }
     if let Some(duration) = track.duration {
@@ -115,6 +125,7 @@ mod tests {
             cover: Some(CoverRef {
                 url: "https://example.com/cover.jpg".into(),
             }),
+            url: Some("https://example.com/stream.mp3".into()),
             qualities: vec![AudioQuality::Flac],
         }
     }
@@ -141,8 +152,19 @@ mod tests {
         assert!(map.contains_key("mpris:trackid"));
         assert!(map.contains_key("xesam:title"));
         assert!(map.contains_key("xesam:artist"));
+        assert!(map.contains_key("xesam:albumArtist"));
         assert!(map.contains_key("xesam:album"));
         assert!(map.contains_key("mpris:artUrl"));
+        assert!(map.contains_key("xesam:url"));
+        assert_eq!(
+            map["xesam:url"].downcast_ref::<String>().map(|s| s.clone()),
+            Ok("https://example.com/stream.mp3".to_owned())
+        );
+        let album_artists = map["xesam:albumArtist"]
+            .downcast_ref::<zvariant::Array>()
+            .unwrap();
+        assert_eq!(album_artists.len(), 1);
+        assert_eq!(album_artists.get::<&str>(0).unwrap().unwrap(), "孙燕姿");
         assert_eq!(
             map["mpris:length"].downcast_ref::<u64>().unwrap(),
             257_000_000

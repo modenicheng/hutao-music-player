@@ -15,3 +15,9 @@ pub mod xdg;
 
 pub use credential::{BackendKind, CredentialStore, FileStore, SecretServiceStore};
 pub use xdg::{cache_dir, config_dir, data_dir};
+
+/// 串行化修改进程环境变量的测试（XDG/HOME/HMP_CREDENTIAL_BACKEND）。
+///
+/// 这些测试直接改动全局 env，并行运行时会互相干扰（预先存在的竞态）。
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -153,6 +153,8 @@ pub struct Track {
     pub duration: Option<std::time::Duration>,
     /// 封面。
     pub cover: Option<CoverRef>,
+    /// 当前可播放 URL（取流成功后填充，供 MPRIS `xesam:url`）。
+    pub url: Option<String>,
     /// 可用音质（从高到低）。
     pub qualities: Vec<AudioQuality>,
 }
@@ -167,6 +169,7 @@ impl Track {
             album: None,
             duration: None,
             cover: None,
+            url: None,
             qualities: Vec::new(),
         }
     }
@@ -244,6 +247,15 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let back: Track = serde_json::from_str(&json).unwrap();
         assert_eq!(back, t);
+    }
+
+    #[test]
+    fn track_carries_playable_url() {
+        let mut t = sample_track();
+        assert!(t.url.is_none());
+        t.url = Some("https://example.com/stream.mp3".into());
+        let back: Track = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back.url.as_deref(), Some("https://example.com/stream.mp3"));
     }
 
     #[test]

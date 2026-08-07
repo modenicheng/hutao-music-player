@@ -912,7 +912,24 @@ DesktopEntry: hmp
 
 缓存失败时可以回退远程 URL，但本地文件应作为默认方案。
 
-### 9.4 测试命令
+### 9.4 命令路由与能力
+
+- `hmp-cli play` 与桌面端均注册 `org.mpris.MediaPlayer2.hmp`。
+- 桌面端 MPRIS `Next`/`Previous` 路由到队列核心（`start_play_relative`），
+  其余命令转发 `PlayerCore`；循环（`LoopStatus`）与随机（`Shuffle`）
+  写入单一状态源 `PlaybackState`，队列逻辑读取同一处。
+- `CanGoNext`/`CanGoPrevious` 由队列核心经 `PlaybackCapabilities` 发布
+  （队列非空即 true）；CLI 无队列语义，能力恒为 false。
+
+### 9.5 Metadata 编码
+
+- `xesam:artist`/`xesam:albumArtist` 必须是 `as`（字符串数组）：
+  用 `Vec<String>` 构造（`Vec<Value>` 会产出 `av` 变体数组，
+  Quickshell/DMS 等严格客户端无法解析，显示为“未知”）。
+- `xesam:albumArtist` 在无独立专辑歌手数据时回退为歌曲歌手。
+- `xesam:url` 使用当前播放流地址（`Track.url`）。
+
+### 9.6 测试命令
 
 ```bash
 playerctl -l

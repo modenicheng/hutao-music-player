@@ -20,4 +20,4 @@ pub use auth::CredentialSummary;
 pub use error::HmpError;
 pub use id::{AlbumId, ArtistId, PlaylistId, TrackId};
 pub use media::{Album, AlbumRef, ArtistRef, AudioQuality, CoverRef, Playlist, Track};
-pub use player::{LoopMode, PlaybackState, PlaybackStatus, PlayerCommand};
+pub use player::{LoopMode, PlaybackCapabilities, PlaybackState, PlaybackStatus, PlayerCommand};

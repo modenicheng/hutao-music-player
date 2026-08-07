@@ -58,6 +58,8 @@ pub struct PlaybackState {
     pub volume: f64,
     /// 循环模式。
     pub loop_mode: LoopMode,
+    /// 是否随机播放。
+    pub shuffle: bool,
     /// 是否支持 Seek。
     pub can_seek: bool,
     /// 缓冲进度（0.0..=1.0，None=未缓冲）。
@@ -73,10 +75,20 @@ impl Default for PlaybackState {
             duration: None,
             volume: 1.0,
             loop_mode: LoopMode::None,
+            shuffle: false,
             can_seek: false,
             buffering: None,
         }
     }
+}
+
+/// 播放控制能力（MPRIS `CanGoNext`/`CanGoPrevious` 等由上层队列核心发布）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaybackCapabilities {
+    /// 是否存在下一首。
+    pub can_go_next: bool,
+    /// 是否存在上一首。
+    pub can_go_previous: bool,
 }
 
 /// `Duration` 以秒（u64）序列化，便于跨进程传递。
@@ -137,8 +149,16 @@ mod tests {
         assert_eq!(s.position, std::time::Duration::ZERO);
         assert_eq!(s.volume, 1.0);
         assert_eq!(s.loop_mode, LoopMode::None);
+        assert!(!s.shuffle);
         assert!(!s.can_seek);
         assert!(s.buffering.is_none());
+    }
+
+    #[test]
+    fn capabilities_default_is_false() {
+        let caps = PlaybackCapabilities::default();
+        assert!(!caps.can_go_next);
+        assert!(!caps.can_go_previous);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use hmp_core::{LoopMode, PlaybackState, PlaybackStatus, PlayerCommand};
+use hmp_core::{LoopMode, PlaybackCapabilities, PlaybackState, PlaybackStatus, PlayerCommand};
 use tokio::sync::{mpsc, watch};
 use zbus::Connection;
 use zbus::fdo::Properties;
@@ -290,6 +290,18 @@ impl MprisService {
         cmd_tx: mpsc::UnboundedSender<PlayerCommand>,
         state_rx: watch::Receiver<PlaybackState>,
     ) -> Result<Self, MprisError> {
+        Self::start_with_capabilities(cmd_tx, state_rx, None).await
+    }
+
+    /// 启动 MPRIS 服务，并同步队列能力（`CanGoNext`/`CanGoPrevious`）。
+    ///
+    /// `capabilities_rx` 由上层队列核心发布（`None` 时能力恒为 false，
+    /// 适用于无队列语义的调用方，如 CLI）。
+    pub async fn start_with_capabilities(
+        cmd_tx: mpsc::UnboundedSender<PlayerCommand>,
+        state_rx: watch::Receiver<PlaybackState>,
+        capabilities_rx: Option<watch::Receiver<PlaybackCapabilities>>,
+    ) -> Result<Self, MprisError> {
         let connection = zbus::connection::Builder::session()?
             .name(BUS_NAME.to_owned())?
             .serve_at(
@@ -322,7 +334,7 @@ impl MprisService {
             .build()
             .await?;
 
-        let sync_task = tokio::spawn(sync_loop(connection.clone(), state_rx));
+        let sync_task = tokio::spawn(sync_loop(connection.clone(), state_rx, capabilities_rx));
 
         Ok(Self {
             connection,
@@ -336,17 +348,68 @@ impl MprisService {
     }
 }
 
-/// 状态同步循环：`PlaybackState` → MPRIS 属性 + PropertiesChanged/Seeked。
-async fn sync_loop(connection: Connection, mut state_rx: watch::Receiver<PlaybackState>) {
+/// 状态同步循环：`PlaybackState` → MPRIS 属性 + PropertiesChanged/Seeked；
+/// `PlaybackCapabilities` → CanGoNext/CanGoPrevious。
+async fn sync_loop(
+    connection: Connection,
+    mut state_rx: watch::Receiver<PlaybackState>,
+    capabilities_rx: Option<watch::Receiver<PlaybackCapabilities>>,
+) {
     // 首次立即同步
     {
         let state = state_rx.borrow().clone();
         publish_state(&connection, &state).await;
     }
-    while state_rx.changed().await.is_ok() {
-        let state = state_rx.borrow().clone();
-        publish_state(&connection, &state).await;
+    let Some(mut capabilities_rx) = capabilities_rx else {
+        while state_rx.changed().await.is_ok() {
+            let state = state_rx.borrow().clone();
+            publish_state(&connection, &state).await;
+        }
+        return;
+    };
+    {
+        let caps = capabilities_rx.borrow().clone();
+        publish_capabilities(&connection, &caps).await;
     }
+    loop {
+        tokio::select! {
+            changed = state_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let state = state_rx.borrow().clone();
+                publish_state(&connection, &state).await;
+            }
+            changed = capabilities_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let caps = capabilities_rx.borrow().clone();
+                publish_capabilities(&connection, &caps).await;
+            }
+        }
+    }
+}
+
+/// 把队列能力发布到 MPRIS `CanGoNext`/`CanGoPrevious`。
+async fn publish_capabilities(connection: &Connection, caps: &PlaybackCapabilities) {
+    let server = connection.object_server();
+    let Ok(player_ref) = server.interface::<_, MprisPlayer>(OBJECT_PATH).await else {
+        return;
+    };
+    let mut changed: HashMap<&str, Value> = HashMap::new();
+    {
+        let mut iface = player_ref.get_mut().await;
+        if iface.can_go_next != caps.can_go_next {
+            iface.can_go_next = caps.can_go_next;
+            changed.insert("CanGoNext", Value::Bool(caps.can_go_next));
+        }
+        if iface.can_go_previous != caps.can_go_previous {
+            iface.can_go_previous = caps.can_go_previous;
+            changed.insert("CanGoPrevious", Value::Bool(caps.can_go_previous));
+        }
+    }
+    emit_properties_changed(player_ref, changed).await;
 }
 
 /// 把一份状态发布到 MPRIS 接口。

@@ -6,7 +6,10 @@
 
 use std::time::Duration;
 
-use hmp_core::{AudioQuality, HmpError, PlaybackState, PlaybackStatus, Track, TrackId};
+use hmp_core::{
+    AlbumId, AlbumRef, ArtistId, ArtistRef, AudioQuality, CoverRef, HmpError, PlaybackState,
+    PlaybackStatus, Track, TrackId,
+};
 use hmp_player_gst::{LoadRequest, PlayerCore};
 use hmp_qqmusic_api::{
     QqMusicClient, SongFileType,
@@ -108,24 +111,53 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let uri = format!("https://isure.stream.qqmusic.qq.com/{purl}",);
 
-    // 组装领域曲目
+    // 组装领域曲目（详情含多歌手/专辑/封面，供 MPRIS metadata 使用）
+    let singers = detail
+        .track
+        .singer
+        .iter()
+        .filter(|s| !s.name.is_empty())
+        .map(|s| ArtistRef {
+            id: ArtistId::new(if s.mid.is_empty() {
+                s.id.to_string()
+            } else {
+                s.mid.clone()
+            }),
+            name: s.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let album = (!detail.track.album.name.is_empty()).then(|| AlbumRef {
+        id: AlbumId::new(detail.track.album.mid.clone()),
+        name: detail.track.album.name.clone(),
+    });
+    let cover = (!detail.track.album.pmid.is_empty()).then(|| CoverRef {
+        url: format!(
+            "https://y.gtimg.cn/music/photo_new/T002R300x300M000{}.jpg",
+            detail.track.album.pmid
+        ),
+    });
     let track = Track {
         id: TrackId::new(track_id),
         title,
-        artists: Vec::new(),
-        album: None,
+        artists: singers,
+        album,
         duration: detail
             .track
             .interval
             .checked_mul(1000)
             .and_then(|ms| u64::try_from(ms).ok())
             .map(Duration::from_millis),
-        cover: None,
+        cover,
+        url: Some(uri.clone()),
         qualities: vec![quality_from_file_type(file_type)],
     };
 
     // 启动播放器
     let core = PlayerCore::new().map_err(|e| e.to_string())?;
+    // 注册 MPRIS（bus 名 org.mpris.MediaPlayer2.hmp，供状态栏/playerctl 显示）
+    let mpris = hmp_mpris::MprisService::start(core.command_sender(), core.subscribe_state())
+        .await
+        .ok();
     let state_rx = core.subscribe_state();
     core.load(LoadRequest {
         track,
@@ -137,6 +169,8 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("正在播放… 按 Ctrl+C 停止");
     print_progress(state_rx).await?;
 
+    // 释放 MPRIS bus 名并停止播放器
+    drop(mpris);
     core.shutdown();
     Ok(())
 }

@@ -106,6 +106,7 @@ async fn main() {
         }),
         duration: Some(Duration::from_secs(5)),
         cover: None,
+        url: None,
         qualities: vec![AudioQuality::Mp3_128],
     };
     core.load(LoadRequest {

@@ -252,6 +252,7 @@ mod tests {
 
     #[test]
     fn backend_kind_from_env_defaults_to_secret_service() {
+        let _lock = crate::TEST_ENV_LOCK.lock().unwrap();
         let guard = EnvGuard;
         unsafe {
             std::env::remove_var("HMP_CREDENTIAL_BACKEND");
@@ -262,6 +263,7 @@ mod tests {
 
     #[test]
     fn backend_kind_from_env_file_override() {
+        let _lock = crate::TEST_ENV_LOCK.lock().unwrap();
         let guard = EnvGuard;
         unsafe {
             std::env::set_var("HMP_CREDENTIAL_BACKEND", "file");

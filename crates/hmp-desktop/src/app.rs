@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hmp_core::{
-    AudioQuality, LoopMode, PlaybackState, PlaybackStatus, PlayerCommand, Track, TrackId,
+    AudioQuality, LoopMode, PlaybackCapabilities, PlaybackState, PlaybackStatus, PlayerCommand,
+    Track, TrackId,
 };
 use hmp_mpris::MprisService;
 use hmp_player_gst::{LoadRequest, PlayerCore};
@@ -187,10 +188,25 @@ pub struct QueueItem {
     pub song_type: i64,
 }
 
+/// MPRIS 媒体命令路由结果。
+#[derive(Debug, PartialEq, Eq)]
+enum MediaCommandRoute {
+    /// 队列相对移动（Next=1 / Previous=-1）。
+    QueueRelative(isize),
+    /// 转发 `PlayerCore`。
+    Forward,
+}
+
 struct ResolvedSongDetail {
     media_mid: String,
     duration: Option<u64>,
     song_type: i64,
+    /// (歌手 mid, 歌手名)
+    singers: Vec<(String, String)>,
+    /// (专辑 mid, 专辑名)
+    album: Option<(String, String)>,
+    /// 专辑封面媒体 ID（用于构造 CDN 封面 URL）
+    cover_pmid: Option<String>,
 }
 
 #[derive(Default)]
@@ -368,10 +384,13 @@ pub struct AppCore {
     songs: Vec<hmp_qqmusic_api::protocol::search::QuickSong>,
     queue: Vec<QueueItem>,
     queue_index: usize,
-    loop_mode: LoopMode,
-    shuffle: bool,
     last_queue_state: Option<(String, bool)>,
     current_lyrics: Option<(String, i64)>,
+    // MPRIS → 播放器/队列命令（由 MPRIS 服务发出，AppCore 路由：
+    // Next/Previous 走队列，其余转发 PlayerCore）
+    media_cmd_rx: mpsc::UnboundedReceiver<PlayerCommand>,
+    // 队列能力（CanGoNext/CanGoPrevious）→ MPRIS
+    capabilities_tx: watch::Sender<PlaybackCapabilities>,
     search_requests: NetworkRequestState,
     search_results_tx: mpsc::UnboundedSender<SearchResult>,
     search_results_rx: mpsc::UnboundedReceiver<SearchResult>,
@@ -414,10 +433,16 @@ impl AppCore {
         let (lyric_results_tx, lyric_results_rx) = mpsc::unbounded_channel();
         let (search_results_tx, search_results_rx) = mpsc::unbounded_channel();
         let (play_results_tx, play_results_rx) = mpsc::unbounded_channel();
+        // MPRIS 媒体命令通道：Next/Previous 等由 AppCore 路由到队列逻辑，
+        // 播放级命令转发 PlayerCore（PlayerCore 自身忽略 Next/Previous/Shuffle）。
+        let (media_cmd_tx, media_cmd_rx) = mpsc::unbounded_channel();
+        // 队列能力（CanGoNext/CanGoPrevious）→ MPRIS
+        let (capabilities_tx, capabilities_rx) = watch::channel(PlaybackCapabilities::default());
         let mpris = tokio::runtime::Handle::current()
-            .block_on(MprisService::start(
-                player.command_sender(),
+            .block_on(MprisService::start_with_capabilities(
+                media_cmd_tx,
                 player.subscribe_state(),
+                Some(capabilities_rx),
             ))
             .ok();
         Ok(Self {
@@ -431,10 +456,10 @@ impl AppCore {
             songs: Vec::new(),
             queue: Vec::new(),
             queue_index: 0,
-            loop_mode: LoopMode::None,
-            shuffle: false,
             last_queue_state: Some(initial_queue_state),
             current_lyrics: None,
+            media_cmd_rx,
+            capabilities_tx,
             search_requests: NetworkRequestState::default(),
             search_results_tx,
             search_results_rx,
@@ -506,6 +531,10 @@ impl AppCore {
                         AppCommand::Quit => break,
                     }
                 }
+                media_cmd = self.media_cmd_rx.recv() => {
+                    let Some(cmd) = media_cmd else { continue };
+                    self.handle_media_command(cmd);
+                }
                 result = self.search_results_rx.recv() => {
                     if let Some(result) = result {
                         self.finish_search(result);
@@ -543,6 +572,40 @@ impl AppCore {
         self.search_requests.cancel();
         self.play_requests.cancel();
         self.cancel_login_session();
+    }
+
+    // -----------------------------------------------------------------
+    // MPRIS 媒体命令路由
+    // -----------------------------------------------------------------
+
+    /// 路由 MPRIS 命令：队列级（Next/Previous）走队列逻辑；
+    /// 其余（播放/暂停/跳转/音量/循环/随机）转发 `PlayerCore`，
+    /// 循环与随机写入单一状态源 `PlaybackState`。
+    fn handle_media_command(&mut self, cmd: PlayerCommand) {
+        match Self::route_media_command(&cmd) {
+            MediaCommandRoute::QueueRelative(delta) => self.start_play_relative(delta),
+            MediaCommandRoute::Forward => {
+                let _ = self.player.command_sender().send(cmd).ok();
+            }
+        }
+    }
+
+    /// MPRIS 命令路由决策（纯函数，便于测试）。
+    fn route_media_command(cmd: &PlayerCommand) -> MediaCommandRoute {
+        match cmd {
+            PlayerCommand::Next => MediaCommandRoute::QueueRelative(1),
+            PlayerCommand::Previous => MediaCommandRoute::QueueRelative(-1),
+            _ => MediaCommandRoute::Forward,
+        }
+    }
+
+    /// 发布队列能力（CanGoNext/CanGoPrevious）。
+    fn sync_capabilities(&self) {
+        let caps = PlaybackCapabilities {
+            can_go_next: !self.queue.is_empty(),
+            can_go_previous: !self.queue.is_empty(),
+        };
+        let _ = self.capabilities_tx.send(caps);
     }
 
     // -----------------------------------------------------------------
@@ -622,10 +685,14 @@ impl AppCore {
         if self.queue.is_empty() {
             return;
         }
+        // 循环/随机单一状态源：由 PlayerCore 状态承载（MPRIS 写入同一处）
+        let state = self.state_rx.borrow().clone();
+        let loop_mode = state.loop_mode;
+        let shuffle = state.shuffle;
         let current = self.pending_queue_index.unwrap_or(self.queue_index);
-        let next = if self.loop_mode == LoopMode::Track {
+        let next = if loop_mode == LoopMode::Track {
             current
-        } else if self.shuffle && delta > 0 && self.queue.len() > 1 {
+        } else if shuffle && delta > 0 && self.queue.len() > 1 {
             let seed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_nanos() as usize)
@@ -680,7 +747,9 @@ impl AppCore {
         };
         self.queue_index = resolved.index;
         *queue_item = resolved.item;
-        let item = queue_item.clone();
+        let mut item = queue_item.clone();
+        // 供 MPRIS `xesam:url` 使用
+        item.track.url = Some(resolved.uri.clone());
         let quality = quality_from_file_type(resolved.file_type);
         self.player.load(LoadRequest {
             uri: resolved.uri,
@@ -689,6 +758,7 @@ impl AppCore {
         });
         self.current_lyrics = Some((item.mid.clone(), item.song_type));
         self.start_lyrics_load(item.mid.clone(), item.song_type);
+        self.sync_capabilities();
         self.publish_queue_snapshot();
         tracing::info!(mid = item.mid, title = item.track.title, "playing");
     }
@@ -928,6 +998,7 @@ fn queue_item_from_search_song(song: &hmp_qqmusic_api::protocol::search::QuickSo
             album: None,
             duration: None,
             cover: None,
+            url: None,
             qualities: Vec::new(),
         },
         mid: song.mid.clone(),
@@ -947,6 +1018,28 @@ async fn resolve_queue_item(client: &QqMusicClient, item: &mut QueueItem) -> Res
         item.media_mid = detail.media_mid;
         item.song_type = detail.song_type;
         item.track.duration = detail.duration.map(Duration::from_secs);
+        // 用详情丰富元数据（MPRIS：xesam:artist/album、mpris:artUrl）
+        if !detail.singers.is_empty() {
+            item.track.artists = detail
+                .singers
+                .iter()
+                .map(|(id, name)| hmp_core::ArtistRef {
+                    id: hmp_core::ArtistId::new(id.clone()),
+                    name: name.clone(),
+                })
+                .collect();
+        }
+        if let Some((album_id, album_name)) = detail.album {
+            item.track.album = Some(hmp_core::AlbumRef {
+                id: hmp_core::AlbumId::new(album_id),
+                name: album_name,
+            });
+        }
+        if let Some(pmid) = detail.cover_pmid {
+            item.track.cover = Some(hmp_core::CoverRef {
+                url: format!("https://y.gtimg.cn/music/photo_new/T002R300x300M000{pmid}.jpg"),
+            });
+        }
     }
     Ok(())
 }
@@ -957,10 +1050,34 @@ async fn client_music_detail(
 ) -> Result<ResolvedSongDetail, hmp_qqmusic_api::QqMusicError> {
     let song_api = SongApi::new(client);
     let detail = song_api.get_detail(mid).await?;
+    let singers = detail
+        .track
+        .singer
+        .iter()
+        .filter(|s| !s.name.is_empty())
+        .map(|s| {
+            let id = if s.mid.is_empty() {
+                s.id.to_string()
+            } else {
+                s.mid.clone()
+            };
+            (id, s.name.clone())
+        })
+        .collect::<Vec<_>>();
+    let album = (!detail.track.album.name.is_empty()).then(|| {
+        (
+            detail.track.album.mid.clone(),
+            detail.track.album.name.clone(),
+        )
+    });
+    let cover_pmid = (!detail.track.album.pmid.is_empty()).then(|| detail.track.album.pmid.clone());
     Ok(ResolvedSongDetail {
         media_mid: detail.track.file.media_mid.clone(),
         duration: u64::try_from(detail.track.interval).ok(),
         song_type: detail.track.type_,
+        singers,
+        album,
+        cover_pmid,
     })
 }
 
@@ -1172,6 +1289,37 @@ mod tests {
         state.cancel();
         assert!(second_token.is_cancelled());
         assert!(!state.accepts(second_generation));
+    }
+
+    #[test]
+    fn media_command_routing_routes_queue_and_forwards_player_commands() {
+        use hmp_core::PlayerCommand;
+        // Next/Previous → 队列相对移动
+        assert_eq!(
+            AppCore::route_media_command(&PlayerCommand::Next),
+            MediaCommandRoute::QueueRelative(1)
+        );
+        assert_eq!(
+            AppCore::route_media_command(&PlayerCommand::Previous),
+            MediaCommandRoute::QueueRelative(-1)
+        );
+        // 其余全部转发 PlayerCore
+        for cmd in [
+            PlayerCommand::Play,
+            PlayerCommand::Pause,
+            PlayerCommand::TogglePlay,
+            PlayerCommand::Stop,
+            PlayerCommand::Seek(std::time::Duration::from_secs(30)),
+            PlayerCommand::SetVolume(0.5),
+            PlayerCommand::SetLoopMode(hmp_core::LoopMode::Track),
+            PlayerCommand::SetShuffle(true),
+        ] {
+            assert_eq!(
+                AppCore::route_media_command(&cmd),
+                MediaCommandRoute::Forward,
+                "{cmd:?} should be forwarded to PlayerCore"
+            );
+        }
     }
 
     #[test]
