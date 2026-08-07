@@ -8,14 +8,9 @@ import { RecommendPage, UiLibrary } from "recommend-page.slint";
 import { SearchPage, UiSong } from "search-page.slint";
 import { QueuePage, UiQueue } from "queue-page.slint";
 import { LyricsPage, UiLyric } from "lyrics-page.slint";
+import { SettingsPage, UiFeature } from "settings-page.slint";
 
-export { UiLibrary, UiPlayback, UiSong, UiQueue, UiLyric }
-
-export struct UiFeature {
-    name: string,
-    status: string,
-    detail: string,
-}
+export { UiLibrary, UiPlayback, UiSong, UiQueue, UiLyric, UiFeature }
 
 export component AppWindow inherits Window {
     title: "胡桃音乐";
@@ -134,9 +129,11 @@ export component AppWindow inherits Window {
                 load-lyrics-requested => { root.load-lyrics-requested(); }
             }
 
-            Rectangle {
+            SettingsPage {
                 visible: root.current-page == "settings";
-                background: Theme.background;
+                feature-statuses: root.feature-statuses;
+                theme-mode: root.theme-mode;
+                theme-requested(mode) => { root.theme-requested(mode); }
             }
         }
 

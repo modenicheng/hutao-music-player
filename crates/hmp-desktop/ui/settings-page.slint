@@ -1,0 +1,160 @@
+import { ListView } from "std-widgets.slint";
+import { FeatureRow } from "primitives.slint";
+import { Theme } from "theme.slint";
+
+export struct UiFeature {
+    name: string,
+    status: string,
+    detail: string,
+}
+
+component ThemeOption inherits Rectangle {
+    in property <string> value;
+    in property <string> label;
+    in property <string> selected-value;
+    callback selected(string);
+
+    height: 38px;
+    border-radius: 6px;
+    background: root.selected-value == root.value ? Theme.accent-muted
+        : option-touch.has-hover ? Theme.surface-hover : transparent;
+    border-width: root.selected-value == root.value ? 1px : 0px;
+    border-color: Theme.accent;
+    accessible-role: radio-button;
+    accessible-label: root.label;
+    accessible-action-default => { root.selected(root.value); }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 9px;
+
+        Rectangle {
+            width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: root.selected-value == root.value ? Theme.accent : Theme.divider;
+            background: transparent;
+
+            Rectangle {
+                x: 4px;
+                y: 4px;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Theme.accent;
+                visible: root.selected-value == root.value;
+            }
+        }
+
+        Text {
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+
+    option-touch := TouchArea {
+        clicked => { root.selected(root.value); }
+    }
+}
+
+export component SettingsPage inherits Rectangle {
+    in property <[UiFeature]> feature-statuses;
+    in-out property <string> theme-mode;
+    callback theme-requested(string);
+
+    background: Theme.background;
+
+    VerticalLayout {
+        padding-left: Theme.content-padding;
+        padding-right: Theme.content-padding;
+        padding-top: 28px;
+        padding-bottom: 22px;
+        spacing: 18px;
+
+        Text {
+            text: "设置";
+            color: Theme.text-primary;
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        Rectangle {
+            height: 110px;
+            background: Theme.surface;
+            border-radius: 8px;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                Text {
+                    text: "外观";
+                    color: Theme.text-primary;
+                    font-size: 16px;
+                    font-weight: 700;
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    ThemeOption {
+                        value: "system";
+                        label: "跟随系统";
+                        selected-value: root.theme-mode;
+                        selected(value) => { root.theme-requested(value); }
+                    }
+                    ThemeOption {
+                        value: "light";
+                        label: "浅色";
+                        selected-value: root.theme-mode;
+                        selected(value) => { root.theme-requested(value); }
+                    }
+                    ThemeOption {
+                        value: "dark";
+                        label: "深色";
+                        selected-value: root.theme-mode;
+                        selected(value) => { root.theme-requested(value); }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            height: 32px;
+            spacing: 10px;
+            Text {
+                text: "桌面 UI 功能状态";
+                color: Theme.text-primary;
+                font-size: 16px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Text {
+                text: "当前实现范围";
+                color: Theme.text-secondary;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 300px;
+            background: Theme.surface;
+            border-radius: 8px;
+
+            ListView {
+                width: parent.width;
+                height: parent.height;
+                for item in root.feature-statuses : FeatureRow {
+                    name: item.name;
+                    status: item.status;
+                    detail: item.detail;
+                }
+            }
+        }
+    }
+}

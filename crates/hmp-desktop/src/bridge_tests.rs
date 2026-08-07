@@ -17,7 +17,9 @@ fn init_ui() -> AppWindow {
     INIT.call_once(|| {
         i_slint_backend_testing::init_integration_test_with_system_time();
     });
-    AppWindow::new().expect("create window")
+    let ui = AppWindow::new().expect("create window");
+    ui.set_feature_statuses(crate::bridge::feature_model(feature_matrix()));
+    ui
 }
 
 #[test]
@@ -79,6 +81,17 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         ui.invoke_theme_requested("light".into());
         assert_eq!(ui.get_theme_mode(), "light");
         ui.invoke_theme_requested("bad-theme".into());
+        assert_eq!(ui.get_theme_mode(), "light");
+
+        ui.set_current_page("settings".into());
+        assert_eq!(ui.get_feature_statuses().row_count(), 7);
+        assert_eq!(
+            ui.get_feature_statuses().row_data(5).unwrap().status,
+            "开发中 / 演示数据"
+        );
+        ui.invoke_theme_requested("light".into());
+        assert_eq!(ui.get_theme_mode(), "light");
+        ui.invoke_theme_requested("invalid".into());
         assert_eq!(ui.get_theme_mode(), "light");
     }
 
@@ -461,22 +474,27 @@ fn demo_recommendations_are_local_and_marked_as_demo() {
 
 #[test]
 fn feature_matrix_uses_approved_statuses() {
-    let statuses = feature_matrix()
+    let matrix = feature_matrix()
         .into_iter()
-        .map(|item| (item.name, item.status))
+        .map(|item| (item.name, item.status, item.detail))
         .collect::<Vec<_>>();
+    assert_eq!(matrix.len(), 7);
     assert_eq!(
-        statuses,
+        matrix,
         [
-            ("登录", "已接入"),
-            ("搜索", "已接入"),
-            ("播放", "已接入"),
-            ("队列展示", "已接入"),
-            ("歌词展示", "部分接入"),
-            ("推荐内容", "开发中 / 演示数据"),
-            ("收藏与资料库同步", "开发中"),
+            ("登录", "已接入", "QQ 音乐扫码登录与凭据状态"),
+            ("搜索", "已接入", "使用 QQ Music Rust API"),
+            (
+                "播放控制",
+                "已接入",
+                "播放、暂停、上一首、下一首、Seek、音量"
+            ),
+            ("队列展示", "已接入", "展示 AppCore 当前真实队列"),
+            ("歌词展示", "部分接入", "已接入接口与空状态，按真实返回展示"),
+            ("推荐内容", "开发中 / 演示数据", "当前使用本地演示数据"),
+            ("收藏与资料库同步", "开发中", "尚未接入账号云端同步"),
         ]
-        .map(|(name, status)| (name.into(), status.into()))
+        .map(|(name, status, detail)| (name.into(), status.into(), detail.into()))
     );
 }
 
