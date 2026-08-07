@@ -9,7 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 base64.workspace = true
-futures-util = "0.3"
+futures-util.workspace = true
 hmp-core.workspace = true
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
 hmp-storage = { path = "../hmp-storage" }

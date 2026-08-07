@@ -40,30 +40,20 @@ pub async fn prepare_playable_at(
         return file_uri(&cached);
     }
 
-    // ---- 3. 下载 ----
+    // ---- 3. 下载 + 尾部检测 ----
     let tmp = tmp_path(cache_root, &key);
     // 清理可能残留的临时文件
     let _ = std::fs::remove_file(&tmp);
 
-    download_to_file(url, &tmp, progress).await?;
-
-    // ---- 4. 尾部检测 ----
-    let total_len = std::fs::metadata(&tmp)?.len() as usize;
-    let strip_len = {
-        let tail_size = 0x40.min(total_len);
-        let mut tail = vec![0u8; tail_size];
-        let file = std::fs::File::open(&tmp)?;
-        use std::io::{Read, Seek, SeekFrom};
-        let mut file = std::io::BufReader::new(file);
-        file.seek(SeekFrom::End(-(tail_size as i64)))?;
-        file.read_exact(&mut tail)?;
-        detect_footer(total_len, &tail).map(|f| match f {
-            hmp_qqmusic_api::algorithms::qmc2::Footer::QTag { audio_len } => audio_len as usize,
-            hmp_qqmusic_api::algorithms::qmc2::Footer::V1 { audio_len } => audio_len as usize,
-        })
+    let strip_len = match download_and_detect_strip(url, &tmp, progress).await {
+        Ok(sl) => sl,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
     };
 
-    // ---- 5. 解密 + 写入 ----
+    // ---- 4. 解密 + 写入 ----
     let final_base = final_path(cache_root, &key, ext_guess);
     let result = decrypt_and_write(&tmp, &final_base, ekey, strip_len).await;
 
@@ -143,14 +133,17 @@ pub async fn prepare_playable_at(
 
 /// 根据 URL 后缀猜测音频扩展名。
 fn ext_guess_from_url(url: &str) -> &'static str {
-    let lower = url.to_lowercase();
+    // 取最后一个路径段（去除查询参数）
+    let path_segment = url.split('?').next().unwrap_or(url);
+    let file_name = path_segment.rsplit('/').next().unwrap_or(path_segment);
+    let lower = file_name.to_lowercase();
     for (suffix, ext) in [
         (".mflac", "flac"),
         (".mgg", "ogg"),
         (".mmp4", "m4a"),
         (".mnac", "m4a"),
     ] {
-        if lower.contains(suffix) {
+        if lower.ends_with(suffix) {
             return ext;
         }
     }
@@ -161,6 +154,32 @@ fn ext_guess_from_url(url: &str) -> &'static str {
 fn file_uri(path: &Path) -> Result<String> {
     let abs = std::fs::canonicalize(path)?;
     Ok(format!("file://{}", abs.display()))
+}
+
+/// 下载文件并检测尾部，返回 strip_len。
+/// 任一步失败均向上传播错误；调用者应负责删除 tmp。
+async fn download_and_detect_strip(
+    url: &str,
+    tmp: &Path,
+    progress: Option<&tokio::sync::watch::Sender<Option<f64>>>,
+) -> Result<Option<usize>> {
+    download_to_file(url, tmp, progress).await?;
+
+    let total_len = std::fs::metadata(tmp)?.len() as usize;
+    let tail_size = 0x40.min(total_len);
+    let mut tail = vec![0u8; tail_size];
+    {
+        let file = std::fs::File::open(tmp)?;
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::io::BufReader::new(file);
+        file.seek(SeekFrom::End(-(tail_size as i64)))?;
+        file.read_exact(&mut tail)?;
+    }
+
+    Ok(detect_footer(total_len, &tail).map(|f| match f {
+        hmp_qqmusic_api::algorithms::qmc2::Footer::QTag { audio_len } => audio_len as usize,
+        hmp_qqmusic_api::algorithms::qmc2::Footer::V1 { audio_len } => audio_len as usize,
+    }))
 }
 
 /// 下载文件到临时路径，支持进度报告。
@@ -619,6 +638,41 @@ mod tests {
         );
         // 最终值为 Some(1.0)
         assert_eq!(values.last(), Some(&Some(1.0)), "should end with Some(1.0)");
+
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn prepare_cleans_tmp_on_download_failure() {
+        let root = test_cache_root().join("clean_tmp");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/test.mflac", server.uri());
+        let ekey = generate_ekey(b"0123456789abcdefghij");
+
+        let result = prepare_playable_at(&root, &url, Some(&ekey), None).await;
+
+        match result {
+            Err(MediaError::HttpStatus(500)) => {}
+            other => panic!("expected Err(HttpStatus(500)), got {other:?}"),
+        }
+
+        // 检查无残留 .tmp 文件
+        let has_tmp = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().extension().is_some_and(|ext| ext == "tmp"));
+        assert!(
+            !has_tmp,
+            "no .tmp files should remain after download failure"
+        );
 
         cleanup(&root);
     }

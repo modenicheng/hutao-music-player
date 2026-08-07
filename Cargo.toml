@@ -25,6 +25,7 @@ slint = "1.17"
 zbus = "5"
 bytes = "1"
 flate2 = "1"
+futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "cookies",
