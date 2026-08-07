@@ -80,6 +80,13 @@ pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
         AppEvent::SearchDone(songs) => {
             ui.set_songs(songs_model(songs));
         }
+        AppEvent::SearchFailed(_)
+        | AppEvent::QueueUpdated(_)
+        | AppEvent::LyricsLoading(_)
+        | AppEvent::LyricsLoaded { .. }
+        | AppEvent::LyricsFailed { .. } => {
+            // Task 1 defines these contracts; later tasks map them to UI state.
+        }
         AppEvent::LoginQr(png) => match decode_png(&png) {
             Ok(img) => {
                 ui.set_qr_image(img);

@@ -4,9 +4,7 @@ use serial_test::serial;
 use slint::{ComponentHandle, Model};
 
 use crate::AppWindow;
-use crate::app::{
-    AppCommand, AppEvent, ThemeMode, UiPage, UiQueueData, UiSongData,
-};
+use crate::app::{AppCommand, AppEvent, ThemeMode, UiLyricData, UiPage, UiQueueData, UiSongData};
 use crate::bridge::{bind_callbacks, decode_png, handle_event, songs_model};
 
 /// 初始化 testing backend（进程内仅一次）。
@@ -139,7 +137,34 @@ fn ui_bridge_integration() {
         assert_eq!(ui.get_songs().row_data(1).unwrap().artist, "周杰伦");
     }
 
-    // 3) 登录二维码事件 → 显示登录面板
+    // 3) Task 1 contract-only events are accepted until later UI mappings land.
+    {
+        let ui = init_ui();
+        let weak = ui.as_weak();
+        let events = [
+            AppEvent::SearchFailed("network error".into()),
+            AppEvent::QueueUpdated(Vec::new()),
+            AppEvent::LyricsLoading("mid-1".into()),
+            AppEvent::LyricsLoaded {
+                mid: "mid-1".into(),
+                lines: vec![UiLyricData {
+                    timestamp_ms: 0,
+                    time: "00:00".into(),
+                    text: "line".into(),
+                    translation: String::new(),
+                }],
+            },
+            AppEvent::LyricsFailed {
+                mid: "mid-1".into(),
+                message: "network error".into(),
+            },
+        ];
+        for event in events {
+            assert!(handle_event(&weak, event));
+        }
+    }
+
+    // 4) 登录二维码事件 → 显示登录面板
     {
         let ui = init_ui();
         let weak = ui.as_weak();
@@ -161,7 +186,7 @@ fn ui_bridge_integration() {
         assert!(ui.get_show_login(), "login panel should show");
     }
 
-    // 4) 登录完成事件 → 更新用户
+    // 5) 登录完成事件 → 更新用户
     {
         let ui = init_ui();
         let weak = ui.as_weak();
