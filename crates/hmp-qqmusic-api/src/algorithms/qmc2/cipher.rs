@@ -6,7 +6,7 @@
 use super::key::{Qmc2Error, key_from_ref, parse_ekey};
 
 /// QMC2 流密码 trait。
-pub trait Qmc2Cipher {
+pub trait Qmc2Cipher: Send + Sync {
     /// 解密从 `offset` 开始的 `buf` 字节（原地修改）。
     fn decrypt(&self, offset: usize, buf: &mut [u8]);
 }

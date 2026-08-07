@@ -12,6 +12,7 @@ slint-build = "1.17"
 
 [dependencies]
 hmp-core = { path = "../hmp-core" }
+hmp-media = { path = "../hmp-media" }
 hmp-mpris = { path = "../hmp-mpris" }
 hmp-player-gst = { path = "../hmp-player-gst" }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }

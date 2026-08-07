@@ -13,6 +13,7 @@ use hmp_core::{
     AudioQuality, LoopMode, PlaybackCapabilities, PlaybackState, PlaybackStatus, PlayerCommand,
     Track, TrackId,
 };
+use hmp_media;
 use hmp_mpris::MprisService;
 use hmp_player_gst::{LoadRequest, PlayerCore};
 use hmp_qqmusic_api::{
@@ -945,7 +946,7 @@ async fn resolve_play_request(
                 .ok_or_else(|| format!("search index out of range: {index}"))?;
             let mut item = queue_item_from_search_song(song);
             resolve_queue_item(client, &mut item).await?;
-            let (file_type, uri) = resolve_stream(
+            let (file_type, uri, ekey) = resolve_stream(
                 client,
                 credential,
                 &item.mid,
@@ -954,6 +955,12 @@ async fn resolve_play_request(
             )
             .await
             .ok_or_else(|| format!("all qualities unavailable for {}", item.mid))?;
+            let uri = match &ekey {
+                Some(key) => hmp_media::prepare_playable(&uri, Some(key), None)
+                    .await
+                    .map_err(|e| format!("QMC2 decrypt failed for {}: {e}", item.mid))?,
+                None => uri,
+            };
             item.track.qualities = vec![quality_from_file_type(file_type)];
             Ok(ResolvedPlayback {
                 index,
@@ -965,7 +972,7 @@ async fn resolve_play_request(
         }
         PlayRequest::Queue { index, mut item } => {
             resolve_queue_item(client, &mut item).await?;
-            let (file_type, uri) = resolve_stream(
+            let (file_type, uri, ekey) = resolve_stream(
                 client,
                 credential,
                 &item.mid,
@@ -974,6 +981,12 @@ async fn resolve_play_request(
             )
             .await
             .ok_or_else(|| format!("all qualities unavailable for {}", item.mid))?;
+            let uri = match &ekey {
+                Some(key) => hmp_media::prepare_playable(&uri, Some(key), None)
+                    .await
+                    .map_err(|e| format!("QMC2 decrypt failed for {}: {e}", item.mid))?,
+                None => uri,
+            };
             item.track.qualities = vec![quality_from_file_type(file_type)];
             Ok(ResolvedPlayback {
                 index,
@@ -1082,13 +1095,14 @@ async fn client_music_detail(
 }
 
 /// 音质回退取流：Master → HiRes → Atmos → FLAC → AAC → 320 → 128。
+/// 返回 `(file_type, https_uri, optional_ekey)`；加密格式携带 ekey 供解密。
 async fn resolve_stream(
     client: &QqMusicClient,
     credential: Option<&Credential>,
     mid: &str,
     media_mid: &str,
     song_type: i64,
-) -> Option<(SongFileType, String)> {
+) -> Option<(SongFileType, String, Option<String>)> {
     let song_api = SongApi::new(client);
     let info = SongFileInfo {
         mid: mid.to_owned(),
@@ -1100,12 +1114,6 @@ async fn resolve_stream(
         let Some(file_type) = quality_to_file_type(quality.clone()) else {
             continue;
         };
-        // 加密格式（.mflac/.mgg/.mmp4 等）需客户端解密，当前播放器不支持，
-        // 视为不可用继续回退（docs/PROJECT.md §7.3 质量回退）。
-        if file_type.is_encrypted {
-            tracing::debug!(quality = ?quality, "skip encrypted format (not playable)");
-            continue;
-        }
         match song_api
             .get_song_urls(std::slice::from_ref(&info), file_type, credential)
             .await
@@ -1113,9 +1121,17 @@ async fn resolve_stream(
             Ok(response) => {
                 for item in &response.data {
                     if item.result == 0 && !item.purl.is_empty() {
+                        let ekey = file_type
+                            .is_encrypted
+                            .then(|| item.ekey.clone())
+                            .filter(|k| !k.is_empty());
+                        if file_type.is_encrypted && ekey.as_deref().map_or(true, str::is_empty) {
+                            tracing::debug!(quality = ?quality, "encrypted stream without ekey");
+                            continue;
+                        }
                         let uri = format!("https://isure.stream.qqmusic.qq.com/{}", item.purl);
                         tracing::info!(quality = ?quality, "stream resolved");
-                        return Some((file_type, uri));
+                        return Some((file_type, uri, ekey));
                     }
                 }
             }
