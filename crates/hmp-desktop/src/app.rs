@@ -480,38 +480,7 @@ impl AppCore {
     }
 
     fn queue_snapshot_for_state(&self, state: &PlaybackState) -> Vec<UiQueueData> {
-        let current_track_id = state.current.as_ref().map(|track| track.id.as_ref());
-        self.queue_snapshot_with_playing(|index, item| {
-            index == self.queue_index
-                && current_track_id == Some(item.track.id.as_ref())
-                && state.status == PlaybackStatus::Playing
-        })
-    }
-
-    fn queue_content_snapshot(&self) -> Vec<UiQueueData> {
-        self.queue_snapshot_with_playing(|_, _| false)
-    }
-
-    fn queue_snapshot_with_playing(
-        &self,
-        is_playing: impl Fn(usize, &QueueItem) -> bool,
-    ) -> Vec<UiQueueData> {
-        self.queue
-            .iter()
-            .enumerate()
-            .map(|(index, item)| UiQueueData {
-                track_id: item.track.id.to_string(),
-                title: item.track.title.clone(),
-                artist: item.track.artist_names(),
-                duration: item
-                    .track
-                    .duration
-                    .map(|duration| format_secs(duration.as_secs_f32()))
-                    .unwrap_or_else(|| "--:--".into()),
-                is_current: index == self.queue_index,
-                is_playing: is_playing(index, item),
-            })
-            .collect()
+        queue_snapshot_for_state(&self.queue, self.queue_index, state)
     }
 
     /// 事件循环（消费命令及后台登录结果）。
@@ -778,7 +747,8 @@ impl AppCore {
     }
 
     fn publish_queue_snapshot(&self) {
-        let snapshot = self.queue_content_snapshot();
+        let state = self.state_rx.borrow().clone();
+        let snapshot = self.queue_snapshot_for_state(&state);
         let _ = self.events_tx.send(AppEvent::QueueUpdated(snapshot));
     }
 
@@ -1036,6 +1006,32 @@ fn queue_item_at(queue: &[QueueItem], index: usize) -> Option<QueueItem> {
     queue.get(index).cloned()
 }
 
+fn queue_snapshot_for_state(
+    queue: &[QueueItem],
+    queue_index: usize,
+    state: &PlaybackState,
+) -> Vec<UiQueueData> {
+    let current_track_id = state.current.as_ref().map(|track| track.id.as_ref());
+    queue
+        .iter()
+        .enumerate()
+        .map(|(index, item)| UiQueueData {
+            track_id: item.track.id.to_string(),
+            title: item.track.title.clone(),
+            artist: item.track.artist_names(),
+            duration: item
+                .track
+                .duration
+                .map(|duration| format_secs(duration.as_secs_f32()))
+                .unwrap_or_else(|| "--:--".into()),
+            is_current: index == queue_index,
+            is_playing: index == queue_index
+                && current_track_id == Some(item.track.id.as_ref())
+                && state.status == PlaybackStatus::Playing,
+        })
+        .collect()
+}
+
 fn queue_publication_changed(
     last_queue_state: &mut Option<(String, bool)>,
     key: (String, bool),
@@ -1203,6 +1199,27 @@ mod tests {
             &mut last_queue_state,
             direct_update
         ));
+    }
+
+    #[test]
+    fn direct_snapshot_preserves_playing_state_when_watcher_key_is_unchanged() {
+        let queue = vec![QueueItem {
+            track: Track::new(TrackId::new("mid-1"), "First"),
+            mid: "mid-1".into(),
+            media_mid: "media-mid-1".into(),
+            song_type: 0,
+        }];
+        let state = PlaybackState {
+            status: PlaybackStatus::Playing,
+            current: Some(queue[0].track.clone()),
+            ..PlaybackState::default()
+        };
+        let key = queue_state_key(&state);
+        let mut last_queue_state = Some(key.clone());
+
+        assert!(!queue_publication_changed(&mut last_queue_state, key));
+        let snapshot = queue_snapshot_for_state(&queue, 0, &state);
+        assert!(snapshot[0].is_playing);
     }
 
     #[test]
