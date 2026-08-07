@@ -58,12 +58,13 @@ fn reload_lyrics_command_is_distinct_from_playback_commands() {
 /// 全部窗口场景（testing backend 进程内单次初始化，官方建议单一 #[test]）。
 #[test]
 #[serial]
-fn app_starts_in_library_and_search_done_replaces_results_without_touching_login_state() {
+fn app_starts_in_library_and_accepts_theme_modes() {
     // 0) 初始路由和主题模式可由生成的 UI 属性读取和修改。
     {
         let ui = init_ui();
         assert_eq!(ui.get_current_page(), "library");
         assert_eq!(ui.get_theme_mode(), "system");
+        assert!(!ui.get_search_completed());
         ui.set_theme_mode("light".into());
         assert_eq!(ui.get_theme_mode(), "light");
         ui.set_theme_mode("dark".into());
@@ -120,9 +121,11 @@ fn app_starts_in_library_and_search_done_replaces_results_without_touching_login
         bind_callbacks(&ui, tx);
         ui.invoke_search_query_edited("  开始懂了  ".into());
         assert!(ui.get_search_query_valid());
+        ui.set_search_completed(true);
         ui.invoke_search_requested("  开始懂了  ".into());
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::Search(k) if k == "开始懂了"));
         assert!(ui.get_search_loading());
+        assert!(!ui.get_search_completed());
         assert_eq!(ui.get_search_error_text(), "");
         ui.invoke_search_query_edited(" \t\n ".into());
         assert!(!ui.get_search_query_valid());
@@ -148,7 +151,56 @@ fn app_starts_in_library_and_search_done_replaces_results_without_touching_login
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::LoginCancel));
     }
 
-    // 3) 搜索结果事件 → 列表
+    // 3) 加载期间，旧搜索结果行的指针操作不能发出播放命令。
+    {
+        let ui = init_ui();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        bind_callbacks(&ui, tx);
+        ui.window().set_size(slint::PhysicalSize::new(820, 560));
+        ui.set_current_page("search".into());
+        ui.set_songs(songs_model(vec![UiSongData {
+            title: "开始懂了".into(),
+            artist: "孙燕姿".into(),
+            duration: "04:30".into(),
+        }]));
+
+        let mut row_position = None;
+        'scan: for y in (120..=500).step_by(10) {
+            for x in (240..=800).step_by(10) {
+                let position = slint::LogicalPosition::new(x as f32, y as f32);
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                        position,
+                        button: slint::platform::PointerEventButton::Left,
+                    });
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                        position,
+                        button: slint::platform::PointerEventButton::Left,
+                    });
+                if matches!(rx.try_recv(), Ok(AppCommand::PlayIndex(0))) {
+                    row_position = Some(position);
+                    break 'scan;
+                }
+            }
+        }
+        let position = row_position.expect("rendered search result row is clickable");
+
+        ui.set_search_loading(true);
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                position,
+                button: slint::platform::PointerEventButton::Left,
+            });
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                position,
+                button: slint::platform::PointerEventButton::Left,
+            });
+        assert!(rx.try_recv().is_err(), "loading row emitted play callback");
+    }
+
+    // 4) 搜索结果事件 → 列表和完成状态
     {
         let ui = init_ui();
         ui.set_logged_in(true);
@@ -175,15 +227,18 @@ fn app_starts_in_library_and_search_done_replaces_results_without_touching_login
         assert_eq!(ui.get_songs().row_data(1).unwrap().artist, "周杰伦");
         assert!(ui.get_logged_in());
         assert!(!ui.get_search_loading());
+        assert!(ui.get_search_completed());
         assert_eq!(ui.get_search_error_text(), "");
 
+        ui.set_search_completed(false);
         handle_event(&weak, AppEvent::SearchFailed("network error".into()));
         assert_eq!(ui.get_songs().row_count(), 2, "failure preserves results");
         assert!(!ui.get_search_loading());
+        assert!(ui.get_search_completed());
         assert_eq!(ui.get_search_error_text(), "network error");
     }
 
-    // 4) Task 1 contract-only events are accepted until later UI mappings land.
+    // 5) Task 1 contract-only events are accepted until later UI mappings land.
     {
         let ui = init_ui();
         let weak = ui.as_weak();
@@ -210,7 +265,7 @@ fn app_starts_in_library_and_search_done_replaces_results_without_touching_login
         }
     }
 
-    // 5) 登录二维码事件 → 显示登录面板
+    // 6) 登录二维码事件 → 显示登录面板
     {
         let ui = init_ui();
         let weak = ui.as_weak();
@@ -245,7 +300,7 @@ fn app_starts_in_library_and_search_done_replaces_results_without_touching_login
         assert!(ui.get_show_login(), "backdrop click must not cancel login");
     }
 
-    // 6) 登录完成事件 → 更新用户
+    // 7) 登录完成事件 → 更新用户
     {
         let ui = init_ui();
         let weak = ui.as_weak();

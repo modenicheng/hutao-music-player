@@ -25,6 +25,7 @@ pub fn bind_callbacks(
         }
         if let Some(ui) = weak.upgrade() {
             ui.set_search_loading(true);
+            ui.set_search_completed(false);
             ui.set_search_error_text("".into());
         }
         let _ = tx.send(AppCommand::Search(query.to_owned()));
@@ -151,10 +152,12 @@ pub fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
         AppEvent::SearchDone(songs) => {
             ui.set_songs(songs_model(songs));
             ui.set_search_loading(false);
+            ui.set_search_completed(true);
             ui.set_search_error_text("".into());
         }
         AppEvent::SearchFailed(message) => {
             ui.set_search_loading(false);
+            ui.set_search_completed(true);
             ui.set_search_error_text(message.into());
         }
         AppEvent::QueueUpdated(_)

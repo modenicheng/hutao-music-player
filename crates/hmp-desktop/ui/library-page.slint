@@ -1,4 +1,4 @@
-import { ListView } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 import { CoverArt, DevelopmentBanner, EmptyState } from "primitives.slint";
 import { Theme } from "theme.slint";
 import { UiPlayback } from "player-bar.slint";
@@ -12,127 +12,137 @@ export component LibraryPage inherits Rectangle {
 
     background: Theme.background;
 
-    VerticalLayout {
-        padding-left: Theme.content-padding;
-        padding-right: Theme.content-padding;
-        padding-top: 28px;
-        padding-bottom: 22px;
-        spacing: 16px;
+    ScrollView {
+        width: parent.width;
+        height: parent.height;
+        viewport-width: self.visible-width;
+        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
-        Text {
-            text: "资料库";
-            color: Theme.text-primary;
-            font-size: 28px;
-            font-weight: 700;
-        }
+        VerticalLayout {
+            width: parent.width;
+            padding-left: Theme.content-padding;
+            padding-right: Theme.content-padding;
+            padding-top: 28px;
+            padding-bottom: 22px;
+            spacing: 16px;
 
-        DevelopmentBanner {
-            text: "开发中 · 收藏与资料库云端同步尚未接入";
-        }
-
-        Rectangle {
-            height: 92px;
-            background: Theme.surface;
-            border-radius: 6px;
-            accessible-role: groupbox;
-            accessible-label: root.playback.title != "" ? "正在播放 " + root.playback.title : "当前没有播放歌曲";
-
-            HorizontalLayout {
-                padding: 14px;
-                spacing: 14px;
-
-                CoverArt { source: root.cover-image; size: 64px; }
-
-                VerticalLayout {
-                    spacing: 4px;
-                    alignment: center;
-                    Text {
-                        text: root.playback.title != "" ? root.playback.title : "当前没有播放歌曲";
-                        color: Theme.text-primary;
-                        font-size: 16px;
-                        font-weight: 700;
-                        overflow: elide;
-                    }
-                    Text {
-                        text: root.playback.artist != "" ? root.playback.artist : "从搜索页查找歌曲并开始播放";
-                        color: Theme.text-secondary;
-                        font-size: 13px;
-                        overflow: elide;
-                    }
-                }
-
-                Text {
-                    width: 92px;
-                    text: root.playback.status == "playing" ? "正在播放" : root.playback.status == "paused" ? "已暂停" : "未播放";
-                    color: root.playback.status == "playing" ? Theme.accent : Theme.text-secondary;
-                    font-size: 12px;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
-                }
+            Text {
+                text: "资料库";
+                color: Theme.text-primary;
+                font-size: 28px;
+                font-weight: 700;
             }
-        }
 
-        Text {
-            text: "当前队列";
-            color: Theme.text-primary;
-            font-size: 18px;
-            font-weight: 700;
-        }
+            DevelopmentBanner {
+                text: "开发中 · 收藏与资料库云端同步尚未接入";
+            }
 
-        ListView {
-            visible: root.library-items.length > 0;
-            for item in root.library-items : Rectangle {
-                height: 56px;
-                background: row-touch.has-hover ? Theme.surface-hover : transparent;
-                accessible-role: list-item;
-                accessible-label: item.title + ", " + item.subtitle;
-
-                row-touch := TouchArea { }
+            Rectangle {
+                height: 92px;
+                background: Theme.surface;
+                border-radius: 6px;
+                accessible-role: groupbox;
+                accessible-label: root.playback.title != "" ? "正在播放 " + root.playback.title : "当前没有播放歌曲";
 
                 HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
+                    padding: 14px;
                     spacing: 14px;
+
+                    CoverArt { source: root.cover-image; size: 64px; }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        alignment: center;
+                        Text {
+                            text: root.playback.title != "" ? root.playback.title : "当前没有播放歌曲";
+                            color: Theme.text-primary;
+                            font-size: 16px;
+                            font-weight: 700;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.playback.artist != "" ? root.playback.artist : "从搜索页查找歌曲并开始播放";
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            overflow: elide;
+                        }
+                    }
+
                     Text {
-                        width: 72px;
-                        text: item.kind;
-                        color: Theme.text-secondary;
+                        width: 92px;
+                        text: root.playback.status == "playing" ? "正在播放" : root.playback.status == "paused" ? "已暂停" : "未播放";
+                        color: root.playback.status == "playing" ? Theme.accent : Theme.text-secondary;
                         font-size: 12px;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                    Text {
-                        text: item.title;
-                        color: Theme.text-primary;
-                        font-size: 14px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                    Text {
-                        text: item.subtitle;
-                        color: Theme.text-secondary;
-                        font-size: 13px;
                         horizontal-alignment: right;
                         vertical-alignment: center;
-                        overflow: elide;
                     }
                 }
+            }
 
-                Rectangle {
-                    y: parent.height - 1px;
-                    height: 1px;
-                    background: Theme.divider;
+            Text {
+                text: "当前队列";
+                color: Theme.text-primary;
+                font-size: 18px;
+                font-weight: 700;
+            }
+
+            VerticalLayout {
+                visible: root.library-items.length > 0;
+                spacing: 0px;
+
+                for item in root.library-items : Rectangle {
+                    height: 56px;
+                    background: row-touch.has-hover ? Theme.surface-hover : transparent;
+                    accessible-role: list-item;
+                    accessible-label: item.title + ", " + item.subtitle;
+
+                    row-touch := TouchArea { }
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 14px;
+                        Text {
+                            width: 72px;
+                            text: item.kind;
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: item.title;
+                            color: Theme.text-primary;
+                            font-size: 14px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: item.subtitle;
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.divider;
+                    }
                 }
             }
-        }
 
-        EmptyState {
-            visible: root.library-items.length == 0;
-            title: "资料库还是空的";
-            detail: "开始搜索并播放歌曲后，真实队列会显示在这里。";
-            action-label: "前往搜索";
-            action-clicked => { root.navigate-to-search(); }
+            EmptyState {
+                visible: root.library-items.length == 0;
+                title: "资料库还是空的";
+                detail: "开始搜索并播放歌曲后，真实队列会显示在这里。";
+                action-label: "前往搜索";
+                action-clicked => { root.navigate-to-search(); }
+            }
         }
     }
 }

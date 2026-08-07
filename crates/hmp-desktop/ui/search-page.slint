@@ -12,6 +12,7 @@ export component SearchPage inherits Rectangle {
     in property <[UiSong]> songs;
     in-out property <string> search-text;
     in property <bool> loading;
+    in property <bool> completed;
     in property <string> error-text;
     in property <bool> query-valid;
     callback query-edited(string);
@@ -86,9 +87,9 @@ export component SearchPage inherits Rectangle {
             }
         }
 
-        Rectangle {
+        HorizontalLayout {
             height: 34px;
-            background: transparent;
+            spacing: 10px;
 
             Text {
                 text: root.loading ? "正在搜索 QQ 音乐…"
@@ -102,8 +103,6 @@ export component SearchPage inherits Rectangle {
             }
 
             Button {
-                x: parent.width - 82px;
-                y: 0px;
                 width: 82px;
                 height: 34px;
                 visible: root.error-text != "" && root.has-query && !root.loading;
@@ -124,12 +123,21 @@ export component SearchPage inherits Rectangle {
 
                 for song[idx] in root.songs : Rectangle {
                     height: 54px;
-                    background: row-touch.has-hover ? Theme.surface-hover : transparent;
+                    background: row-touch.has-hover && !root.loading ? Theme.surface-hover : transparent;
+                    opacity: root.loading ? 0.55 : 1;
                     accessible-role: button;
                     accessible-label: "播放 " + song.title + ", " + song.artist;
-                    accessible-action-default => { root.play-requested(idx); }
+                    accessible-enabled: !root.loading;
+                    accessible-action-default => {
+                        if (!root.loading) {
+                            root.play-requested(idx);
+                        }
+                    }
 
-                    row-touch := TouchArea { clicked => { root.play-requested(idx); } }
+                    row-touch := TouchArea {
+                        enabled: !root.loading;
+                        clicked => { root.play-requested(idx); }
+                    }
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -180,8 +188,8 @@ export component SearchPage inherits Rectangle {
                 width: parent.width;
                 height: parent.height;
                 visible: !root.show-results && !root.loading && root.error-text == "";
-                title: root.has-query ? "没有找到结果" : "搜索 QQ 音乐";
-                detail: root.has-query ? "换一个关键词再试一次。" : "输入歌曲、歌手或专辑名称。";
+                title: root.completed ? "没有找到结果" : "搜索 QQ 音乐";
+                detail: root.completed ? "换一个关键词再试一次。" : "输入歌曲、歌手或专辑名称。";
                 action-label: "";
             }
 

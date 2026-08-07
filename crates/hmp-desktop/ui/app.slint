@@ -33,6 +33,7 @@ export component AppWindow inherits Window {
     in-out property <string> search-text;
     in-out property <bool> search-query-valid: false;
     in-out property <bool> search-loading: false;
+    in-out property <bool> search-completed: false;
     in-out property <string> search-error-text;
     in property <UiPlayback> playback;
     in property <bool> logged-in;
@@ -98,6 +99,7 @@ export component AppWindow inherits Window {
                 songs: root.songs;
                 search-text <=> root.search-text;
                 loading: root.search-loading;
+                completed: root.search-completed;
                 error-text: root.search-error-text;
                 query-valid: root.search-query-valid;
                 query-edited(text) => { root.search-query-edited(text); }
