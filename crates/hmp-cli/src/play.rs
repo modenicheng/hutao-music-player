@@ -66,19 +66,13 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         song_type: 0,
         media_mid: Some(media_mid),
     };
-    let mut chosen: Option<(SongFileType, String)> = None;
+    let mut chosen: Option<(SongFileType, String, Option<String>)> = None;
     let mut last_error: Option<String> = None;
 
     'quality: for quality in AudioQuality::Master.fallback_chain() {
         let Some(file_type) = quality_to_file_type(quality.clone()) else {
             continue;
         };
-        // 加密格式（.mflac/.mgg/.mmp4 等）需客户端解密，当前播放器不支持，
-        // 视为不可用继续回退（docs/PROJECT.md §7.3 质量回退）。
-        if file_type.is_encrypted {
-            tracing::info!(quality = ?quality, "跳过加密音质（暂不支持解密）");
-            continue;
-        }
         let urls = song_api
             .get_song_urls(
                 std::slice::from_ref(&file_info),
@@ -90,7 +84,14 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
             Ok(resp) => {
                 for item in &resp.data {
                     if item.result == 0 && !item.purl.is_empty() {
-                        chosen = Some((file_type, item.purl.clone()));
+                        let ekey = file_type.is_encrypted.then(|| item.ekey.clone());
+                        // 加密音质必须有 ekey，否则视为不可用继续回退
+                        if file_type.is_encrypted && ekey.as_deref().is_none_or(str::is_empty) {
+                            last_error =
+                                Some(format!("encrypted but no ekey (result={})", item.result));
+                            continue;
+                        }
+                        chosen = Some((file_type, item.purl.clone(), ekey));
                         println!("音质: {quality:?} ({}{})", file_type.s, file_type.e);
                         break 'quality;
                     }
@@ -103,13 +104,36 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let (file_type, purl) = chosen.ok_or_else(|| {
+    let (file_type, purl, ekey) = chosen.ok_or_else(|| {
         HmpError::QualityUnavailable.to_string().replace(
             "quality is unavailable",
             &format!("所有音质均不可用 (最后错误: {:?})", last_error),
         )
     })?;
-    let uri = format!("https://isure.stream.qqmusic.qq.com/{purl}",);
+    let remote_uri = format!("https://isure.stream.qqmusic.qq.com/{purl}");
+    let uri = match &ekey {
+        Some(key) => {
+            println!("解密中…（QMC2）");
+            let (progress_tx, progress_rx) = tokio::sync::watch::channel(Some(0.0f64));
+            let progress_handle = {
+                let mut rx = progress_rx;
+                tokio::spawn(async move {
+                    while rx.changed().await.is_ok() {
+                        if let Some(p) = *rx.borrow() {
+                            print!("\r解密进度: {:.0}%", p * 100.0);
+                        }
+                    }
+                })
+            };
+            let prepared = hmp_media::prepare_playable(&remote_uri, Some(key), Some(&progress_tx))
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = progress_handle.await;
+            println!("\r解密完成，播放本地缓存: {prepared}");
+            prepared
+        }
+        None => remote_uri,
+    };
 
     // 组装领域曲目（详情含多歌手/专辑/封面，供 MPRIS metadata 使用）
     let singers = detail

@@ -11,6 +11,7 @@ rust-version.workspace = true
 clap = { workspace = true }
 hmp-core = { path = "../hmp-core" }
 hmp-mpris = { path = "../hmp-mpris" }
+hmp-media = { path = "../hmp-media" }
 hmp-player-gst = { path = "../hmp-player-gst" }
 hmp-storage = { path = "../hmp-storage" }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
