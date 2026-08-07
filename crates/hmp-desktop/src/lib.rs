@@ -11,4 +11,5 @@ pub use app::{
 };
 
 #[cfg(test)]
-mod bridge_tests;
+#[path = "bridge_tests.rs"]
+mod ui_bridge_integration;

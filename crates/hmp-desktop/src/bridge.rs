@@ -1,8 +1,8 @@
 //! UI 桥接：Slint 回调 ↔ 应用命令 / 事件。
 
-use slint::{ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
+use slint::{ComponentHandle, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
-use crate::app::{AppCommand, AppEvent, UiSongData};
+use crate::app::{AppCommand, AppEvent, ThemeMode, UiPage, UiSongData};
 
 /// 绑定 UI 回调 → 应用命令通道。
 pub fn bind_callbacks(
@@ -43,6 +43,29 @@ pub fn bind_callbacks(
     });
     ui.on_login_cancel(move || {
         let _ = cmd_tx.send(AppCommand::LoginCancel);
+    });
+}
+
+/// 绑定仅影响本地 UI 状态的回调。
+pub fn bind_ui_state_callbacks(ui: &crate::AppWindow) {
+    let weak = ui.as_weak();
+    ui.on_navigate_requested(move |value| {
+        let Some(page) = UiPage::parse(value.as_str()) else {
+            return;
+        };
+        if let Some(ui) = weak.upgrade() {
+            ui.set_current_page(page.as_str().into());
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_theme_requested(move |value| {
+        let Some(mode) = ThemeMode::parse(value.as_str()) else {
+            return;
+        };
+        if let Some(ui) = weak.upgrade() {
+            ui.set_theme_mode(mode.as_str().into());
+        }
     });
 }
 

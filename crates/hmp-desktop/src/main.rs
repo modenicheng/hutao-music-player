@@ -1,6 +1,6 @@
 //! HMP 桌面应用入口：Slint UI + 应用核心编排（docs/PROJECT.md §4.1）。
 
-use hmp_desktop::{AppCommand, AppCore, AppWindow, UiPlayback, app, bridge};
+use hmp_desktop::{AppCore, AppWindow, UiPlayback, app, bridge};
 use slint::ComponentHandle;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,13 +20,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut core = AppCore::new(cmd_rx, event_tx)?;
     let ui = AppWindow::new()?;
 
-    // UI 回调 → 应用命令
-    bridge::bind_callbacks(&ui, cmd_tx.clone());
-    let ui_weak = ui.as_weak();
-    ui.on_login_cancel(move || {
-        let _ = cmd_tx.clone().send(AppCommand::LoginCancel);
-        if let Some(ui) = ui_weak.upgrade() {
-            ui.set_show_login(false);
+    // UI 回调 → 应用命令 / 本地界面状态
+    bridge::bind_callbacks(&ui, cmd_tx);
+    bridge::bind_ui_state_callbacks(&ui);
+    let weak = ui.as_weak();
+    ui.on_queue_requested(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.invoke_navigate_requested("queue".into());
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_lyrics_requested(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.invoke_navigate_requested("lyrics".into());
         }
     });
 

@@ -1,0 +1,94 @@
+import { Slider } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { CoverArt, IconButton } from "primitives.slint";
+
+export struct UiPlayback {
+    title: string,
+    artist: string,
+    status: string,
+    position: float,
+    duration: float,
+    volume: float,
+    position-text: string,
+    duration-text: string,
+}
+
+export component PlayerBar inherits Rectangle {
+    in property <UiPlayback> playback;
+    in property <image> cover-image;
+    callback play-pause;
+    callback next-requested;
+    callback prev-requested;
+    callback seek-requested(float);
+    callback volume-requested(float);
+    callback queue-clicked;
+    callback lyrics-clicked;
+
+    height: Theme.player-height;
+    background: Theme.surface;
+    Rectangle { height: 1px; background: Theme.divider; }
+
+    HorizontalLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 14px;
+
+        HorizontalLayout {
+            width: 280px;
+            spacing: 12px;
+            CoverArt { source: root.cover-image; size: 64px; }
+            VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: root.playback.title != "" ? root.playback.title : "未在播放";
+                    color: Theme.text-primary;
+                    font-size: 15px;
+                    font-weight: 600;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.playback.artist != "" ? root.playback.artist : "—";
+                    color: Theme.text-secondary;
+                    font-size: 13px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        VerticalLayout {
+            spacing: 5px;
+            HorizontalLayout {
+                alignment: center;
+                spacing: 6px;
+                IconButton { glyph: "⏮"; accessible-name: "上一首"; clicked => { root.prev-requested(); } }
+                IconButton { glyph: root.playback.status == "playing" ? "❚❚" : "▶"; accessible-name: "播放或暂停"; emphasized: true; clicked => { root.play-pause(); } }
+                IconButton { glyph: "⏭"; accessible-name: "下一首"; clicked => { root.next-requested(); } }
+                IconButton { glyph: "≡"; accessible-name: "播放队列"; clicked => { root.queue-clicked(); } }
+                IconButton { glyph: "¶"; accessible-name: "歌词"; clicked => { root.lyrics-clicked(); } }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                Text { text: root.playback.position-text; color: Theme.text-secondary; font-size: 12px; vertical-alignment: center; }
+                Slider {
+                    minimum: 0;
+                    maximum: root.playback.duration > 0 ? root.playback.duration : 1;
+                    value: root.playback.position;
+                    enabled: root.playback.duration > 0;
+                    changed(v) => { root.seek-requested(v); }
+                }
+                Text { text: root.playback.duration-text; color: Theme.text-secondary; font-size: 12px; vertical-alignment: center; }
+            }
+        }
+
+        HorizontalLayout {
+            width: 160px;
+            spacing: 10px;
+            Text { text: "🔊"; color: Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
+            Slider { minimum: 0; maximum: 1; value: root.playback.volume; changed(v) => { root.volume-requested(v); } }
+        }
+    }
+}

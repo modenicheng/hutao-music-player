@@ -1,0 +1,136 @@
+import { Theme } from "theme.slint";
+
+component NavigationRow inherits Rectangle {
+    in property <string> label;
+    in property <string> glyph;
+    in property <string> page;
+    in property <string> current-page;
+    callback selected(string);
+
+    height: 40px;
+    border-radius: 6px;
+    background: root.current-page == root.page ? Theme.accent-muted
+        : row-touch.has-hover ? Theme.surface-hover : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.selected(root.page); }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+
+        Text {
+            width: 22px;
+            text: root.glyph;
+            color: root.current-page == root.page ? Theme.accent : Theme.text-secondary;
+            font-size: 15px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: 14px;
+            font-weight: root.current-page == root.page ? 700 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    row-touch := TouchArea {
+        clicked => { root.selected(root.page); }
+    }
+}
+
+export component SideBar inherits Rectangle {
+    in property <string> current-page;
+    in property <bool> logged-in;
+    in property <string> user-name;
+    callback navigate-requested(string);
+    callback login-start;
+
+    width: Theme.sidebar-width;
+    background: Theme.sidebar;
+
+    VerticalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 22px;
+        padding-bottom: 18px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            height: 38px;
+            spacing: 10px;
+            Rectangle {
+                width: 32px;
+                height: 32px;
+                border-radius: 6px;
+                background: Theme.accent;
+                Text {
+                    text: "♪";
+                    color: Theme.accent-foreground;
+                    font-size: 18px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            Text {
+                text: "胡桃音乐";
+                color: Theme.text-primary;
+                font-size: 18px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle { height: 1px; background: Theme.divider; }
+
+        VerticalLayout {
+            spacing: 3px;
+            NavigationRow { label: "资料库"; glyph: "♫"; page: "library"; current-page: root.current-page; selected(page) => { root.navigate-requested(page); } }
+            NavigationRow { label: "推荐"; glyph: "★"; page: "recommend"; current-page: root.current-page; selected(page) => { root.navigate-requested(page); } }
+            NavigationRow { label: "搜索"; glyph: "⌕"; page: "search"; current-page: root.current-page; selected(page) => { root.navigate-requested(page); } }
+            NavigationRow { label: "播放队列"; glyph: "≡"; page: "queue"; current-page: root.current-page; selected(page) => { root.navigate-requested(page); } }
+            NavigationRow { label: "歌词"; glyph: "¶"; page: "lyrics"; current-page: root.current-page; selected(page) => { root.navigate-requested(page); } }
+            NavigationRow { label: "设置"; glyph: "⚙"; page: "settings"; current-page: root.current-page; selected(page) => { root.navigate-requested(page); } }
+        }
+
+        Rectangle { vertical-stretch: 1; height: 0px; }
+
+        Rectangle {
+            height: 44px;
+            border-radius: 6px;
+            background: account-touch.has-hover ? Theme.surface-hover : Theme.surface;
+            accessible-role: button;
+            accessible-label: root.logged-in ? root.user-name : "登录 QQ 音乐";
+            accessible-action-default => { if (!root.logged-in) { root.login-start(); } }
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+                Text {
+                    text: "●";
+                    color: root.logged-in ? Theme.accent : Theme.text-secondary;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.logged-in ? root.user-name : "登录 QQ 音乐";
+                    color: Theme.text-primary;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            account-touch := TouchArea {
+                enabled: !root.logged-in;
+                clicked => { root.login-start(); }
+            }
+        }
+    }
+}

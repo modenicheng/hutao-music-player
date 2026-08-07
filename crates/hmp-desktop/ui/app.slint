@@ -1,182 +1,16 @@
-// HMP 主界面 —— Apple Music 风格深色主题
-// 主题：近黑背景、红色渐变强调（胡桃火系）、圆角卡片、毛玻璃播放栏
-
-import { ListView, Palette, Slider } from "std-widgets.slint";
-import { LineEditBase } from "vendor/lineedit-base.slint";
+import { ListView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { CoverArt, IconButton } from "primitives.slint";
+import { SideBar } from "sidebar.slint";
+import { PlayerBar, UiPlayback } from "player-bar.slint";
+import { LoginDialog } from "login-dialog.slint";
 
-// ---- 数据 ----
+export { UiPlayback }
 
 export struct UiSong {
     title: string,
     artist: string,
     duration: string,
 }
-
-export struct UiPlayback {
-    title: string,
-    artist: string,
-    status: string,    // "playing" | "paused" | "stopped"
-    position: float,   // 秒
-    duration: float,   // 秒
-    volume: float,     // 0..1
-    position-text: string,
-    duration-text: string,
-}
-
-// ---- 侧边栏 ----
-
-component SideBar inherits Rectangle {
-    callback login-start;
-    callback login-cancel;
-    in property <bool> logged-in;
-    in property <string> user-name;
-    in property <bool> show-login;
-    in property <image> qr-image;
-    in property <string> login-status;
-
-    background: Theme.sidebar;
-    width: Theme.sidebar-width;
-
-    VerticalLayout {
-        padding-left: 18px;
-        padding-right: 18px;
-        padding-top: 24px;
-        padding-bottom: 20px;
-        spacing: 8px;
-
-        // Logo
-        HorizontalLayout {
-            spacing: 10px;
-            Rectangle {
-                width: 34px; height: 34px;
-                border-radius: 10px;
-                background: Theme.accent;
-                Text {
-                    text: "♪";
-                    color: Theme.accent-foreground;
-                    font-size: 18px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-            Text {
-                text: "胡桃音乐";
-                color: Theme.text-primary;
-                font-size: 19px;
-                font-weight: 700;
-                vertical-alignment: center;
-            }
-        }
-
-        Rectangle { height: 1px; background: Theme.divider; }
-
-        // 导航
-        VerticalLayout {
-            spacing: 4px;
-            Rectangle {
-                height: 38px;
-                border-radius: 9px;
-                background: Theme.surface;
-                HorizontalLayout {
-                    padding-left: 12px;
-                    spacing: 10px;
-                    Text { text: "🔍"; color: Theme.text-secondary; font-size: 15px; vertical-alignment: center; }
-                    Text { text: "搜索"; color: Theme.text-primary; font-size: 15px; font-weight: 600; vertical-alignment: center; }
-                }
-            }
-        }
-
-        // 弹性空白：把底部区域推到窗口底部（不遮挡任何内容）
-        Rectangle { vertical-stretch: 1; height: 0px; }
-
-        // 登录区（底部）
-        VerticalLayout {
-            spacing: 8px;
-            visible: root.show-login;
-            Rectangle {
-                height: 200px;
-                border-radius: 14px;
-                background: Theme.surface;
-                Image {
-                    source: root.qr-image;
-                    width: 180px; height: 180px;
-                    x: (parent.width - 180px) / 2;
-                    y: (parent.height - 180px) / 2;
-                }
-            }
-            Text {
-                text: root.login-status;
-                color: Theme.text-secondary;
-                font-size: 13px;
-                horizontal-alignment: center;
-                wrap: word-wrap;
-            }
-            Rectangle {
-                height: 36px;
-                border-radius: 10px;
-                background: Theme.surface-hover;
-                cancel-touch := TouchArea {
-                    clicked => { root.login-cancel(); }
-                }
-                Text {
-                    text: "取消";
-                    color: Theme.text-primary;
-                    font-size: 13px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-        }
-
-        // 登录区（未登录）
-        Rectangle {
-            height: 44px;
-            border-radius: 12px;
-            background: Theme.surface;
-            visible: !root.logged-in && !root.show-login;
-            login-touch := TouchArea {
-                clicked => { root.login-start(); }
-            }
-            HorizontalLayout {
-                padding-left: 12px; padding-right: 12px;
-                spacing: 10px;
-                Text { text: "👤"; color: Theme.text-secondary; font-size: 16px; vertical-alignment: center; }
-                Text {
-                    text: "登录 QQ 音乐";
-                    color: Theme.text-primary;
-                    font-size: 14px;
-                    vertical-alignment: center;
-                    horizontal-alignment: left;
-                }
-            }
-        }
-
-        // 用户区（已登录）
-        Rectangle {
-            height: 44px;
-            border-radius: 12px;
-            background: Theme.surface;
-            visible: root.logged-in;
-            HorizontalLayout {
-                padding-left: 12px; padding-right: 12px;
-                spacing: 10px;
-                Text { text: "👤"; color: Theme.accent; font-size: 16px; vertical-alignment: center; }
-                Text {
-                    text: root.user-name;
-                    color: Theme.text-primary;
-                    font-size: 14px;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-            }
-        }
-    }
-}
-
-// ---- 搜索页 ----
 
 component SearchPage inherits Rectangle {
     in property <[UiSong]> songs;
@@ -187,227 +21,53 @@ component SearchPage inherits Rectangle {
     VerticalLayout {
         padding-left: Theme.content-padding;
         padding-right: Theme.content-padding;
-        padding-top: 32px;
-        spacing: 18px;
-
-        Text {
-            text: "搜索";
-            color: Theme.text-primary;
-            font-size: 30px;
-            font-weight: 700;
-        }
-
-        // 搜索框
+        padding-top: 28px;
+        spacing: 16px;
+        Text { text: "搜索"; color: Theme.text-primary; font-size: 28px; font-weight: 700; }
         Rectangle {
-            height: 46px;
-            border-radius: 12px;
+            height: 44px;
+            border-radius: 6px;
             background: Theme.surface;
             HorizontalLayout {
                 padding-left: 14px;
-                padding-right: 8px;
+                padding-right: 14px;
                 spacing: 10px;
-                Text { text: "🔍"; color: Theme.text-secondary; font-size: 16px; vertical-alignment: center; }
-                placeholder := Text {
-                    text: "歌曲、歌手、专辑";
-                    color: Theme.text-secondary;
-                    font-size: 15px;
-                    vertical-alignment: center;
-                    visible: root.search-text == "";
-                    touch-area := TouchArea {
-                        clicked => { search-input.focus(); }
-                    }
-                }
+                Text { text: "⌕"; color: Theme.text-secondary; font-size: 18px; vertical-alignment: center; }
                 search-input := TextInput {
                     text: root.search-text;
                     color: Theme.text-primary;
                     font-size: 15px;
                     vertical-alignment: center;
-                    edited => {
-                        root.search-text = search-input.text;
-                    }
-                    accepted => {
-                        root.search-requested(search-input.text);
-                    }
+                    edited => { root.search-text = self.text; }
+                    accepted => { root.search-requested(self.text); }
                 }
             }
         }
-
-        // 结果列表
         ListView {
-            viewport-height: parent.height - 10px;
-            for song[idx] in root.songs : HorizontalLayout {
+            for song[idx] in root.songs : Rectangle {
                 height: 52px;
-                Rectangle {
-                    height: 44px;
-                    border-radius: 10px;
-                    background: row-touch.has-hover ? Theme.surface-hover : transparent;
-                    row-touch := TouchArea {
-                        clicked => { root.play-requested(idx); }
-                    }
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 12px;
-                        spacing: 14px;
-                        Text {
-                            text: (idx + 1) + ".";
-                            color: Theme.text-secondary;
-                            font-size: 13px;
-                            width: 28px;
-                            vertical-alignment: center;
-                        }
-                        Text {
-                            text: song.title;
-                            color: Theme.text-primary;
-                            font-size: 15px;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                        Rectangle { width: 0px; }
-                        Text {
-                            text: song.artist;
-                            color: Theme.text-secondary;
-                            font-size: 14px;
-                            vertical-alignment: center;
-                            horizontal-alignment: right;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: song.duration;
-                            color: Theme.text-secondary;
-                            font-size: 13px;
-                            width: 50px;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                        }
-                    }
+                background: row-touch.has-hover ? Theme.surface-hover : transparent;
+                row-touch := TouchArea { clicked => { root.play-requested(idx); } }
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 14px;
+                    Text { text: (idx + 1) + "."; color: Theme.text-secondary; font-size: 13px; width: 28px; vertical-alignment: center; }
+                    Text { text: song.title; color: Theme.text-primary; font-size: 15px; font-weight: 600; vertical-alignment: center; overflow: elide; }
+                    Text { text: song.artist; color: Theme.text-secondary; font-size: 14px; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
+                    Text { text: song.duration; color: Theme.text-secondary; font-size: 13px; width: 50px; horizontal-alignment: right; vertical-alignment: center; }
                 }
             }
         }
     }
 }
-
-// ---- 底部播放栏 ----
-
-component PlayerBar inherits Rectangle {
-    in property <UiPlayback> playback;
-    in property <image> cover-image;
-    callback play-pause;
-    callback next-requested;
-    callback prev-requested;
-    callback seek-requested(float);
-    callback volume-requested(float);
-
-    height: Theme.player-height;
-    background: Theme.surface;
-    Rectangle {
-        height: 1px;
-        background: Theme.divider;
-    }
-
-    HorizontalLayout {
-        padding-left: 18px;
-        padding-right: 18px;
-        padding-top: 14px;
-        padding-bottom: 14px;
-        spacing: 14px;
-
-        // 左侧：封面 + 信息
-        HorizontalLayout {
-            width: 280px;
-            spacing: 12px;
-            CoverArt {
-                source: root.cover-image;
-                size: 64px;
-            }
-            VerticalLayout {
-                spacing: 4px;
-                Text {
-                    text: root.playback.title != "" ? root.playback.title : "未在播放";
-                    color: Theme.text-primary;
-                    font-size: 15px;
-                    font-weight: 600;
-                    overflow: elide;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: root.playback.artist != "" ? root.playback.artist : "—";
-                    color: Theme.text-secondary;
-                    font-size: 13px;
-                    overflow: elide;
-                    vertical-alignment: center;
-                }
-            }
-        }
-
-        // 中间：控制 + 进度
-        VerticalLayout {
-            spacing: 6px;
-            HorizontalLayout {
-                alignment: center;
-                spacing: 8px;
-                IconButton {
-                    glyph: "⏮";
-                    accessible-name: "上一首";
-                    clicked => { root.prev-requested(); }
-                }
-                IconButton {
-                    glyph: root.playback.status == "playing" ? "❚❚" : "▶";
-                    accessible-name: "播放或暂停";
-                    emphasized: true;
-                    clicked => { root.play-pause(); }
-                }
-                IconButton {
-                    glyph: "⏭";
-                    accessible-name: "下一首";
-                    clicked => { root.next-requested(); }
-                }
-            }
-            HorizontalLayout {
-                spacing: 10px;
-                Text {
-                    text: root.playback.position-text;
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
-                Slider {
-                    minimum: 0;
-                    maximum: root.playback.duration > 0 ? root.playback.duration : 1;
-                    value: root.playback.position;
-                    enabled: root.playback.duration > 0;
-                    changed(v) => { root.seek-requested(v); }
-                }
-                Text {
-                    text: root.playback.duration-text;
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
-            }
-        }
-
-        // 右侧：音量
-        HorizontalLayout {
-            width: 160px;
-            spacing: 10px;
-            Text { text: "🔊"; color: Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
-            Slider {
-                minimum: 0;
-                maximum: 1;
-                value: root.playback.volume;
-                changed(v) => { root.volume-requested(v); }
-            }
-        }
-    }
-}
-
-// ---- 主窗口 ----
 
 export component AppWindow inherits Window {
     title: "胡桃音乐";
     preferred-width: 1100px;
     preferred-height: 720px;
+    min-width: 820px;
+    min-height: 560px;
     background: Theme.background;
 
     in-out property <string> current-page: "library";
@@ -417,11 +77,15 @@ export component AppWindow inherits Window {
     in property <UiPlayback> playback;
     in property <bool> logged-in;
     in property <string> user-name;
-    in property <bool> show-login;
+    in-out property <bool> show-login;
     in property <image> qr-image;
     in property <string> login-status;
     in property <image> cover-image;
 
+    callback navigate-requested(string);
+    callback queue-requested;
+    callback lyrics-requested;
+    callback theme-requested(string);
     callback search-requested(string);
     callback play-requested(int);
     callback play-pause;
@@ -432,9 +96,7 @@ export component AppWindow inherits Window {
     callback login-start;
     callback login-cancel;
 
-    init => {
-        root.palette-color-scheme = ColorScheme.unknown;
-    }
+    init => { root.palette-color-scheme = ColorScheme.unknown; }
     changed theme-mode => {
         root.palette-color-scheme = root.theme-mode == "light" ? ColorScheme.light
             : root.theme-mode == "dark" ? ColorScheme.dark
@@ -444,23 +106,24 @@ export component AppWindow inherits Window {
     VerticalLayout {
         spacing: 0;
         HorizontalLayout {
+            spacing: 0;
             SideBar {
+                current-page: root.current-page;
                 logged-in: root.logged-in;
                 user-name: root.user-name;
-                show-login: root.show-login;
-                qr-image: root.qr-image;
-                login-status: root.login-status;
-                login-start => { root.login-start(); }
-                login-cancel => { root.login-cancel(); }
+                navigate-requested(page) => { root.navigate-requested(page); }
+                login-start => { root.show-login = true; root.login-start(); }
             }
-            Rectangle {
-                width: 1px;
-                background: Theme.divider;
-            }
+            Rectangle { width: 1px; background: Theme.divider; }
             SearchPage {
+                visible: root.current-page == "search";
                 songs: root.songs;
                 search-requested(text) => { root.search-requested(text); }
                 play-requested(idx) => { root.play-requested(idx); }
+            }
+            Rectangle {
+                visible: root.current-page != "search";
+                background: Theme.background;
             }
         }
         PlayerBar {
@@ -469,8 +132,23 @@ export component AppWindow inherits Window {
             play-pause => { root.play-pause(); }
             next-requested => { root.next-requested(); }
             prev-requested => { root.prev-requested(); }
-            seek-requested(v) => { root.seek-requested(v); }
-            volume-requested(v) => { root.volume-requested(v); }
+            seek-requested(value) => { root.seek-requested(value); }
+            volume-requested(value) => { root.volume-requested(value); }
+            queue-clicked => { root.queue-requested(); }
+            lyrics-clicked => { root.lyrics-requested(); }
         }
+    }
+
+    LoginDialog {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        show-login: root.show-login;
+        qr-image: root.qr-image;
+        login-status: root.login-status;
+        login-start => { root.login-start(); }
+        login-cancel => { root.login-cancel(); }
+        close => { root.show-login = false; }
     }
 }

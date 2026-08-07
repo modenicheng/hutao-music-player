@@ -2464,6 +2464,7 @@ dependencies = [
  "slint",
  "slint-build",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

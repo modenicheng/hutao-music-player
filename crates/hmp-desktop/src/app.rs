@@ -20,6 +20,7 @@ use hmp_qqmusic_api::{
 };
 use hmp_storage::credential::{CredentialStore, store_from_env};
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 /// UI 页面稳定标识。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +182,44 @@ pub struct QueueItem {
     pub media_mid: String,
 }
 
+#[derive(Default)]
+struct LoginSessionState {
+    generation: u64,
+    cancel: Option<CancellationToken>,
+}
+
+impl LoginSessionState {
+    fn begin(&mut self) -> (u64, CancellationToken) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+        (self.generation, cancel)
+    }
+
+    fn cancel(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+    }
+
+    fn accepts(&self, generation: u64) -> bool {
+        self.generation == generation
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|cancel| !cancel.is_cancelled())
+    }
+}
+
+struct LoginResult {
+    generation: u64,
+    result: Result<Credential, String>,
+}
+
 /// 应用核心。
 pub struct AppCore {
     pub client: QqMusicClient,
@@ -196,6 +235,10 @@ pub struct AppCore {
     loop_mode: LoopMode,
     shuffle: bool,
     last_queue_state: Option<(String, bool)>,
+    login_results_tx: mpsc::UnboundedSender<LoginResult>,
+    login_results_rx: mpsc::UnboundedReceiver<LoginResult>,
+    login_generation: u64,
+    login_cancel: Option<CancellationToken>,
     _mpris: Option<MprisService>,
 }
 
@@ -216,6 +259,7 @@ impl AppCore {
                 None
             }
         };
+        let (login_results_tx, login_results_rx) = mpsc::unbounded_channel();
         let mpris = tokio::runtime::Handle::current()
             .block_on(MprisService::start(
                 player.command_sender(),
@@ -236,6 +280,10 @@ impl AppCore {
             loop_mode: LoopMode::None,
             shuffle: false,
             last_queue_state: None,
+            login_results_tx,
+            login_results_rx,
+            login_generation: 0,
+            login_cancel: None,
             _mpris: mpris,
         })
     }
@@ -287,25 +335,36 @@ impl AppCore {
             .collect()
     }
 
-    /// 事件循环（消费命令）。
+    /// 事件循环（消费命令及后台登录结果）。
     pub async fn run(&mut self) {
-        while let Some(cmd) = self.cmd_rx.recv().await {
-            match cmd {
-                AppCommand::Search(keyword) => self.search(&keyword).await,
-                AppCommand::PlayIndex(idx) => self.play_index(idx).await,
-                AppCommand::TogglePlay => self.toggle_play(),
-                AppCommand::Next => self.play_relative(1).await,
-                AppCommand::Previous => self.play_relative(-1).await,
-                AppCommand::Seek(secs) => {
-                    self.player.seek(Duration::from_secs_f32(secs.max(0.0)));
+        loop {
+            tokio::select! {
+                command = self.cmd_rx.recv() => {
+                    let Some(command) = command else { break };
+                    match command {
+                        AppCommand::Search(keyword) => self.search(&keyword).await,
+                        AppCommand::PlayIndex(idx) => self.play_index(idx).await,
+                        AppCommand::TogglePlay => self.toggle_play(),
+                        AppCommand::Next => self.play_relative(1).await,
+                        AppCommand::Previous => self.play_relative(-1).await,
+                        AppCommand::Seek(secs) => {
+                            self.player.seek(Duration::from_secs_f32(secs.max(0.0)));
+                        }
+                        AppCommand::SetVolume(v) => self.player.set_volume(v.clamp(0.0, 1.0) as f64),
+                        AppCommand::LoginStart => self.start_login(),
+                        AppCommand::LoginCancel => self.cancel_login(),
+                        AppCommand::ReloadLyrics => {}
+                        AppCommand::Quit => break,
+                    }
                 }
-                AppCommand::SetVolume(v) => self.player.set_volume(v.clamp(0.0, 1.0) as f64),
-                AppCommand::LoginStart => self.login_start().await,
-                AppCommand::LoginCancel => self.login_cancel().await,
-                AppCommand::ReloadLyrics => {}
-                AppCommand::Quit => break,
+                result = self.login_results_rx.recv() => {
+                    if let Some(result) = result {
+                        self.finish_login(result);
+                    }
+                }
             }
         }
+        self.cancel_login_session();
     }
 
     // -----------------------------------------------------------------
@@ -543,44 +602,97 @@ impl AppCore {
     // 登录
     // -----------------------------------------------------------------
 
-    async fn login_start(&mut self) {
-        let login = LoginApi::new(&self.client);
-        let qr = match login.get_qrcode(QRLoginType::Qq).await {
-            Ok(qr) => qr,
-            Err(e) => {
-                let _ = self
-                    .events_tx
-                    .send(AppEvent::LoginStatus(format!("获取二维码失败: {e}")));
-                tracing::error!("get qrcode failed: {e}");
-                return;
+    fn start_login(&mut self) {
+        let (generation, cancel) = self.begin_login_session();
+        let client = QqMusicClient::with_config(self.client.config());
+        let events_tx = self.events_tx.clone();
+        let results_tx = self.login_results_tx.clone();
+
+        tokio::spawn(async move {
+            let login = LoginApi::new(&client);
+            let result = async {
+                let qr = tokio::select! {
+                    _ = cancel.cancelled() => return Err("登录已取消".into()),
+                    result = login.get_qrcode(QRLoginType::Qq) => {
+                        result.map_err(|error| format!("获取二维码失败: {error}"))?
+                    }
+                };
+                let _ = events_tx.send(AppEvent::LoginQr(qr.data.clone()));
+                let _ = events_tx.send(AppEvent::LoginStatus("请用 QQ 手机版扫码并确认".into()));
+                login
+                    .wait_qrcode_login(
+                        &qr,
+                        Default::default(),
+                        Duration::from_secs(180),
+                        Some(&cancel),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
             }
-        };
-        let _ = self.events_tx.send(AppEvent::LoginQr(qr.data.clone()));
-        let _ = self
-            .events_tx
-            .send(AppEvent::LoginStatus("请用 QQ 手机版扫码并确认".into()));
-        // 二维码回调由 UI 侧处理（QRImage 属性）；此处轮询等待
-        match login
-            .wait_qrcode_login(&qr, Default::default(), Duration::from_secs(180), None)
-            .await
-        {
-            Ok(credential) => {
-                if let Err(e) = self.store.save(&credential) {
-                    tracing::error!("save credential failed: {e}");
-                } else {
-                    let name = credential.uin.clone();
-                    self.credential = Some(credential);
-                    let _ = self.events_tx.send(AppEvent::LoginDone(name));
-                    tracing::info!("login ok");
-                }
-            }
-            Err(e) => tracing::warn!("login cancelled/failed: {e}"),
-        }
+            .await;
+            let _ = results_tx.send(LoginResult { generation, result });
+        });
     }
 
-    async fn login_cancel(&mut self) {
-        // 当前实现通过 wait_qrcode_login 的超时/取消令牌控制；
-        // 简化：无取消令牌，UI 层关闭登录面板即可。
+    fn begin_login_session(&mut self) -> (u64, CancellationToken) {
+        let mut session = LoginSessionState {
+            generation: self.login_generation,
+            cancel: self.login_cancel.take(),
+        };
+        let result = session.begin();
+        self.login_generation = session.generation;
+        self.login_cancel = session.cancel;
+        result
+    }
+
+    fn cancel_login_session(&mut self) {
+        let mut session = LoginSessionState {
+            generation: self.login_generation,
+            cancel: self.login_cancel.take(),
+        };
+        session.cancel();
+        self.login_generation = session.generation;
+        self.login_cancel = session.cancel;
+    }
+
+    fn accepts_login_result(&self, generation: u64) -> bool {
+        LoginSessionState {
+            generation: self.login_generation,
+            cancel: self.login_cancel.clone(),
+        }
+        .accepts(generation)
+    }
+
+    fn cancel_login(&mut self) {
+        self.cancel_login_session();
+        let _ = self
+            .events_tx
+            .send(AppEvent::LoginStatus("登录已取消".into()));
+    }
+
+    fn finish_login(&mut self, login: LoginResult) {
+        if !self.accepts_login_result(login.generation) {
+            return;
+        }
+        match login.result {
+            Ok(credential) => {
+                if let Err(error) = self.store.save(&credential) {
+                    let message = format!("保存登录凭证失败: {error}");
+                    let _ = self.events_tx.send(AppEvent::LoginStatus(message));
+                    tracing::error!("save credential failed: {error}");
+                    return;
+                }
+                let name = credential.uin.clone();
+                self.credential = Some(credential);
+                self.cancel_login_session();
+                let _ = self.events_tx.send(AppEvent::LoginDone(name));
+                tracing::info!("login ok");
+            }
+            Err(message) => {
+                let _ = self.events_tx.send(AppEvent::LoginStatus(message.clone()));
+                tracing::warn!("login failed: {message}");
+            }
+        }
     }
 }
 
@@ -647,4 +759,20 @@ pub fn playback_snapshot(
 pub fn format_secs(s: f32) -> String {
     let s = s.max(0.0) as u64;
     format!("{:02}:{:02}", s / 60, s % 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn starting_or_cancelling_login_invalidates_the_previous_session() {
+        let mut state = LoginSessionState::default();
+        let (first_generation, first_token) = state.begin();
+        let (second_generation, _) = state.begin();
+        assert!(second_generation > first_generation);
+        assert!(first_token.is_cancelled());
+        state.cancel();
+        assert!(!state.accepts(second_generation));
+    }
 }

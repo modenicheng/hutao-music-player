@@ -5,7 +5,9 @@ use slint::{ComponentHandle, Model};
 
 use crate::AppWindow;
 use crate::app::{AppCommand, AppEvent, ThemeMode, UiLyricData, UiPage, UiQueueData, UiSongData};
-use crate::bridge::{bind_callbacks, decode_png, handle_event, songs_model};
+use crate::bridge::{
+    bind_callbacks, bind_ui_state_callbacks, decode_png, handle_event, songs_model,
+};
 
 /// 初始化 testing backend（进程内仅一次）。
 fn init_ui() -> AppWindow {
@@ -65,6 +67,16 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert_eq!(ui.get_theme_mode(), "light");
         ui.set_theme_mode("dark".into());
         assert_eq!(ui.get_theme_mode(), "dark");
+
+        bind_ui_state_callbacks(&ui);
+        ui.invoke_navigate_requested("queue".into());
+        assert_eq!(ui.get_current_page(), "queue");
+        ui.invoke_navigate_requested("bad-page".into());
+        assert_eq!(ui.get_current_page(), "queue");
+        ui.invoke_theme_requested("light".into());
+        assert_eq!(ui.get_theme_mode(), "light");
+        ui.invoke_theme_requested("bad-theme".into());
+        assert_eq!(ui.get_theme_mode(), "light");
     }
 
     // 1) 登录按钮可点击（覆盖"登录无法点击"反馈）：扫描侧边栏底部注入点击
@@ -75,8 +87,8 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         assert!(!ui.get_logged_in());
         assert!(!ui.get_show_login());
         let mut hit = None;
-        'scan: for y in (400..=700).step_by(20) {
-            for x in (20..=200).step_by(30) {
+        'scan: for y in (0..=720).step_by(10) {
+            for x in (10..=220).step_by(10) {
                 let pos = slint::LogicalPosition::new(x as f32, y as f32);
                 ui.window()
                     .dispatch_event(slint::platform::WindowEvent::PointerPressed {
@@ -123,6 +135,8 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         );
         ui.invoke_login_start();
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::LoginStart));
+        ui.invoke_login_cancel();
+        assert!(matches!(rx.try_recv().unwrap(), AppCommand::LoginCancel));
     }
 
     // 3) 搜索结果事件 → 列表

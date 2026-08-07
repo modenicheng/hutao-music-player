@@ -1,0 +1,96 @@
+import { Theme } from "theme.slint";
+import { IconButton } from "primitives.slint";
+
+export component LoginDialog inherits Rectangle {
+    in property <bool> show-login;
+    in property <image> qr-image;
+    in property <string> login-status;
+    callback login-start;
+    callback login-cancel;
+    callback close;
+
+    visible: root.show-login;
+    background: #00000088;
+    accessible-role: groupbox;
+    accessible-label: "QQ 音乐登录";
+
+    Rectangle {
+        width: 360px;
+        height: 430px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 8px;
+        background: Theme.background;
+        border-width: 1px;
+        border-color: Theme.divider;
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 14px;
+
+            HorizontalLayout {
+                height: 44px;
+                Text {
+                    text: "登录 QQ 音乐";
+                    color: Theme.text-primary;
+                    font-size: 20px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                IconButton {
+                    glyph: "×";
+                    accessible-name: "关闭登录";
+                    clicked => { root.login-cancel(); root.close(); }
+                }
+            }
+
+            Rectangle {
+                width: 260px;
+                height: 260px;
+                horizontal-stretch: 0;
+                background: Theme.surface;
+                border-radius: 6px;
+                Image {
+                    x: 10px;
+                    y: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height - 20px;
+                    source: root.qr-image;
+                    image-fit: contain;
+                }
+            }
+
+            Text {
+                text: root.login-status;
+                color: Theme.text-secondary;
+                font-size: 13px;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle {
+                    height: 38px;
+                    border-radius: 6px;
+                    background: retry-touch.has-hover ? Theme.accent-muted : Theme.surface;
+                    accessible-role: button;
+                    accessible-label: "重新获取二维码";
+                    accessible-action-default => { root.login-start(); }
+                    Text { text: "重新获取"; color: Theme.text-primary; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                    retry-touch := TouchArea { clicked => { root.login-start(); } }
+                }
+                Rectangle {
+                    height: 38px;
+                    border-radius: 6px;
+                    background: cancel-touch.has-hover ? Theme.surface-hover : Theme.surface;
+                    accessible-role: button;
+                    accessible-label: "取消登录";
+                    accessible-action-default => { root.login-cancel(); root.close(); }
+                    Text { text: "取消"; color: Theme.text-primary; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                    cancel-touch := TouchArea { clicked => { root.login-cancel(); root.close(); } }
+                }
+            }
+        }
+    }
+}
