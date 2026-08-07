@@ -5,7 +5,10 @@ slint::include_modules!();
 pub mod app;
 pub mod bridge;
 
-pub use app::{AppCommand, AppCore, AppEvent, UiSongData};
+pub use app::{
+    AppCommand, AppCore, AppEvent, ThemeMode, UiFeatureData, UiLyricData, UiPage, UiQueueData,
+    UiSongData,
+};
 
 #[cfg(test)]
 mod bridge_tests;

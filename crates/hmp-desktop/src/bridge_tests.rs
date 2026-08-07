@@ -4,7 +4,9 @@ use serial_test::serial;
 use slint::{ComponentHandle, Model};
 
 use crate::AppWindow;
-use crate::app::{AppCommand, AppEvent, UiSongData};
+use crate::app::{
+    AppCommand, AppEvent, ThemeMode, UiPage, UiQueueData, UiSongData,
+};
 use crate::bridge::{bind_callbacks, decode_png, handle_event, songs_model};
 
 /// 初始化 testing backend（进程内仅一次）。
@@ -14,6 +16,42 @@ fn init_ui() -> AppWindow {
         i_slint_backend_testing::init_integration_test_with_system_time();
     });
     AppWindow::new().expect("create window")
+}
+
+#[test]
+fn page_and_theme_values_use_stable_wire_names() {
+    assert_eq!(UiPage::Library.as_str(), "library");
+    assert_eq!(UiPage::parse("queue"), Some(UiPage::Queue));
+    assert_eq!(UiPage::parse("unknown"), None);
+    assert_eq!(ThemeMode::FollowSystem.as_str(), "system");
+    assert_eq!(ThemeMode::parse("light"), Some(ThemeMode::Light));
+}
+
+#[test]
+fn queue_event_contains_current_playing_flags() {
+    let event = AppEvent::QueueUpdated(vec![UiQueueData {
+        track_id: "mid-1".into(),
+        title: "晴天".into(),
+        artist: "周杰伦".into(),
+        duration: "04:29".into(),
+        is_current: true,
+        is_playing: true,
+    }]);
+    assert!(matches!(event, AppEvent::QueueUpdated(items) if items[0].is_current));
+}
+
+#[test]
+fn reload_lyrics_command_is_distinct_from_playback_commands() {
+    let command = AppCommand::ReloadLyrics;
+    assert!(matches!(command, AppCommand::ReloadLyrics));
+
+    for playback_command in [
+        AppCommand::TogglePlay,
+        AppCommand::Next,
+        AppCommand::Previous,
+    ] {
+        assert!(!matches!(playback_command, AppCommand::ReloadLyrics));
+    }
 }
 
 /// 全部窗口场景（testing backend 进程内单次初始化，官方建议单一 #[test]）。

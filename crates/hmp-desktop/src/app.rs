@@ -9,7 +9,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hmp_core::{AudioQuality, LoopMode, PlaybackState, PlayerCommand, Track, TrackId};
+use hmp_core::{
+    AudioQuality, LoopMode, PlaybackState, PlaybackStatus, PlayerCommand, Track, TrackId,
+};
 use hmp_mpris::MprisService;
 use hmp_player_gst::{LoadRequest, PlayerCore};
 use hmp_qqmusic_api::{
@@ -17,7 +19,70 @@ use hmp_qqmusic_api::{
     song::{SongApi, SongFileInfo},
 };
 use hmp_storage::credential::{CredentialStore, store_from_env};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+
+/// UI 页面稳定标识。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiPage {
+    Library,
+    Recommend,
+    Search,
+    Queue,
+    Lyrics,
+    Settings,
+}
+
+impl UiPage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Library => "library",
+            Self::Recommend => "recommend",
+            Self::Search => "search",
+            Self::Queue => "queue",
+            Self::Lyrics => "lyrics",
+            Self::Settings => "settings",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "library" => Some(Self::Library),
+            "recommend" => Some(Self::Recommend),
+            "search" => Some(Self::Search),
+            "queue" => Some(Self::Queue),
+            "lyrics" => Some(Self::Lyrics),
+            "settings" => Some(Self::Settings),
+            _ => None,
+        }
+    }
+}
+
+/// UI 主题模式稳定标识。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeMode {
+    FollowSystem,
+    Light,
+    Dark,
+}
+
+impl ThemeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FollowSystem => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::FollowSystem),
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+}
 
 /// 搜索结果显示数据（标题/歌手/时长文本）。
 #[derive(Clone, Debug)]
@@ -27,11 +92,52 @@ pub struct UiSongData {
     pub duration: String,
 }
 
+/// 播放队列显示数据。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiQueueData {
+    pub track_id: String,
+    pub title: String,
+    pub artist: String,
+    pub duration: String,
+    pub is_current: bool,
+    pub is_playing: bool,
+}
+
+/// 歌词行显示数据。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiLyricData {
+    pub timestamp_ms: u64,
+    pub time: String,
+    pub text: String,
+    pub translation: String,
+}
+
+/// 功能状态显示数据。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiFeatureData {
+    pub name: String,
+    pub status: String,
+    pub detail: String,
+}
+
 /// 应用事件（AppCore → UI）。
 #[derive(Clone, Debug)]
 pub enum AppEvent {
     /// 搜索完成（结果列表）。
     SearchDone(Vec<UiSongData>),
+    /// 搜索失败。
+    SearchFailed(String),
+    /// 播放队列状态更新。
+    QueueUpdated(Vec<UiQueueData>),
+    /// 开始加载指定歌曲的歌词。
+    LyricsLoading(String),
+    /// 指定歌曲的歌词加载完成。
+    LyricsLoaded {
+        mid: String,
+        lines: Vec<UiLyricData>,
+    },
+    /// 指定歌曲的歌词加载失败。
+    LyricsFailed { mid: String, message: String },
     /// 登录二维码（PNG 字节）。
     LoginQr(Vec<u8>),
     /// 登录状态文本。
@@ -61,6 +167,8 @@ pub enum AppCommand {
     LoginStart,
     /// 取消登录。
     LoginCancel,
+    /// 重新加载当前歌曲歌词。
+    ReloadLyrics,
     /// 退出。
     Quit,
 }
@@ -77,6 +185,7 @@ pub struct QueueItem {
 pub struct AppCore {
     pub client: QqMusicClient,
     pub player: Arc<PlayerCore>,
+    state_rx: watch::Receiver<PlaybackState>,
     cmd_rx: mpsc::UnboundedReceiver<AppCommand>,
     events_tx: mpsc::UnboundedSender<AppEvent>,
     store: Box<dyn CredentialStore>,
@@ -86,6 +195,7 @@ pub struct AppCore {
     queue_index: usize,
     loop_mode: LoopMode,
     shuffle: bool,
+    last_queue_state: Option<(String, bool)>,
     _mpris: Option<MprisService>,
 }
 
@@ -96,6 +206,7 @@ impl AppCore {
         events_tx: mpsc::UnboundedSender<AppEvent>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let player = Arc::new(PlayerCore::new()?);
+        let state_rx = player.subscribe_state();
         let store = store_from_env();
         // 密钥环不可用不阻塞启动：降级为未登录，凭据保存时再报错
         let credential = match store.load() {
@@ -114,6 +225,7 @@ impl AppCore {
         Ok(Self {
             client: QqMusicClient::new(),
             player,
+            state_rx,
             cmd_rx,
             events_tx,
             store,
@@ -123,6 +235,7 @@ impl AppCore {
             queue_index: 0,
             loop_mode: LoopMode::None,
             shuffle: false,
+            last_queue_state: None,
             _mpris: mpris,
         })
     }
@@ -145,6 +258,35 @@ impl AppCore {
         &self.songs
     }
 
+    /// 当前播放队列的 UI 快照。
+    pub fn queue_snapshot(&self) -> Vec<UiQueueData> {
+        let state = self.state_rx.borrow();
+        let current_track_id = state.current.as_ref().map(|track| track.id.as_ref());
+
+        self.queue
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let is_current = index == self.queue_index;
+                let matches_playback = current_track_id == Some(item.track.id.as_ref());
+                UiQueueData {
+                    track_id: item.track.id.to_string(),
+                    title: item.track.title.clone(),
+                    artist: item.track.artist_names(),
+                    duration: item
+                        .track
+                        .duration
+                        .map(|duration| format_secs(duration.as_secs_f32()))
+                        .unwrap_or_else(|| "--:--".into()),
+                    is_current,
+                    is_playing: is_current
+                        && matches_playback
+                        && state.status == PlaybackStatus::Playing,
+                }
+            })
+            .collect()
+    }
+
     /// 事件循环（消费命令）。
     pub async fn run(&mut self) {
         while let Some(cmd) = self.cmd_rx.recv().await {
@@ -160,6 +302,7 @@ impl AppCore {
                 AppCommand::SetVolume(v) => self.player.set_volume(v.clamp(0.0, 1.0) as f64),
                 AppCommand::LoginStart => self.login_start().await,
                 AppCommand::LoginCancel => self.login_cancel().await,
+                AppCommand::ReloadLyrics => {}
                 AppCommand::Quit => break,
             }
         }
@@ -185,7 +328,10 @@ impl AppCore {
                 let _ = self.events_tx.send(AppEvent::SearchDone(data));
                 tracing::info!(count = self.songs.len(), keyword, "search done");
             }
-            Err(e) => tracing::error!("search failed: {e}"),
+            Err(e) => {
+                let _ = self.events_tx.send(AppEvent::SearchFailed(e.to_string()));
+                tracing::error!("search failed: {e}");
+            }
         }
     }
 
