@@ -158,6 +158,14 @@ fn decide_await_step(
         return AwaitStep::KeepWaiting;
     }
     use hmp_core::PlaybackStatus as S;
+    // seq 已推进 = 命令完成。**先查错误**（P1：装载失败时旧曲仍在 Playing，
+    // 若不先查会把旧曲目当成新请求成功打印「已开始播放: 旧标题」）。
+    if let Some(info) = &st.last_error {
+        return AwaitStep::Failure(CliError::Response {
+            code: info.code,
+            message: info.message.clone(),
+        });
+    }
     match st.playback.status {
         S::Playing | S::Paused => AwaitStep::Success(
             st.playback
@@ -510,6 +518,23 @@ mod tests {
         assert_eq!(
             failure_code(&step).map(|(c, _)| c),
             Some(IpcErrorCode::Internal)
+        );
+    }
+
+    /// P1 #4：seq 推进 + last_error 时，即使状态仍是 Playing(旧曲) 也必须判失败
+    /// （旧行为优先 Playing → 打印「已开始播放: 旧标题」）。
+    #[test]
+    fn decide_fails_on_last_error_even_when_playing_old_track() {
+        let mut st = mkst(6, hmp_core::PlaybackStatus::Playing, Some("旧曲"));
+        st.last_error = Some(hmp_core::ErrorInfo {
+            code: IpcErrorCode::TrackNotFound,
+            message: "新曲解析失败".into(),
+        });
+        let step = decide_await_step(5, &st, false, false);
+        assert_eq!(
+            failure_code(&step),
+            Some((IpcErrorCode::TrackNotFound, "新曲解析失败".into())),
+            "last_error 优先于 Playing 判定"
         );
     }
 

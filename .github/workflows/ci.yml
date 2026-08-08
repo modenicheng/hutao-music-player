@@ -29,6 +29,13 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # hmp-player-gst 绑定 GLib/GStreamer：缺开发包时 glib-sys 找不到 glib-2.0.pc。
+      - name: Install GLib/GStreamer deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
@@ -38,6 +45,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # 编译需 dev 包；运行时测试（e2e/player-gst）用 fakeaudiosink（plugins-bad）
+      # + playbin 解码 wav（plugins-good/base）。
+      - name: Install GLib/GStreamer deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
       - run: cargo test --workspace
       - run: cargo doc --no-deps --workspace
 

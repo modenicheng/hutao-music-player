@@ -20,6 +20,7 @@ hmp-core = { path = "../hmp-core" }
 hmp-daemon = { path = "../hmp-daemon" }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
 hmp-storage = { path = "../hmp-storage" }
+rusqlite = { workspace = true }
 image = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net"] }

@@ -2537,6 +2537,7 @@ dependencies = [
  "hmp-qqmusic-api",
  "hmp-storage",
  "image",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
@@ -2572,6 +2573,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "url",
  "wiremock",
 ]
 

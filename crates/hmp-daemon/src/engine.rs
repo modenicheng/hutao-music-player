@@ -149,7 +149,7 @@ impl PlaybackEngine {
                                     self.end_session("manual");
                                     self.publish();
                                     if let Some(id) = self.queue.current().cloned() {
-                                        self.load_and_play(id).await;
+                                        let _ = self.load_and_play(id).await;
                                     } else {
                                         self.last_error = None;
                                         self.driver.stop();
@@ -165,13 +165,19 @@ impl PlaybackEngine {
                             self.publish();
                         }
                         Request::OpenUri(uri) => {
-                            // MPRIS OpenUri：file:// → 本地播放；其余 → 错误。
-                            match uri.strip_prefix("file://") {
-                                Some(path) if !path.is_empty() => {
-                                    let src = PlayRequest::Local(TrackId::new(format!("local:{path}")));
+                            // MPRIS OpenUri：仅接受 file://（URL 解码后转本地播放）；其余 → 错误。
+                            match url::Url::parse(&uri)
+                                .ok()
+                                .and_then(|u| u.to_file_path().ok())
+                            {
+                                Some(path) => {
+                                    let src = PlayRequest::Local(TrackId::new(format!(
+                                        "local:{}",
+                                        path.display()
+                                    )));
                                     self.play_source(src, false).await;
                                 }
-                                _ => {
+                                None => {
                                     self.last_error = Some(ErrorInfo {
                                         code: IpcErrorCode::Internal,
                                         message: format!("不支持的 URI: {uri}"),
@@ -253,18 +259,39 @@ impl PlaybackEngine {
     }
 
     async fn navigate_next(&mut self) {
-        self.end_session("next");
-        if let Some(id) = self.queue.skip_next() {
-            self.publish();
-            self.load_and_play(id).await;
+        // 先裁决再换会话（P1：队列无可跳目标时不得先关掉当前会话）。
+        let saved = self.queue.save_state();
+        let Some(id) = self.queue.skip_next() else {
+            return;
+        };
+        let old_db_track = self.current_db_track;
+        if self.load_and_play(id).await.is_ok() {
+            // 装载成功才切换会话：关闭命令前打开的会话（同曲连续播放则延续）。
+            if let Some(old) = old_db_track {
+                if self.current_db_track != Some(old) {
+                    self.close_session(old, "next");
+                }
+            }
+        } else {
+            // 装载失败：回滚队列位置（原曲继续播放，状态一致）。
+            self.queue.restore_state(saved);
         }
     }
 
     async fn navigate_prev(&mut self) {
-        self.end_session("previous");
-        if let Some(id) = self.queue.prev_track() {
-            self.publish();
-            self.load_and_play(id).await;
+        let saved = self.queue.save_state();
+        let Some(id) = self.queue.prev_track() else {
+            return;
+        };
+        let old_db_track = self.current_db_track;
+        if self.load_and_play(id).await.is_ok() {
+            if let Some(old) = old_db_track {
+                if self.current_db_track != Some(old) {
+                    self.close_session(old, "previous");
+                }
+            }
+        } else {
+            self.queue.restore_state(saved);
         }
     }
 
@@ -273,6 +300,10 @@ impl PlaybackEngine {
     /// seq 在**命令完成后**（解析+装载结束，无论成败）推进并发布：
     /// CLI 以 seq 前进作为「本命令结果已可见」的边界。中间发布保持旧 seq，
     /// 避免 CLI 在解析/装载窗口误判（Bug 1：Empty 误报；Bug 2：旧曲目确认）。
+    ///
+    /// **事务式换曲**（P1）：先装载（队列与会话不动），装载成功后才提交
+    /// 队列变更与会话切换；装载失败则保持旧队列/旧会话/旧曲继续播放，
+    /// 仅发布错误——CLI 不再把旧曲目当成新请求成功。
     async fn play_source(&mut self, src: PlayRequest, playnext: bool) {
         let ids = match self.resolver.resolve_source_ids(&src).await {
             Ok(ids) => ids,
@@ -294,29 +325,45 @@ impl PlaybackEngine {
             self.publish();
             return;
         }
-        // 换曲：结束当前播放会话（新会话在 load 成功后开启）。
-        self.end_session("manual");
-        if playnext {
-            // 整片插入当前曲之后（多曲目；空队列按 replace 建队）。
-            if let Some(at) = self.queue.insert_after_current(ids.clone()) {
-                self.queue.set_current(at); // 当前曲定位到插入的首曲（开始播放它）
+        let old_db_track = self.current_db_track;
+        match self.load_and_play(ids[0].clone()).await {
+            Ok(()) => {
+                // 提交：关闭命令前打开的旧会话（同曲连续播放则延续）。
+                if let Some(old) = old_db_track {
+                    if self.current_db_track != Some(old) {
+                        self.close_session(old, "manual");
+                    }
+                }
+                if playnext {
+                    // 整片插入当前曲之后（多曲目；空队列按 replace 建队）。
+                    if let Some(at) = self.queue.insert_after_current(ids) {
+                        self.queue.set_current(at); // 当前曲定位到插入的首曲（开始播放它）
+                    }
+                } else {
+                    self.queue.replace(ids, 0);
+                }
+                self.seq += 1;
+                self.publish();
             }
-            self.publish();
-            self.load_and_play(ids[0].clone()).await;
-        } else {
-            self.queue.replace(ids.clone(), 0);
-            self.publish();
-            self.load_and_play(ids[0].clone()).await;
+            Err(e) => {
+                // 装载失败：队列/会话/播放均保持原状，仅发布错误（P1）。
+                self.last_error = Some(error_info(&e));
+                self.seq += 1;
+                self.publish();
+            }
         }
-        self.seq += 1;
-        self.publish();
     }
 
     async fn on_ended(&mut self) {
         self.end_session("ended");
+        let saved = self.queue.save_state();
         if let Some(id) = self.queue.advance_on_eos() {
             self.publish();
-            self.load_and_play(id).await;
+            if self.load_and_play(id).await.is_err() {
+                // 续播失败：回滚队列位置（已播完的曲目停在当前位置）。
+                self.queue.restore_state(saved);
+            }
+            self.publish();
         } else {
             self.publish();
         }
@@ -324,6 +371,8 @@ impl PlaybackEngine {
 
     /// 媒体库：upsert 曲目并开启播放会话（B4 会话粒度：INSERT play_events）。
     /// 库不可用/写失败不阻断播放（仅 warn 级）。
+    /// 同曲目连续播放（重播/循环）不新建会话——会话延续，避免同一曲目
+    /// 留下两条未闭合记录（P1 会话一致性）。
     fn start_session(&mut self, track: &hmp_core::Track) {
         let Some(library) = &self.library else {
             return;
@@ -332,6 +381,9 @@ impl PlaybackEngine {
         let row = track_row(track);
         match library.upsert_track(&row) {
             Ok(track_id) => {
+                if self.current_db_track == Some(track_id) {
+                    return; // 同曲延续
+                }
                 if library.record_play_start(track_id, now_unix()).is_ok() {
                     self.current_db_track = Some(track_id);
                 }
@@ -343,9 +395,13 @@ impl PlaybackEngine {
     /// 媒体库：结束当前播放会话（UPDATE play_events + 播放次数）。
     /// 收听时长 = 当前播放位置（位置无时长上限时原样记录）。
     fn end_session(&mut self, reason: &'static str) {
-        let Some(track_id) = self.current_db_track.take() else {
-            return;
-        };
+        if let Some(track_id) = self.current_db_track.take() {
+            self.close_session(track_id, reason);
+        }
+    }
+
+    /// 按曲目 id 关闭播放会话（事务提交路径用：先装载成功、后关闭旧会话）。
+    fn close_session(&self, track_id: i64, reason: &'static str) {
         let Some(library) = &self.library else {
             return;
         };
@@ -362,8 +418,8 @@ impl PlaybackEngine {
         }
     }
 
-    /// 解析 + 解密 + 加载 + 播放。
-    async fn load_and_play(&mut self, id: TrackId) {
+    /// 解析 + 解密 + 加载 + 播放。装载失败返回错误（调用方决定回滚/保持）。
+    async fn load_and_play(&mut self, id: TrackId) -> Result<(), EngineError> {
         // 成功路径：清除旧错误（Finding 2）。
         self.last_error = None;
         match self.resolver.resolve_track(&id).await {
@@ -384,12 +440,14 @@ impl PlaybackEngine {
                 // 媒体库：upsert 曲目 + 开启播放会话（B4）。
                 self.start_session(&res.track);
                 self.publish();
+                Ok(())
             }
             Err(e) => {
                 tracing::error!(%e, "解析失败: {id}");
                 // 队列位置保持；错误详情进入复合状态（Finding 2）。
                 self.last_error = Some(error_info(&e));
                 self.publish();
+                Err(e)
             }
         }
     }
@@ -425,9 +483,16 @@ fn now_unix() -> i64 {
 }
 
 /// `hmp_core::Track` → 媒体库行（窄投影：只存稳定身份与元数据，不存播放 URL）。
+/// 按 provider 写 source（P1：本地曲目不得写 `qq`，否则同一文件在
+/// tracks 中生成两条记录——local_files 连一条、播放历史连另一条）。
 fn track_row(t: &hmp_core::Track) -> hmp_storage::TrackRow {
+    let source = if hmp_core::TrackProvider::from_id(&t.id.0) == hmp_core::TrackProvider::Local {
+        "local"
+    } else {
+        "qq"
+    };
     hmp_storage::TrackRow {
-        source: "qq",
+        source,
         source_key: t.id.0.clone(),
         title: t.title.clone(),
         album: t.album.as_ref().map(|a| a.name.clone()),
@@ -613,6 +678,61 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
             let err = clone_error(&self.err);
             Box::pin(async move { Err(err) })
+        }
+    }
+
+    /// 源解析成功、但指定曲目 resolve_track 失败的解析器（装载失败事务测试）。
+    #[derive(Debug)]
+    pub struct PartialFailResolver {
+        pub ids: Mutex<Vec<Vec<TrackId>>>,
+        pub fail_ids: Vec<TrackId>,
+        pub err: EngineError,
+    }
+
+    impl PartialFailResolver {
+        pub fn new(ids: Vec<Vec<TrackId>>, fail_ids: Vec<TrackId>) -> Arc<Self> {
+            Arc::new(Self {
+                ids: Mutex::new(ids),
+                fail_ids,
+                err: EngineError::TrackNotFound,
+            })
+        }
+    }
+
+    impl SourceResolver for PartialFailResolver {
+        fn resolve_source_ids(
+            &self,
+            _src: &hmp_core::PlayRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
+            Box::pin(async { Ok(self.ids.lock().unwrap().remove(0)) })
+        }
+        fn resolve_track(
+            &self,
+            id: &TrackId,
+        ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+            let id = id.clone();
+            let fail = self.fail_ids.contains(&id);
+            let err = clone_error(&self.err);
+            Box::pin(async move {
+                if fail {
+                    return Err(err);
+                }
+                Ok(ResolvedTrack {
+                    track: Track {
+                        id: id.clone(),
+                        title: format!("t-{id}"),
+                        artists: vec![],
+                        album: None,
+                        duration: Some(std::time::Duration::from_secs(60)),
+                        cover: None,
+                        url: Some(format!("fake://{id}")),
+                        available_qualities: vec![],
+                    },
+                    uri: format!("fake://{id}"),
+                    media: None,
+                    quality: hmp_core::AudioQuality::Mp3_128,
+                })
+            })
         }
     }
 
@@ -803,7 +923,8 @@ mod tests {
         assert!(state.queue.tracks.is_empty());
     }
 
-    /// caps：shuffle 开启时队尾仍可 Next（引擎可回绕），MPRIS 不再误报 false。
+    /// caps：shuffle 与循环正交——None 模式队尾开 shuffle 仍不可 Next（不再隐含列表循环）；
+    /// 开 List 循环后恒可。MPRIS 能力与实际队列裁决一致。
     #[tokio::test]
     async fn caps_allow_next_at_tail_when_shuffled() {
         let (driver, _sr, _er) = FakeDriver::new();
@@ -836,7 +957,16 @@ mod tests {
             .await
             .unwrap();
         wait_idle().await;
-        assert!(handle.state_rx.borrow().caps.can_go_next); // 洗牌可回绕
+        // shuffle 只改顺序：None 循环队尾仍不可 next（旧行为洗牌即隐含列表循环）。
+        assert!(!handle.state_rx.borrow().caps.can_go_next);
+        assert!(handle.state_rx.borrow().caps.can_go_previous);
+        // List 循环恒可。
+        handle
+            .cmd(Request::Command(PlayerCommand::SetLoopMode(LoopMode::List)))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert!(handle.state_rx.borrow().caps.can_go_next);
         assert!(handle.state_rx.borrow().caps.can_go_previous);
     }
 
@@ -1373,5 +1503,177 @@ mod tests {
                 .contains(&PlayerCommand::Stop)
         );
         assert_eq!(driver.loads.lock().unwrap().len(), 1, "空队列不应再加载");
+    }
+
+    /// P1 #4：Play 新曲装载失败 → 旧曲继续播放、队列保持原状、发布错误；
+    /// CLI 据此不再把旧曲目当成新请求成功（seq 推进 + last_error）。
+    #[tokio::test]
+    async fn play_load_failure_keeps_old_queue_and_track() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = PartialFailResolver::new(
+            vec![vec![TrackId::new("a")], vec![TrackId::new("b")]],
+            vec![TrackId::new("b")],
+        );
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(handle.state_rx.borrow().seq, 1);
+        assert_eq!(
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.clone()),
+            Some(TrackId::new("a"))
+        );
+
+        // 播放 b：resolve_track(b) 失败 → 事务回滚。
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert_eq!(st.seq, 2, "失败命令仍推进 seq（完成边界）");
+        assert!(st.last_error.is_some(), "应发布装载失败详情");
+        // 队列未替换、旧曲仍在播：状态一致，CLI 不会误报成功。
+        assert_eq!(
+            st.queue.tracks,
+            vec![TrackId::new("a")],
+            "装载失败不得替换队列"
+        );
+        assert_eq!(
+            st.playback.current.as_ref().map(|t| t.id.clone()),
+            Some(TrackId::new("a")),
+            "装载失败时旧曲继续播放"
+        );
+        assert_eq!(st.playback.status, PlaybackStatus::Playing);
+    }
+
+    /// P1 #6：None 循环队尾 Next（无可跳目标）→ 不得先关会话（否则收听时长丢失）。
+    #[tokio::test]
+    async fn next_without_target_keeps_session_open() {
+        use hmp_storage::LibraryDb;
+
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")]]);
+        let library = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let (handle, _st) =
+            start_engine_with_library(driver.clone(), resolver, library.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+
+        // 队列只有 a，None 循环：Next 无目标。会话必须保持打开。
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let mut lib = library.lock().unwrap();
+        let recent = lib.recent_plays(10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(
+            recent[0].ended_at, None,
+            "无可跳目标时不得关闭当前会话（P1 #6）"
+        );
+    }
+
+    /// P1 #6：导航装载失败 → 回滚队列位置（原曲继续播放，状态一致）。
+    #[tokio::test]
+    async fn failed_next_rolls_back_queue_position() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = PartialFailResolver::new(
+            vec![vec![TrackId::new("a"), TrackId::new("b")]],
+            vec![TrackId::new("b")],
+        );
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(handle.state_rx.borrow().queue.current, Some(0));
+
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert!(st.last_error.is_some());
+        assert_eq!(
+            st.queue.current,
+            Some(0),
+            "装载失败应回滚队列位置（不得停在未装载的 b 上）"
+        );
+        assert_eq!(
+            st.playback.current.as_ref().map(|t| t.id.clone()),
+            Some(TrackId::new("a")),
+            "原曲继续播放"
+        );
+    }
+
+    /// 同曲重播（Play 同一曲目）：会话延续，不新建未闭合记录。
+    #[tokio::test]
+    async fn same_track_replay_continues_session() {
+        use hmp_storage::LibraryDb;
+
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("a")]]);
+        let library = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let (handle, _st) =
+            start_engine_with_library(driver.clone(), resolver, library.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let mut lib = library.lock().unwrap();
+        let recent = lib.recent_plays(10).unwrap();
+        assert_eq!(recent.len(), 1, "同曲重播不得新建会话");
+        assert_eq!(recent[0].ended_at, None, "会话保持打开");
+    }
+
+    /// P1 #5：track_row 按 provider 写 source（本地曲目不得写成 qq）。
+    #[test]
+    fn track_row_uses_provider_source() {
+        let local = Track {
+            id: TrackId::new("local:/home/u/music/a.flac"),
+            title: "x".into(),
+            artists: vec![],
+            album: None,
+            duration: None,
+            cover: None,
+            url: None,
+            available_qualities: vec![],
+        };
+        let qq = Track {
+            id: TrackId::new("003aQm4F3GJHZq"),
+            title: "y".into(),
+            artists: vec![],
+            album: None,
+            duration: None,
+            cover: None,
+            url: None,
+            available_qualities: vec![],
+        };
+        let local_row = track_row(&local);
+        let qq_row = track_row(&qq);
+        assert_eq!(local_row.source, "local", "本地曲目 source 应为 local");
+        assert_eq!(qq_row.source, "qq");
+        assert_eq!(local_row.source_key, "local:/home/u/music/a.flac");
     }
 }

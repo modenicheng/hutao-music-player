@@ -1,13 +1,16 @@
 # cargo-deny 配置（CI 依赖审查）
 # 安装: cargo install cargo-deny
+#
+# 注：cargo-deny v2 配置格式只有**顶层** `version`；各节（[advisories] 等）
+# 不接受 `version = 2`（旧 v1 风格，v2 解析器直接报错，见审计）。
+
+version = 2
 
 [advisories]
-version = 2
 yanked = "warn"
 ignore = []
 
 [licenses]
-version = 2
 allow = [
     "MIT",
     "Apache-2.0",
@@ -21,10 +24,8 @@ allow = [
 private = { ignore = true }
 
 [bans]
-version = 2
 multiple-versions = "warn"
 
 [sources]
-version = 2
 unknown-registry = "deny"
 unknown-git = "deny"

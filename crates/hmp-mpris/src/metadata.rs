@@ -25,10 +25,12 @@ pub fn loop_status(mode: hmp_core::LoopMode) -> &'static str {
 pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedValue)> {
     let mut meta: Vec<(&'static str, OwnedValue)> = Vec::new();
 
-    // mpris:trackid —— 必填，格式 /org/hmp/track/<id>
-    let track_id_path: zvariant::ObjectPath = format!("/org/hmp/track/{}", track.id)
-        .try_into()
-        .unwrap_or_else(|_| "/org/hmp/track/unknown".try_into().expect("static path"));
+    // mpris:trackid —— 必填，格式 /org/hmp/track/<id>。
+    // 本地 id（如 `local:/home/a/song.flac` 含 `:`/`/`/`.`）不能直接作 ObjectPath
+    // 元素：直接拼接会解析失败 → 全部退化为 `/org/hmp/track/unknown`，
+    // 本地曲目失去唯一 MPRIS identity（P1）。改用稳定编码：可直用时直用，
+    // 否则 FNV-1a 64 哈希 hex（唯一、稳定、跨重启不变）。
+    let track_id_path: zvariant::ObjectPath = track_id_object_path(&track.id.0);
     meta.push((
         "mpris:trackid",
         OwnedValue::try_from(Value::ObjectPath(track_id_path)).expect("object path"),
@@ -88,6 +90,27 @@ pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedValue)> {
         ));
     }
     meta
+}
+
+/// 曲目 id → MPRIS ObjectPath（稳定、唯一、可直用时保持可读）。
+fn track_id_object_path(id: &str) -> zvariant::ObjectPath<'static> {
+    let direct = format!("/org/hmp/track/{id}");
+    if let Ok(p) = zvariant::ObjectPath::try_from(direct.as_str()) {
+        return p.to_owned();
+    }
+    format!("/org/hmp/track/{:016x}", fnv1a64(id.as_bytes()))
+        .try_into()
+        .expect("hex object path")
+}
+
+/// FNV-1a 64 位哈希（稳定、无 rand 依赖）。
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
 }
 
 /// 音质展示标签。
@@ -179,5 +202,27 @@ mod tests {
             meta.iter().any(|(k, _)| *k == "mpris:trackid"),
             "trackid is always present"
         );
+    }
+
+    /// P1：本地 id（含非法 ObjectPath 字符）必须得到唯一、稳定的 trackid，
+    /// 不得退化为 /unknown（否则所有本地歌曲共享同一 identity）。
+    #[test]
+    fn local_track_ids_get_unique_object_paths() {
+        let a = track_id_object_path("local:/home/u/music/我的歌.flac");
+        let b = track_id_object_path("local:/home/u/music/another.flac");
+        assert_ne!(a, b, "不同本地曲目必须不同 trackid");
+        assert_ne!(a, "/org/hmp/track/unknown");
+        assert_eq!(a, a.clone(), "同一 id 稳定");
+        assert_eq!(
+            track_id_object_path("local:/home/u/music/我的歌.flac"),
+            a,
+            "跨调用稳定（哈希，非随机）"
+        );
+    }
+
+    #[test]
+    fn qq_mid_keeps_readable_path() {
+        let p = track_id_object_path("003aQm4F3GJHZq");
+        assert_eq!(p.as_str(), "/org/hmp/track/003aQm4F3GJHZq");
     }
 }

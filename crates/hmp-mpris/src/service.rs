@@ -49,7 +49,8 @@ impl MprisRoot {
 
     #[zbus(property)]
     fn supported_uri_schemes(&self) -> Vec<&str> {
-        vec!["https", "http", "file"]
+        // 与 daemon 实际能力一致：仅本地文件（MPRIS OpenUri 只接受 file://）。
+        vec!["file"]
     }
 
     #[zbus(property)]
@@ -94,6 +95,8 @@ pub struct MprisPlayer {
     can_pause: bool,
     can_seek: bool,
     can_control: bool,
+    /// 用户 seek 意图（Seek/SetPosition 置位，位置变化时消费并发 Seeked）。
+    pending_seek: bool,
     /// OpenUri 转发通道（上层播放 URI；None = 不支持）。
     open_uri_tx: Option<mpsc::UnboundedSender<String>>,
 }
@@ -134,6 +137,7 @@ impl MprisPlayer {
     async fn seek(&mut self, offset_us: i64) -> zbus::fdo::Result<()> {
         let new_pos = (self.position_us + offset_us).max(0);
         self.position_us = new_pos;
+        self.pending_seek = true;
         let _ = self
             .cmd_tx
             .send(PlayerCommand::Seek(std::time::Duration::from_micros(
@@ -150,6 +154,7 @@ impl MprisPlayer {
     ) -> zbus::fdo::Result<()> {
         let pos = position_us.max(0);
         self.position_us = pos;
+        self.pending_seek = true;
         let _ = self
             .cmd_tx
             .send(PlayerCommand::Seek(std::time::Duration::from_micros(
@@ -348,6 +353,7 @@ impl MprisService {
                     can_pause: false,
                     can_seek: false,
                     can_control: true,
+                    pending_seek: false,
                     open_uri_tx,
                 },
             )?
@@ -439,16 +445,15 @@ async fn publish_state(connection: &Connection, state: &PlaybackState) {
         return;
     };
 
-    // 1) Seeked 信号（position 变化且状态为播放/暂停时）
-    if state.position.as_micros() as i64 != player_ref.get().await.position_us {
-        let position_us = state.position.as_micros().min(i64::MAX as u128) as i64;
-        player_ref.get_mut().await.update_position(position_us);
-        if matches!(
-            state.status,
-            PlaybackStatus::Playing | PlaybackStatus::Paused
-        ) {
-            let _ = emit_seeked(&player_ref, position_us).await;
-        }
+    // 1) Position 更新。Seeked 信号仅在**用户 seek 后**发出，
+    //    不随普通进度 tick 连续发送——MPRIS spec：Seeked 表示不连续位置跳变。
+    let position_us = state.position.as_micros().min(i64::MAX as u128) as i64;
+    let emit_seek = {
+        let mut iface = player_ref.get_mut().await;
+        iface.apply_position(position_us)
+    };
+    if emit_seek {
+        let _ = emit_seeked(&player_ref, position_us).await;
     }
 
     // 2) 可写属性 → PropertiesChanged
@@ -464,6 +469,20 @@ async fn publish_state(connection: &Connection, state: &PlaybackState) {
 impl MprisPlayer {
     fn update_position(&mut self, position_us: i64) {
         self.position_us = position_us;
+    }
+
+    /// 处理一次位置同步：更新 position；返回是否应发 Seeked。
+    /// 规则：仅当位置**变化**且存在用户 seek 意图（pending_seek）时才发——
+    /// 普通播放进度 tick 不发送 Seeked（MPRIS spec：Seeked = 不连续跳变）。
+    /// 位置未变化时保留 pending（seek 尚未被驱动应用，等下一次同步）。
+    fn apply_position(&mut self, position_us: i64) -> bool {
+        if self.position_us == position_us {
+            return false;
+        }
+        self.update_position(position_us);
+        let emit = self.pending_seek;
+        self.pending_seek = false;
+        emit
     }
 
     fn update_props(&mut self, state: &PlaybackState, changed: &mut HashMap<&str, Value>) {
@@ -575,6 +594,7 @@ mod tests {
             can_pause: false,
             can_seek: false,
             can_control: true,
+            pending_seek: false,
             open_uri_tx: None,
         }
     }
@@ -633,5 +653,31 @@ mod tests {
     fn open_uri_not_supported_without_channel() {
         let iface = iface();
         assert!(iface.open_uri("file:///tmp/x.mp3").is_err());
+    }
+
+    /// Seeked 语义：普通进度 tick 不发 Seeked；用户 seek 后位置变化才发一次。
+    #[test]
+    fn seeked_only_after_user_seek() {
+        let mut iface = iface();
+        // 普通 tick：位置前进 → 不发 Seeked。
+        assert!(!iface.apply_position(1_000_000));
+        assert_eq!(iface.position_us, 1_000_000);
+        assert!(!iface.apply_position(2_000_000), "进度 tick 不得发 Seeked");
+
+        // 用户 seek：置 pending → 位置变化 → 发一次并消费。
+        iface.pending_seek = true;
+        assert!(iface.apply_position(60_000_000), "seek 后应发 Seeked");
+        assert!(!iface.apply_position(61_000_000), "Seeked 只发一次");
+    }
+
+    /// Seek 尚未被驱动应用（位置未变）→ pending 保留，位置变化后再发。
+    #[test]
+    fn pending_seek_survives_until_position_moves() {
+        let mut iface = iface();
+        iface.pending_seek = true;
+        assert!(!iface.apply_position(0), "位置未变不发");
+        assert!(iface.pending_seek, "pending 应保留至位置变化");
+        assert!(iface.apply_position(5_000_000));
+        assert!(!iface.pending_seek);
     }
 }

@@ -2,32 +2,45 @@
 //!
 //! 幂等：同路径重扫只更新元数据；输出新增/更新计数。
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
 use hmp_storage::{LibraryDb, read_meta};
 
 /// 递归收集音频文件（按扩展名过滤）。
-fn collect_audio(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
+/// 目录与文件均 canonicalize：相对路径/symlink → 绝对真实路径，
+/// 保证 `local:<path>` 身份稳定、可去重（P1）；visited 集合防 symlink 环。
+fn collect_audio(
+    dir: &Path,
+    visited: &mut HashSet<std::path::PathBuf>,
+    out: &mut Vec<std::path::PathBuf>,
+) -> std::io::Result<()> {
+    let real = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if !visited.insert(real.clone()) {
+        return Ok(()); // 已访问（symlink 环/重复目录）
+    }
+    for entry in std::fs::read_dir(&real)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            collect_audio(&path, out)?;
+            collect_audio(&path, visited, out)?;
         } else if hmp_storage::is_audio_ext(&path) {
-            out.push(path);
+            out.push(path.canonicalize().unwrap_or(path));
         }
     }
     Ok(())
 }
 
 /// 扫描目录入库，返回 (新增, 更新)。
+/// 目录入口先 canonicalize：`hmp scan ./Music` 不再因 daemon 后续 cwd 不同而失配。
 pub fn scan_dir(dir: &Path, db: &mut LibraryDb) -> Result<(u32, u32), Box<dyn std::error::Error>> {
-    if !dir.is_dir() {
-        return Err(format!("不是目录: {}", dir.display()).into());
-    }
+    let dir = dir
+        .canonicalize()
+        .map_err(|_| format!("不是目录: {}", dir.display()))?;
     let mut files = Vec::new();
-    collect_audio(dir, &mut files)?;
+    let mut visited = HashSet::new();
+    collect_audio(&dir, &mut visited, &mut files)?;
     let (mut added, mut updated) = (0u32, 0u32);
     for path in files {
         let key = format!("local:{}", path.display());
@@ -75,8 +88,37 @@ mod tests {
     fn collect_recurses_and_filters() {
         let dir = sample_dir();
         let mut files = Vec::new();
-        collect_audio(dir.path(), &mut files).unwrap();
+        let mut visited = HashSet::new();
+        collect_audio(dir.path(), &mut visited, &mut files).unwrap();
         assert_eq!(files.len(), 3, "3 个音频，1 个非音频被过滤: {files:?}");
+        // 规范化：路径应绝对化（collect 内部 canonicalize）。
+        assert!(files.iter().all(|p| p.is_absolute()));
+    }
+
+    #[test]
+    fn scan_canonicalizes_relative_dir() {
+        // 相对目录扫描 → 入库 key 为绝对真实路径（daemon 后续 cwd 不同也能找到）。
+        let dir = sample_dir();
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let rel = dir
+            .path()
+            .strip_prefix(std::env::current_dir().unwrap())
+            .map(|p| p.to_path_buf());
+        let scan_dir_input = match rel {
+            Ok(r) if r.components().count() > 0 => r,
+            _ => dir.path().to_path_buf(), // tempdir 不在 cwd 下：退化为绝对路径
+        };
+        let (added, _) = scan_dir(&scan_dir_input, &mut db).unwrap();
+        assert_eq!(added, 3);
+        // 每个文件都能以 canonical 路径查到（相对 key 会失配）。
+        for name in ["a.mp3", "b.flac"] {
+            let canonical = std::fs::canonicalize(dir.path().join(name)).unwrap();
+            let key = format!("local:{}", canonical.display());
+            assert!(
+                db.track_id("local", &key).unwrap().is_some(),
+                "入库 key 应为 canonical 绝对路径: {key}"
+            );
+        }
     }
 
     #[test]

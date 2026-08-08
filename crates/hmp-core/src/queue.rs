@@ -28,6 +28,18 @@ pub struct QueueSnapshot {
     pub shuffle: bool,
 }
 
+/// 队列完整内部状态（含播放顺序排列；引擎事务回滚用，见 [`QueueCore::save_state`]）。
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct QueueState {
+    pub tracks: Vec<TrackId>,
+    pub order: Vec<usize>,
+    pub cursor: usize,
+    pub has_current: bool,
+    pub loop_mode: LoopMode,
+    pub shuffle: bool,
+}
+
 /// xorshift64*：hmp-core 不引入 rand 依赖，洗牌用自实现 PRNG。
 #[derive(Clone, Debug)]
 struct XorShift(u64);
@@ -85,13 +97,21 @@ impl QueueCore {
     }
 
     /// 清空并播放 `tracks[start_at]`。
+    ///
+    /// 不变式：`order` 恒为 `tracks` 的排列且 `cursor` 在其内有效（`has_current` 时）。
+    /// 本方法先按**新队列**计算 canonical 当前曲，再重建播放顺序；
+    /// 不得依赖旧 `order`（旧队列可能是空的或长度不同的，P0 越界根因）。
     pub fn replace(&mut self, tracks: Vec<TrackId>, start_at: usize) {
+        let current = if tracks.is_empty() {
+            None
+        } else {
+            Some(start_at.min(tracks.len() - 1))
+        };
         self.tracks = tracks;
-        self.has_current = !self.tracks.is_empty();
+        self.has_current = current.is_some();
         self.rebuild_order();
-        if self.has_current {
-            let canonical = start_at.min(self.tracks.len() - 1);
-            self.cursor = self.order.iter().position(|&x| x == canonical).unwrap_or(0);
+        if let Some(c) = current {
+            self.cursor = self.order.iter().position(|&x| x == c).unwrap_or(0);
         } else {
             self.cursor = 0;
         }
@@ -221,6 +241,30 @@ impl QueueCore {
         }
     }
 
+    /// 完整内部状态（含播放顺序与 cursor；引擎事务回滚用）。
+    #[doc(hidden)]
+    pub fn save_state(&self) -> QueueState {
+        QueueState {
+            tracks: self.tracks.clone(),
+            order: self.order.clone(),
+            cursor: self.cursor,
+            has_current: self.has_current,
+            loop_mode: self.loop_mode,
+            shuffle: self.shuffle,
+        }
+    }
+
+    /// 回滚到 `save_state` 捕获的状态（保留 rng 种子）。
+    #[doc(hidden)]
+    pub fn restore_state(&mut self, s: QueueState) {
+        self.tracks = s.tracks;
+        self.order = s.order;
+        self.cursor = s.cursor;
+        self.has_current = s.has_current;
+        self.loop_mode = s.loop_mode;
+        self.shuffle = s.shuffle;
+    }
+
     /// 循环模式。
     pub fn loop_mode(&self) -> LoopMode {
         self.loop_mode
@@ -236,15 +280,34 @@ impl QueueCore {
         self.shuffle
     }
 
-    /// 设置洗牌：开 → 生成随机播放顺序（当前曲保持在原槽位）；
-    /// 关 → 恢复规范顺序。
+    /// 设置洗牌：开 → 生成随机播放顺序（当前曲保持在原槽位，位置不跳变）；
+    /// 关 → 恢复恒等顺序，**当前曲目（canonical）保持不变**——
+    /// 只保留 cursor 数值会把当前曲静默换成另一首（旧实现 bug）。
     pub fn set_shuffle(&mut self, shuffle: bool) {
+        if self.shuffle == shuffle {
+            return;
+        }
+        // 旧 order 一致（不变式），此刻读取 canonical 当前曲安全。
+        let cur = self.current_idx();
         self.shuffle = shuffle;
         self.rebuild_order();
+        if let Some(cur) = cur {
+            if let Some(p) = self.order.iter().position(|&x| x == cur) {
+                if shuffle {
+                    // 开：当前曲保持在原 cursor 槽（播放位置不跳变）。
+                    let slot = self.cursor.min(self.order.len() - 1);
+                    self.order.swap(p, slot);
+                    self.cursor = slot;
+                } else {
+                    // 关：当前曲 = 原 canonical 曲在新恒等顺序中的位置。
+                    self.cursor = p;
+                }
+            }
+        }
     }
 
     /// 用户主动下一首。Repeat One **不**阻止跳歌（Track 模式按回绕处理）；
-    /// 洗牌/列表回绕；None 模式到头即停（`None`）。
+    /// List 循环回绕；**None 模式到头即停**（shuffle 只决定顺序，不隐含列表循环）。
     pub fn skip_next(&mut self) -> Option<TrackId> {
         if self.tracks.is_empty() {
             return None;
@@ -255,9 +318,9 @@ impl QueueCore {
             return Some(self.tracks[self.order[0]].clone());
         }
         if self.cursor + 1 >= self.order.len() {
+            // 随机/恒等序列到头：None 停止；List/Track 回绕。
             match self.loop_mode {
-                // None 模式到头即停；洗牌/列表/Track 回绕（洗牌像列表循环）。
-                LoopMode::None if !self.shuffle => return None,
+                LoopMode::None => return None,
                 _ => self.cursor = 0,
             }
         } else {
@@ -279,7 +342,7 @@ impl QueueCore {
     }
 
     /// 上一首：沿播放顺序回退（洗牌下即回到真正刚播过的那首）。
-    /// Track 模式保持当前；列表/洗牌回绕；None 模式队首即停（`None`）。
+    /// Track 模式保持当前；List 回绕；**None 模式队首即停**（shuffle 不隐含循环）。
     pub fn prev_track(&mut self) -> Option<TrackId> {
         if self.tracks.is_empty() {
             return None;
@@ -291,10 +354,6 @@ impl QueueCore {
         }
         match self.loop_mode {
             LoopMode::Track => Some(self.tracks[self.order[self.cursor]].clone()),
-            LoopMode::List | LoopMode::None if self.shuffle => {
-                self.cursor = (self.cursor + self.order.len() - 1) % self.order.len();
-                Some(self.tracks[self.order[self.cursor]].clone())
-            }
             LoopMode::List => {
                 self.cursor = (self.cursor + self.order.len() - 1) % self.order.len();
                 Some(self.tracks[self.order[self.cursor]].clone())
@@ -310,28 +369,27 @@ impl QueueCore {
         }
     }
 
-    /// 播放能力：CanGoNext（洗牌/列表/Track 恒可；None 视位置）。
+    /// 播放能力：CanGoNext（Track/List 恒可；None 视位置；shuffle 不额外放行）。
     pub fn can_go_next(&self) -> bool {
         if self.tracks.is_empty() {
             return false;
         }
-        self.shuffle
-            || matches!(self.loop_mode, LoopMode::Track | LoopMode::List)
+        matches!(self.loop_mode, LoopMode::Track | LoopMode::List)
             || (self.has_current && self.cursor + 1 < self.order.len())
     }
 
-    /// 播放能力：CanGoPrevious（洗牌/列表/Track 恒可；None 视位置）。
+    /// 播放能力：CanGoPrevious（Track/List 恒可；None 视位置；shuffle 不额外放行）。
     pub fn can_go_previous(&self) -> bool {
         if self.tracks.is_empty() {
             return false;
         }
-        self.shuffle
-            || matches!(self.loop_mode, LoopMode::Track | LoopMode::List)
+        matches!(self.loop_mode, LoopMode::Track | LoopMode::List)
             || (self.has_current && self.cursor > 0)
     }
 
-    /// （重新）生成播放顺序：洗牌 → Fisher-Yates 排列（当前曲留在原槽）；
-    /// 否则恒等排列。
+    /// （重新）生成播放顺序：洗牌 → Fisher-Yates 排列；否则恒等排列。
+    /// 注意：**不得**在此读取 `current_idx()`（旧 `order` 可能已失效，P0 根因）；
+    /// 需要保留当前曲的调用方应在队列变更前自行计算 canonical 下标。
     fn rebuild_order(&mut self) {
         let n = self.tracks.len();
         if self.shuffle && n > 1 {
@@ -339,13 +397,6 @@ impl QueueCore {
             for i in (1..n).rev() {
                 let j = (self.rng.next_u64() % (i + 1) as u64) as usize;
                 perm.swap(i, j);
-            }
-            // 当前曲保持在原 cursor 槽（若存在）。
-            let cur = self.current_idx();
-            if let Some(cur) = cur {
-                if let Some(p) = perm.iter().position(|&x| x == cur) {
-                    perm.swap(p, self.cursor.min(n - 1));
-                }
             }
             self.order = perm;
         } else {
@@ -532,6 +583,7 @@ mod tests {
 
     #[test]
     fn shuffle_visits_all_tracks_without_repeat() {
+        // shuffle + None 循环：完整访问随机周期后停止（不隐含列表循环）。
         let mut q = QueueCore::new();
         q.replace(vec![t("a"), t("b"), t("c"), t("d"), t("e")], 0);
         q.set_seed(42);
@@ -545,9 +597,9 @@ mod tests {
             assert!(seen.insert(id.clone()), "洗牌周期内不应重复 {id}");
             played.push(id);
         }
-        // 周期结束回绕（像列表循环）。
-        let wrap = q.skip_next().unwrap();
-        assert_eq!(wrap, played[0], "周期结束回绕到本周期第一首");
+        // 周期播完（None 循环）→ 停止，不隐式回绕。
+        assert_eq!(q.skip_next(), None, "shuffle + None 周期末应停止");
+        assert_eq!(played.len(), 5);
     }
 
     #[test]
@@ -562,8 +614,8 @@ mod tests {
         // Previous 应回到真正刚播过的 second 之前那首 = first（播放顺序历史）。
         let prev = q.prev_track().unwrap();
         assert_eq!(prev, first);
-        // 再 Previous 一次回到当前 cycle 起点之前？——洗牌下回绕，仍合法。
-        assert!(q.prev_track().is_some());
+        // 回到周期起点后（None 循环）Previous 再按无上一首处理（不再隐式回绕）。
+        assert_eq!(q.prev_track(), None);
     }
 
     #[test]
@@ -607,7 +659,11 @@ mod tests {
         assert!(!q.can_go_next()); // None 模式队尾不可 next
         assert!(q.can_go_previous()); // 但 prev 可用（cursor 2 > 0）
         q.set_shuffle(true);
-        assert!(q.can_go_next()); // 洗牌可回绕
+        // shuffle 只改顺序：None 循环队尾仍不可 next（不再因 shuffle 隐含列表循环）。
+        assert!(!q.can_go_next());
+        assert!(q.can_go_previous());
+        q.set_loop_mode(LoopMode::List);
+        assert!(q.can_go_next()); // 列表循环恒可
         assert!(q.can_go_previous());
     }
 
@@ -626,5 +682,74 @@ mod tests {
         let q = QueueCore::new();
         assert!(!q.can_go_next());
         assert!(!q.can_go_previous());
+    }
+
+    /// P0 回归：空队列开 shuffle → replace 多曲目不得越界 panic。
+    /// （旧实现 rebuild_order 从已失效的空 order 读 current_idx() → 越界。）
+    #[test]
+    fn replace_after_empty_with_shuffle_does_not_panic() {
+        let mut q = QueueCore::new();
+        q.set_shuffle(true); // 空队列：order = []
+        q.replace(vec![t("a"), t("b"), t("c")], 0);
+        assert_eq!(q.current(), Some(&t("a")));
+        assert_eq!(q.snapshot().tracks.len(), 3);
+    }
+
+    /// P1：shuffle 播放若干首后关闭 shuffle，当前曲目必须保持不变
+    /// （旧实现保留 cursor 数值 → QueueCore 静默换曲，GStreamer 仍播原曲）。
+    /// 多种子扫描：任意种子下关 shuffle 后 canonical 当前曲不变（旧实现部分种子失败）。
+    #[test]
+    fn shuffle_off_keeps_canonical_current() {
+        for seed in 1..=30u64 {
+            let mut q = QueueCore::new();
+            q.replace(vec![t("a"), t("b"), t("c"), t("d"), t("e")], 0);
+            q.set_seed(seed);
+            q.set_shuffle(true);
+            // 播放两首（移动 cursor）。
+            let _ = q.skip_next();
+            let _ = q.skip_next();
+            let canonical_before = q.current_idx().unwrap();
+            let playing = q.current().cloned().unwrap();
+            q.set_shuffle(false);
+            assert_eq!(
+                q.current(),
+                Some(&playing),
+                "seed {seed}: 关闭 shuffle 后当前曲目不得改变（应保留 canonical 曲目而非 cursor 数值）"
+            );
+            assert_eq!(q.current_idx(), Some(canonical_before), "seed {seed}");
+        }
+    }
+
+    /// P1：shuffle 与 LoopStatus 正交——None 模式下随机序列到头即停，不隐含列表循环。
+    #[test]
+    fn shuffle_none_loop_stops_at_end_of_cycle() {
+        let mut q = QueueCore::new();
+        q.replace(vec![t("a"), t("b"), t("c")], 0);
+        q.set_seed(7);
+        q.set_shuffle(true);
+        // 访问完整个随机周期（3 首）后，None 循环 → 停止。
+        let _ = q.skip_next();
+        let _ = q.skip_next();
+        assert_eq!(
+            q.skip_next(),
+            None,
+            "shuffle + None 循环到随机序列末尾应停止（旧行为隐含列表循环）"
+        );
+        assert!(!q.can_go_next());
+    }
+
+    /// P1：shuffle + List 循环 → 随机序列末尾回绕到周期第一首。
+    #[test]
+    fn shuffle_with_list_loop_wraps() {
+        let mut q = QueueCore::new();
+        q.replace(vec![t("a"), t("b"), t("c")], 0);
+        q.set_seed(7);
+        q.set_loop_mode(LoopMode::List);
+        q.set_shuffle(true);
+        let first = q.current().cloned().unwrap();
+        let _ = q.skip_next();
+        let _ = q.skip_next();
+        assert_eq!(q.skip_next(), Some(first), "List + shuffle 周期末回绕");
+        assert!(q.can_go_next());
     }
 }

@@ -51,6 +51,34 @@ pub struct RecentPlay {
     pub reason: String,
 }
 
+/// 收藏条目（列表查询结果）。
+#[derive(Clone, Debug)]
+pub struct FavoriteRow {
+    pub track_id: i64,
+    pub source: String,
+    pub source_key: String,
+    pub title: String,
+    pub created_at: Option<i64>,
+}
+
+/// 本地歌单条目（列表查询结果）。
+#[derive(Clone, Debug)]
+pub struct PlaylistRow {
+    pub id: i64,
+    pub name: String,
+    pub created_at: Option<i64>,
+    pub track_count: i64,
+}
+
+/// 本地歌单内曲目。
+#[derive(Clone, Debug)]
+pub struct PlaylistTrackRow {
+    pub position: i64,
+    pub track_id: i64,
+    pub title: String,
+    pub source_key: String,
+}
+
 /// 媒体库（进程内单一连接；跨任务共享用 `Arc<Mutex<LibraryDb>>`，WAL 允许
 /// 多进程并发读写——daemon 写入、CLI 读取）。
 pub struct LibraryDb {
@@ -288,6 +316,205 @@ impl LibraryDb {
             )
             .optional()
     }
+
+    /// 收藏曲目（upsert 曲目行 + 收藏；幂等）。
+    /// `source`/`source_key` 与播放历史一致（qq → mid；local → `local:<path>`）。
+    pub fn add_favorite(
+        &mut self,
+        source: &'static str,
+        source_key: &str,
+        title: &str,
+    ) -> rusqlite::Result<i64> {
+        let tid = self.upsert_track(&TrackRow {
+            source,
+            source_key: source_key.to_owned(),
+            title: title.to_owned(),
+            album: None,
+            artist: None,
+            duration_ms: None,
+            cover_uri: None,
+        })?;
+        self.conn.execute(
+            "INSERT INTO favorites (track_id, created_at) VALUES (?1, ?2)
+             ON CONFLICT(track_id) DO UPDATE SET created_at = excluded.created_at",
+            params![tid, now_unix()],
+        )?;
+        Ok(tid)
+    }
+
+    /// 取消收藏（按曲目行 id）。
+    pub fn remove_favorite(&mut self, track_id: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM favorites WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        Ok(())
+    }
+
+    /// 是否已收藏（按曲目行 id）。
+    pub fn is_favorite(&mut self, track_id: i64) -> rusqlite::Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM favorites WHERE track_id = ?1",
+            params![track_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 收藏列表（新→旧）。
+    pub fn list_favorites(&mut self, limit: u32) -> rusqlite::Result<Vec<FavoriteRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.track_id, t.source, t.source_key, t.title, f.created_at
+             FROM favorites f JOIN tracks t ON t.id = f.track_id
+             ORDER BY f.created_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(FavoriteRow {
+                track_id: r.get(0)?,
+                source: r.get(1)?,
+                source_key: r.get(2)?,
+                title: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 新建本地歌单，返回 id。
+    pub fn create_playlist(&mut self, name: &str) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO playlists (name, created_at, updated_at) VALUES (?1, ?2, ?2)",
+            params![name, now_unix()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 重命名歌单；不存在 → QueryReturnedNoRows。
+    pub fn rename_playlist(&mut self, id: i64, name: &str) -> rusqlite::Result<()> {
+        let n = self.conn.execute(
+            "UPDATE playlists SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![name, now_unix(), id],
+        )?;
+        if n == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    /// 删除歌单（级联删曲目关联）。
+    pub fn delete_playlist(&mut self, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+            params![id],
+        )?;
+        self.conn
+            .execute("DELETE FROM playlists WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// 歌单列表（含曲目数）。
+    pub fn list_playlists(&mut self) -> rusqlite::Result<Vec<PlaylistRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, p.name, p.created_at,
+                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id)
+             FROM playlists p ORDER BY p.created_at",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PlaylistRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                created_at: r.get(2)?,
+                track_count: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 歌单内曲目（按 position）。
+    pub fn playlist_tracks(&mut self, playlist_id: i64) -> rusqlite::Result<Vec<PlaylistTrackRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pt.position, t.id, t.title, t.source_key
+             FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
+             WHERE pt.playlist_id = ?1 ORDER BY pt.position",
+        )?;
+        let rows = stmt.query_map(params![playlist_id], |r| {
+            Ok(PlaylistTrackRow {
+                position: r.get(0)?,
+                track_id: r.get(1)?,
+                title: r.get(2)?,
+                source_key: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 往歌单追加曲目（幂等：同曲不重复；曲目行按需 upsert）。
+    /// 歌单不存在 → QueryReturnedNoRows。
+    pub fn add_playlist_track(
+        &mut self,
+        playlist_id: i64,
+        source: &'static str,
+        source_key: &str,
+        title: &str,
+    ) -> rusqlite::Result<()> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playlists WHERE id = ?1)",
+            params![playlist_id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let tid = self.upsert_track(&TrackRow {
+            source,
+            source_key: source_key.to_owned(),
+            title: title.to_owned(),
+            album: None,
+            artist: None,
+            duration_ms: None,
+            cover_uri: None,
+        })?;
+        let dup: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2)",
+            params![playlist_id, tid],
+            |r| r.get(0),
+        )?;
+        if dup {
+            return Ok(());
+        }
+        let max_pos: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position), -1) FROM playlist_tracks WHERE playlist_id = ?1",
+            params![playlist_id],
+            |r| r.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![playlist_id, tid, max_pos + 1, now_unix()],
+        )?;
+        Ok(())
+    }
+
+    /// 从歌单移除指定 position 的曲目。
+    pub fn remove_playlist_track(
+        &mut self,
+        playlist_id: i64,
+        position: i64,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND position = ?2",
+            params![playlist_id, position],
+        )?;
+        Ok(())
+    }
+}
+
+/// 当前 unix 时间戳（秒）。
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// 逐级迁移到最新 user_version。

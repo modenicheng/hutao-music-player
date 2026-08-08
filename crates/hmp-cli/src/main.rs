@@ -14,8 +14,11 @@ use clap::{Parser, Subcommand};
 mod auth;
 mod client;
 mod commands;
+mod favorite;
 mod history;
+mod library;
 mod login;
+mod playlist;
 mod quality;
 mod scan;
 mod search;
@@ -53,6 +56,16 @@ enum Command {
     Scan {
         /// 起始目录。
         dir: String,
+    },
+    /// 本地收藏管理：add <id> / remove <id> / list（直读媒体库）。
+    Favorite {
+        /// 子命令参数。
+        args: Vec<String>,
+    },
+    /// 本地歌单管理：new / rename / rm / add / rm-track / show / list。
+    Playlist {
+        /// 子命令参数。
+        args: Vec<String>,
     },
     /// 搜索歌曲。
     Search { keyword: String },
@@ -113,6 +126,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Quality { alias, no_fallback } => quality::run(alias, no_fallback).await,
         Command::History { count } => history::run(count).await,
         Command::Scan { dir } => scan::run(&dir).await,
+        Command::Favorite { args } => favorite::run(&args).await,
+        Command::Playlist { args } => playlist::run(&args).await,
         Command::Search { keyword } => search::run(&keyword).await,
         Command::Play { source } => {
             let mut c = client::DaemonClient::connect_or_spawn().await?;

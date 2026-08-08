@@ -6,7 +6,6 @@
 //! **不要求 QQ 登录**（登录门按 provider 判定，见 server.rs）。
 
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -39,14 +38,24 @@ impl LocalSourceResolver {
             .ok_or_else(|| EngineError::Internal(format!("非法本地曲目 id `{id}`")))
     }
 
+    /// 本地 id 的路径规范化（相对路径/symlink → 绝对真实路径）。
+    /// 保证 `local:<path>` 身份稳定：同一文件不因相对/绝对/symlink 生成多条记录（P1）。
+    fn canonical_id(id: TrackId) -> TrackId {
+        match id.0.strip_prefix("local:") {
+            Some(p) if !p.is_empty() => match std::fs::canonicalize(p) {
+                Ok(c) => TrackId::new(format!("local:{}", c.display())),
+                Err(_) => id, // 不存在/不可达：保持原样，由 resolve_track 报 TrackNotFound
+            },
+            _ => id,
+        }
+    }
+
     /// 按本地 id 解析（入库 + 构造 ResolvedTrack）。
     async fn resolve_local(&self, id: TrackId) -> Result<ResolvedTrack, EngineError> {
+        let id = Self::canonical_id(id);
         let path = Self::path_of(&id)?;
-        let path = Path::new(path);
-        if !path.exists() {
-            return Err(EngineError::TrackNotFound);
-        }
-        let meta = hmp_storage::read_meta(path);
+        let path = std::fs::canonicalize(path).map_err(|_| EngineError::TrackNotFound)?;
+        let meta = hmp_storage::read_meta(&path);
         let title = meta
             .as_ref()
             .map(|m| m.title.clone())
@@ -61,12 +70,19 @@ impl LocalSourceResolver {
         let album = meta.as_ref().and_then(|m| m.album.clone());
         let duration = meta.as_ref().and_then(|m| m.duration_ms);
 
-        let uri = format!("file://{}", path.display());
+        // 文件 URI 走 URL 编码（空格/#/%/Unicode 安全，P1）。
+        let uri = url::Url::from_file_path(&path)
+            .map(|u| u.to_string())
+            .map_err(|_| {
+                EngineError::Internal(format!("路径无法编码为 file URI: {}", path.display()))
+            })?;
         {
             let mut lib = self.library.lock().unwrap();
-            lib.add_local_file(path, meta.as_ref())
+            lib.add_local_file(&path, meta.as_ref())
                 .map_err(|e| EngineError::Internal(format!("媒体库写入失败: {e}")))?;
         }
+        // 本地音质如实上报（按格式/码率；旧实现一律 Mp3_128，无损曲目被误报，P1）。
+        let quality = local_quality(&path, meta.as_ref());
         let track = Track {
             id,
             title,
@@ -85,13 +101,13 @@ impl LocalSourceResolver {
             duration: duration.map(|ms| std::time::Duration::from_millis(ms as u64)),
             cover: None,
             url: Some(uri.clone()),
-            available_qualities: vec![AudioQuality::Mp3_128],
+            available_qualities: vec![quality.clone()],
         };
         Ok(ResolvedTrack {
             track,
             uri,
             media: None,
-            quality: AudioQuality::Mp3_128,
+            quality,
         })
     }
 }
@@ -104,7 +120,7 @@ impl SourceResolver for LocalSourceResolver {
         match src {
             PlayRequest::Local(id) => {
                 let id = id.clone();
-                Box::pin(async move { Ok(vec![id]) })
+                Box::pin(async move { Ok(vec![Self::canonical_id(id)]) })
             }
             _ => Box::pin(async {
                 Err(EngineError::Internal("本地解析器仅支持 local 源".into()))
@@ -126,14 +142,37 @@ impl SourceResolver for LocalSourceResolver {
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
         let uri = uri.to_string();
         Box::pin(async move {
-            let Some(path) = uri.strip_prefix("file://") else {
+            // URL 解码（空格/#/%/Unicode 安全，P1）。
+            let Ok(url) = url::Url::parse(&uri) else {
                 return Err(EngineError::Internal(format!(
                     "本地解析器不支持 URI `{uri}`"
                 )));
             };
-            self.resolve_local(TrackId::new(format!("local:{path}")))
+            let Ok(path) = url.to_file_path() else {
+                return Err(EngineError::Internal(format!(
+                    "本地解析器不支持 URI `{uri}`"
+                )));
+            };
+            self.resolve_local(TrackId::new(format!("local:{}", path.display())))
                 .await
         })
+    }
+}
+
+/// 本地文件音质如实映射（P1：旧实现一律 Mp3_128，FLAC/WAV 被误报）。
+/// 无损格式 → Flac；AAC → Aac；OGG/Opus → Mp3_320（HQ 档）；MP3 按码率分档。
+fn local_quality(path: &std::path::Path, meta: Option<&hmp_storage::LocalMeta>) -> AudioQuality {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    let bitrate = meta.and_then(|m| m.bitrate);
+    match ext.as_deref() {
+        Some("flac" | "wav" | "ape") => AudioQuality::Flac,
+        Some("m4a" | "aac") => AudioQuality::Aac,
+        Some("ogg" | "opus") => AudioQuality::Mp3_320,
+        Some("mp3") if bitrate.map(|b| b >= 300_000).unwrap_or(false) => AudioQuality::Mp3_320,
+        _ => AudioQuality::Mp3_128,
     }
 }
 
@@ -206,7 +245,7 @@ mod tests {
         assert!(LocalSourceResolver::path_of(&TrackId::new("local:")).is_err());
     }
 
-    /// 本地解析：无标签文件 → 文件名回退；入库后可再查；URI = file://。
+    /// 本地解析：无标签文件 → 文件名回退；入库后可再查；URI = file://（URL 编码）。
     #[tokio::test]
     async fn resolve_local_file_falls_back_to_stem_and_ingests() {
         let dir = tempfile::tempdir().unwrap();
@@ -215,21 +254,59 @@ mod tests {
 
         let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
         let resolver = LocalSourceResolver::new(lib.clone());
-        let id = TrackId::new(format!("local:{}", path.display()));
+        let canonical = std::fs::canonicalize(&path).unwrap();
+        let id = TrackId::new(format!("local:{}", canonical.display()));
         let resolved = resolver.resolve_track(&id).await.unwrap();
 
-        assert_eq!(resolved.uri, format!("file://{}", path.display()));
+        // URL 编码的 file URI（url crate）。
+        let expected_uri = url::Url::from_file_path(&canonical).unwrap().to_string();
+        assert_eq!(resolved.uri, expected_uri);
         assert_eq!(resolved.track.title, "我的歌", "无标签应回退文件名");
-        assert_eq!(resolved.quality, AudioQuality::Mp3_128);
         assert!(resolved.track.url.as_deref() == Some(resolved.uri.as_str()));
 
-        // 已入库：可按 id 查询。
+        // 已入库：可按 canonical id 查询。
         let mut lib = lib.lock().unwrap();
         let db_id = lib.track_id("local", id.as_ref()).unwrap().unwrap();
         assert_eq!(
             lib.local_path(db_id).unwrap().unwrap(),
-            path.display().to_string()
+            canonical.display().to_string()
         );
+    }
+
+    /// P1：文件名含空格/`#`/Unicode 时，URI 必须正确编码并可往返解析。
+    #[tokio::test]
+    async fn resolve_uri_with_special_chars_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a b#c 我的歌.mp3");
+        std::fs::write(&path, b"not real audio").unwrap();
+
+        let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let resolver = LocalSourceResolver::new(lib.clone());
+        let uri = url::Url::from_file_path(std::fs::canonicalize(&path).unwrap())
+            .unwrap()
+            .to_string();
+        assert!(uri.contains("%20"), "空格应编码: {uri}");
+        let resolved = resolver.resolve_uri(&uri).await.unwrap();
+        assert_eq!(resolved.uri, uri, "URI 应原样往返");
+        assert_eq!(resolved.track.title, "a b#c 我的歌");
+    }
+
+    /// P1：本地音质如实上报——flac → Flac（旧实现一律 Mp3_128）。
+    #[tokio::test]
+    async fn local_flac_reports_lossless_quality() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("song.flac");
+        std::fs::write(&path, b"not real audio").unwrap();
+
+        let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let resolver = LocalSourceResolver::new(lib.clone());
+        let id = TrackId::new(format!(
+            "local:{}",
+            std::fs::canonicalize(&path).unwrap().display()
+        ));
+        let resolved = resolver.resolve_track(&id).await.unwrap();
+        assert_eq!(resolved.quality, AudioQuality::Flac, "FLAC 应报 Flac");
+        assert_eq!(resolved.track.available_qualities, vec![AudioQuality::Flac]);
     }
 
     /// 不存在的本地文件 → TrackNotFound。

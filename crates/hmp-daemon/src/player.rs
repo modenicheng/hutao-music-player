@@ -221,6 +221,11 @@ impl SourceResolver for QqSourceResolver {
 }
 
 /// 音质 → 文件类型（与 CLI play.rs 一致，复制）。
+///
+/// `HiRes` 映射到 `SongFileType::MASTER`（AIM0）是**有意**的：上游无独立
+/// Hi-Res 文件类型，MASTER 即「臻品母带 = FLAC 24Bit/192kHz」档（qqmusic-api
+/// 文档），也就是 Hi-Res 产品本身。QQ 侧不存在 F1M0 等独立 Hi-Res 档位，
+/// 因此 `hmp quality hires` 与 `hmp quality master` 请求同一档（回退链不同）。
 fn quality_to_file_type(q: &AudioQuality) -> Option<SongFileType> {
     use AudioQuality::*;
     match q {
@@ -526,6 +531,27 @@ mod tests {
     }
 
     /// size 字段 → 可用音质（从高到低；缺失档位不出现）。
+    /// HiRes 有意映射 MASTER（上游无独立 Hi-Res 类型；MASTER = 24Bit/192kHz）。
+    #[test]
+    fn hires_maps_to_master_file_type() {
+        assert_eq!(
+            quality_to_file_type(&AudioQuality::HiRes),
+            Some(SongFileType::MASTER)
+        );
+        assert_eq!(
+            quality_to_file_type(&AudioQuality::Master),
+            Some(SongFileType::MASTER)
+        );
+        assert_eq!(
+            quality_to_file_type(&AudioQuality::Flac),
+            Some(SongFileType::FLAC)
+        );
+        assert_eq!(
+            quality_to_file_type(&AudioQuality::Mp3_320),
+            Some(SongFileType::MP3_320)
+        );
+    }
+
     #[test]
     fn available_from_sizes_maps_definite_qualities() {
         let f = hmp_qqmusic_api::models::File {
