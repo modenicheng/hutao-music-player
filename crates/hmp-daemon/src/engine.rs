@@ -127,15 +127,8 @@ impl PlaybackEngine {
                             break;
                         }
                         Request::Command(cmd) => self.handle_player_command(cmd).await,
-                        Request::Play(src) => {
-                            // 换曲操作前置位命令代际（Finding 1）：CLI 以 seq 前进作为边界。
-                            self.seq += 1;
-                            self.play_source(src, false).await;
-                        }
-                        Request::PlayNext(src) => {
-                            self.seq += 1;
-                            self.play_source(src, true).await;
-                        }
+                        Request::Play(src) => self.play_source(src, false).await,
+                        Request::PlayNext(src) => self.play_source(src, true).await,
                         Request::QueueAppend(src) => {
                             match self.resolver.resolve_source_ids(&src).await {
                                 Ok(ids) => {
@@ -173,7 +166,6 @@ impl PlaybackEngine {
                         }
                         Request::OpenUri(uri) => {
                             // MPRIS OpenUri：file:// → 本地播放；其余 → 错误。
-                            self.seq += 1;
                             match uri.strip_prefix("file://") {
                                 Some(path) if !path.is_empty() => {
                                     let src = PlayRequest::Local(TrackId::new(format!("local:{path}")));
@@ -184,6 +176,7 @@ impl PlaybackEngine {
                                         code: IpcErrorCode::Internal,
                                         message: format!("不支持的 URI: {uri}"),
                                     });
+                                    self.seq += 1;
                                     self.publish();
                                 }
                             }
@@ -228,12 +221,14 @@ impl PlaybackEngine {
     async fn handle_player_command(&mut self, cmd: PlayerCommand) {
         match cmd {
             PlayerCommand::Next => {
-                self.seq += 1;
                 self.navigate_next().await;
+                self.seq += 1;
+                self.publish();
             }
             PlayerCommand::Previous => {
-                self.seq += 1;
                 self.navigate_prev().await;
+                self.seq += 1;
+                self.publish();
             }
             PlayerCommand::SetLoopMode(m) => {
                 self.queue.set_loop_mode(m);
@@ -274,18 +269,28 @@ impl PlaybackEngine {
     }
 
     /// Play / PlayNext：解析源 → 替换/插入队列 → 加载当前。
+    ///
+    /// seq 在**命令完成后**（解析+装载结束，无论成败）推进并发布：
+    /// CLI 以 seq 前进作为「本命令结果已可见」的边界。中间发布保持旧 seq，
+    /// 避免 CLI 在解析/装载窗口误判（Bug 1：Empty 误报；Bug 2：旧曲目确认）。
     async fn play_source(&mut self, src: PlayRequest, playnext: bool) {
         let ids = match self.resolver.resolve_source_ids(&src).await {
             Ok(ids) => ids,
             Err(e) => {
-                // 解析失败 → 发布错误详情（Finding 2）。
+                // 解析失败 → 发布错误详情（Finding 2）+ 推进命令代际。
                 self.last_error = Some(error_info(&e));
+                self.seq += 1;
                 self.publish();
                 return;
             }
         };
         if ids.is_empty() {
-            self.last_error = None;
+            // 空源是确定性失败：携带错误，CLI 不用等到超时。
+            self.last_error = Some(ErrorInfo {
+                code: IpcErrorCode::Internal,
+                message: "源解析结果为空，无曲目可播放".into(),
+            });
+            self.seq += 1;
             self.publish();
             return;
         }
@@ -303,6 +308,8 @@ impl PlaybackEngine {
             self.publish();
             self.load_and_play(ids[0].clone()).await;
         }
+        self.seq += 1;
+        self.publish();
     }
 
     async fn on_ended(&mut self) {
@@ -364,12 +371,16 @@ impl PlaybackEngine {
                 self.active_media = res.media; // 旧 guard 自动 Drop → 旧代理停止
                 let uri = res.uri.clone();
                 let quality = res.quality;
+                let expected = res.track.id.clone();
                 self.driver.load(hmp_player_gst::LoadRequest {
                     track: res.track.clone(),
                     uri,
                     quality,
                 });
                 self.driver.play();
+                // 等待驱动应用装载（真实驱动为异步管道）：完成前发布的复合状态
+                // 不得携带旧曲目（Bug 2：play-next 后显示旧曲）。
+                self.wait_current_applied(&expected).await;
                 // 媒体库：upsert 曲目 + 开启播放会话（B4）。
                 self.start_session(&res.track);
                 self.publish();
@@ -379,6 +390,27 @@ impl PlaybackEngine {
                 // 队列位置保持；错误详情进入复合状态（Finding 2）。
                 self.last_error = Some(error_info(&e));
                 self.publish();
+            }
+        }
+    }
+
+    /// 等待驱动把 current 更新为 `expected`（同步应用的驱动立即返回；
+    /// 异步管道（真实 GStreamer）等待其装载臂发布）。5s 超时仅防御性告警。
+    async fn wait_current_applied(&mut self, expected: &TrackId) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let cur = self.state_rx.borrow();
+                if cur.current.as_ref().map(|t| &t.id) == Some(expected) {
+                    return;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!("驱动未在 5s 内应用装载（current 未更新），继续播放流程");
+                return;
+            }
+            if self.state_rx.changed().await.is_err() {
+                return;
             }
         }
     }
@@ -469,7 +501,14 @@ mod tests {
 
     impl PlaybackDriver for FakeDriver {
         fn load(&self, request: LoadRequest) {
-            self.loads.lock().unwrap().push(request.uri);
+            self.loads.lock().unwrap().push(request.uri.clone());
+            // 模拟真实驱动：装载即把 current 更新为目标曲目并进入 Playing。
+            let (track, quality) = (request.track.clone(), request.quality);
+            self.state_tx.send_modify(|s| {
+                s.status = PlaybackStatus::Playing;
+                s.current = Some(track);
+                s.actual_quality = Some(quality);
+            });
         }
         fn play(&self) {}
         fn pause(&self) {}
@@ -992,6 +1031,204 @@ mod tests {
         // 引擎退出后向命令通道发消息不再成功（发送端仍可发，但引擎不再消费——不断言；
         // 断言驱动已 shutdown）
         assert!(driver.commands.lock().unwrap().is_empty()); // shutdown 不产生命令
+    }
+
+    /// 装载应用有延迟的驱动（模拟真实 GStreamer 异步管道：load() 返回后
+    /// 驱动任务才更新 current）。
+    struct SlowDriver {
+        inner: Arc<FakeDriver>,
+    }
+
+    impl SlowDriver {
+        fn new() -> (
+            Arc<Self>,
+            watch::Receiver<PlaybackState>,
+            broadcast::Receiver<PlayerEvent>,
+        ) {
+            let (inner, sr, er) = FakeDriver::new();
+            (Arc::new(Self { inner }), sr, er)
+        }
+    }
+
+    impl PlaybackDriver for SlowDriver {
+        fn load(&self, request: LoadRequest) {
+            // 只记录 uri，不调用 inner.load（inner 已同步应用）：
+            // 异步 150ms 后才把 current 更新为装载曲目。
+            self.inner.loads.lock().unwrap().push(request.uri.clone());
+            let st = self.inner.state_tx.clone();
+            let track = request.track.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                st.send_modify(|s| {
+                    s.status = PlaybackStatus::Playing;
+                    s.current = Some(track);
+                });
+            });
+        }
+        fn play(&self) {}
+        fn pause(&self) {}
+        fn seek(&self, _p: std::time::Duration) {}
+        fn stop(&self) {
+            self.inner.command(PlayerCommand::Stop);
+        }
+        fn set_volume(&self, _v: f64) {}
+        fn command(&self, cmd: PlayerCommand) {
+            self.inner.command(cmd);
+        }
+        fn shutdown(&self) {}
+        fn subscribe_state(&self) -> watch::Receiver<PlaybackState> {
+            self.inner.subscribe_state()
+        }
+        fn subscribe_events(&self) -> broadcast::Receiver<PlayerEvent> {
+            self.inner.subscribe_events()
+        }
+    }
+
+    /// resolve_source_ids 有延迟的解析器（模拟歌单分页网络解析）。
+    #[derive(Debug)]
+    struct DelayResolver {
+        inner: Arc<FakeResolver>,
+        delay: std::time::Duration,
+    }
+
+    impl SourceResolver for DelayResolver {
+        fn resolve_source_ids(
+            &self,
+            src: &PlayRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
+            let inner = self.inner.clone();
+            let delay = self.delay;
+            let src = src.clone();
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                inner.resolve_source_ids(&src).await
+            })
+        }
+        fn resolve_track(
+            &self,
+            id: &TrackId,
+        ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+            self.inner.resolve_track(id)
+        }
+    }
+
+    /// Bug 1（seq 受理即前置自增）：解析期间 seq 已推进、状态仍 Empty，
+    /// CLI 首个轮询即误报「后端空闲」。修复：seq 在命令完成后才推进。
+    #[tokio::test]
+    async fn seq_does_not_advance_while_source_resolving() {
+        let (driver, _sr, _er) = SlowDriver::new();
+        let resolver = Arc::new(DelayResolver {
+            inner: FakeResolver::new(vec![vec![TrackId::new("a")]]),
+            delay: std::time::Duration::from_millis(200),
+        });
+        let handle = PlaybackEngine::start(driver.clone(), resolver, Arc::new(|| true));
+        let st = handle.state_rx.clone();
+        let seq0 = st.borrow().seq;
+
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        // 命令在途：seq 必须保持边界值（CLI 依赖这一点继续轮询）。
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            st.borrow().seq,
+            seq0,
+            "解析未完成时 seq 不得推进（Bug 1：CLI 在 Empty 窗口误报）"
+        );
+        // 完成后：seq 越过边界，且首个 seq>seq0 的发布不得是「无错误的 Empty」
+        // （Bug 1：CLI 在 Empty 窗口误报「后端空闲」）。
+        // 引擎必须先装载完再推进代际。
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut saw_advanced = false;
+        loop {
+            {
+                let s = st.borrow();
+                if s.seq > seq0 {
+                    if !saw_advanced {
+                        saw_advanced = true;
+                        assert_eq!(
+                            s.playback.status,
+                            PlaybackStatus::Playing,
+                            "seq 首次推进时的发布不得是 Empty（Bug 1：CLI 误报「后端空闲」）"
+                        );
+                        assert_eq!(
+                            s.playback.current.as_ref().map(|t| t.id.clone()),
+                            Some(TrackId::new("a")),
+                            "seq 首次推进时当前曲目应为新曲"
+                        );
+                    }
+                    if s.playback.status == PlaybackStatus::Playing {
+                        break;
+                    }
+                }
+            }
+            assert!(tokio::time::Instant::now() < deadline, "3s 内未完成装载");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(driver.inner.loads.lock().unwrap().len(), 1);
+    }
+
+    /// Bug 2（状态滞后）：seq 推进时复合状态必须已反映新曲（而非旧曲）。
+    /// 修复：load 后等待驱动应用装载再发布完成态。
+    #[tokio::test]
+    async fn seq_advance_implies_new_track_applied() {
+        let (driver, _sr, _er) = SlowDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("b")]]);
+        let handle = PlaybackEngine::start(driver.clone(), resolver, Arc::new(|| true));
+        let st = handle.state_rx.clone();
+        let seq0 = st.borrow().seq;
+
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+            .await
+            .unwrap();
+        // 等待 seq 越过边界，然后立即断言：当前曲目必须是新曲 b。
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            {
+                let s = st.borrow();
+                if s.seq > seq0 {
+                    assert_eq!(
+                        s.playback.current.as_ref().map(|t| t.id.clone()),
+                        Some(TrackId::new("b")),
+                        "seq 推进时状态必须已反映新曲（Bug 2：显示旧曲）"
+                    );
+                    break;
+                }
+            }
+            assert!(tokio::time::Instant::now() < deadline, "3s 内未完成");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// 空源：完成态携带错误（CLI 可确定性报告，而非等到 15s 超时）。
+    #[tokio::test]
+    async fn empty_source_sets_error_and_advances_seq() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![]]);
+        let (handle, st) = start_engine(driver.clone(), resolver).await;
+        let seq0 = st.borrow().seq;
+
+        handle
+            .cmd(Request::Play(PlayRequest::Playlist(
+                hmp_core::PlaylistId::new("p"),
+            )))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            {
+                let s = st.borrow();
+                if s.seq > seq0 {
+                    assert!(s.last_error.is_some(), "空源应有错误详情");
+                    assert!(s.queue.tracks.is_empty());
+                    break;
+                }
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     /// Finding 1：Play/PlayNext/Next/Previous 前置位 seq（命令代际边界）。

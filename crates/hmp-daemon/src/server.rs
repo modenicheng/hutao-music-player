@@ -234,7 +234,15 @@ mod tests {
         events_tx: broadcast::Sender<PlayerEvent>,
     }
     impl PlaybackDriver for SDriver {
-        fn load(&self, _r: LoadRequest) {}
+        fn load(&self, r: LoadRequest) {
+            // 同步应用（模拟真实驱动装载臂）：current + Playing。
+            let (track, quality) = (r.track, r.quality);
+            self.state_tx.send_modify(|s| {
+                s.status = PlaybackStatus::Playing;
+                s.current = Some(track);
+                s.actual_quality = Some(quality);
+            });
+        }
         fn play(&self) {}
         fn pause(&self) {}
         fn seek(&self, _p: std::time::Duration) {}

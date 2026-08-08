@@ -65,7 +65,11 @@ pub async fn cmd_play(client: &mut DaemonClient, src: &str) -> Result<(), CliErr
     let req = Request::Play(parse_source(src));
     let resp = send(client, req).await?;
     match resp {
-        Response::Ok => await_playing(client, seq0).await,
+        Response::Ok => {
+            let title = await_playing(client, seq0).await?;
+            print_started(&title);
+            Ok(())
+        }
         Response::Err { code, message } => Err(CliError::Response { code, message }),
         _ => Err(CliError::Protocol("意外响应".into())),
     }
@@ -80,73 +84,130 @@ pub async fn cmd_playnext(client: &mut DaemonClient, src: &str) -> Result<(), Cl
     let req = Request::PlayNext(parse_source(src));
     let resp = send(client, req).await?;
     match resp {
-        Response::Ok => await_playing(client, seq0).await,
+        Response::Ok => {
+            let title = await_playing(client, seq0).await?;
+            print_started(&title);
+            Ok(())
+        }
         Response::Err { code, message } => Err(CliError::Response { code, message }),
         _ => Err(CliError::Protocol("意外响应".into())),
     }
 }
 
-/// 短轮询确认（≤15s）：先等 seq 越过命令前边界（本命令已被引擎处理），
-/// 再按最终状态判定：Playing/Paused → 成功；Error/Empty → 失败（携带后端
-/// 映射的 last_error，Finding 2）。不得把 seq 前进前的旧状态当终态。
-async fn await_playing(client: &mut DaemonClient, seq0: u64) -> Result<(), CliError> {
+/// 打印「已开始播放: <标题>」。
+fn print_started(title: &str) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "已开始播放: {title}");
+    let _ = out.flush();
+}
+
+/// 短轮询确认（默认 ≤15s）：先等 seq 越过命令前边界（引擎已完成本命令），
+/// 再按最终状态判定：Playing/Paused → 返回新曲标题；Error → 失败（携带后端
+/// 映射的 last_error，Finding 2）；Empty 仅在携带错误详情时才算失败（Bug 1：
+/// 解析/装载窗口的 Empty 应继续轮询而非误报「后端空闲」）。
+///
+/// 不得把 seq 前进前的旧状态当终态；seq 前进时状态必须已反映命令结果
+/// （引擎侧完成态语义，Bug 2：不再用旧曲目确认）。
+async fn await_playing(client: &mut DaemonClient, seq0: u64) -> Result<String, CliError> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut last_empty_without_error = false;
     loop {
         let st = match send(client, Request::Status).await? {
             Response::Status(s) => s,
             _ => return Err(CliError::Protocol("Status 响应异常".into())),
         };
-        if st.seq <= seq0 {
-            // 命令尚未被引擎处理：旧状态（Empty/旧的 Playing）不是本命令的结果。
-            if tokio::time::Instant::now() >= deadline {
-                return Err(CliError::Response {
-                    code: IpcErrorCode::Internal,
-                    message: "播放确认超时（15s）".into(),
-                });
+        match decide_await_step(
+            seq0,
+            &st,
+            tokio::time::Instant::now() >= deadline,
+            last_empty_without_error,
+        ) {
+            AwaitStep::KeepWaiting => {
+                last_empty_without_error = st.playback.status == hmp_core::PlaybackStatus::Empty
+                    && st.last_error.is_none();
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            continue;
+            AwaitStep::Success(title) => return Ok(title),
+            AwaitStep::Failure(e) => return Err(e),
         }
-        use hmp_core::PlaybackStatus as S;
-        match st.playback.status {
-            S::Playing | S::Paused => {
-                let mut out = std::io::stdout().lock();
-                writeln!(
-                    out,
-                    "已开始播放: {}",
-                    st.playback
-                        .current
-                        .as_ref()
-                        .map(|t| t.title.as_str())
-                        .unwrap_or("?")
-                )?;
-                out.flush()?;
-                return Ok(());
-            }
-            S::Error | S::Empty => {
-                // 终态失败：优先报告后端映射的错误（code + message，Finding 2）。
-                let info = st.last_error.unwrap_or(hmp_core::ErrorInfo {
-                    code: IpcErrorCode::Internal,
-                    message: if st.playback.status == S::Error {
-                        "播放失败（见后端日志）".into()
-                    } else {
-                        "后端空闲，播放未启动".into()
-                    },
-                });
-                return Err(CliError::Response {
-                    code: info.code,
-                    message: info.message,
-                });
-            }
-            _ => {}
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(CliError::Response {
+    }
+}
+
+/// 轮询决策（纯函数，可单测）。
+#[derive(Debug)]
+enum AwaitStep {
+    KeepWaiting,
+    Success(String),
+    Failure(CliError),
+}
+
+fn decide_await_step(
+    seq0: u64,
+    st: &hmp_core::DaemonState,
+    deadline_hit: bool,
+    last_empty_without_error: bool,
+) -> AwaitStep {
+    if st.seq <= seq0 {
+        // 命令尚未完成：旧状态不是本命令的结果。
+        if deadline_hit {
+            return AwaitStep::Failure(CliError::Response {
                 code: IpcErrorCode::Internal,
                 message: "播放确认超时（15s）".into(),
             });
         }
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        return AwaitStep::KeepWaiting;
+    }
+    use hmp_core::PlaybackStatus as S;
+    match st.playback.status {
+        S::Playing | S::Paused => AwaitStep::Success(
+            st.playback
+                .current
+                .as_ref()
+                .map(|t| t.title.clone())
+                .unwrap_or_else(|| "?".into()),
+        ),
+        S::Error => {
+            // 播放器错误是确定性失败（即使无错误详情）。
+            let info = st.last_error.clone().unwrap_or(hmp_core::ErrorInfo {
+                code: IpcErrorCode::Internal,
+                message: "播放失败（见后端日志）".into(),
+            });
+            AwaitStep::Failure(CliError::Response {
+                code: info.code,
+                message: info.message,
+            })
+        }
+        S::Empty => {
+            // 仅携带错误详情（解析失败/空源）才算终态失败；
+            // 无错误的 Empty 是装载中的瞬时状态，继续轮询。
+            if let Some(info) = st.last_error.clone() {
+                AwaitStep::Failure(CliError::Response {
+                    code: info.code,
+                    message: info.message,
+                })
+            } else if deadline_hit {
+                AwaitStep::Failure(CliError::Response {
+                    code: IpcErrorCode::Internal,
+                    message: if last_empty_without_error {
+                        "播放确认超时（15s）：后端仍空闲".into()
+                    } else {
+                        "播放确认超时（15s）".into()
+                    },
+                })
+            } else {
+                AwaitStep::KeepWaiting
+            }
+        }
+        _ => {
+            if deadline_hit {
+                AwaitStep::Failure(CliError::Response {
+                    code: IpcErrorCode::Internal,
+                    message: "播放确认超时（15s）".into(),
+                })
+            } else {
+                AwaitStep::KeepWaiting
+            }
+        }
     }
 }
 
@@ -326,5 +387,156 @@ mod tests {
             Request::Command(PlayerCommand::SetVolume(1.0)) // clamp 到 0..1
         );
         assert_eq!(quit_req(), Request::Quit);
+    }
+
+    // ---------- await_playing 决策（Bug 1 / Bug 2 的 CLI 侧契约） ----------
+
+    /// 构造状态。
+    fn mkst(
+        seq: u64,
+        status: hmp_core::PlaybackStatus,
+        title: Option<&str>,
+    ) -> hmp_core::DaemonState {
+        hmp_core::DaemonState {
+            playback: hmp_core::PlaybackState {
+                status,
+                current: title.map(|t| hmp_core::Track {
+                    id: hmp_core::TrackId::new("t"),
+                    title: t.into(),
+                    artists: vec![],
+                    album: None,
+                    duration: Some(std::time::Duration::from_secs(60)),
+                    cover: None,
+                    url: Some("fake://t".into()),
+                    available_qualities: vec![],
+                }),
+                ..Default::default()
+            },
+            queue: Default::default(),
+            caps: Default::default(),
+            seq,
+            last_error: None,
+        }
+    }
+
+    fn failure_code(step: &AwaitStep) -> Option<(IpcErrorCode, String)> {
+        match step {
+            AwaitStep::Failure(CliError::Response { code, message }) => {
+                Some((*code, message.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Bug 1：seq 未推进 + Empty（解析窗口）→ 继续轮询，绝不报「后端空闲」。
+    #[test]
+    fn decide_keeps_waiting_while_empty_before_seq_advance() {
+        let step = decide_await_step(
+            5,
+            &mkst(5, hmp_core::PlaybackStatus::Empty, None),
+            false,
+            false,
+        );
+        assert!(matches!(step, AwaitStep::KeepWaiting));
+    }
+
+    /// Bug 1：seq 已推进 + Empty 且无错误 → 仍继续轮询（装载中的瞬时状态）。
+    /// （旧行为：首个轮询即报「后端空闲，播放未启动」）
+    #[test]
+    fn decide_keeps_waiting_on_error_free_empty_after_seq_advance() {
+        let step = decide_await_step(
+            5,
+            &mkst(6, hmp_core::PlaybackStatus::Empty, None),
+            false,
+            false,
+        );
+        assert!(
+            matches!(step, AwaitStep::KeepWaiting),
+            "无错误详情的 Empty 不得判失败"
+        );
+    }
+
+    /// Bug 2：seq 未推进 + Playing(旧曲)（装载窗口）→ 继续轮询，不得用旧曲确认。
+    #[test]
+    fn decide_ignores_stale_playing_before_seq_advance() {
+        let step = decide_await_step(
+            5,
+            &mkst(5, hmp_core::PlaybackStatus::Playing, Some("旧曲")),
+            false,
+            false,
+        );
+        assert!(matches!(step, AwaitStep::KeepWaiting));
+    }
+
+    /// 成功：seq 已推进 + Playing → 返回新曲标题。
+    #[test]
+    fn decide_success_returns_new_track_title() {
+        let step = decide_await_step(
+            5,
+            &mkst(6, hmp_core::PlaybackStatus::Playing, Some("新曲")),
+            false,
+            false,
+        );
+        match step {
+            AwaitStep::Success(title) => assert_eq!(title, "新曲"),
+            other => panic!("预期成功，实际 {other:?}"),
+        }
+    }
+
+    /// 解析失败：seq 推进 + Empty + 错误详情 → 报告 code+message（Finding 2）。
+    #[test]
+    fn decide_reports_resolve_error() {
+        let mut err = mkst(6, hmp_core::PlaybackStatus::Empty, None);
+        err.last_error = Some(hmp_core::ErrorInfo {
+            code: IpcErrorCode::NotLoggedIn,
+            message: "未登录".into(),
+        });
+        let step = decide_await_step(5, &err, false, false);
+        assert_eq!(
+            failure_code(&step),
+            Some((IpcErrorCode::NotLoggedIn, "未登录".into()))
+        );
+    }
+
+    /// 播放器错误（无错误详情）也是终态失败。
+    #[test]
+    fn decide_reports_playback_error_without_detail() {
+        let step = decide_await_step(
+            5,
+            &mkst(6, hmp_core::PlaybackStatus::Error, None),
+            false,
+            false,
+        );
+        assert_eq!(
+            failure_code(&step).map(|(c, _)| c),
+            Some(IpcErrorCode::Internal)
+        );
+    }
+
+    /// 空源（空歌单）：Empty + 错误详情 → 确定性失败（而非等到超时）。
+    #[test]
+    fn decide_reports_empty_source_error() {
+        let mut st = mkst(6, hmp_core::PlaybackStatus::Empty, None);
+        st.last_error = Some(hmp_core::ErrorInfo {
+            code: IpcErrorCode::Internal,
+            message: "源解析结果为空，无曲目可播放".into(),
+        });
+        let step = decide_await_step(5, &st, false, false);
+        assert!(matches!(step, AwaitStep::Failure(_)));
+    }
+
+    /// 截止时间：无错误的 Empty → 超时（消息提示后端仍空闲，而非误报启动失败）。
+    #[test]
+    fn decide_times_out_on_empty_without_error() {
+        let step = decide_await_step(
+            5,
+            &mkst(6, hmp_core::PlaybackStatus::Empty, None),
+            true,
+            true,
+        );
+        assert_eq!(
+            failure_code(&step).map(|(_, m)| m.contains("超时")),
+            Some(true)
+        );
     }
 }
