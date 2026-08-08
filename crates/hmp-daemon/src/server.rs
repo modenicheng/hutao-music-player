@@ -54,11 +54,13 @@ pub async fn serve(listener: UnixListener, handle: EngineHandle) {
 }
 
 /// 需要登录态的请求（服务器同步前置校验，spec §6）。
-fn is_play_request(req: &Request) -> bool {
-    matches!(
-        req,
-        Request::Play(_) | Request::PlayNext(_) | Request::QueueAppend(_)
-    )
+/// 本地源（`PlayRequest::Local`）不要求 QQ 凭证（媒体库重构 C2）。
+fn requires_credential(req: &Request) -> bool {
+    let src = match req {
+        Request::Play(s) | Request::PlayNext(s) | Request::QueueAppend(s) => s,
+        _ => return false,
+    };
+    !matches!(src, hmp_core::PlayRequest::Local(_))
 }
 
 /// 单连接处理：请求/响应循环 + 订阅事件推送（reader 任务 + channel 并发版）。
@@ -145,7 +147,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             write_frame(wr, &ev).await?;
         }
         Ok(req) => {
-            if is_play_request(&req) && !(handle.credential_ok)() {
+            if requires_credential(&req) && !(handle.credential_ok)() {
                 write_frame(
                     wr,
                     &Response::Err {
@@ -249,7 +251,9 @@ mod tests {
     }
 
     /// 最小 fake 解析器（不触网）。
+    #[derive(Debug)]
     struct SResolver;
+
     impl SourceResolver for SResolver {
         fn resolve_source_ids(
             &self,
@@ -456,6 +460,37 @@ mod tests {
         let (sock, listener) = temp_socket().await;
         let handle = test_engine(false).await;
         tokio::spawn(async move { serve(listener, handle).await });
+        let resp = request(
+            &sock,
+            &Request::Play(PlayRequest::Track(TrackId::new("m1"))),
+        )
+        .await;
+        assert!(matches!(
+            resp,
+            Response::Err {
+                code: IpcErrorCode::NotLoggedIn,
+                ..
+            }
+        ));
+    }
+
+    /// 未登录时：QQ 源被前置拒绝，本地源放行（登录门按 provider，C2）。
+    #[tokio::test]
+    async fn local_play_without_credentials_is_allowed() {
+        let (sock, listener) = temp_socket().await;
+        let handle = test_engine(false).await;
+        tokio::spawn(async move { serve(listener, handle).await });
+        // 本地源不要求 QQ 登录。
+        let resp = request(
+            &sock,
+            &Request::Play(PlayRequest::Local(TrackId::new("local:/tmp/x.mp3"))),
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::Ok),
+            "本地播放不应要求登录，实际: {resp:?}"
+        );
+        // 同一连接 QQ 源仍被拒。
         let resp = request(
             &sock,
             &Request::Play(PlayRequest::Track(TrackId::new("m1"))),

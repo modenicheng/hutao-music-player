@@ -365,6 +365,7 @@ async fn resolve_track_falls_back_to_plain_via_mock_api() {
 
 /// 把本地 wav 当播放源的解析器：模拟歌单 `PlayRequest::Playlist` →
 /// [t1, t2]，每首解析为 `file://` URI（真实播放本地音频，产生真实 EOS）。
+#[derive(Debug)]
 struct LocalWavResolver {
     playlist: Vec<TrackId>,
     wavs: HashMap<TrackId, String>,
@@ -388,6 +389,7 @@ impl SourceResolver for LocalWavResolver {
             hmp_core::PlayRequest::Playlist(_) => self.playlist.clone(),
             hmp_core::PlayRequest::Track(id) => vec![id.clone()],
             hmp_core::PlayRequest::Album(_) => Vec::new(),
+            hmp_core::PlayRequest::Local(_) => Vec::new(),
         };
         Box::pin(async move { Ok(ids) })
     }

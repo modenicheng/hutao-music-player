@@ -132,7 +132,7 @@ pub enum EngineError {
 /// 返回 `BoxFuture`（而非 RPITIT）：RPITIT 的 `impl Future + Send` 返回类型
 /// 会使 trait 失去 dyn 兼容性（E0038），而引擎以 `Arc<dyn SourceResolver>`
 /// 持有本接缝（见计划 Task 2 Step 3 的备选说明）。
-pub trait SourceResolver: Send + Sync {
+pub trait SourceResolver: Send + Sync + std::fmt::Debug {
     /// 解析源为 TrackId 列表（单曲=1 个；歌单/专辑=分页拉取）。
     fn resolve_source_ids(
         &self,
@@ -144,6 +144,15 @@ pub trait SourceResolver: Send + Sync {
         &self,
         track_id: &TrackId,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>>;
+
+    /// 直接按 URI 解析（MPRIS `OpenUri`；默认不支持，本地解析器实现 `file://`）。
+    fn resolve_uri(
+        &self,
+        uri: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        let msg = uri.to_string();
+        Box::pin(async move { Err(EngineError::Internal(format!("URI 播放暂不支持: {msg}"))) })
+    }
 }
 
 /// 生产解析器（QQ API + 共享凭证）。
@@ -379,6 +388,9 @@ pub async fn resolve_source_ids_impl(
 ) -> Result<Vec<TrackId>, EngineError> {
     match src {
         hmp_core::PlayRequest::Track(id) => Ok(vec![id.clone()]),
+        hmp_core::PlayRequest::Local(_) => Err(EngineError::Internal(
+            "QQ 解析器不支持本地源（组合解析器负责分发）".into(),
+        )),
         hmp_core::PlayRequest::Playlist(id) => {
             let list_id: i64 = id
                 .as_ref()

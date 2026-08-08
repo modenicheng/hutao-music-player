@@ -1,6 +1,7 @@
 //! HMP 后台播放后端（docs/PROJECT.md §8.5）。
 pub mod daemon;
 pub mod engine;
+pub mod local;
 #[cfg(feature = "mpris")]
 pub mod mpris;
 pub mod player;

@@ -222,6 +222,72 @@ impl LibraryDb {
             )
             .optional()
     }
+
+    /// 本地文件入库：upsert tracks(source='local', source_key=`local:<path>`) +
+    /// local_files(path 唯一)；返回 track id。
+    /// 幂等：同一路径重扫只更新元数据，不重复建曲目。
+    pub fn add_local_file(
+        &mut self,
+        path: &Path,
+        meta: Option<&crate::local::LocalMeta>,
+    ) -> rusqlite::Result<i64> {
+        let meta = match meta {
+            Some(m) => m.clone(),
+            None => crate::local::LocalMeta {
+                title: path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("未知")
+                    .to_string(),
+                ..Default::default()
+            },
+        };
+        let source_key = format!("local:{}", path.display());
+        let id = self.upsert_track(&TrackRow {
+            source: "local",
+            source_key,
+            title: meta.title,
+            album: meta.album,
+            artist: meta.artist,
+            duration_ms: meta.duration_ms,
+            cover_uri: None,
+        })?;
+        let md = std::fs::metadata(path).ok();
+        self.conn.execute(
+            r#"INSERT INTO local_files (track_id, path, file_size, mtime, format, bitrate, sample_rate)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+               ON CONFLICT(path) DO UPDATE SET
+                 file_size = excluded.file_size,
+                 mtime = excluded.mtime,
+                 format = COALESCE(excluded.format, local_files.format),
+                 bitrate = COALESCE(excluded.bitrate, local_files.bitrate),
+                 sample_rate = COALESCE(excluded.sample_rate, local_files.sample_rate)"#,
+            params![
+                id,
+                path.display().to_string(),
+                md.as_ref().map(|m| m.len() as i64),
+                md.as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64),
+                meta.format,
+                meta.bitrate,
+                meta.sample_rate,
+            ],
+        )?;
+        Ok(id)
+    }
+
+    /// 本地曲目路径（local_files 关联）。
+    pub fn local_path(&mut self, track_id: i64) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT path FROM local_files WHERE track_id = ?1",
+                params![track_id],
+                |r| r.get(0),
+            )
+            .optional()
+    }
 }
 
 /// 逐级迁移到最新 user_version。

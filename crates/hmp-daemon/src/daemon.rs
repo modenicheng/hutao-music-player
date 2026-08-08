@@ -5,7 +5,8 @@ use hmp_qqmusic_api::QqMusicClient;
 use hmp_storage::credential::store_from_env;
 
 use crate::engine::{EngineHandle, PlaybackEngine};
-use crate::player::{GstDriver, PlaybackDriver, QqSourceResolver};
+use crate::local::{CompositeSourceResolver, LocalSourceResolver};
+use crate::player::{GstDriver, PlaybackDriver, QqSourceResolver, SourceResolver};
 
 /// 后端运行配置。
 pub struct DaemonConfig {
@@ -27,13 +28,24 @@ impl Daemon {
             let resolver = Arc::clone(&resolver);
             Arc::new(move || resolver.has_credential())
         };
-        // 媒体库（`$XDG_DATA_HOME/hmp/library.sqlite3`）；不可用仅告警不阻断播放。
+        // 媒体库（`$XDG_DATA_HOME/hmp/library.sqlite3`）；打开失败回退内存库
+        // （播放历史不持久，播放不受阻断）。
         let library =
-            hmp_storage::LibraryDb::open(&hmp_storage::data_dir().join("library.sqlite3"))
-                .map(|db| Arc::new(std::sync::Mutex::new(db)))
-                .map_err(|e| tracing::warn!(%e, "媒体库打开失败，播放历史不落库"))
-                .ok();
-        let handle = PlaybackEngine::start_with_library(driver, resolver, credential_ok, library);
+            match hmp_storage::LibraryDb::open(&hmp_storage::data_dir().join("library.sqlite3")) {
+                Ok(db) => Arc::new(std::sync::Mutex::new(db)),
+                Err(e) => {
+                    tracing::warn!(%e, "媒体库打开失败，回退内存库（历史不持久）");
+                    Arc::new(std::sync::Mutex::new(
+                        hmp_storage::LibraryDb::open_in_memory().unwrap(),
+                    ))
+                }
+            };
+        // 组合解析器：QQ（网络取流，需凭证）+ 本地（file://，无需凭证）。
+        let local = Arc::new(LocalSourceResolver::new(library.clone()));
+        let resolver: Arc<dyn SourceResolver> =
+            Arc::new(CompositeSourceResolver::new(resolver, local));
+        let handle =
+            PlaybackEngine::start_with_library(driver, resolver, credential_ok, Some(library));
         Ok(Self { handle })
     }
 }

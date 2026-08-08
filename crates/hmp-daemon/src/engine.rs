@@ -171,6 +171,23 @@ impl PlaybackEngine {
                             self.queue.clear();
                             self.publish();
                         }
+                        Request::OpenUri(uri) => {
+                            // MPRIS OpenUri：file:// → 本地播放；其余 → 错误。
+                            self.seq += 1;
+                            match uri.strip_prefix("file://") {
+                                Some(path) if !path.is_empty() => {
+                                    let src = PlayRequest::Local(TrackId::new(format!("local:{path}")));
+                                    self.play_source(src, false).await;
+                                }
+                                _ => {
+                                    self.last_error = Some(ErrorInfo {
+                                        code: IpcErrorCode::Internal,
+                                        message: format!("不支持的 URI: {uri}"),
+                                    });
+                                    self.publish();
+                                }
+                            }
+                        }
                         // 查询类由服务器直接读 state_rx 处理；引擎忽略（防御）。
                         _ => {}
                     }
@@ -474,6 +491,7 @@ mod tests {
     }
 
     /// 固定返回曲目列表的解析器（不触网）。
+    #[derive(Debug)]
     pub struct FakeResolver {
         pub ids: Mutex<Vec<Vec<TrackId>>>, // 每次 resolve_source_ids 弹出一个列表
     }
@@ -520,6 +538,7 @@ mod tests {
     }
 
     /// 源解析即失败的解析器（Finding 2 测试）。
+    #[derive(Debug)]
     pub struct FailResolver {
         pub err: EngineError,
     }
