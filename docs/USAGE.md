@@ -95,7 +95,9 @@ playerctl -p hmp ...  │        (127.0.0.1 本机)          │
 | `hmp volume <0..1>` | 音量（如 `hmp volume 0.5`） |
 | `hmp loop <none\|list\|track>` | 循环模式：顺序播完停 / 列表循环 / 单曲循环 |
 | `hmp shuffle <on\|off>` | 随机播放 |
-| `hmp status` | 显示当前曲目/状态/进度/音量/循环/队列 |
+| `hmp status` | 显示当前曲目/状态/进度/音量/音质/循环/队列 |
+| `hmp quality [auto\|master\|hires\|atmos\|flac\|aac\|320\|128] [--no-fallback]` | 查看/设置音质策略（见 §6） |
+| `hmp history [n]` | 最近播放（直读媒体库，默认 10 条） |
 | `hmp quit` | 优雅退出后端 |
 
 ### 4.3 后端进程管理
@@ -117,7 +119,16 @@ playerctl -p hmp ...  │        (127.0.0.1 本机)          │
 
 ## 6. 音质与 QMC2 解密
 
-- **质量回退链**：`Master → HiRes → Atmos → Flac → Mp3_320 → Mp3_128`（会员音质优先，逐级降级）；
+- **音质策略**（持久化于 `~/.config/hmp/config.toml`，`hmp quality` 查看/设置）：
+  ```bash
+  hmp quality                 # 查看当前策略与生效链
+  hmp quality auto            # 自动：从最高档起逐级回退（默认）
+  hmp quality flac            # 固定 FLAC，失败回退 320/128
+  hmp quality 320 --no-fallback  # 只尝试 320k，不降级
+  # 可用档位：auto | master | hires | atmos | flac | aac | 320 | 128
+  ```
+- **回退链**：`auto` = `Master → HiRes → Atmos → Flac → Mp3_320 → Mp3_128`；固定档位从该档起降级。音质是 **source resolution policy**（resolver 按链取流），不是播放器参数。
+- **可用 vs 实际**：曲目的 `available_qualities`（QQ size 字段 + 本次探测成功档位）与播放状态的 `actual_quality` 分离；`hmp status` 显示实际音质。
 - **加密音质**（`.mflac`/`.mgg`/`.mmp4` 等，FLAC 及以上）：daemon 用接口 `ekey` 经本地回环解密代理（127.0.0.1 随机端口，Range 按需解密）**流式播放**，边下边播、支持即时 Seek；CDN 不支持 Range 时回退整文件解密缓存；
 - OGG 系列（`O8M1` 等）尚未纳入回退链（后续项）。
 
@@ -155,10 +166,12 @@ cargo fmt --all -- --check
 ```
 
 覆盖面：
-- **hmp-core**：`QueueCore` 纯逻辑（循环回绕/prev/洗牌/插队/移除）、IPC 帧编解码（round-trip、长度上限、截断）；
+- **hmp-core**：`QueueCore` 纯逻辑（循环回绕/prev/播放顺序洗牌/历史回退/插队整片/移除）、IPC 帧编解码（round-trip、长度上限、截断）；
 - **hmp-daemon 引擎**：FakeDriver/FakeResolver 注入——Play 替换队列、Next/Prev 导航、EOS 自动续播、List/Track 循环、移除当前曲立即接替、quit 终止、seq/last_error 发布；
 - **服务器**：真实 Unix socket + 协议客户端——Status/Queue/订阅推送（含空闲订阅者事件流）、畸形帧、未登录前置校验、多客户端；
-- **CLI**：状态格式化、播放源解析、二维码渲染（已知像素图断言）、登录刷新判定、`hmp quit` 进程级优雅退出。
+- **CLI**：状态格式化、播放源解析、二维码渲染（已知像素图断言）、登录刷新判定、`hmp quit` 进程级优雅退出、`hmp quality`/`hmp history` 格式化；
+- **存储**：SQLite 媒体库（迁移 v1、upsert 幂等、播放会话 start→end 闭环、WAL 并发）、配置 round-trip、回退链生成；
+- **e2e（wiremock）**：QQ 详情/取流契约、音质回退链顺序（Auto 含 Atmos；固定 FLAC 只试 F0M0）。
 
 ### 9.2 真机验收（需 QQ 账号 + 桌面环境 + GStreamer）
 
