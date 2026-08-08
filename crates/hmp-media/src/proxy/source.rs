@@ -1,14 +1,18 @@
 //! CDN 流式数据源：探测 CDN Range 支持 → 解析 QMC2 尾部 →
-//! 构建流密码 → 按需拉取并解密区间。
+//! 构建流密码 → 按需拉取并分块解密区间。
 //!
 //! 若 CDN 不支持 `Range`（返回 200 或无 `Content-Range`），
 //! 自动回退到 `decrypt` 全量下载-解密-缓存流程。
+//!
+//! 播放路径通过 [`Source::open`] 返回分块流，每个 chunk 在到达时
+//! 即时解密并写入 TCP socket，避免全量缓冲。
 
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use hmp_qqmusic_api::algorithms::qmc2::{self, Footer, Qmc2Cipher};
 use tokio::sync::{Semaphore, oneshot};
 use tracing::{debug, warn};
@@ -54,6 +58,7 @@ impl Drop for MediaGuard {
 /// CDN 区间拉取 + 按需 QMC2 解密的数据源。
 ///
 /// 实现 [`Source`] 供 [`super::http::serve`] 使用。
+/// [`open`](Source::open) 返回分块流，每块在到达时即时解密。
 struct StreamSource {
     /// HTTP 客户端（复用连接）。
     client: reqwest::Client,
@@ -74,86 +79,170 @@ impl Source for StreamSource {
         self.audio_len
     }
 
-    fn read_range<'a>(
-        &'a self,
-        range: ByteRange,
-    ) -> Pin<
-        Box<dyn std::future::Future<Output = io::Result<std::borrow::Cow<'a, [u8]>>> + Send + 'a>,
-    > {
-        Box::pin(async move {
-            let _permit = self
-                .sem
-                .acquire()
-                .await
-                .map_err(|e| io::Error::other(format!("信号量获取失败: {e}")))?;
+    type ChunkStream<'a> = Pin<Box<dyn Stream<Item = io::Result<Vec<u8>>> + Send + 'a>>;
 
-            let start = range.start;
-            let end = range.end;
-            let range_header = format!("bytes={start}-{end}");
+    fn open<'a>(&'a self, range: ByteRange) -> Self::ChunkStream<'a> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<io::Result<Vec<u8>>>(8);
 
-            debug!(cdn_url = %self.cdn_url, %range_header, "请求 CDN 区间");
+        let client = self.client.clone();
+        let cdn_url = self.cdn_url.clone();
+        let cipher = Arc::clone(&self.cipher);
+        let sem = Arc::clone(&self.sem);
+        let start = range.start;
+        let end = range.end;
 
-            let response = self
-                .client
-                .get(&self.cdn_url)
-                .header("Range", &range_header)
-                .send()
-                .await
-                .map_err(|e| io::Error::other(format!("CDN 请求失败: {e}")))?;
+        tokio::spawn(async move {
+            stream_range_into_channel(client, cdn_url, cipher, sem, start, end, tx).await;
+        });
 
-            let status = response.status();
-
-            let body_bytes: Vec<u8> = if status == reqwest::StatusCode::PARTIAL_CONTENT {
-                // 206 — 预期路径，读取全部 body
-                response
-                    .bytes()
-                    .await
-                    .map_err(|e| io::Error::other(format!("读取 206 body 失败: {e}")))?
-                    .to_vec()
-            } else if status == reqwest::StatusCode::OK {
-                // 200 — CDN 忽略了 Range，读取全量后切片（防御性路径）
-                warn!(cdn_url = %self.cdn_url, "CDN 返回 200（忽略 Range），正在读取全量");
-                let full_bytes = read_full_body(response).await?;
-                let slice_start = start as usize;
-                let slice_end = (end as usize).min(full_bytes.len().saturating_sub(1));
-                if slice_start >= full_bytes.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "区间超出全量范围",
-                    ));
-                }
-                full_bytes[slice_start..=slice_end].to_vec()
-            } else {
-                return Err(io::Error::other(format!("CDN 返回非预期状态码: {status}")));
-            };
-
-            // 解密
-            let mut buf = body_bytes.to_vec();
-            let decrypt_len = buf.len();
-            // 分块解密，避免一次性处理可能超大的 buf
-            const CHUNK: usize = 256 * 1024; // 256 KiB
-            let mut dec_offset = start as usize;
-            for chunk in buf.chunks_mut(CHUNK) {
-                self.cipher.decrypt(dec_offset, chunk);
-                dec_offset += chunk.len();
-            }
-
-            debug!(start, end, len = decrypt_len, "CDN 区间解密完成");
-
-            Ok(std::borrow::Cow::Owned(buf))
-        })
+        Box::pin(ReceiverStream { rx })
     }
 }
 
-/// 流式读取全量 body（200 回退路径），按 256 KiB 分块累积。
-async fn read_full_body(response: reqwest::Response) -> io::Result<Vec<u8>> {
-    let mut stream = response.bytes_stream();
-    let mut acc: Vec<u8> = Vec::new();
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| io::Error::other(format!("读取流错误: {e}")))?;
-        acc.extend_from_slice(&chunk);
+// ── 分块流辅助 ──────────────────────────────────────────────────────
+
+/// `tokio::sync::mpsc::Receiver` 的 [`Stream`] 适配器。
+struct ReceiverStream {
+    rx: tokio::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+}
+
+impl Stream for ReceiverStream {
+    type Item = io::Result<Vec<u8>>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
     }
-    Ok(acc)
+}
+
+/// 后台任务：向 CDN 发起 Range 请求，分块解密，通过 channel 发送。
+async fn stream_range_into_channel(
+    client: reqwest::Client,
+    cdn_url: String,
+    cipher: Arc<dyn Qmc2Cipher>,
+    sem: Arc<Semaphore>,
+    start: u64,
+    end: u64,
+    tx: tokio::sync::mpsc::Sender<io::Result<Vec<u8>>>,
+) {
+    let _permit = match sem.acquire_owned().await {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = tx
+                .send(Err(io::Error::other(format!("信号量获取失败: {e}"))))
+                .await;
+            return;
+        }
+    };
+
+    let range_header = format!("bytes={start}-{end}");
+    debug!(cdn_url = %cdn_url, %range_header, "请求 CDN 区间");
+
+    let response = match client
+        .get(&cdn_url)
+        .header("Range", &range_header)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx
+                .send(Err(io::Error::other(format!("CDN 请求失败: {e}"))))
+                .await;
+            return;
+        }
+    };
+
+    let status = response.status();
+
+    if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        // 206 — 预期路径：流式解密
+        let mut byte_stream = response.bytes_stream();
+        let mut offset = start;
+        while let Some(chunk_result) = byte_stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    let mut buf = chunk.to_vec();
+                    cipher.decrypt(offset as usize, &mut buf);
+                    offset += buf.len() as u64;
+                    if tx.send(Ok(buf)).await.is_err() {
+                        return; // 接收端已关闭
+                    }
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(io::Error::other(format!("读取流错误: {e}"))))
+                        .await;
+                    return;
+                }
+            }
+        }
+        // 206 流自然结束
+    } else if status == reqwest::StatusCode::OK {
+        // 200 — CDN 忽略了 Range（防御性路径）
+        // 流式读取全量，丢弃 start 之前的字节，解密并 yield [start..=end]
+        warn!(cdn_url = %cdn_url, "CDN 返回 200（忽略 Range），流式跳过");
+        let mut byte_stream = response.bytes_stream();
+        let mut bytes_skipped: u64 = 0;
+        let mut bytes_yielded: u64 = 0;
+        let target = end - start + 1;
+
+        while bytes_yielded < target {
+            match byte_stream.next().await {
+                Some(Ok(chunk)) => {
+                    let _chunk_len = chunk.len() as u64;
+
+                    if bytes_skipped < start {
+                        let skip_in_chunk = ((start - bytes_skipped) as usize).min(chunk.len());
+                        bytes_skipped += skip_in_chunk as u64;
+
+                        if skip_in_chunk >= chunk.len() {
+                            continue;
+                        }
+                        // 部分跳过：取跳过之后的剩余字节
+                        let rest = &chunk[skip_in_chunk..];
+                        let take = (rest.len() as u64).min(target - bytes_yielded) as usize;
+                        let mut buf = rest[..take].to_vec();
+                        cipher.decrypt(start as usize + bytes_yielded as usize, &mut buf);
+                        bytes_yielded += take as u64;
+                        if tx.send(Ok(buf)).await.is_err() {
+                            return;
+                        }
+                    } else {
+                        // 已过跳过阶段 — 正常 yield
+                        let take = (chunk.len() as u64).min(target - bytes_yielded) as usize;
+                        let mut buf = chunk[..take].to_vec();
+                        cipher.decrypt(start as usize + bytes_yielded as usize, &mut buf);
+                        bytes_yielded += take as u64;
+                        if tx.send(Ok(buf)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    let _ = tx
+                        .send(Err(io::Error::other(format!("读取流错误: {e}"))))
+                        .await;
+                    return;
+                }
+                None => {
+                    if bytes_skipped < start {
+                        let _ = tx
+                            .send(Err(io::Error::other("CDN body 在跳过区间前结束")))
+                            .await;
+                    } else if bytes_yielded < target {
+                        let _ = tx.send(Err(io::Error::other("CDN 流提前结束"))).await;
+                    }
+                    return;
+                }
+            }
+        }
+    } else {
+        let _ = tx
+            .send(Err(io::Error::other(format!(
+                "CDN 返回非预期状态码: {status}"
+            ))))
+            .await;
+    }
 }
 
 // ── 探测与就绪 ──────────────────────────────────────────────────────
@@ -196,6 +285,7 @@ pub async fn prepare_stream(
     let mut footer = qmc2::detect_footer(total_len as usize, &tail_bytes);
 
     // QTag/V1 → 检查是否需要拉精确尾部（ekey 文本区超出 0x40 窗口）
+    let mut have_full_tail = false; // tail_bytes 是否覆盖 audio_len..end
     let needs_refetch =
         if let Some(Footer::QTag { audio_len: al } | Footer::V1 { audio_len: al }) = &footer {
             let al = *al as u64;
@@ -217,6 +307,7 @@ pub async fn prepare_stream(
             .map_err(|e| MediaError::Network(format!("精确尾部拉取失败: {e}")))?;
         // 用精确尾部重新检测
         footer = qmc2::detect_footer(al as usize + tail_bytes.len(), &tail_bytes);
+        have_full_tail = true;
     }
 
     let audio_len: usize = match &footer {
@@ -228,9 +319,20 @@ pub async fn prepare_stream(
     let cipher: Arc<dyn Qmc2Cipher> = if let Some(e) = ekey {
         let c = qmc2::decrypt_factory(e).map_err(MediaError::Key)?;
         Arc::from(c)
+    } else if have_full_tail {
+        // 复用已拉取的精确尾部，避免重复请求
+        match embedded_ekey_from_bytes(&tail_bytes, audio_len) {
+            Ok(e) => {
+                let c = qmc2::decrypt_factory(&e).map_err(MediaError::Key)?;
+                Arc::from(c)
+            }
+            Err(_) => {
+                warn!("内嵌 ekey 提取失败，回退到全量下载");
+                return fallback_playable(url, None, progress).await;
+            }
+        }
     } else {
         // 无 API ekey → 从尾部提取内嵌 ekey
-        // 总是从 audio_len 拉到末尾获取完整尾部，供 embedded_ekey_from_bytes 使用
         let ekey_tail = fetch_range(&client, url, audio_len as u64, tail_end)
             .await
             .map_err(|e| MediaError::Network(format!("ekey 尾部拉取失败: {e}")))?;
@@ -513,9 +615,7 @@ mod tests {
         assert_eq!(code, 206);
         assert_eq!(&body, &plaintext[..4096]);
 
-        // 请求 bytes=5000-6000（seek 行为）
-        // 注：plaintext 仅 4100 字节，5000 超出 audio_len，代理返回 416
-        // 改用有效区间
+        // 请求 bytes=1000-2000（seek 行为）
         let (code2, body2) = fetch_via_proxy(&prepared.uri, 1000, Some(2000)).await;
         assert_eq!(code2, 206);
         assert_eq!(&body2, &plaintext[1000..=2000]);
@@ -759,5 +859,79 @@ mod tests {
         let (code2, body2) = fetch_via_proxy(&prepared.uri, 0, Some(1000)).await;
         assert_eq!(code2, 206);
         assert_eq!(&body2, &plaintext[0..=1000]);
+    }
+
+    #[tokio::test]
+    async fn prepare_stream_200_defense_path() {
+        // 测试 200 防御路径：CDN probe 返回 206（bytes=0-0 成功），但
+        // 后续数据区间请求返回 200 全量 body。open 必须流式跳过 start 之前的
+        // 字节并正确解密 [start..=end]。
+        let plaintext = {
+            let mut v = b"fLaC".to_vec();
+            v.extend((0..512).map(|i| (i % 256) as u8));
+            v
+        };
+        let key = b"0123456789abcdefghij";
+        let (encrypted, ekey) = testutil::make_encrypted(&plaintext, key, true);
+        let total_len = encrypted.len() as u64;
+        let encrypted_full = encrypted.clone();
+
+        let server = MockServer::start().await;
+
+        // HEAD mock
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Length", total_len.to_string())
+                    .insert_header("Accept-Ranges", "bytes"),
+            )
+            .mount(&server)
+            .await;
+
+        // 组合 mock：bytes=0-0 → 206；尾部区间 → 206；数据区间 → 200
+        Mock::given(method("GET"))
+            .and(header_exists("Range"))
+            .respond_with(move |req: &wiremock::Request| {
+                let range_val = req
+                    .headers
+                    .get("Range")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+
+                if range_val == "bytes=0-0" {
+                    let body = &encrypted[0..=0];
+                    return ResponseTemplate::new(206)
+                        .insert_header("Content-Range", format!("bytes 0-0/{total_len}"))
+                        .set_body_bytes(body.to_vec());
+                }
+
+                if let Some((start, end)) = parse_range_value(range_val) {
+                    // 尾部区间返回 206（prepare_stream 需要检测 footer）
+                    if start >= total_len.saturating_sub(0x40) {
+                        let end_capped = end.min(total_len.saturating_sub(1));
+                        let body = &encrypted_full[start as usize..=end_capped as usize];
+                        return ResponseTemplate::new(206)
+                            .insert_header(
+                                "Content-Range",
+                                format!("bytes {start}-{end_capped}/{total_len}"),
+                            )
+                            .set_body_bytes(body.to_vec());
+                    }
+                }
+
+                // 其他区间 → 200 全量（CDN 忽略 Range，触发 200 防御路径）
+                ResponseTemplate::new(200).set_body_bytes(encrypted_full.clone())
+            })
+            .mount(&server)
+            .await;
+
+        let prepared = prepare_stream(&server.uri(), Some(&ekey), None)
+            .await
+            .expect("prepare_stream 应成功");
+
+        // 请求 bytes=100-199 → 应通过 200 跳过路径正确解密
+        let (code, body) = fetch_via_proxy(&prepared.uri, 100, Some(199)).await;
+        assert_eq!(code, 206);
+        assert_eq!(&body, &plaintext[100..=199]);
     }
 }
