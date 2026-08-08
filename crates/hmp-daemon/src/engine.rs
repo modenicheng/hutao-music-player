@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use hmp_core::{
-    DaemonState, ErrorInfo, IpcErrorCode, LoopMode, PlayRequest, PlaybackCapabilities,
-    PlaybackState, PlayerCommand, Request, TrackId,
+    DaemonState, ErrorInfo, IpcErrorCode, PlayRequest, PlaybackCapabilities, PlaybackState,
+    PlayerCommand, Request, TrackId,
 };
 use hmp_player_gst::PlayerEvent;
 use tokio::sync::{mpsc, watch};
@@ -175,25 +175,9 @@ impl PlaybackEngine {
     /// 同时把精确的播放能力发布到 `caps_tx`（MPRIS 消费，Finding 9）。
     fn publish(&self) {
         let queue = self.queue.snapshot();
-        let len = queue.tracks.len();
-        let cur = queue.current;
         let caps = PlaybackCapabilities {
-            can_go_next: if len == 0 {
-                false
-            } else {
-                match queue.loop_mode {
-                    LoopMode::Track | LoopMode::List => true,
-                    LoopMode::None => cur.is_some_and(|c| c + 1 < len),
-                }
-            },
-            can_go_previous: if len == 0 {
-                false
-            } else {
-                match queue.loop_mode {
-                    LoopMode::Track | LoopMode::List => true,
-                    LoopMode::None => cur.is_some_and(|c| c > 0),
-                }
-            },
+            can_go_next: self.queue.can_go_next(),
+            can_go_previous: self.queue.can_go_previous(),
         };
         let state = DaemonState {
             playback: self.state_rx.borrow().clone(),
@@ -234,7 +218,7 @@ impl PlaybackEngine {
     }
 
     async fn navigate_next(&mut self) {
-        if let Some(id) = self.queue.next_track() {
+        if let Some(id) = self.queue.skip_next() {
             self.publish();
             self.load_and_play(id).await;
         }
@@ -264,8 +248,10 @@ impl PlaybackEngine {
             return;
         }
         if playnext {
-            let idx = self.queue.insert_next(ids[0].clone());
-            self.queue.set_current(idx); // 定位到刚插入的位置（可能是队列中部）
+            // 整片插入当前曲之后（多曲目；空队列按 replace 建队）。
+            if let Some(at) = self.queue.insert_after_current(ids.clone()) {
+                self.queue.set_current(at); // 当前曲定位到插入的首曲（开始播放它）
+            }
             self.publish();
             self.load_and_play(ids[0].clone()).await;
         } else {
@@ -276,13 +262,7 @@ impl PlaybackEngine {
     }
 
     async fn on_ended(&mut self) {
-        if self.queue.loop_mode() == LoopMode::Track {
-            if let Some(id) = self.queue.current().cloned() {
-                self.load_and_play(id).await;
-            }
-            return;
-        }
-        if let Some(id) = self.queue.next_track() {
+        if let Some(id) = self.queue.advance_on_eos() {
             self.publish();
             self.load_and_play(id).await;
         } else {
@@ -690,6 +670,50 @@ mod tests {
                 TrackId::new("c")
             ]
         );
+        assert_eq!(
+            driver.loads.lock().unwrap().last(),
+            Some(&"fake://x".to_string())
+        );
+    }
+
+    /// `hmp playnext playlist:<id>`：整片歌单插入当前曲之后（旧代码只插 ids[0]）。
+    #[tokio::test]
+    async fn playnext_inserts_full_playlist_after_current() {
+        let (driver, _st, _ev) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![
+            vec![TrackId::new("a")],       // Play(a)
+            vec![TrackId::new("x"), TrackId::new("y"), TrackId::new("z")], // PlayNext(playlist)
+        ]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        handle
+            .cmd(Request::Command(PlayerCommand::Next)) // a → 定位到 b? 无 b：直接播完场景
+            .await
+            .unwrap();
+        wait_idle().await;
+        // 回到 a（None 模式 a 之后无曲，Next 不跳）
+        let _ = handle.state_rx.borrow().queue.current;
+        handle
+            .cmd(Request::PlayNext(PlayRequest::Playlist(hmp_core::PlaylistId::new("p"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let state = handle.state_rx.borrow();
+        // 整片插入：x y z 全在队列且紧跟 a 之后，当前播放 x。
+        assert_eq!(
+            state.queue.tracks,
+            vec![
+                TrackId::new("a"),
+                TrackId::new("x"),
+                TrackId::new("y"),
+                TrackId::new("z")
+            ]
+        );
+        assert_eq!(state.queue.current, Some(1)); // 当前 = x
         assert_eq!(
             driver.loads.lock().unwrap().last(),
             Some(&"fake://x".to_string())
