@@ -457,6 +457,10 @@ impl MprisPlayer {
             self.loop_status = loop_status.to_owned();
             changed.insert("LoopStatus", Value::from(loop_status));
         }
+        if self.shuffle != state.shuffle {
+            self.shuffle = state.shuffle;
+            changed.insert("Shuffle", Value::Bool(state.shuffle));
+        }
         if (self.volume - state.volume).abs() > 1e-9 {
             self.volume = state.volume;
             changed.insert("Volume", Value::F64(state.volume));
@@ -526,4 +530,68 @@ async fn emit_seeked(player_ref: &InterfaceRef<MprisPlayer>, position_us: i64) {
     .await;
     let _ = player_ref.seeked(emitter, position_us).await;
     // 同步任务需要看到新位置（避免重复发 Seeked）——字段已在 publish 中更新
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn iface() -> MprisPlayer {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        MprisPlayer {
+            cmd_tx: tx,
+            playback_status: "Stopped".into(),
+            loop_status: "None".into(),
+            shuffle: false,
+            volume: 1.0,
+            position_us: 0,
+            metadata: HashMap::new(),
+            rate: 1.0,
+            minimum_rate: 1.0,
+            maximum_rate: 1.0,
+            can_go_next: false,
+            can_go_previous: false,
+            can_play: false,
+            can_pause: false,
+            can_seek: false,
+            can_control: true,
+        }
+    }
+
+    fn state(shuffle: bool) -> PlaybackState {
+        PlaybackState {
+            shuffle,
+            ..Default::default()
+        }
+    }
+
+    /// Shuffle 属性从 PlaybackState 回同步（旧代码漏同步：hmp shuffle on 后
+    /// 桌面 Shell 仍显示 false）。
+    #[test]
+    fn update_props_syncs_shuffle_on() {
+        let mut iface = iface();
+        let mut changed: HashMap<&str, Value> = HashMap::new();
+        iface.update_props(&state(true), &mut changed);
+        assert!(iface.shuffle);
+        assert_eq!(changed.get("Shuffle"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn update_props_syncs_shuffle_off() {
+        let mut iface = iface();
+        iface.shuffle = true;
+        let mut changed: HashMap<&str, Value> = HashMap::new();
+        iface.update_props(&state(false), &mut changed);
+        assert!(!iface.shuffle);
+        assert_eq!(changed.get("Shuffle"), Some(&Value::Bool(false)));
+    }
+
+    /// 无变化时不产生属性变更。
+    #[test]
+    fn update_props_noop_when_shuffle_unchanged() {
+        let mut iface = iface();
+        let mut changed: HashMap<&str, Value> = HashMap::new();
+        iface.update_props(&state(false), &mut changed);
+        assert!(changed.get("Shuffle").is_none());
+    }
 }
