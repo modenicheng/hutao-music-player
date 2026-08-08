@@ -358,7 +358,8 @@ pub async fn resolve_track_impl(
     ))
 }
 
-/// 解析源为 TrackId 列表（单曲/歌单/专辑；歌单/专辑分页拉取，上限 3 页防超限）。
+/// 解析源为 TrackId 列表（单曲/歌单/专辑；歌单/专辑分页拉取，
+/// 以服务端 hasmore/total 为终止条件，安全上限 `MAX_PAGES` 页防死循环）。
 pub async fn resolve_source_ids_impl(
     client: &QqMusicClient,
     src: &hmp_core::PlayRequest,
@@ -371,21 +372,23 @@ pub async fn resolve_source_ids_impl(
                 .parse()
                 .map_err(|_| EngineError::PlaylistNotFound("歌单 id 非数字".into()))?;
             let api = SonglistApi::new(client);
-            let mut out = Vec::new();
-            for page in 1..=3 {
-                let resp = api
-                    .get_detail(list_id, 0, 100, page, true, false, false)
-                    .await
-                    .map_err(|e| EngineError::PlaylistNotFound(e.to_string()))?;
-                for s in &resp.songs {
-                    if !s.mid.is_empty() {
-                        out.push(TrackId::new(s.mid.clone()));
-                    }
+            let out = collect_paged(|page| {
+                let api = &api;
+                async move {
+                    let resp = api
+                        .get_detail(list_id, 0, 100, page, true, false, false)
+                        .await
+                        .map_err(|e| EngineError::PlaylistNotFound(e.to_string()))?;
+                    let mids = resp
+                        .songs
+                        .iter()
+                        .filter(|s| !s.mid.is_empty())
+                        .map(|s| TrackId::new(s.mid.clone()))
+                        .collect();
+                    Ok((mids, resp.hasmore != 0, resp.total))
                 }
-                if resp.hasmore == 0 || out.len() as i64 >= resp.total {
-                    break;
-                }
-            }
+            })
+            .await?;
             if out.is_empty() {
                 return Err(EngineError::PlaylistNotFound("歌单为空".into()));
             }
@@ -393,27 +396,53 @@ pub async fn resolve_source_ids_impl(
         }
         hmp_core::PlayRequest::Album(id) => {
             let api = AlbumApi::new(client);
-            let mut out = Vec::new();
-            for page in 1..=3 {
-                let resp = api
-                    .get_song(id.as_ref(), 100, page)
-                    .await
-                    .map_err(|e| EngineError::PlaylistNotFound(e.to_string()))?;
-                for s in &resp.song_list {
-                    if !s.mid.is_empty() {
-                        out.push(TrackId::new(s.mid.clone()));
-                    }
+            let out = collect_paged(|page| {
+                let api = &api;
+                async move {
+                    let resp = api
+                        .get_song(id.as_ref(), 100, page)
+                        .await
+                        .map_err(|e| EngineError::PlaylistNotFound(e.to_string()))?;
+                    let mids = resp
+                        .song_list
+                        .iter()
+                        .filter(|s| !s.mid.is_empty())
+                        .map(|s| TrackId::new(s.mid.clone()))
+                        .collect();
+                    Ok((mids, true, resp.total_num))
                 }
-                if out.len() as i64 >= resp.total_num {
-                    break;
-                }
-            }
+            })
+            .await?;
             if out.is_empty() {
                 return Err(EngineError::PlaylistNotFound("专辑为空".into()));
             }
             Ok(out)
         }
     }
+}
+
+/// 分页收集安全上限（100 页 × 100 首/页 = 1 万首，防服务端异常死循环）。
+pub const MAX_PAGES: i64 = 100;
+
+/// 分页收集：以服务端终止条件收尾，而非固定页数。
+/// `fetch(page)` 返回 (mids, hasmore, total)；hasmore=false、
+/// 已收集 ≥ total、或超过 `MAX_PAGES` 页时停止。
+pub async fn collect_paged<F, Fut>(mut fetch: F) -> Result<Vec<TrackId>, EngineError>
+where
+    F: FnMut(i64) -> Fut,
+    Fut: Future<Output = Result<(Vec<TrackId>, bool, i64), EngineError>>,
+{
+    let mut out = Vec::new();
+    let mut page = 1i64;
+    loop {
+        let (mids, hasmore, total) = fetch(page).await?;
+        out.extend(mids);
+        if !hasmore || out.len() as i64 >= total || page >= MAX_PAGES {
+            break;
+        }
+        page += 1;
+    }
+    Ok(out)
 }
 
 /// 反向映射（展示用）。
@@ -451,6 +480,78 @@ mod tests {
         assert_eq!(CHAIN[0], AudioQuality::Master);
         assert_eq!(CHAIN[2], AudioQuality::Atmos);
         assert_eq!(CHAIN[5], AudioQuality::Mp3_128);
+    }
+
+    /// 分页：以服务端 hasmore/total 为终止条件，超过 3 页也能取全（旧代码 3×100 截断）。
+    #[tokio::test]
+    async fn collect_paged_fetches_beyond_three_pages() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let ids = {
+            let calls = calls.clone();
+            collect_paged(move |page| {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let page = page as u32;
+                    let start = (page - 1) * 100;
+                    let mids =
+                        (start..start + 100).map(|i| TrackId::new(i.to_string())).collect();
+                    // 4 页共 400 首，前三页 hasmore=1
+                    Ok((mids, page < 4, 400))
+                }
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(ids.len(), 400, "应取全部 400 首而非 3 页截断");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 4);
+        assert_eq!(ids[399].as_ref(), "399");
+    }
+
+    /// 分页：hasmore=false 提前终止，不取多余页。
+    #[tokio::test]
+    async fn collect_paged_stops_on_hasmore_false() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let ids = {
+            let calls = calls.clone();
+            collect_paged(move |page| {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let page = page as u32;
+                    let mids = vec![TrackId::new(format!("p{page}"))];
+                    Ok((mids, page < 2, 9999)) // total 很大但 hasmore=false 即停
+                }
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(ids.len(), 2);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    /// 分页：total 达到即停（服务端总数少时不多拉）。
+    #[tokio::test]
+    async fn collect_paged_stops_at_total() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let ids = {
+            let calls = calls.clone();
+            collect_paged(move |page| {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let page = page as u32;
+                    let mids = (0..50)
+                        .map(|i| TrackId::new(format!("p{page}-{i}")))
+                        .collect();
+                    Ok((mids, true, 150)) // 3 页 × 50 = 150
+                }
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(ids.len(), 150);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 3);
     }
 
     /// 音质 → 文件类型映射：Atmos 必须可映射（链中尝试时不会因 None 跳过）。
