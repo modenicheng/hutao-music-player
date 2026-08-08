@@ -6,7 +6,9 @@
 //! # 协议约定
 //!
 //! - 仅接受 `GET` / `HEAD`；忽略请求路径
-//! - 默认 HTTP/1.1 keep-alive；`Connection: close` 时单请求后关闭
+//! - 严格验证请求行 `METHOD SP path SP HTTP/1.x`；格式错误 → 400
+//! - HTTP/1.1 默认 keep-alive；HTTP/1.0 默认 close
+//! - `Connection: close` / `Connection: keep-alive` 显式覆盖默认值
 //! - 所有响应带 `Accept-Ranges: bytes`、`Content-Type: application/octet-stream`
 
 use std::borrow::Cow;
@@ -103,11 +105,25 @@ async fn handle_connection(stream: TcpStream, source: Arc<dyn Source>) {
             continue; // 跳过空行
         }
 
-        // 解析 "METHOD SP path SP HTTP/1.1"
-        let mut parts = request_line.splitn(3, ' ');
-        let method = parts.next().unwrap_or("");
-        let _path = parts.next().unwrap_or("/");
-        let _version = parts.next().unwrap_or("HTTP/1.1");
+        // 解析 "METHOD SP path SP HTTP/1.x"
+        let parts: Vec<&str> = request_line.splitn(3, ' ').collect();
+        if parts.len() != 3 {
+            write_quick_response(&mut writer, 400, true).await;
+            break;
+        }
+        let method = parts[0];
+        let _path = parts[1];
+        let version = parts[2];
+
+        // 验证 HTTP 版本
+        if version != "HTTP/1.1" && version != "HTTP/1.0" {
+            write_quick_response(&mut writer, 400, true).await;
+            break;
+        }
+
+        // HTTP/1.0 默认不 keep-alive；HTTP/1.1 默认 keep-alive
+        // Connection 头可显式覆盖（见下方解析）
+        let mut connection_close = version == "HTTP/1.0";
 
         // 仅接受 GET / HEAD
         if method != "GET" && method != "HEAD" {
@@ -118,7 +134,6 @@ async fn handle_connection(stream: TcpStream, source: Arc<dyn Source>) {
         let is_head = method == "HEAD";
 
         // ── 读取请求头 ──────────────────────────────────────────
-        let mut connection_close = false;
         let mut range_value: Option<String> = None;
 
         loop {
@@ -140,7 +155,11 @@ async fn handle_connection(stream: TcpStream, source: Arc<dyn Source>) {
             // 解析 "Key: Value"
             if let Some((key, value)) = header_line.split_once(": ") {
                 if key.eq_ignore_ascii_case("Connection") {
-                    connection_close = value.eq_ignore_ascii_case("close");
+                    if value.eq_ignore_ascii_case("close") {
+                        connection_close = true;
+                    } else if value.eq_ignore_ascii_case("keep-alive") {
+                        connection_close = false;
+                    }
                 } else if key.eq_ignore_ascii_case("Range") {
                     range_value = Some(value.to_string());
                 }
@@ -175,7 +194,9 @@ async fn handle_connection(stream: TcpStream, source: Arc<dyn Source>) {
                                 .await;
                             }
                             Err(e) => {
-                                debug!(%e, "读取音频区间失败，关闭连接");
+                                debug!(%e, "读取音频区间失败，返回 502");
+                                let body = b"Bad Gateway";
+                                write_response(&mut writer, 502, body, None, true, false).await;
                                 break;
                             }
                         }
@@ -198,15 +219,16 @@ async fn handle_connection(stream: TcpStream, source: Arc<dyn Source>) {
                     write_response(&mut writer, 200, &data, None, connection_close, is_head).await;
                 }
                 Err(e) => {
-                    debug!(%e, "读取全量音频失败，关闭连接");
+                    debug!(%e, "读取全量音频失败，返回 502");
+                    let body = b"Bad Gateway";
+                    write_response(&mut writer, 502, body, None, true, false).await;
                     break;
                 }
             }
         }
 
         // ── 连接生命周期 ────────────────────────────────────────
-        if connection_close || is_head {
-            // HEAD 只服务一次请求；Connection: close 显式关闭
+        if connection_close {
             break;
         }
     }
@@ -281,13 +303,17 @@ pub fn status_line(code: u16) -> &'static str {
         400 => "400 Bad Request",
         405 => "405 Method Not Allowed",
         416 => "416 Range Not Satisfiable",
+        502 => "502 Bad Gateway",
         _ => "500 Internal Server Error",
     }
 }
 
 /// 去除 `\r\n` 或 `\n` 尾部的辅助函数。
 fn trim_crlf(s: &str) -> &str {
-    s.trim_end_matches(['\r', '\n'])
+    s.strip_suffix("\r\n")
+        .or_else(|| s.strip_suffix('\n'))
+        .or_else(|| s.strip_suffix('\r'))
+        .unwrap_or(s)
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────
@@ -329,6 +355,32 @@ mod tests {
                 let end = (range.end as usize).min(self.data.len().saturating_sub(1));
                 Ok(Cow::Borrowed(&self.data[start..=end]))
             })
+        }
+    }
+
+    // ── 测试辅助：失败 Source ────────────────────────────────
+
+    /// 假音频源：所有 `read_range` 调用返回 `Err`，用于测试 502 路径。
+    struct FailingSource {
+        audio_len: u64,
+    }
+
+    impl FailingSource {
+        fn new(audio_len: u64) -> Self {
+            Self { audio_len }
+        }
+    }
+
+    impl Source for FailingSource {
+        fn audio_len(&self) -> u64 {
+            self.audio_len
+        }
+
+        fn read_range<'a>(
+            &'a self,
+            _range: ByteRange,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Cow<'a, [u8]>>> + Send + 'a>> {
+            Box::pin(async move { Err(std::io::Error::other("simulated source failure")) })
         }
     }
 
@@ -401,6 +453,50 @@ mod tests {
         }
 
         (code, headers, body)
+    }
+
+    /// 仅读取 HTTP 响应头部（不读取 body），用于 HEAD 请求的响应。
+    ///
+    /// HEAD 响应 `Content-Length` 报告完整 body 大小但不发送 body，
+    /// 因此不能依赖 Content-Length 读取 body（keep-alive 连接会挂起）。
+    async fn read_headers_only(
+        stream: &mut tokio::net::TcpStream,
+    ) -> (u16, HashMap<String, String>) {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+
+        loop {
+            let n = stream.read(&mut buf).await.expect("读取响应失败");
+            if n == 0 {
+                panic!("连接在读取头部前关闭");
+            }
+            raw.extend_from_slice(&buf[..n]);
+            if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let header_end = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("未找到头部结束标记");
+
+        let header_text = std::str::from_utf8(&raw[..header_end]).expect("头部非 UTF-8");
+
+        let mut lines = header_text.split("\r\n");
+        let status_line = lines.next().expect("缺少状态行");
+        let parts: Vec<&str> = status_line.splitn(3, ' ').collect();
+        assert_eq!(parts[0], "HTTP/1.1", "响应应为 HTTP/1.1");
+        let code: u16 = parts[1].parse().expect("状态码非数字");
+
+        let mut headers = HashMap::new();
+        for line in lines {
+            if let Some((k, v)) = line.split_once(": ") {
+                headers.insert(k.to_lowercase(), v.to_string());
+            }
+        }
+
+        (code, headers)
     }
 
     /// 启动服务端并返回 `(local_addr, stop_tx)`。`stop_tx` drop 后 accept
@@ -526,7 +622,7 @@ mod tests {
             .await
             .expect("连接失败");
         stream
-            .write_all(b"HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .write_all(b"HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
 
@@ -622,6 +718,138 @@ mod tests {
 
     // ── status_line 单元测试 ─────────────────────────────────────
 
+    // ── 400 Bad Request 测试 ────────────────────────────────
+
+    #[tokio::test]
+    async fn serve_400_on_missing_http_version() {
+        let source = Arc::new(FakeSource::new(100));
+        let (addr, _stop) = spawn_server(Arc::clone(&source) as Arc<dyn Source>).await;
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("连接失败");
+        // 缺少 HTTP 版本 → 400
+        stream.write_all(b"GET /\r\n\r\n").await.unwrap();
+
+        let (code, _headers, _body) = read_response(&mut stream).await;
+        assert_eq!(code, 400, "缺少 HTTP 版本应返回 400");
+    }
+
+    #[tokio::test]
+    async fn serve_405_on_unknown_method() {
+        let source = Arc::new(FakeSource::new(100));
+        let (addr, _stop) = spawn_server(Arc::clone(&source) as Arc<dyn Source>).await;
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("连接失败");
+        stream
+            .write_all(b"BANANA / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let (code, _headers, _body) = read_response(&mut stream).await;
+        assert_eq!(code, 405, "未知方法应返回 405");
+    }
+
+    #[tokio::test]
+    async fn serve_400_on_garbage_request_line() {
+        let source = Arc::new(FakeSource::new(100));
+        let (addr, _stop) = spawn_server(Arc::clone(&source) as Arc<dyn Source>).await;
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("连接失败");
+        // 完全无效的请求行 → 400
+        stream.write_all(b"xyz\r\n\r\n").await.unwrap();
+
+        let (code, _headers, _body) = read_response(&mut stream).await;
+        assert_eq!(code, 400, "垃圾请求行应返回 400");
+    }
+
+    // ── 502 Bad Gateway 测试 ─────────────────────────────────
+
+    #[tokio::test]
+    async fn serve_502_on_source_error() {
+        let source = Arc::new(FailingSource::new(100));
+        let (addr, _stop) = spawn_server(Arc::clone(&source) as Arc<dyn Source>).await;
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("连接失败");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let (code, headers, body) = read_response(&mut stream).await;
+        assert_eq!(code, 502, "数据源错误应返回 502");
+        assert_eq!(
+            headers.get("connection").map(|v| v.as_str()),
+            Some("close"),
+            "502 应设置 Connection: close"
+        );
+        assert!(!body.is_empty(), "502 应携带正文");
+    }
+
+    #[tokio::test]
+    async fn serve_502_on_source_error_with_range() {
+        let source = Arc::new(FailingSource::new(100));
+        let (addr, _stop) = spawn_server(Arc::clone(&source) as Arc<dyn Source>).await;
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("连接失败");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-9\r\n\r\n")
+            .await
+            .unwrap();
+
+        let (code, headers, body) = read_response(&mut stream).await;
+        assert_eq!(code, 502, "Range + 数据源错误应返回 502");
+        assert_eq!(
+            headers.get("connection").map(|v| v.as_str()),
+            Some("close"),
+            "502 应设置 Connection: close"
+        );
+        assert!(!body.is_empty(), "502 应携带正文");
+    }
+
+    // ── HEAD keep-alive 测试 ─────────────────────────────────
+
+    #[tokio::test]
+    async fn serve_head_keepalive_then_get() {
+        let source = Arc::new(FakeSource::new(100));
+        let (addr, _stop) = spawn_server(Arc::clone(&source) as Arc<dyn Source>).await;
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("连接失败");
+
+        // HEAD → 应保持连接（读取仅头部，不读取 body，因为 HEAD 无 body）
+        stream
+            .write_all(b"HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let (code1, headers1) = read_headers_only(&mut stream).await;
+        assert_eq!(code1, 200);
+        assert!(
+            headers1.get("connection") != Some(&"close".to_string()),
+            "HEAD 不应强制 Connection: close"
+        );
+
+        // 同一连接上 GET → 应成功
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\n\r\n")
+            .await
+            .unwrap();
+        let (code2, _headers2, body2) = read_response(&mut stream).await;
+        assert_eq!(code2, 206, "HEAD 后 GET 应成功");
+        assert_eq!(&body2, &[0, 1, 2, 3, 4]);
+    }
+
+    // ── status_line 单元测试 ─────────────────────────────────────
+
     #[test]
     fn status_line_known_codes() {
         assert_eq!(status_line(200), "200 OK");
@@ -629,5 +857,6 @@ mod tests {
         assert_eq!(status_line(400), "400 Bad Request");
         assert_eq!(status_line(405), "405 Method Not Allowed");
         assert_eq!(status_line(416), "416 Range Not Satisfiable");
+        assert_eq!(status_line(502), "502 Bad Gateway");
     }
 }
