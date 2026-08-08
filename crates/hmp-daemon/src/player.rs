@@ -8,9 +8,12 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use hmp_core::{PlaybackState, PlayerCommand, Track, TrackId};
+use hmp_core::{
+    AlbumId, AlbumRef, ArtistId, ArtistRef, AudioQuality, CoverRef, PlaybackState, PlayerCommand,
+    Track, TrackId,
+};
 use hmp_player_gst::{LoadRequest, PlayerCore, PlayerEvent};
-use hmp_qqmusic_api::QqMusicClient;
+use hmp_qqmusic_api::{AlbumApi, QqMusicClient, SongApi, SongFileInfo, SongFileType, SonglistApi};
 use hmp_storage::credential::Store;
 use tokio::sync::{broadcast, watch};
 
@@ -143,8 +146,6 @@ pub trait SourceResolver: Send + Sync {
 
 /// 生产解析器（QQ API + 共享凭证）。
 pub struct QqSourceResolver {
-    // `client` 在 Task 3 的解析实现中使用（音质回退/歌单专辑拉取）。
-    #[allow(dead_code)]
     client: QqMusicClient,
     store: Store,
 }
@@ -174,7 +175,6 @@ impl QqSourceResolver {
             .is_some_and(|c| c.is_logged_in())
     }
 
-    #[allow(dead_code)] // Task 3 解析实现（resolve_track_impl/resolve_source_ids_impl）使用
     fn load_credential(&self) -> Result<hmp_storage::credential::Credential, EngineError> {
         self.store
             .load()
@@ -183,25 +183,237 @@ impl QqSourceResolver {
     }
 }
 
-// TODO(Task 3): 填充真实解析实现（自由函数 `resolve_source_ids_impl` /
-// `resolve_track_impl`，见计划 Task 3 Step 4）。当前占位保证 daemon 组装
-// 可编译：引擎运行正常，仅 Play/PlayNext/QueueAppend 的解析阶段返回错误。
 impl SourceResolver for QqSourceResolver {
     fn resolve_source_ids(
         &self,
-        _src: &hmp_core::PlayRequest,
+        src: &hmp_core::PlayRequest,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
-        Box::pin(async {
-            Err(EngineError::Internal("曲目解析未实现（Task 3）".to_owned()))
+        // 克隆 src：让 future 持有数据，不借用参数（返回类型生命周期为 `&self`）。
+        let src = src.clone();
+        Box::pin(async move {
+            self.load_credential()?;
+            resolve_source_ids_impl(&self.client, &src).await
         })
     }
 
     fn resolve_track(
         &self,
-        _track_id: &TrackId,
+        track_id: &TrackId,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
-        Box::pin(async {
-            Err(EngineError::Internal("曲目解析未实现（Task 3）".to_owned()))
+        // 克隆 id：让 future 持有数据，不借用参数（返回类型生命周期为 `&self`）。
+        let track_id = track_id.clone();
+        Box::pin(async move {
+            let credential = self.load_credential()?;
+            resolve_track_impl(&self.client, &credential, &track_id).await
         })
+    }
+}
+
+/// 音质 → 文件类型（与 CLI play.rs 一致，复制）。
+fn quality_to_file_type(q: &AudioQuality) -> Option<SongFileType> {
+    use AudioQuality::*;
+    match q {
+        Master => Some(SongFileType::MASTER),
+        HiRes => Some(SongFileType::MASTER),
+        Atmos => Some(SongFileType::ATMOS_2),
+        Flac => Some(SongFileType::FLAC),
+        Aac => Some(SongFileType::AAC_192),
+        Mp3_320 => Some(SongFileType::MP3_320),
+        Mp3_128 => Some(SongFileType::MP3_128),
+        Unknown(_) => None,
+    }
+}
+
+/// 解析单个曲目 → 可播放 URI + 元数据（音质回退 + QMC2 解密）。
+pub async fn resolve_track_impl(
+    client: &QqMusicClient,
+    credential: &hmp_storage::credential::Credential,
+    track_id: &TrackId,
+) -> Result<ResolvedTrack, EngineError> {
+    let song_api = SongApi::new(client);
+    let detail = song_api
+        .get_detail(track_id.as_ref())
+        .await
+        .map_err(|e| EngineError::Internal(format!("详情请求失败: {e}")))?;
+    let media_mid = detail.track.file.media_mid.clone();
+    if media_mid.is_empty() {
+        return Err(EngineError::TrackNotFound);
+    }
+    // 元数据（歌手/专辑/封面，供 MPRIS）
+    let singers = detail
+        .track
+        .singer
+        .iter()
+        .filter(|s| !s.name.is_empty())
+        .map(|s| ArtistRef {
+            id: ArtistId::new(if s.mid.is_empty() {
+                s.id.to_string()
+            } else {
+                s.mid.clone()
+            }),
+            name: s.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let album = (!detail.track.album.name.is_empty()).then(|| AlbumRef {
+        id: AlbumId::new(detail.track.album.mid.clone()),
+        name: detail.track.album.name.clone(),
+    });
+    let cover = (!detail.track.album.pmid.is_empty()).then(|| CoverRef {
+        url: format!(
+            "https://y.gtimg.cn/music/photo_new/T002R300x300M000{}.jpg",
+            detail.track.album.pmid
+        ),
+    });
+    let title = detail.track.name.clone();
+
+    // 音质回退链
+    let file_info = SongFileInfo {
+        mid: track_id.as_ref().to_owned(),
+        file_type: None,
+        song_type: 0,
+        media_mid: Some(media_mid),
+    };
+    let mut last_error = None;
+    for quality in AudioQuality::Master.fallback_chain() {
+        let Some(file_type) = quality_to_file_type(&quality) else {
+            continue;
+        };
+        let urls = song_api
+            .get_song_urls(
+                std::slice::from_ref(&file_info),
+                file_type,
+                Some(credential),
+            )
+            .await;
+        let mut found: Option<(SongFileType, String, Option<hmp_media::PreparedMedia>)> = None;
+        match urls {
+            Ok(resp) => {
+                for item in &resp.data {
+                    if item.result == 0 && !item.purl.is_empty() {
+                        let remote_uri =
+                            format!("https://isure.stream.qqmusic.qq.com/{}", item.purl);
+                        if file_type.is_encrypted {
+                            match hmp_media::prepare_stream(
+                                &remote_uri,
+                                (!item.ekey.is_empty()).then_some(item.ekey.as_str()),
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(p) => {
+                                    let uri = p.uri.clone();
+                                    found = Some((file_type, uri, Some(p)));
+                                    break;
+                                }
+                                Err(e) => {
+                                    last_error = Some(format!("QMC2 decrypt failed: {e}"));
+                                    continue;
+                                }
+                            }
+                        } else {
+                            // 明文无需解密 guard：直接播放 CDN URL（media: None）
+                            found = Some((file_type, remote_uri, None));
+                            break;
+                        }
+                    } else {
+                        last_error = Some(format!("result={}", item.result));
+                    }
+                }
+            }
+            Err(e) => {
+                last_error = Some(e.to_string());
+            }
+        }
+        if let Some((file_type, uri, media)) = found {
+            let track = Track {
+                id: track_id.clone(),
+                title,
+                artists: singers,
+                album,
+                duration: detail
+                    .track
+                    .interval
+                    .checked_mul(1000)
+                    .and_then(|ms| u64::try_from(ms).ok())
+                    .map(std::time::Duration::from_millis),
+                cover,
+                url: Some(uri.clone()),
+                qualities: vec![quality_from_file_type(&file_type)],
+            };
+            return Ok(ResolvedTrack { track, uri, media });
+        }
+    }
+    Err(EngineError::QualityUnavailable(
+        last_error.unwrap_or_default(),
+    ))
+}
+
+/// 解析源为 TrackId 列表（单曲/歌单/专辑；歌单/专辑分页拉取，上限 3 页防超限）。
+pub async fn resolve_source_ids_impl(
+    client: &QqMusicClient,
+    src: &hmp_core::PlayRequest,
+) -> Result<Vec<TrackId>, EngineError> {
+    match src {
+        hmp_core::PlayRequest::Track(id) => Ok(vec![id.clone()]),
+        hmp_core::PlayRequest::Playlist(id) => {
+            let list_id: i64 = id
+                .as_ref()
+                .parse()
+                .map_err(|_| EngineError::PlaylistNotFound("歌单 id 非数字".into()))?;
+            let api = SonglistApi::new(client);
+            let mut out = Vec::new();
+            for page in 1..=3 {
+                let resp = api
+                    .get_detail(list_id, 0, 100, page, true, false, false)
+                    .await
+                    .map_err(|e| EngineError::PlaylistNotFound(e.to_string()))?;
+                for s in &resp.songs {
+                    if !s.mid.is_empty() {
+                        out.push(TrackId::new(s.mid.clone()));
+                    }
+                }
+                if resp.hasmore == 0 || out.len() as i64 >= resp.total {
+                    break;
+                }
+            }
+            if out.is_empty() {
+                return Err(EngineError::PlaylistNotFound("歌单为空".into()));
+            }
+            Ok(out)
+        }
+        hmp_core::PlayRequest::Album(id) => {
+            let api = AlbumApi::new(client);
+            let mut out = Vec::new();
+            for page in 1..=3 {
+                let resp = api
+                    .get_song(id.as_ref(), 100, page)
+                    .await
+                    .map_err(|e| EngineError::PlaylistNotFound(e.to_string()))?;
+                for s in &resp.song_list {
+                    if !s.mid.is_empty() {
+                        out.push(TrackId::new(s.mid.clone()));
+                    }
+                }
+                if out.len() as i64 >= resp.total_num {
+                    break;
+                }
+            }
+            if out.is_empty() {
+                return Err(EngineError::PlaylistNotFound("专辑为空".into()));
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// 反向映射（展示用）。
+fn quality_from_file_type(t: &SongFileType) -> AudioQuality {
+    match (t.s, t.e) {
+        ("AIM0", _) => AudioQuality::Master,
+        ("Q0M0", _) => AudioQuality::Atmos,
+        ("F0M0", _) => AudioQuality::Flac,
+        ("C600", _) => AudioQuality::Aac,
+        ("M800", _) => AudioQuality::Mp3_320,
+        _ => AudioQuality::Mp3_128,
     }
 }
