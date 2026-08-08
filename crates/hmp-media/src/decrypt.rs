@@ -162,16 +162,22 @@ fn finish_error(tmp: &Path, final_base: &Path, error: DecryptError) -> Result<St
     }
 }
 
-fn embedded_ekey(path: &Path, audio_len: usize) -> Result<String> {
-    let bytes = std::fs::read(path)?;
-    let footer = detect_footer(bytes.len(), &bytes[bytes.len().saturating_sub(0x40)..])
+/// 从尾部字节提取内嵌 ekey（供文件缓存与流式代理共用）。
+///
+/// - `tail`：从 `audio_len` 到文件末尾的全部字节（即 QTag 元数据区或 V1 密钥区）
+/// - `audio_len`：加密音频部分字节数
+///
+/// `tail` 的 `len() + audio_len` 即原文件总长。
+pub(crate) fn embedded_ekey_from_bytes(tail: &[u8], audio_len: usize) -> Result<String> {
+    let total_len = audio_len + tail.len();
+    let footer = detect_footer(total_len, &tail[tail.len().saturating_sub(0x40)..])
         .ok_or_else(|| MediaError::Unsupported("文件不含内嵌 ekey 尾部".to_string()))?;
     let key_bytes = match footer {
-        Footer::QTag { .. } => bytes[audio_len..bytes.len() - 8]
+        Footer::QTag { .. } => tail[..tail.len() - 8]
             .split(|byte| *byte == b',')
             .next()
             .unwrap_or_default(),
-        Footer::V1 { .. } => &bytes[audio_len..bytes.len() - 4],
+        Footer::V1 { .. } => &tail[..tail.len() - 4],
     };
     if let Ok(text) = std::str::from_utf8(key_bytes) {
         if parse_ekey(text).is_ok() {
@@ -181,6 +187,12 @@ fn embedded_ekey(path: &Path, audio_len: usize) -> Result<String> {
     let key = parse_ekey_decoded(key_bytes)
         .map_err(|_| MediaError::Unsupported("内嵌 ekey 无法解析".to_string()))?;
     Ok(hmp_qqmusic_api::algorithms::qmc2::generate_ekey(&key))
+}
+
+/// 从文件路径读取尾部并提取内嵌 ekey（委托给 [`embedded_ekey_from_bytes`]）。
+fn embedded_ekey(path: &Path, audio_len: usize) -> Result<String> {
+    let bytes = std::fs::read(path)?;
+    embedded_ekey_from_bytes(&bytes[audio_len..], audio_len)
 }
 
 // ---------------------------------------------------------------------------
@@ -423,35 +435,14 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::testutil;
     use hmp_qqmusic_api::algorithms::qmc2::key::generate_ekey;
     use tokio::sync::watch;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// 构造 QMC2 加密测试数据。
-    ///
-    /// - `plaintext`：明文音频数据（应以已知魔数开头，如 `b"fLaC"`）
-    /// - `with_footer`：是否在末尾附加 V1 尾部 `[raw_key_bytes][key_len LE u32]`
-    ///
-    /// 返回 `(encrypted_data, ekey)`。
-    fn make_encrypted(plaintext: &[u8], key: &[u8], with_footer: bool) -> (Vec<u8>, String) {
-        let ekey = generate_ekey(key);
-        let cipher = decrypt_factory(&ekey).unwrap();
-
-        let mut encrypted = plaintext.to_vec();
-        cipher.decrypt(0, &mut encrypted);
-
-        if with_footer {
-            let key_len = key.len() as u32;
-            encrypted.extend_from_slice(key);
-            encrypted.extend_from_slice(&key_len.to_le_bytes());
-        }
-
-        (encrypted, ekey)
-    }
-
     fn test_cache_root() -> PathBuf {
-        std::env::temp_dir().join(format!("hmp-media-test-{}", std::process::id()))
+        testutil::test_cache_root()
     }
 
     fn cleanup(root: &Path) {
@@ -470,7 +461,7 @@ mod tests {
             v.extend((0..2048).map(|i| (i % 256) as u8));
             v
         };
-        let (encrypted, ekey) = make_encrypted(&plaintext, key, false);
+        let (encrypted, ekey) = testutil::make_encrypted(&plaintext, key, false);
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -510,7 +501,7 @@ mod tests {
             v.extend((0..2048).map(|i| (i % 256) as u8));
             v
         };
-        let (encrypted, ekey) = make_encrypted(&plaintext, key, true);
+        let (encrypted, ekey) = testutil::make_encrypted(&plaintext, key, true);
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -560,7 +551,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let plaintext = b"fLaC embedded qtag";
         let key = b"0123456789abcdefghij";
-        let (mut encrypted, ekey) = make_encrypted(plaintext, key, false);
+        let (mut encrypted, ekey) = testutil::make_encrypted(plaintext, key, false);
         let metadata = format!("{ekey},123,2,");
         encrypted.extend_from_slice(metadata.as_bytes());
         encrypted.extend_from_slice(&(metadata.len() as u32).to_be_bytes());
@@ -585,7 +576,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let plaintext = b"OggS embedded stag";
         let key = b"0123456789abcdefghij";
-        let (mut encrypted, ekey) = make_encrypted(plaintext, key, false);
+        let (mut encrypted, ekey) = testutil::make_encrypted(plaintext, key, false);
         encrypted.extend_from_slice(ekey.as_bytes());
         encrypted.extend_from_slice(&(ekey.len() as u32).to_le_bytes());
         let server = MockServer::start().await;
@@ -624,7 +615,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let plaintext = b"fLaC fresh";
-        let (encrypted, ekey) = make_encrypted(plaintext, b"0123456789abcdefghij", false);
+        let (encrypted, ekey) = testutil::make_encrypted(plaintext, b"0123456789abcdefghij", false);
         let server = MockServer::start().await;
         let url = format!("{}/test.mflac", server.uri());
         Mock::given(method("GET"))
@@ -663,7 +654,7 @@ mod tests {
 
         let key = b"0123456789abcdefghij";
         let plaintext = b"fLaC".to_vec();
-        let (encrypted, ekey) = make_encrypted(&plaintext, key, false);
+        let (encrypted, ekey) = testutil::make_encrypted(&plaintext, key, false);
 
         let server = MockServer::start().await;
         // 使用含后缀的 URL 以便 ext_guess 能推断为 "flac"
@@ -722,7 +713,7 @@ mod tests {
             plaintext[64 + i] = desired_tail[i] ^ key_stream[i];
         }
 
-        let (encrypted, _ekey) = make_encrypted(&plaintext, key, false);
+        let (encrypted, _ekey) = testutil::make_encrypted(&plaintext, key, false);
         // 验证尾部确实为目标值
         assert_eq!(
             &encrypted[encrypted.len() - 4..],
@@ -764,7 +755,7 @@ mod tests {
             v.extend((0..2048).map(|i| (i % 256) as u8));
             v
         };
-        let (encrypted, ekey) = make_encrypted(&plaintext, key, false);
+        let (encrypted, ekey) = testutil::make_encrypted(&plaintext, key, false);
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))

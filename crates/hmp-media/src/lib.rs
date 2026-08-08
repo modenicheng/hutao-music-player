@@ -6,6 +6,12 @@ pub mod cache;
 pub mod decrypt;
 pub mod proxy;
 
+#[cfg(test)]
+pub(crate) mod testutil;
+
+pub use proxy::PreparedMedia;
+pub use proxy::prepare_stream;
+
 use thiserror::Error;
 
 /// 媒体准备过程中的错误。
@@ -57,7 +63,7 @@ pub async fn prepare_playable_embedded(
     decrypt::prepare_playable_embedded_at(&root, url, progress).await
 }
 
-fn default_cache_root() -> Result<std::path::PathBuf, MediaError> {
+pub(crate) fn default_cache_root() -> Result<std::path::PathBuf, MediaError> {
     let root = hmp_storage::cache_dir().join("decrypted");
     std::fs::create_dir_all(&root)
         .map_err(|e| MediaError::Cache(format!("无法创建缓存目录: {e}")))?;

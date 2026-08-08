@@ -6,3 +6,6 @@
 
 pub mod http;
 pub mod range;
+pub mod source;
+
+pub use source::{PreparedMedia, prepare_stream};
