@@ -681,7 +681,7 @@ mod tests {
     async fn playnext_inserts_full_playlist_after_current() {
         let (driver, _st, _ev) = FakeDriver::new();
         let resolver = FakeResolver::new(vec![
-            vec![TrackId::new("a")],       // Play(a)
+            vec![TrackId::new("a")],                                       // Play(a)
             vec![TrackId::new("x"), TrackId::new("y"), TrackId::new("z")], // PlayNext(playlist)
         ]);
         let (handle, _st) = start_engine(driver.clone(), resolver).await;
@@ -698,7 +698,9 @@ mod tests {
         // 回到 a（None 模式 a 之后无曲，Next 不跳）
         let _ = handle.state_rx.borrow().queue.current;
         handle
-            .cmd(Request::PlayNext(PlayRequest::Playlist(hmp_core::PlaylistId::new("p"))))
+            .cmd(Request::PlayNext(PlayRequest::Playlist(
+                hmp_core::PlaylistId::new("p"),
+            )))
             .await
             .unwrap();
         wait_idle().await;

@@ -91,11 +91,7 @@ impl QueueCore {
         self.rebuild_order();
         if self.has_current {
             let canonical = start_at.min(self.tracks.len() - 1);
-            self.cursor = self
-                .order
-                .iter()
-                .position(|&x| x == canonical)
-                .unwrap_or(0);
+            self.cursor = self.order.iter().position(|&x| x == canonical).unwrap_or(0);
         } else {
             self.cursor = 0;
         }

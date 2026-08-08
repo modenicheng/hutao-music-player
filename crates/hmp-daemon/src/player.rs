@@ -494,8 +494,9 @@ mod tests {
                     calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let page = page as u32;
                     let start = (page - 1) * 100;
-                    let mids =
-                        (start..start + 100).map(|i| TrackId::new(i.to_string())).collect();
+                    let mids = (start..start + 100)
+                        .map(|i| TrackId::new(i.to_string()))
+                        .collect();
                     // 4 页共 400 首，前三页 hasmore=1
                     Ok((mids, page < 4, 400))
                 }
