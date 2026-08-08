@@ -31,6 +31,7 @@ hutao-music-player/
 
 ```bash
 hmp login                    # 终端 ASCII 二维码登录
+hmp auth                     # 显示登录状况
 hmp search "歌曲名"           # 搜索
 hmp play <track-id>          # 后台播放（自动拉起常驻 daemon）
 hmp status                   # 状态
@@ -63,6 +64,7 @@ cargo fmt --all -- --check
 
 ```bash
 hmp login                    # QQ 扫码登录：终端 ASCII 二维码，扫码后凭证存入系统密钥环
+hmp auth                     # 显示登录状况
 hmp search "歌曲名"           # 搜索歌曲
 hmp play <track-id>          # 遥控后端播放（track-id | playlist:<id> | album:<id>）
 hmp playnext <id>            # 插队播放

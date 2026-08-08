@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! hmp login                  # QQ 扫码登录并保存凭证
+//! hmp auth                   # 显示登录状况
 //! hmp search "歌曲名"        # 搜索歌曲
 //! hmp play <source>          # 遥控后端播放（track-id | playlist:<id> | album:<id>）
 //! hmp status                 # 查询后端状态
@@ -10,6 +11,7 @@
 
 use clap::{Parser, Subcommand};
 
+mod auth;
 mod client;
 mod commands;
 mod login;
@@ -29,6 +31,8 @@ struct Cli {
 enum Command {
     /// QQ 扫码登录（终端 ASCII 二维码）。
     Login,
+    /// 显示登录状况（本地凭证检查）。
+    Auth,
     /// 搜索歌曲。
     Search { keyword: String },
     /// 播放（单曲 / playlist:<id> / album:<id>；遥控后端）。
@@ -84,6 +88,7 @@ async fn main() {
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Login => login::run().await,
+        Command::Auth => auth::run().await,
         Command::Search { keyword } => search::run(&keyword).await,
         Command::Play { source } => {
             let mut c = client::DaemonClient::connect_or_spawn().await?;

@@ -37,6 +37,18 @@ hmp login
 - 成功后在终端打印用户信息；凭证存入系统密钥环（SecretService）；无密钥环环境回退为明文文件（会明确提示）；
 - 登录是 CLI 交互操作；**后台 daemon 只读同一份凭证**，无需在 daemon 里重复登录。
 
+查看登录状况：
+
+```bash
+hmp auth
+# 登录: 已登录
+# 用户: 939861972 (musicid: 939861972)
+# 过期: 未过期
+# 后端: 系统密钥环 (SecretService)
+```
+
+（本地凭证检查，不依赖 daemon；未登录时提示运行 `hmp login`。）
+
 ## 3. 播放：后台播放架构
 
 ```text
@@ -61,6 +73,9 @@ playerctl -p hmp ...  │        (127.0.0.1 本机)          │
 | 命令 | 说明 |
 |---|---|
 | `hmp play <id>` | 清空队列并立即播放。`<id>` 支持三种源：`<songmid>`（单曲）、`playlist:<id>`（歌单）、`album:<id>`（专辑） |
+| `hmp login` | QQ 扫码登录（终端 ASCII 二维码） |
+| `hmp auth` | 显示登录状况（用户/过期/凭证后端，本地检查） |
+| `hmp search <关键词>` | 搜索歌曲，输出 track-id |
 | `hmp playnext <id>` | 把 `<id>` 插到当前曲之后并**立即播放**（同三种源语法，多曲源取第一首） |
 | `hmp queue add <id>` | 追加到队尾（不打断当前播放） |
 | `hmp queue show` | 列出队列（`▶` 标记当前曲） |

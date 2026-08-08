@@ -7,6 +7,8 @@
 #   当 API 出现外部使用者、发布节奏分化或独立维护需求时再拆仓迁移历史
 [workspace]
 members = ["crates/hmp-cli", "crates/hmp-core", "crates/hmp-daemon", "crates/hmp-desktop", "crates/hmp-media", "crates/hmp-mpris", "crates/hmp-player-gst", "crates/hmp-qqmusic-api", "crates/hmp-storage"]
+# workspace 根 `cargo run` 默认运行 hmp（遥控命令），`cargo run --bin hmp-desktop` 跑桌面端。
+default-members = ["crates/hmp-cli"]
 resolver = "3"
 
 [workspace.package]
