@@ -604,9 +604,6 @@ pub fn decode_frame<T: serde::de::DeserializeOwned>(frame: &[u8]) -> Result<T, F
 
 > hmp-core 若尚未依赖 `thiserror`/`serde_json`，在 `crates/hmp-core/Cargo.toml` 添加（workspace 已有这两个依赖，直接引用 `{ workspace = true }`）。`FrameError::Json` 变体在 `TooLarge` 测试中不被触碰，保持字段未用不告警。
 
-```rust
-// crates/hmp-core/src/ipc.rs
-
 - [ ] **Step 8: 运行测试确认通过**
 
 Run: `cargo test -p hmp-core`  Expected: 全部通过（含既有 200+ 测试）
