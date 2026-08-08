@@ -1,7 +1,7 @@
 //! 凭据存储（keyring 优先，文件显式回退）。
 
 use hmp_core::HmpError;
-use hmp_qqmusic_api::Credential;
+pub use hmp_qqmusic_api::Credential;
 
 /// 后端类型。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +32,11 @@ pub trait CredentialStore: Send + Sync {
     /// 删除凭证。
     fn delete(&self) -> Result<(), HmpError>;
 }
+
+/// 凭据存储的具体类型（`store_from_env()` 的返回类型）。
+///
+/// 供 daemon/API 层按值持有（`Box<dyn CredentialStore>`），避免暴露具体后端。
+pub type Store = Box<dyn CredentialStore>;
 
 /// Secret Service 后端（keyring v1，Linux 默认）。
 ///

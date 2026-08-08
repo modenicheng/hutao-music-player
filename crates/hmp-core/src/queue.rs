@@ -121,6 +121,13 @@ impl QueueCore {
         self.current.and_then(|i| self.tracks.get(i))
     }
 
+    /// 将当前曲定位到队尾（playnext 插入后使用）。
+    pub fn set_current_to_last(&mut self) {
+        if !self.tracks.is_empty() {
+            self.current = Some(self.tracks.len() - 1);
+        }
+    }
+
     /// 快照。
     pub fn snapshot(&self) -> QueueSnapshot {
         QueueSnapshot {
@@ -313,6 +320,14 @@ mod tests {
         q.clear();
         assert_eq!(q.current(), None);
         assert!(q.snapshot().tracks.is_empty());
+    }
+
+    #[test]
+    fn set_current_to_last_positions_at_end() {
+        let mut q = QueueCore::new();
+        q.replace(vec![t("a"), t("b")], 0);
+        q.set_current_to_last();
+        assert_eq!(q.current(), Some(&t("b")));
     }
 
     #[test]
