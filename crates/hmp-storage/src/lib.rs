@@ -10,10 +10,12 @@
 //! 密钥环不可用时**不静默降级**为明文：默认后端失败直接报错，
 //! 提示安装 `gnome-keyring` 或 `kwallet`。
 
+pub mod config;
 pub mod credential;
 pub mod db;
 pub mod xdg;
 
+pub use config::{Config, QualityMode, QualityPref};
 pub use credential::{BackendKind, CredentialStore, FileStore, SecretServiceStore};
 pub use db::{LibraryDb, PlayEnd, RecentPlay, TrackRow};
 pub use xdg::{cache_dir, config_dir, data_dir};

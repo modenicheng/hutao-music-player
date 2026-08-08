@@ -101,7 +101,37 @@ impl AudioQuality {
         ]
     }
 
+    /// 解析 CLI/配置别名（`auto`/`master`/`hires`/`atmos`/`flac`/`aac`/`320`/`128`）。
+    pub fn from_alias(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "master" => Some(Self::Master),
+            "hires" | "hi-res" => Some(Self::HiRes),
+            "atmos" => Some(Self::Atmos),
+            "flac" | "lossless" => Some(Self::Flac),
+            "aac" => Some(Self::Aac),
+            "320" | "320k" | "mp3_320" => Some(Self::Mp3_320),
+            "128" | "128k" | "mp3_128" => Some(Self::Mp3_128),
+            _ => None,
+        }
+    }
+
+    /// 别名（`from_alias` 的逆）。
+    pub fn to_alias(&self) -> String {
+        match self {
+            Self::Master => "master".into(),
+            Self::HiRes => "hires".into(),
+            Self::Atmos => "atmos".into(),
+            Self::Flac => "flac".into(),
+            Self::Aac => "aac".into(),
+            Self::Mp3_320 => "320".into(),
+            Self::Mp3_128 => "128".into(),
+            Self::Unknown(s) => s.clone(),
+        }
+    }
+
     /// 质量回退链（docs/PROJECT.md §7.3）：请求目标音质不可用时逐级降级。
+    /// 文档化回退链（docs/PROJECT.md §7.3，含 Atmos）：
+    /// `Master` → `HiRes` → `Atmos` → `Flac` → `Mp3_320` → `Mp3_128`。
     ///
     /// 例如 `HiRes` → `Flac` → `Mp3_320` → `Mp3_128`。
     pub fn fallback_chain(self) -> Vec<AudioQuality> {
@@ -109,6 +139,7 @@ impl AudioQuality {
             AudioQuality::Master => vec![
                 AudioQuality::Master,
                 AudioQuality::HiRes,
+                AudioQuality::Atmos,
                 AudioQuality::Flac,
                 AudioQuality::Mp3_320,
                 AudioQuality::Mp3_128,
@@ -275,6 +306,7 @@ mod tests {
             vec![
                 AudioQuality::Master,
                 AudioQuality::HiRes,
+                AudioQuality::Atmos,
                 AudioQuality::Flac,
                 AudioQuality::Mp3_320,
                 AudioQuality::Mp3_128,
