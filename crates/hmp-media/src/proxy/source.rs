@@ -10,9 +10,8 @@
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use hmp_qqmusic_api::algorithms::qmc2::{self, Footer, Qmc2Cipher};
 use tokio::sync::{Semaphore, oneshot};
 use tracing::{debug, warn};
@@ -69,7 +68,7 @@ struct StreamSource {
     /// 解密后的音频长度（剥离 footer 后）。
     audio_len: u64,
     /// CDN 上的原始文件总长。
-    _total_len: u64,
+    total_len: u64,
     /// 并发限制（最多 4 个并行 range 请求）。
     sem: Arc<Semaphore>,
 }
@@ -82,166 +81,131 @@ impl Source for StreamSource {
     type ChunkStream<'a> = Pin<Box<dyn Stream<Item = io::Result<Vec<u8>>> + Send + 'a>>;
 
     fn open<'a>(&'a self, range: ByteRange) -> Self::ChunkStream<'a> {
-        let (tx, rx) = tokio::sync::mpsc::channel::<io::Result<Vec<u8>>>(8);
-
         let client = self.client.clone();
         let cdn_url = self.cdn_url.clone();
         let cipher = Arc::clone(&self.cipher);
         let sem = Arc::clone(&self.sem);
-        let start = range.start;
-        let end = range.end;
+        let total_len = self.total_len;
 
-        tokio::spawn(async move {
-            stream_range_into_channel(client, cdn_url, cipher, sem, start, end, tx).await;
-        });
-
-        Box::pin(ReceiverStream { rx })
+        // 此 future 由 HTTP 连接任务直接驱动；连接取消时请求、等待信号量和
+        // 解密链都会一同 drop，不会留下后台 producer。
+        Box::pin(
+            futures_util::stream::once(async move {
+                fetch_and_decrypt_range(client, cdn_url, cipher, sem, range, total_len).await
+            })
+            .try_flatten(),
+        )
     }
 }
 
-// ── 分块流辅助 ──────────────────────────────────────────────────────
+type OwnedChunkStream = Pin<Box<dyn Stream<Item = io::Result<Vec<u8>>> + Send>>;
 
-/// `tokio::sync::mpsc::Receiver` 的 [`Stream`] 适配器。
-struct ReceiverStream {
-    rx: tokio::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
-}
-
-impl Stream for ReceiverStream {
-    type Item = io::Result<Vec<u8>>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
-}
-
-/// 后台任务：向 CDN 发起 Range 请求，分块解密，通过 channel 发送。
-async fn stream_range_into_channel(
+/// 拉取并验证一个区间。返回的流由 HTTP 连接任务直接驱动。
+async fn fetch_and_decrypt_range(
     client: reqwest::Client,
     cdn_url: String,
     cipher: Arc<dyn Qmc2Cipher>,
     sem: Arc<Semaphore>,
-    start: u64,
-    end: u64,
-    tx: tokio::sync::mpsc::Sender<io::Result<Vec<u8>>>,
-) {
-    let _permit = match sem.acquire_owned().await {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = tx
-                .send(Err(io::Error::other(format!("信号量获取失败: {e}"))))
-                .await;
-            return;
-        }
-    };
-
+    range: ByteRange,
+    total_len: u64,
+) -> io::Result<OwnedChunkStream> {
+    let permit = sem
+        .acquire_owned()
+        .await
+        .map_err(|e| io::Error::other(format!("信号量获取失败: {e}")))?;
+    let start = range.start;
+    let end = range.end;
+    let expected_len = end - start + 1;
     let range_header = format!("bytes={start}-{end}");
     debug!(cdn_url = %cdn_url, %range_header, "请求 CDN 区间");
 
-    let response = match client
+    let response = client
         .get(&cdn_url)
         .header("Range", &range_header)
         .send()
         .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = tx
-                .send(Err(io::Error::other(format!("CDN 请求失败: {e}"))))
-                .await;
-            return;
-        }
-    };
-
+        .map_err(|e| io::Error::other(format!("CDN 请求失败: {e}")))?;
     let status = response.status();
 
     if status == reqwest::StatusCode::PARTIAL_CONTENT {
-        // 206 — 预期路径：流式解密
-        let mut byte_stream = response.bytes_stream();
-        let mut offset = start;
-        while let Some(chunk_result) = byte_stream.next().await {
-            match chunk_result {
-                Ok(chunk) => {
-                    let mut buf = chunk.to_vec();
-                    cipher.decrypt(offset as usize, &mut buf);
-                    offset += buf.len() as u64;
-                    if tx.send(Ok(buf)).await.is_err() {
-                        return; // 接收端已关闭
+        let valid_range = response
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| parse_content_range(v) == Some((start, end, total_len)));
+        if !valid_range {
+            return Err(io::Error::other("CDN 206 Content-Range 与请求不一致"));
+        }
+        if response
+            .content_length()
+            .is_some_and(|len| len != expected_len)
+        {
+            return Err(io::Error::other("CDN 206 body 长度与请求区间不一致"));
+        }
+        let byte_stream = response.bytes_stream();
+        Ok(Box::pin(futures_util::stream::unfold(
+            (byte_stream, start, 0_u64, false, permit),
+            move |(mut byte_stream, offset, delivered, finished, permit)| {
+                let cipher = Arc::clone(&cipher);
+                async move {
+                    if finished {
+                        return None;
+                    }
+                    match byte_stream.next().await {
+                        Some(Ok(chunk)) => {
+                            let chunk_len = chunk.len() as u64;
+                            if chunk_len > expected_len.saturating_sub(delivered) {
+                                return Some((
+                                    Err(io::Error::other("CDN 206 body 超出请求区间")),
+                                    (byte_stream, offset, delivered, true, permit),
+                                ));
+                            }
+                            let mut output = chunk.to_vec();
+                            cipher.decrypt(offset as usize, &mut output);
+                            Some((
+                                Ok(output),
+                                (
+                                    byte_stream,
+                                    offset + chunk_len,
+                                    delivered + chunk_len,
+                                    false,
+                                    permit,
+                                ),
+                            ))
+                        }
+                        Some(Err(e)) => Some((
+                            Err(io::Error::other(format!("读取流错误: {e}"))),
+                            (byte_stream, offset, delivered, true, permit),
+                        )),
+                        None if delivered == expected_len => None,
+                        None => Some((
+                            Err(io::Error::other("CDN 206 body 在请求区间前结束")),
+                            (byte_stream, offset, delivered, true, permit),
+                        )),
                     }
                 }
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(io::Error::other(format!("读取流错误: {e}"))))
-                        .await;
-                    return;
-                }
-            }
-        }
-        // 206 流自然结束
+            },
+        )))
     } else if status == reqwest::StatusCode::OK {
-        // 200 — CDN 忽略了 Range（防御性路径）
-        // 流式读取全量，丢弃 start 之前的字节，解密并 yield [start..=end]
         warn!(cdn_url = %cdn_url, "CDN 返回 200（忽略 Range），流式跳过");
-        let mut byte_stream = response.bytes_stream();
-        let mut bytes_skipped: u64 = 0;
-        let mut bytes_yielded: u64 = 0;
-        let target = end - start + 1;
-
-        while bytes_yielded < target {
-            match byte_stream.next().await {
-                Some(Ok(chunk)) => {
-                    let _chunk_len = chunk.len() as u64;
-
-                    if bytes_skipped < start {
-                        let skip_in_chunk = ((start - bytes_skipped) as usize).min(chunk.len());
-                        bytes_skipped += skip_in_chunk as u64;
-
-                        if skip_in_chunk >= chunk.len() {
-                            continue;
-                        }
-                        // 部分跳过：取跳过之后的剩余字节
-                        let rest = &chunk[skip_in_chunk..];
-                        let take = (rest.len() as u64).min(target - bytes_yielded) as usize;
-                        let mut buf = rest[..take].to_vec();
-                        cipher.decrypt(start as usize + bytes_yielded as usize, &mut buf);
-                        bytes_yielded += take as u64;
-                        if tx.send(Ok(buf)).await.is_err() {
-                            return;
-                        }
-                    } else {
-                        // 已过跳过阶段 — 正常 yield
-                        let take = (chunk.len() as u64).min(target - bytes_yielded) as usize;
-                        let mut buf = chunk[..take].to_vec();
-                        cipher.decrypt(start as usize + bytes_yielded as usize, &mut buf);
-                        bytes_yielded += take as u64;
-                        if tx.send(Ok(buf)).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-                Some(Err(e)) => {
-                    let _ = tx
-                        .send(Err(io::Error::other(format!("读取流错误: {e}"))))
-                        .await;
-                    return;
-                }
-                None => {
-                    if bytes_skipped < start {
-                        let _ = tx
-                            .send(Err(io::Error::other("CDN body 在跳过区间前结束")))
-                            .await;
-                    } else if bytes_yielded < target {
-                        let _ = tx.send(Err(io::Error::other("CDN 流提前结束"))).await;
-                    }
-                    return;
-                }
-            }
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| io::Error::other(format!("读取流错误: {e}")))?;
+        let end_exclusive = end
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("区间溢出"))?;
+        if (body.len() as u64) < end_exclusive {
+            return Err(io::Error::other("CDN body 在请求区间前结束"));
         }
+        let mut output = body[start as usize..end_exclusive as usize].to_vec();
+        cipher.decrypt(start as usize, &mut output);
+        Ok(Box::pin(futures_util::stream::once(async move {
+            let _permit = permit;
+            Ok(output)
+        })))
     } else {
-        let _ = tx
-            .send(Err(io::Error::other(format!(
-                "CDN 返回非预期状态码: {status}"
-            ))))
-            .await;
+        Err(io::Error::other(format!("CDN 返回非预期状态码: {status}")))
     }
 }
 
@@ -355,7 +319,7 @@ pub async fn prepare_stream(
         cdn_url: url.to_owned(),
         cipher,
         audio_len: audio_len as u64,
-        _total_len: total_len,
+        total_len,
         sem: Arc::new(Semaphore::new(4)),
     });
 
@@ -381,8 +345,9 @@ pub async fn prepare_stream(
 
 /// 探测 CDN 是否支持 Range 请求。
 ///
-/// 先发 HEAD 拿 Content-Length；再发 `GET Range: bytes=0-0` 确认：
-/// - 返回 206 且有有效的 `Content-Range: bytes 0-0/{total}` 且 total>0
+/// 先发 HEAD 拿正数 Content-Length；再发 `GET Range: bytes=0-0` 确认：
+/// - 返回 206 且严格为 `Content-Range: bytes 0-0/{total}`
+/// - `total` 为正数且与 HEAD Content-Length 一致
 /// - 不满足 → 报错（触发回退）
 async fn probe_cdn(client: &reqwest::Client, url: &str) -> Result<u64, MediaError> {
     // HEAD
@@ -393,15 +358,17 @@ async fn probe_cdn(client: &reqwest::Client, url: &str) -> Result<u64, MediaErro
         .map_err(|e| MediaError::Network(format!("HEAD 请求失败: {e}")))?;
 
     let head_status = head_resp.status();
-    if !head_status.is_success() {
+    if head_status != reqwest::StatusCode::OK {
         return Err(MediaError::HttpStatus(head_status.as_u16()));
     }
 
-    let _content_length = head_resp
+    let head_total = head_resp
         .headers()
         .get("content-length")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok());
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&total| total > 0)
+        .ok_or_else(|| MediaError::Unsupported("CDN HEAD 缺少有效 Content-Length".to_string()))?;
 
     // GET Range: bytes=0-0
     let range_resp = client
@@ -422,26 +389,31 @@ async fn probe_cdn(client: &reqwest::Client, url: &str) -> Result<u64, MediaErro
         .headers()
         .get("content-range")
         .and_then(|v| v.to_str().ok())
-        .and_then(parse_content_range_total)
-        .ok_or_else(|| MediaError::Unsupported("CDN 未返回有效的 Content-Range".to_string()))?;
+        .and_then(parse_content_range_00)
+        .ok_or_else(|| MediaError::Unsupported("CDN 未返回严格的 Content-Range".to_string()))?;
 
-    if total == 0 {
-        return Err(MediaError::Unsupported("CDN 报告零长度".to_string()));
+    if total != head_total {
+        return Err(MediaError::Unsupported(
+            "CDN HEAD 与 Range 探测总长度不一致".to_string(),
+        ));
     }
 
     debug!(total, "CDN Range 探测成功");
     Ok(total)
 }
 
-/// 解析 `Content-Range` 头值中的 total 字段。
-///
-/// 期望格式 `bytes s-e/total`，返回 `total`。
-fn parse_content_range_total(header: &str) -> Option<u64> {
-    // 剥离 "bytes " 前缀
+/// 严格解析 `Content-Range: bytes 0-0/{total}`，并要求 total 为正数。
+fn parse_content_range_00(header: &str) -> Option<u64> {
+    let total = header.strip_prefix("bytes 0-0/")?.parse::<u64>().ok()?;
+    (total > 0).then_some(total)
+}
+
+/// 解析精确的 `Content-Range: bytes start-end/total`。
+fn parse_content_range(header: &str) -> Option<(u64, u64, u64)> {
     let spec = header.strip_prefix("bytes ")?;
-    // 提取 "/total" 部分
-    let (_range, total_str) = spec.rsplit_once('/')?;
-    total_str.parse::<u64>().ok()
+    let (range, total) = spec.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
 }
 
 /// 从 CDN 拉取指定区间。
@@ -592,6 +564,74 @@ mod tests {
     }
 
     // ── 测试用例 ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn probe_cdn_requires_head_content_length() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("Content-Range", "bytes 0-0/10")
+                    .set_body_bytes(vec![0]),
+            )
+            .mount(&server)
+            .await;
+
+        assert!(
+            probe_cdn(&reqwest::Client::new(), &server.uri())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_cdn_rejects_mismatched_or_non_206_probe() {
+        let mismatched = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200).insert_header("Content-Length", "10"))
+            .mount(&mismatched)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("Content-Range", "bytes 0-0/11")
+                    .set_body_bytes(vec![0]),
+            )
+            .mount(&mismatched)
+            .await;
+        assert!(
+            probe_cdn(&reqwest::Client::new(), &mismatched.uri())
+                .await
+                .is_err()
+        );
+
+        let ignored_range = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200).insert_header("Content-Length", "10"))
+            .mount(&ignored_range)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0; 10]))
+            .mount(&ignored_range)
+            .await;
+        assert!(
+            probe_cdn(&reqwest::Client::new(), &ignored_range.uri())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parse_content_range_00_is_strict() {
+        assert_eq!(parse_content_range_00("bytes 0-0/10"), Some(10));
+        assert_eq!(parse_content_range_00("bytes 0-1/10"), None);
+        assert_eq!(parse_content_range_00("bytes 0-0/0"), None);
+        assert_eq!(parse_content_range_00("bytes 0-0/10 extra"), None);
+    }
 
     #[tokio::test]
     async fn prepare_stream_serves_decrypted_range() {
@@ -859,6 +899,103 @@ mod tests {
         let (code2, body2) = fetch_via_proxy(&prepared.uri, 0, Some(1000)).await;
         assert_eq!(code2, 206);
         assert_eq!(&body2, &plaintext[0..=1000]);
+    }
+
+    #[tokio::test]
+    async fn prepare_stream_returns_502_for_invalid_runtime_206() {
+        let plaintext = b"fLaC invalid response".to_vec();
+        let key = b"0123456789abcdefghij";
+        let (encrypted, ekey) = testutil::make_encrypted(&plaintext, key, true);
+        let total_len = encrypted.len() as u64;
+        let server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200).insert_header("Content-Length", total_len.to_string()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header_exists("Range"))
+            .respond_with(move |req: &wiremock::Request| {
+                let range = req
+                    .headers
+                    .get("Range")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                if range == "bytes=0-0" {
+                    return ResponseTemplate::new(206)
+                        .insert_header("Content-Range", format!("bytes 0-0/{total_len}"))
+                        .set_body_bytes(encrypted[0..=0].to_vec());
+                }
+                if range == "bytes=0-3" {
+                    return ResponseTemplate::new(206)
+                        .insert_header("Content-Range", format!("bytes 1-1/{total_len}"))
+                        .set_body_bytes(encrypted[0..1].to_vec());
+                }
+                if let Some((start, end)) = parse_range_value(range) {
+                    let end = end.min(total_len - 1);
+                    return ResponseTemplate::new(206)
+                        .insert_header("Content-Range", format!("bytes {start}-{end}/{total_len}"))
+                        .set_body_bytes(encrypted[start as usize..=end as usize].to_vec());
+                }
+                ResponseTemplate::new(416)
+            })
+            .mount(&server)
+            .await;
+
+        let prepared = prepare_stream(&server.uri(), Some(&ekey), None)
+            .await
+            .expect("prepare_stream 应成功");
+        let (code, body) = fetch_via_proxy(&prepared.uri, 0, Some(3)).await;
+        assert_eq!(code, 502);
+        assert_eq!(body, b"Bad Gateway");
+    }
+
+    #[tokio::test]
+    async fn prepare_stream_returns_502_for_short_runtime_206_body() {
+        let plaintext = b"fLaC short response".to_vec();
+        let key = b"0123456789abcdefghij";
+        let (encrypted, ekey) = testutil::make_encrypted(&plaintext, key, true);
+        let total_len = encrypted.len() as u64;
+        let server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200).insert_header("Content-Length", total_len.to_string()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header_exists("Range"))
+            .respond_with(move |req: &wiremock::Request| {
+                let range = req
+                    .headers
+                    .get("Range")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                if let Some((start, end)) = parse_range_value(range) {
+                    let end = end.min(total_len - 1);
+                    let body_end = if range == "bytes=0-3" {
+                        0
+                    } else {
+                        end as usize
+                    };
+                    return ResponseTemplate::new(206)
+                        .insert_header("Content-Range", format!("bytes {start}-{end}/{total_len}"))
+                        .set_body_bytes(encrypted[start as usize..=body_end].to_vec());
+                }
+                ResponseTemplate::new(416)
+            })
+            .mount(&server)
+            .await;
+
+        let prepared = prepare_stream(&server.uri(), Some(&ekey), None)
+            .await
+            .expect("prepare_stream 应成功");
+        let (code, body) = fetch_via_proxy(&prepared.uri, 0, Some(3)).await;
+        assert_eq!(code, 502);
+        assert_eq!(body, b"Bad Gateway");
     }
 
     #[tokio::test]

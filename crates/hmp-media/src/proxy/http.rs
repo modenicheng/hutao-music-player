@@ -13,12 +13,14 @@
 
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::{Stream, StreamExt, pin_mut};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-use tokio::sync::oneshot;
+use tokio::sync::{Semaphore, oneshot};
+use tokio::task::JoinSet;
 use tracing::debug;
 
 use super::range::{ByteRange, clamp_end, parse_range};
@@ -44,30 +46,60 @@ pub trait Source: Send + Sync {
 ///
 /// - `listener`：已绑定的 TCP 监听器（建议 `127.0.0.1:0`）
 /// - `source`：音频数据源（共享引用）
-/// - `stop`：收到信号后退出 accept 循环；已接受的连接继续运行至结束
+/// - `stop`：收到信号后取消并等待所有已接受的连接
 pub async fn serve<S: Source + 'static>(
     listener: TcpListener,
     source: Arc<S>,
-    mut stop: oneshot::Receiver<()>,
+    stop: oneshot::Receiver<()>,
 ) {
+    serve_with_timeout(listener, source, stop, Duration::from_secs(30)).await;
+}
+
+/// 启动带请求读取超时的 HTTP 代理（测试可使用较短超时）。
+async fn serve_with_timeout<S: Source + 'static>(
+    listener: TcpListener,
+    source: Arc<S>,
+    mut stop: oneshot::Receiver<()>,
+    read_timeout: Duration,
+) {
+    const MAX_CONNECTIONS: usize = 8;
+    let conn_sem = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let mut connections = JoinSet::new();
+
     loop {
         tokio::select! {
             _ = &mut stop => {
-                debug!("收到关闭信号，停止 accept 循环");
+                debug!("收到关闭信号，取消已接受连接");
+                connections.shutdown().await;
                 return;
+            }
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(e) = result {
+                    debug!(%e, "连接任务异常结束");
+                }
             }
             result = listener.accept() => {
                 match result {
-                    Ok((stream, addr)) => {
+                    Ok((mut stream, addr)) => {
+                        let permit = match Arc::clone(&conn_sem).try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                debug!(%addr, "连接数已达上限，拒绝连接");
+                                let _ = write_error(&mut stream, 503, b"Service Unavailable", true).await;
+                                continue;
+                            }
+                        };
                         debug!(%addr, "新连接");
                         let source = Arc::clone(&source);
-                        tokio::spawn(async move {
-                            handle_connection(stream, source).await;
+                        connections.spawn(async move {
+                            let _permit = permit;
+                            handle_connection(stream, source, read_timeout).await;
                         });
                     }
                     Err(e) => {
                         debug!(%e, "accept 错误，退出循环");
-                        break;
+                        connections.shutdown().await;
+                        return;
                     }
                 }
             }
@@ -76,7 +108,11 @@ pub async fn serve<S: Source + 'static>(
 }
 
 /// 处理单个 TCP 连接：循环读取 HTTP 请求并响应。
-async fn handle_connection<S: Source + 'static>(stream: TcpStream, source: Arc<S>) {
+async fn handle_connection<S: Source + 'static>(
+    stream: TcpStream,
+    source: Arc<S>,
+    read_timeout: Duration,
+) {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line_buf = String::new();
@@ -87,11 +123,15 @@ async fn handle_connection<S: Source + 'static>(stream: TcpStream, source: Arc<S
         line_buf.clear();
 
         // ── 读取请求行 ──────────────────────────────────────────
-        match reader.read_line(&mut line_buf).await {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
-            Err(e) => {
+        match tokio::time::timeout(read_timeout, reader.read_line(&mut line_buf)).await {
+            Ok(Ok(0)) => break, // EOF
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
                 debug!(%e, "读取请求行失败");
+                break;
+            }
+            Err(_) => {
+                debug!("读取请求行超时");
                 break;
             }
         }
@@ -134,12 +174,16 @@ async fn handle_connection<S: Source + 'static>(stream: TcpStream, source: Arc<S
 
         loop {
             line_buf.clear();
-            match reader.read_line(&mut line_buf).await {
-                Ok(0) => break, // EOF（无头部直接结束）
-                Ok(_) => {}
-                Err(e) => {
+            match tokio::time::timeout(read_timeout, reader.read_line(&mut line_buf)).await {
+                Ok(Ok(0)) => break, // EOF（无头部直接结束）
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
                     debug!(%e, "读取请求头失败");
                     break;
+                }
+                Err(_) => {
+                    debug!("读取请求头超时");
+                    return;
                 }
             }
 
@@ -177,13 +221,26 @@ async fn handle_connection<S: Source + 'static>(stream: TcpStream, source: Arc<S
                     } else {
                         let cr = format!("bytes {}-{}/{}", clamped.start, clamped.end, audio_len);
                         let content_len = clamped.end - clamped.start + 1;
-                        if stream_range_body(
+                        if is_head {
+                            if write_status_headers(
+                                &mut writer,
+                                206,
+                                content_len,
+                                Some(&cr),
+                                connection_close,
+                            )
+                            .await
+                            .is_err()
+                                || writer.flush().await.is_err()
+                            {
+                                break;
+                            }
+                        } else if stream_range_body(
                             &mut writer,
                             206,
                             content_len,
                             Some(&cr),
                             connection_close,
-                            is_head,
                             source.open(clamped),
                         )
                         .await
@@ -208,13 +265,20 @@ async fn handle_connection<S: Source + 'static>(stream: TcpStream, source: Arc<S
                 end: audio_len.saturating_sub(1),
             };
             let content_len = audio_len;
-            if stream_range_body(
+            if is_head {
+                if write_status_headers(&mut writer, 200, content_len, None, connection_close)
+                    .await
+                    .is_err()
+                    || writer.flush().await.is_err()
+                {
+                    break;
+                }
+            } else if stream_range_body(
                 &mut writer,
                 200,
                 content_len,
                 None,
                 connection_close,
-                is_head,
                 source.open(full),
             )
             .await
@@ -284,7 +348,6 @@ async fn stream_range_body(
     content_length: u64,
     content_range: Option<&str>,
     connection_close: bool,
-    head_only: bool,
     chunks: impl Stream<Item = io::Result<Vec<u8>>>,
 ) -> io::Result<()> {
     pin_mut!(chunks);
@@ -311,9 +374,7 @@ async fn stream_range_body(
             debug!(%e, "首个分块读取失败，返回 502");
             let body = b"Bad Gateway";
             write_status_headers(writer, 502, body.len() as u64, None, true).await?;
-            if !head_only {
-                writer.write_all(body).await?;
-            }
+            writer.write_all(body).await?;
             writer.flush().await?;
             Ok(())
         }
@@ -327,10 +388,6 @@ async fn stream_range_body(
                 connection_close,
             )
             .await?;
-
-            if head_only {
-                return writer.flush().await;
-            }
 
             writer.write_all(&first_data).await?;
 
@@ -362,6 +419,7 @@ pub fn status_line(code: u16) -> &'static str {
         405 => "405 Method Not Allowed",
         416 => "416 Range Not Satisfiable",
         502 => "502 Bad Gateway",
+        503 => "503 Service Unavailable",
         _ => "500 Internal Server Error",
     }
 }
@@ -536,12 +594,19 @@ mod tests {
     async fn spawn_server<S: Source + 'static>(
         source: Arc<S>,
     ) -> (std::net::SocketAddr, oneshot::Sender<()>) {
+        spawn_server_with_timeout(source, Duration::from_secs(30)).await
+    }
+
+    async fn spawn_server_with_timeout<S: Source + 'static>(
+        source: Arc<S>,
+        read_timeout: Duration,
+    ) -> (std::net::SocketAddr, oneshot::Sender<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("绑定失败");
         let addr = listener.local_addr().expect("获取地址失败");
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let source_clone = Arc::clone(&source);
         tokio::spawn(async move {
-            serve(listener, source_clone, stop_rx).await;
+            serve_with_timeout(listener, source_clone, stop_rx, read_timeout).await;
         });
         (addr, stop_tx)
     }
@@ -721,6 +786,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serve_closes_idle_connection_on_shutdown() {
+        let source = Arc::new(FakeSource::new(100));
+        let (addr, stop_tx) = spawn_server(Arc::clone(&source)).await;
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("连接失败");
+
+        drop(stop_tx);
+
+        let mut byte = [0u8; 1];
+        let result = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
+            .await
+            .expect("关闭连接超时");
+        assert!(matches!(result, Ok(0) | Err(_)), "停止后空闲连接应关闭");
+    }
+
+    #[tokio::test]
+    async fn serve_closes_idle_request_after_read_timeout() {
+        let source = Arc::new(FakeSource::new(100));
+        let (addr, _stop) =
+            spawn_server_with_timeout(Arc::clone(&source), Duration::from_millis(25)).await;
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("连接失败");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+            .await
+            .expect("发送部分请求失败");
+
+        let mut byte = [0u8; 1];
+        let result = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
+            .await
+            .expect("请求读取超时后连接未关闭");
+        assert!(matches!(result, Ok(0) | Err(_)), "超时后连接应关闭");
+    }
+
+    #[tokio::test]
     async fn serve_stops_on_shutdown() {
         let source = Arc::new(FakeSource::new(100));
         let (addr, stop_tx) = spawn_server(Arc::clone(&source)).await;
@@ -858,11 +960,11 @@ mod tests {
             .unwrap();
 
         let (code, headers, body) = read_response(&mut stream).await;
-        assert_eq!(code, 502, "HEAD on FailingSource should produce 502");
+        assert_eq!(code, 200, "HEAD must not open the source");
         assert!(body.is_empty(), "HEAD response must not include a body");
         assert_eq!(
             headers.get("content-length").map(|v| v.as_str()),
-            Some("11")
+            Some("100")
         );
         assert_eq!(headers.get("connection").map(|v| v.as_str()), Some("close"));
     }
@@ -939,5 +1041,6 @@ mod tests {
         assert_eq!(status_line(405), "405 Method Not Allowed");
         assert_eq!(status_line(416), "416 Range Not Satisfiable");
         assert_eq!(status_line(502), "502 Bad Gateway");
+        assert_eq!(status_line(503), "503 Service Unavailable");
     }
 }
