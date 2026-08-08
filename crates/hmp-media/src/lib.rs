@@ -4,6 +4,7 @@
 
 pub mod cache;
 pub mod decrypt;
+pub mod proxy;
 
 use thiserror::Error;
 
