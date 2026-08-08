@@ -138,7 +138,9 @@ pub enum IpcErrorCode {
 
 1. `get_qrcode` 后先尝试解码图像并渲染 ASCII 到 stdout（不依赖 tty 检测，非 tty 也打印）；
 2. PNG 仍保存到临时目录（`hmp-qr.png`）作**兜底**：图像解码失败或渲染异常时提示用户手动打开该文件；
-3. 渲染成功后正常进入 `wait_qrcode_login` 轮询（扫码结果提示沿用现有逻辑）。
+3. **过期自动刷新**：渲染后进入轮询；`wait_qrcode_login` 返回超时类错误（二维码过期 `Timeout` 事件或整体超时）时，自动重新 `get_qrcode` → 重新渲染 → 继续轮询，无需用户重跑命令；总墙钟上限（10 分钟）防无限循环（一直不扫也不死循环）；
+4. **输出约定**：二维码渲染与轮询提示全部用 `write!` + `stdout().flush()` 显式冲刷，**不使用裸 `println!`**（管道/重定向场景下避免缓冲导致二维码延迟显示；与 `hmp play` 进度行的既有约定一致）。
+5. 渲染成功后正常进入 `wait_qrcode_login` 轮询（扫码结果提示沿用现有逻辑）。
 
 ## 5. 协议与数据流
 
@@ -171,7 +173,7 @@ pub enum IpcErrorCode {
   - 协议集成：真实 socket + 真协议客户端，多客户端并发、订阅 fan-out、畸形帧；
   - wiremock 端到端（真实 gst + 本地生成 wav + 假 QQ API）验证 Play→详情→回退→解密→播放→Ended→下一首 闭环；
   - tray/MPRIS 默认 features 开关——无桌面环境（CI）下跑 backend-only。
-- **CLI**：client 单测（ENOENT 拉起、ECONNREFUSED 恢复、超时）；`qr_ascii` 渲染单测（已知像素图 → 断言输出字符序列、宽度钳位 32..=120、纵横比 2:1、解码失败走 PNG 兜底）；集成：起 daemon → `hmp status`/`hmp pause` 断言。
+- **CLI**：client 单测（ENOENT 拉起、ECONNREFUSED 恢复、超时）；`qr_ascii` 渲染单测（已知像素图 → 断言输出字符序列、宽度钳位 32..=120、纵横比 2:1、解码失败走 PNG 兜底）；`login` 刷新循环单测（伪造超时错误 → 断言重新取码/重渲染调用、墙钟上限生效）；集成：起 daemon → `hmp status`/`hmp pause` 断言。
 
 ## 9. 里程碑拆分建议（供 writing-plans 细化）
 
