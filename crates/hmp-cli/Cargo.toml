@@ -15,8 +15,10 @@ hmp-media = { path = "../hmp-media" }
 hmp-player-gst = { path = "../hmp-player-gst" }
 hmp-storage = { path = "../hmp-storage" }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
+image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
