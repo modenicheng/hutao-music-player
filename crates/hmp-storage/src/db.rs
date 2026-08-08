@@ -12,9 +12,6 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
-/// 迁移版本（user_version）。
-const MIGRATION_VERSION: i64 = 1;
-
 /// 曲目行（窄投影：调用方从 `hmp_core::Track` 映射，存储层不依赖媒体模型）。
 #[derive(Clone, Debug)]
 pub struct TrackRow {
@@ -366,7 +363,7 @@ mod tests {
     fn open_creates_dir_and_wal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("library.sqlite3");
-        let mut db = LibraryDb::open(&path).unwrap();
+        let db = LibraryDb::open(&path).unwrap();
         assert!(path.exists());
         let journal: String = db
             .conn
