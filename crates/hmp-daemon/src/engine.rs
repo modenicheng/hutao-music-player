@@ -24,6 +24,8 @@ pub struct EngineHandle {
     pub state_rx: watch::Receiver<DaemonState>,
     /// 凭证前置校验（服务器对 Play 类请求同步检查，spec §6）。
     pub credential_ok: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// 引擎终止信号（`run()` 退出时置位；serve 据此优雅退出清理 socket，spec §6）。
+    pub terminated: Arc<tokio::sync::Notify>,
 }
 
 impl EngineHandle {
@@ -54,6 +56,7 @@ impl PlaybackEngine {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (state_tx, state_rx) = watch::channel(DaemonState::default());
         let playback_rx = driver.subscribe_state();
+        let terminated = Arc::new(tokio::sync::Notify::new());
         let mut engine = Self {
             driver,
             resolver,
@@ -63,11 +66,17 @@ impl PlaybackEngine {
             cmd_rx,
             active_media: None,
         };
-        tokio::spawn(async move { engine.run().await });
+        let engine_terminated = terminated.clone();
+        tokio::spawn(async move {
+            engine.run().await;
+            // 引擎退出（含 `hmp quit`）→ 通知编排层收尾（spec §6）。
+            engine_terminated.notify_waiters();
+        });
         EngineHandle {
             command_tx: cmd_tx,
             state_rx,
             credential_ok,
+            terminated,
         }
     }
 
@@ -546,14 +555,20 @@ mod tests {
         );
     }
 
-    /// 播放结束到队列末尾 → 状态发布（Ended 保持，不崩）。
+    /// `hmp quit`（Request::Quit）→ 引擎退出 → 终止信号置位（serve 据此优雅退出，spec §6）。
     #[tokio::test]
     async fn quit_shuts_down_engine() {
         let (driver, _sr, _er) = FakeDriver::new();
         let resolver = FakeResolver::new(vec![]);
         let (handle, _st) = start_engine(driver.clone(), resolver).await;
         handle.cmd(Request::Quit).await.unwrap();
-        wait_idle().await;
+        // 引擎退出后终止信号须在 1s 内置位（`run()` 退出路径 notify_waiters）。
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            handle.terminated.notified(),
+        )
+        .await
+        .expect("quit 后引擎终止信号 1s 内未置位");
         // 引擎退出后向命令通道发消息不再成功（发送端仍可发，但引擎不再消费——不断言；
         // 断言驱动已 shutdown）
         assert!(driver.commands.lock().unwrap().is_empty()); // shutdown 不产生命令

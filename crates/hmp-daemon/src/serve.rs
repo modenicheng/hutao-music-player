@@ -55,8 +55,13 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
         });
     }
     let server_handle = tokio::spawn(server::serve(listener, handle.clone()));
-    // 等待退出信号
-    let _ = quit_rx.recv().await;
+    // 等待退出信号：信号任务（SIGINT/SIGTERM）或引擎终止（`hmp quit` / tray 退出 →
+    // 引擎 run() 退出 → terminated 置位）任一触发即优雅退出（spec §6：停播 + 清理 socket）。
+    let terminated = handle.terminated.clone();
+    tokio::select! {
+        _ = quit_rx.recv() => {}
+        _ = terminated.notified() => {}
+    }
     // 停服务器（监听关闭）+ 清理
     server_handle.abort();
     let _ = tokio::fs::remove_file(&path).await;
