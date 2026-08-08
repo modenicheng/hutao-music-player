@@ -37,6 +37,23 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
+## 用法
+
+```bash
+hmp login                    # QQ 扫码登录：终端 ASCII 二维码，扫码后凭证存入系统密钥环
+hmp search "歌曲名"           # 搜索歌曲
+hmp play <track-id>          # 遥控后端播放（track-id | playlist:<id> | album:<id>）
+hmp status                   # 查询后端状态
+hmp pause / resume / next / prev / stop \
+   / seek 60 / volume 0.5 / loop list / shuffle on
+hmp quit                     # 优雅退出后端
+hmp serve                    # 前台运行后端（--background 后台运行，由遥控命令自动拉起）
+```
+
+后台播放：`hmp play/status/...` 等遥控命令自动拉起常驻 daemon（单例 Unix socket
+`$XDG_RUNTIME_DIR/hmp.sock`），CLI 退出后播放不中断；亦可用 `playerctl -p hmp ...`
+经 MPRIS 遥控（见 `docs/PROJECT.md` §8.6）。
+
 ## 鸣谢 / Acknowledgements
 
 HMP 的 QMC2 加密音质解密实现基于以下开源项目的研究与代码（许可证均与 GPL-3.0-or-later 兼容）：

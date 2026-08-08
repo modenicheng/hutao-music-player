@@ -873,6 +873,22 @@ pub struct PlaybackQueue {
 随机播放不能每次 Next 都重新随机，否则 Previous 无法返回上一首。应生成并维护稳定的随机顺序。
 即需要 shuffle 一个新的播放队列
 
+### 8.6 后台播放（service + tray）
+
+`hmp serve` 启动常驻后端（CLI 遥控命令自动拉起：连接 `$XDG_RUNTIME_DIR/hmp.sock`
+失败时 spawn `hmp serve --background`），单例 Unix socket（`$XDG_RUNTIME_DIR/hmp.sock`，
+回退 `/tmp/hmp-{uid}.sock`）。
+
+```text
+hmp play <track-id|playlist:<id>|album:<id>>   # 播放/换队列
+hmp playnext <source> / hmp queue show|add|remove|clear
+hmp pause / resume / next / prev / stop / seek <秒> / volume <0..1> / loop none|list|track / shuffle on|off
+hmp status / hmp quit
+```
+
+架构：单一 `Request` 命令通道 + 单一 `watch<DaemonState>` 状态出口；
+前端（socket 服务器 / tray / MPRIS）均为适配器，通过同一通道命令、同一出口读状态。
+
 ---
 
 ## 9. MPRIS 实现要求
