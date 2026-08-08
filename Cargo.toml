@@ -28,6 +28,9 @@ zbus = "5"
 bytes = "1"
 flate2 = "1"
 futures-util = "0.3"
+lofty = "0.21"
+rusqlite = { version = "0.32", features = ["bundled"] }
+toml = "0.8"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "cookies",

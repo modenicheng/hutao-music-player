@@ -11,9 +11,11 @@
 //! 提示安装 `gnome-keyring` 或 `kwallet`。
 
 pub mod credential;
+pub mod db;
 pub mod xdg;
 
 pub use credential::{BackendKind, CredentialStore, FileStore, SecretServiceStore};
+pub use db::{LibraryDb, PlayEnd, RecentPlay, TrackRow};
 pub use xdg::{cache_dir, config_dir, data_dir};
 
 /// 串行化修改进程环境变量的测试（XDG/HOME/HMP_CREDENTIAL_BACKEND）。
