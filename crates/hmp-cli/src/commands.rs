@@ -150,12 +150,14 @@ async fn await_playing(client: &mut DaemonClient, seq0: u64) -> Result<(), CliEr
     }
 }
 
-/// 解析播放源：`playlist:<id>` / `album:<id>` / 其他 = 单曲。
+/// 解析播放源：`playlist:<id>` / `album:<id>` / `local:<路径>` / 其他 = 单曲。
 pub fn parse_source(src: &str) -> hmp_core::PlayRequest {
     if let Some(id) = src.strip_prefix("playlist:") {
         hmp_core::PlayRequest::Playlist(hmp_core::PlaylistId::new(id))
     } else if let Some(id) = src.strip_prefix("album:") {
         hmp_core::PlayRequest::Album(hmp_core::AlbumId::new(id))
+    } else if let Some(id) = src.strip_prefix("local:") {
+        hmp_core::PlayRequest::Local(hmp_core::TrackId::new(format!("local:{id}")))
     } else {
         hmp_core::PlayRequest::Track(hmp_core::TrackId::new(src))
     }

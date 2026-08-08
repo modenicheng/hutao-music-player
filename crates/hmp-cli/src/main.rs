@@ -17,6 +17,7 @@ mod commands;
 mod history;
 mod login;
 mod quality;
+mod scan;
 mod search;
 
 use hmp_core::{LoopMode, Request};
@@ -47,6 +48,11 @@ enum Command {
     History {
         /// 条数（默认 10）。
         count: Option<u32>,
+    },
+    /// 递归扫描本地音乐目录入库。
+    Scan {
+        /// 起始目录。
+        dir: String,
     },
     /// 搜索歌曲。
     Search { keyword: String },
@@ -106,6 +112,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Auth => auth::run().await,
         Command::Quality { alias, no_fallback } => quality::run(alias, no_fallback).await,
         Command::History { count } => history::run(count).await,
+        Command::Scan { dir } => scan::run(&dir).await,
         Command::Search { keyword } => search::run(&keyword).await,
         Command::Play { source } => {
             let mut c = client::DaemonClient::connect_or_spawn().await?;
