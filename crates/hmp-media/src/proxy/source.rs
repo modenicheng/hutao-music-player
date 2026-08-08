@@ -188,22 +188,88 @@ async fn fetch_and_decrypt_range(
         )))
     } else if status == reqwest::StatusCode::OK {
         warn!(cdn_url = %cdn_url, "CDN 返回 200（忽略 Range），流式跳过");
-        let body = response
-            .bytes()
-            .await
-            .map_err(|e| io::Error::other(format!("读取流错误: {e}")))?;
-        let end_exclusive = end
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("区间溢出"))?;
-        if (body.len() as u64) < end_exclusive {
-            return Err(io::Error::other("CDN body 在请求区间前结束"));
-        }
-        let mut output = body[start as usize..end_exclusive as usize].to_vec();
-        cipher.decrypt(start as usize, &mut output);
-        Ok(Box::pin(futures_util::stream::once(async move {
-            let _permit = permit;
-            Ok(output)
-        })))
+        let byte_stream = response.bytes_stream();
+        Ok(Box::pin(futures_util::stream::unfold(
+            (byte_stream, start, start, 0_u64, false, permit),
+            move |(byte_stream, skip_remaining, decrypt_offset, delivered, finished, permit)| {
+                let cipher = Arc::clone(&cipher);
+                async move {
+                    if finished {
+                        return None;
+                    }
+                    let mut byte_stream = byte_stream;
+                    let mut skip_remaining = skip_remaining;
+                    let decrypt_offset = decrypt_offset;
+                    let delivered = delivered;
+                    loop {
+                        match byte_stream.next().await {
+                            Some(Ok(chunk)) => {
+                                if skip_remaining > 0 {
+                                    let chunk_len = chunk.len() as u64;
+                                    if chunk_len <= skip_remaining {
+                                        skip_remaining -= chunk_len;
+                                        continue;
+                                    }
+                                    // chunk straddles the start boundary
+                                    let start_idx = skip_remaining as usize;
+                                    let remaining = expected_len.saturating_sub(delivered) as usize;
+                                    let take = remaining.min(chunk.len() - start_idx);
+                                    let mut output = chunk[start_idx..start_idx + take].to_vec();
+                                    cipher.decrypt(decrypt_offset as usize, &mut output);
+                                    let new_delivered = delivered + take as u64;
+                                    let done = new_delivered == expected_len;
+                                    return Some((
+                                        Ok(output),
+                                        (
+                                            byte_stream,
+                                            0,
+                                            decrypt_offset + take as u64,
+                                            new_delivered,
+                                            done,
+                                            permit,
+                                        ),
+                                    ));
+                                }
+
+                                // normal path: skip already done
+                                let remaining = expected_len.saturating_sub(delivered) as usize;
+                                let take = remaining.min(chunk.len());
+                                let mut output = chunk[..take].to_vec();
+                                cipher.decrypt(decrypt_offset as usize, &mut output);
+                                let new_delivered = delivered + take as u64;
+                                let done = new_delivered == expected_len;
+                                return Some((
+                                    Ok(output),
+                                    (
+                                        byte_stream,
+                                        0,
+                                        decrypt_offset + take as u64,
+                                        new_delivered,
+                                        done,
+                                        permit,
+                                    ),
+                                ));
+                            }
+                            Some(Err(e)) => {
+                                return Some((
+                                    Err(io::Error::other(format!("读取流错误: {e}"))),
+                                    (byte_stream, 0, decrypt_offset, delivered, true, permit),
+                                ));
+                            }
+                            None => {
+                                if delivered == expected_len {
+                                    return None;
+                                }
+                                return Some((
+                                    Err(io::Error::other("CDN body 在请求区间前结束")),
+                                    (byte_stream, 0, decrypt_offset, delivered, true, permit),
+                                ));
+                            }
+                        }
+                    }
+                }
+            },
+        )))
     } else {
         Err(io::Error::other(format!("CDN 返回非预期状态码: {status}")))
     }
@@ -994,6 +1060,76 @@ mod tests {
             .await
             .expect("prepare_stream 应成功");
         let (code, body) = fetch_via_proxy(&prepared.uri, 0, Some(3)).await;
+        assert_eq!(code, 502);
+        assert_eq!(body, b"Bad Gateway");
+    }
+
+    #[tokio::test]
+    async fn prepare_stream_200_defense_short_body_returns_502() {
+        // 200 防御路径：CDN body 远短于请求的 start，首个分块即为错误，
+        // stream_range_body 在写入响应头前拉取分块，故返回干净的 502。
+        let plaintext = {
+            let mut v = b"fLaC".to_vec();
+            v.extend((0..512).map(|i| (i % 256) as u8));
+            v
+        };
+        let key = b"0123456789abcdefghij";
+        let (encrypted, ekey) = testutil::make_encrypted(&plaintext, key, true);
+        let total_len = encrypted.len() as u64;
+        // body 仅 50 字节，远小于请求的 start（100），全部被 skip 消耗
+        let encrypted_short = encrypted[..50].to_vec();
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Length", total_len.to_string())
+                    .insert_header("Accept-Ranges", "bytes"),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(header_exists("Range"))
+            .respond_with(move |req: &wiremock::Request| {
+                let range_val = req
+                    .headers
+                    .get("Range")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+
+                if range_val == "bytes=0-0" {
+                    return ResponseTemplate::new(206)
+                        .insert_header("Content-Range", format!("bytes 0-0/{total_len}"))
+                        .set_body_bytes(encrypted[0..=0].to_vec());
+                }
+
+                if let Some((start, end)) = parse_range_value(range_val) {
+                    if start >= total_len.saturating_sub(0x40) {
+                        let end_capped = end.min(total_len.saturating_sub(1));
+                        let body = &encrypted[start as usize..=end_capped as usize];
+                        return ResponseTemplate::new(206)
+                            .insert_header(
+                                "Content-Range",
+                                format!("bytes {start}-{end_capped}/{total_len}"),
+                            )
+                            .set_body_bytes(body.to_vec());
+                    }
+                }
+
+                // 200 但 body 极短
+                ResponseTemplate::new(200).set_body_bytes(encrypted_short.clone())
+            })
+            .mount(&server)
+            .await;
+
+        let prepared = prepare_stream(&server.uri(), Some(&ekey), None)
+            .await
+            .expect("prepare_stream 应成功");
+
+        // bytes=100-199：start=100 > short body 50 字节 → 全部被 skip，流提前结束
+        let (code, body) = fetch_via_proxy(&prepared.uri, 100, Some(199)).await;
         assert_eq!(code, 502);
         assert_eq!(body, b"Bad Gateway");
     }
