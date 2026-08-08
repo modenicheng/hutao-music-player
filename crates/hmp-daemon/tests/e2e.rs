@@ -82,7 +82,7 @@ struct EnvGuard {
 
 /// 串行化修改环境变量的 resolve 测试（`Config::load` 读 `XDG_CONFIG_HOME`，
 /// 与 `resolve_track_falls_back_to_plain_via_mock_api` 共享环境）。
-static CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static CONFIG_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl EnvGuard {
     /// 设置 file 凭证后端 + 临时配置目录，返回还原句柄。
@@ -256,7 +256,7 @@ async fn mount_qq_mocks(server: &MockServer) {
 /// 不触网、不依赖 GStreamer；验证 daemon 对 QQ API 响应的解析契约。
 #[tokio::test]
 async fn resolve_track_falls_back_to_plain_via_mock_api() {
-    let _lock = CONFIG_ENV_LOCK.lock().unwrap();
+    let _lock = CONFIG_ENV_LOCK.lock().await;
     // 1) 凭证隔离：file 后端 + 临时 XDG_CONFIG_HOME（真实 daemon 的环境变量路径）
     let dir = tempfile::tempdir().unwrap();
     let _env = EnvGuard::install(dir.path());
@@ -477,7 +477,7 @@ async fn wait_next_ended(
 /// 断言：GetEVkey 序列只含 F0M0（Q0M0/AIM0 不出现）→ 加密失败后明文 M500 兜底。
 #[tokio::test]
 async fn resolve_track_respects_fixed_quality_config() {
-    let _lock = CONFIG_ENV_LOCK.lock().unwrap();
+    let _lock = CONFIG_ENV_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let _env = EnvGuard::install(dir.path());
     // 写配置：固定 FLAC + 允许回退。

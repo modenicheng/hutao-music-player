@@ -39,10 +39,7 @@ fn parse_source(source: &str) -> (i64, Vec<ParsedLine>) {
     for raw_line in source.lines() {
         let mut rest = raw_line.trim();
         let mut timestamps = Vec::new();
-        loop {
-            let Some(end) = rest.strip_prefix('[').and_then(|value| value.find(']')) else {
-                break;
-            };
+        while let Some(end) = rest.strip_prefix('[').and_then(|value| value.find(']')) {
             let tag_end = end + 1;
             let tag = &rest[1..tag_end];
             if let Some(offset) = tag
@@ -87,9 +84,7 @@ fn apply_offset(timestamp_ms: u64, offset_ms: i64) -> u64 {
 fn parse_timestamp(value: &str) -> Option<u64> {
     let (minutes, seconds) = value.split_once(':')?;
     let minutes = minutes.parse::<u64>().ok()?;
-    let (seconds, fraction) = seconds
-        .split_once(|separator| separator == '.' || separator == ',')
-        .unwrap_or((seconds, ""));
+    let (seconds, fraction) = seconds.split_once(['.', ',']).unwrap_or((seconds, ""));
     let seconds = seconds.parse::<u64>().ok()?;
     if seconds >= 60 {
         return None;

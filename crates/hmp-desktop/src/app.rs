@@ -249,6 +249,7 @@ struct SearchResult {
     result: Result<Vec<hmp_qqmusic_api::protocol::search::QuickSong>, String>,
 }
 
+#[allow(clippy::large_enum_variant)] // 桌面内部命令枚举，装箱徒增无谓 churn
 enum PlayRequest {
     Search {
         index: usize,

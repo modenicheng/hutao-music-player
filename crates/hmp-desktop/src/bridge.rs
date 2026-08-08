@@ -168,9 +168,9 @@ pub fn lyrics_model(lines: Vec<UiLyricData>, position_ms: f32) -> ModelRc<crate:
     let active_index = lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.timestamp_ms as f32 <= position_ms)
-        .map(|(index, _)| index)
-        .last();
+        .rev()
+        .find(|(_, line)| line.timestamp_ms as f32 <= position_ms)
+        .map(|(index, _)| index);
     ModelRc::new(VecModel::from(
         lines
             .into_iter()
@@ -181,11 +181,12 @@ pub fn lyrics_model(lines: Vec<UiLyricData>, position_ms: f32) -> ModelRc<crate:
 }
 
 pub fn update_lyrics_active_line(model: &ModelRc<crate::UiLyric>, position_ms: f32) {
-    let active_index = (0..model.row_count())
-        .filter_map(|index| model.row_data(index).map(|line| (index, line)))
-        .filter(|(_, line)| line.timestamp_ms <= position_ms)
-        .map(|(index, _)| index)
-        .last();
+    let active_index = (0..model.row_count()).rev().find_map(|index| {
+        model
+            .row_data(index)
+            .filter(|line| line.timestamp_ms <= position_ms)
+            .map(|_| index)
+    });
     for index in 0..model.row_count() {
         let Some(mut line) = model.row_data(index) else {
             continue;
