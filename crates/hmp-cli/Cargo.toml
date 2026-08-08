@@ -1,24 +1,25 @@
 [package]
 name = "hmp-cli"
-description = "HMP 命令行原型：hmp login / search / play（docs/PROJECT.md §20 里程碑）"
+description = "HMP 命令行客户端：hmp login / search / 遥控后端播放（docs/PROJECT.md §20 里程碑）"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+# 二进制命名为 `hmp`（与 clap 命令名、文档用法一致；`CARGO_BIN_EXE_hmp` 供集成测试）。
+[[bin]]
+name = "hmp"
+path = "src/main.rs"
+
 [dependencies]
 clap = { workspace = true }
 hmp-core = { path = "../hmp-core" }
-hmp-mpris = { path = "../hmp-mpris" }
-hmp-media = { path = "../hmp-media" }
-hmp-player-gst = { path = "../hmp-player-gst" }
-hmp-storage = { path = "../hmp-storage" }
+hmp-daemon = { path = "../hmp-daemon" }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
+hmp-storage = { path = "../hmp-storage" }
 image = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
