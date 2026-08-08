@@ -368,7 +368,7 @@ async fn sync_loop(
         return;
     };
     {
-        let caps = capabilities_rx.borrow().clone();
+        let caps = *capabilities_rx.borrow();
         publish_capabilities(&connection, &caps).await;
     }
     loop {
@@ -384,7 +384,7 @@ async fn sync_loop(
                 if changed.is_err() {
                     break;
                 }
-                let caps = capabilities_rx.borrow().clone();
+                let caps = *capabilities_rx.borrow();
                 publish_capabilities(&connection, &caps).await;
             }
         }
