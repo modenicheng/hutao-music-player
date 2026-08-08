@@ -10,13 +10,35 @@ HMP 是一个面向 Linux 的轻量 Rust QQ 音乐播放器，重点提供完整
 hutao-music-player/
 ├── Cargo.toml              # workspace 根（resolver 3, edition 2024）
 ├── crates/
-│   └── hmp-qqmusic-api/    # QQ 音乐 API 移植 crate（独立发布 crates.io）
+│   ├── hmp-core/           # 领域模型：Track/PlayerCommand/PlaybackState/QueueCore/IPC 协议
+│   ├── hmp-qqmusic-api/    # QQ 音乐 API 移植 crate（独立发布 crates.io）
+│   ├── hmp-player-gst/     # GStreamer 播放核心（PlayerCore）
+│   ├── hmp-media/          # 下载/QMC2 解密/缓存/本地回环解密代理
+│   ├── hmp-storage/        # 凭证存储
+│   ├── hmp-mpris/          # MPRIS D-Bus 服务
+│   ├── hmp-daemon/         # 后台播放后端（socket 服务器 + 播放引擎 + tray/MPRIS 适配）
+│   ├── hmp-desktop/        # Slint 桌面端（接入中）
+│   └── hmp-cli/            # CLI（登录/搜索/遥控子命令，二进制名 `hmp`）
 ├── docs/
 │   ├── PROJECT.md          # 项目总纲
+│   ├── USAGE.md            # ★ 使用文档（命令参考/队列语义/故障排查/测试指南）
 │   └── QQMUSIC_PORTING.md  # 移植跟踪（上游模块 → Rust 模块映射）
 ├── fixtures/               # 差分测试原始录制
 └── scripts/
 ```
+
+## 快速上手
+
+```bash
+hmp login                    # 终端 ASCII 二维码登录
+hmp search "歌曲名"           # 搜索
+hmp play <track-id>          # 后台播放（自动拉起常驻 daemon）
+hmp status                   # 状态
+hmp pause / next / seek 60   # 遥控
+hmp quit                     # 退出后端
+```
+
+完整使用文档（命令参考、队列语义、音质与解密、MPRIS/托盘、故障排查、测试指南）见 **[docs/USAGE.md](docs/USAGE.md)**。
 
 ## Crate 说明
 
@@ -43,6 +65,8 @@ cargo fmt --all -- --check
 hmp login                    # QQ 扫码登录：终端 ASCII 二维码，扫码后凭证存入系统密钥环
 hmp search "歌曲名"           # 搜索歌曲
 hmp play <track-id>          # 遥控后端播放（track-id | playlist:<id> | album:<id>）
+hmp playnext <id>            # 插队播放
+hmp queue show|add <id>|remove <idx>|clear
 hmp status                   # 查询后端状态
 hmp pause / resume / next / prev / stop \
    / seek 60 / volume 0.5 / loop list / shuffle on
@@ -51,8 +75,8 @@ hmp serve                    # 前台运行后端（--background 后台运行，
 ```
 
 后台播放：`hmp play/status/...` 等遥控命令自动拉起常驻 daemon（单例 Unix socket
-`$XDG_RUNTIME_DIR/hmp.sock`），CLI 退出后播放不中断；亦可用 `playerctl -p hmp ...`
-经 MPRIS 遥控（见 `docs/PROJECT.md` §8.6）。
+`$XDG_RUNTIME_DIR/hmp.sock`，`flock` 保证单实例），CLI 退出后播放不中断；亦可用
+`playerctl -p hmp ...` 经 MPRIS 遥控（见 [docs/USAGE.md](docs/USAGE.md) §7）。
 
 ## 鸣谢 / Acknowledgements
 

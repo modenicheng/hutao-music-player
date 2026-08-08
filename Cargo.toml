@@ -13,7 +13,7 @@ resolver = "3"
 edition = "2024"
 license = "GPL-3.0-or-later"
 # TODO(发布前): 替换为真实仓库地址
-repository = "https://github.com/<owner>/hutao-music-player"
+repository = "https://github.com/modenicheng/hutao-music-player"
 rust-version = "1.85"
 
 [workspace.dependencies]
