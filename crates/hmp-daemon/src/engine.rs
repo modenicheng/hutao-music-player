@@ -173,8 +173,8 @@ impl PlaybackEngine {
             return;
         }
         if playnext {
-            self.queue.insert_next(ids[0].clone());
-            self.queue.set_current_to_last(); // 定位到刚插入的
+            let idx = self.queue.insert_next(ids[0].clone());
+            self.queue.set_current(idx); // 定位到刚插入的位置（可能是队列中部）
             self.publish();
             self.load_and_play(ids[0].clone()).await;
         } else {
@@ -501,6 +501,48 @@ mod tests {
         assert_eq!(
             driver.loads.lock().unwrap().clone(),
             vec!["fake://a", "fake://b", "fake://a"]
+        );
+    }
+
+    /// PlayNext：插入到当前曲之后，current 定位到插入位置（队列中部也正确）。
+    #[tokio::test]
+    async fn playnext_inserts_after_current_mid_queue() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![
+            vec![TrackId::new("a"), TrackId::new("b"), TrackId::new("c")],
+            vec![TrackId::new("x")],
+        ]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(handle.state_rx.borrow().queue.current, Some(1)); // 当前为 b
+        handle
+            .cmd(Request::PlayNext(PlayRequest::Track(TrackId::new("x"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let state = handle.state_rx.borrow();
+        assert_eq!(state.queue.current, Some(2)); // 指向插入的 x
+        assert_eq!(
+            state.queue.tracks,
+            vec![
+                TrackId::new("a"),
+                TrackId::new("b"),
+                TrackId::new("x"),
+                TrackId::new("c")
+            ]
+        );
+        assert_eq!(
+            driver.loads.lock().unwrap().last(),
+            Some(&"fake://x".to_string())
         );
     }
 

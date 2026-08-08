@@ -84,10 +84,12 @@ impl QueueCore {
         self.tracks.extend(tracks);
     }
 
-    /// 插到当前曲之后（playnext）。
-    pub fn insert_next(&mut self, track: TrackId) {
+    /// 插到当前曲之后（playnext）；返回插入位置（0 基）。
+    pub fn insert_next(&mut self, track: TrackId) -> usize {
         let at = self.current.map_or(self.tracks.len(), |i| i + 1);
-        self.tracks.insert(at.min(self.tracks.len()), track);
+        let idx = at.min(self.tracks.len());
+        self.tracks.insert(idx, track);
+        idx
     }
 
     /// 移除 0 基位置曲目；返回是否成功。
@@ -121,10 +123,10 @@ impl QueueCore {
         self.current.and_then(|i| self.tracks.get(i))
     }
 
-    /// 将当前曲定位到队尾（playnext 插入后使用）。
-    pub fn set_current_to_last(&mut self) {
+    /// 将当前曲定位到指定 0 基位置（越界钳制到队尾；空队列无操作）。
+    pub fn set_current(&mut self, index: usize) {
         if !self.tracks.is_empty() {
-            self.current = Some(self.tracks.len() - 1);
+            self.current = Some(index.min(self.tracks.len() - 1));
         }
     }
 
@@ -323,11 +325,23 @@ mod tests {
     }
 
     #[test]
-    fn set_current_to_last_positions_at_end() {
+    fn insert_next_returns_inserted_index() {
         let mut q = QueueCore::new();
-        q.replace(vec![t("a"), t("b")], 0);
-        q.set_current_to_last();
-        assert_eq!(q.current(), Some(&t("b")));
+        q.replace(vec![t("a"), t("b"), t("c")], 1);
+        let idx = q.insert_next(t("x"));
+        assert_eq!(idx, 2); // 插到当前（b，位置 1）之后
+        assert_eq!(q.snapshot().tracks, vec![t("a"), t("b"), t("x"), t("c")]);
+    }
+
+    #[test]
+    fn set_current_clamps() {
+        let mut q = QueueCore::new();
+        q.replace(vec![t("a"), t("b"), t("c")], 0);
+        q.set_current(99); // 越界 → 钳制到队尾
+        assert_eq!(q.current(), Some(&t("c")));
+        let mut empty = QueueCore::new();
+        empty.set_current(0); // 空队列 no-op
+        assert_eq!(empty.current(), None);
     }
 
     #[test]
