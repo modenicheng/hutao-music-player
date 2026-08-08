@@ -94,6 +94,8 @@ pub struct MprisPlayer {
     can_pause: bool,
     can_seek: bool,
     can_control: bool,
+    /// OpenUri 转发通道（上层播放 URI；None = 不支持）。
+    open_uri_tx: Option<mpsc::UnboundedSender<String>>,
 }
 
 #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
@@ -156,9 +158,16 @@ impl MprisPlayer {
         Ok(())
     }
 
-    /// 打开 URI（当前不支持，返回错误）。
-    fn open_uri(&self, _uri: &str) -> zbus::fdo::Result<()> {
-        Err(zbus::fdo::Error::NotSupported("URI 播放暂不支持".into()))
+    /// 打开 URI：转发到上层（`open_uri_tx` 存在时）；无转发通道 → NotSupported。
+    fn open_uri(&self, uri: &str) -> zbus::fdo::Result<()> {
+        match &self.open_uri_tx {
+            Some(tx) => {
+                tx.send(uri.to_string())
+                    .map_err(|_| zbus::fdo::Error::Failed("转发通道关闭".into()))?;
+                Ok(())
+            }
+            None => Err(zbus::fdo::Error::NotSupported("URI 播放暂不支持".into())),
+        }
     }
 
     /// Seeked 信号（播放器核心 seek 后由同步任务发出）。
@@ -302,6 +311,16 @@ impl MprisService {
         state_rx: watch::Receiver<PlaybackState>,
         capabilities_rx: Option<watch::Receiver<PlaybackCapabilities>>,
     ) -> Result<Self, MprisError> {
+        Self::start_with_capabilities_and_uri(cmd_tx, state_rx, capabilities_rx, None).await
+    }
+
+    /// 启动 MPRIS 服务并挂载 OpenUri 转发通道（C4）。
+    pub async fn start_with_capabilities_and_uri(
+        cmd_tx: mpsc::UnboundedSender<PlayerCommand>,
+        state_rx: watch::Receiver<PlaybackState>,
+        capabilities_rx: Option<watch::Receiver<PlaybackCapabilities>>,
+        open_uri_tx: Option<mpsc::UnboundedSender<String>>,
+    ) -> Result<Self, MprisError> {
         let connection = zbus::connection::Builder::session()?
             .name(BUS_NAME.to_owned())?
             .serve_at(
@@ -329,6 +348,7 @@ impl MprisService {
                     can_pause: false,
                     can_seek: false,
                     can_control: true,
+                    open_uri_tx,
                 },
             )?
             .build()
@@ -555,6 +575,7 @@ mod tests {
             can_pause: false,
             can_seek: false,
             can_control: true,
+            open_uri_tx: None,
         }
     }
 
@@ -593,5 +614,24 @@ mod tests {
         let mut changed: HashMap<&str, Value> = HashMap::new();
         iface.update_props(&state(false), &mut changed);
         assert!(!changed.contains_key("Shuffle"));
+    }
+
+    /// OpenUri：有转发通道 → 送达；无 → NotSupported（与 SupportedUriSchemes 一致）。
+    #[test]
+    fn open_uri_forwards_when_channel_present() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut iface = iface();
+        iface.open_uri_tx = Some(tx);
+        iface.open_uri("file:///tmp/x.mp3").unwrap();
+        assert_eq!(rx.try_recv().unwrap(), "file:///tmp/x.mp3");
+        // 通道仍通，后续 URI 不报错。
+        iface.open_uri("https://x/1.mp3").unwrap();
+        assert_eq!(rx.try_recv().unwrap(), "https://x/1.mp3");
+    }
+
+    #[test]
+    fn open_uri_not_supported_without_channel() {
+        let iface = iface();
+        assert!(iface.open_uri("file:///tmp/x.mp3").is_err());
     }
 }

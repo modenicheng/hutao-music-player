@@ -728,6 +728,42 @@ mod tests {
         assert_eq!(driver.loads.lock().unwrap().len(), 1); // 只加载过一次
     }
 
+    /// MPRIS OpenUri：file:// 转为本地播放请求（C4）。
+    #[tokio::test]
+    async fn open_uri_file_plays_via_play_source() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("local:/tmp/x.mp3")]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::OpenUri("file:///tmp/x.mp3".into()))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let state = handle.state_rx.borrow();
+        assert_eq!(state.queue.tracks.len(), 1);
+        assert_eq!(state.queue.tracks[0].as_ref(), "local:/tmp/x.mp3");
+        assert_eq!(
+            driver.loads.lock().unwrap().last(),
+            Some(&"fake://local:/tmp/x.mp3".to_string())
+        );
+    }
+
+    /// MPRIS OpenUri：非 file:// → 错误上浮（last_error）。
+    #[tokio::test]
+    async fn open_uri_unsupported_scheme_sets_error() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::OpenUri("https://x/1.mp3".into()))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let state = handle.state_rx.borrow();
+        assert!(state.last_error.is_some());
+        assert!(state.queue.tracks.is_empty());
+    }
+
     /// caps：shuffle 开启时队尾仍可 Next（引擎可回绕），MPRIS 不再误报 false。
     #[tokio::test]
     async fn caps_allow_next_at_tail_when_shuffled() {

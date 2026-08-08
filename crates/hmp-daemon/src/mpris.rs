@@ -41,7 +41,24 @@ pub async fn start_mpris(
         });
         rx
     };
-    match hmp_mpris::MprisService::start_with_capabilities(cmd_tx, playback_rx, Some(caps_rx)).await
+    // OpenUri 转发：MPRIS → 引擎 `Request::OpenUri`（file:// 本地播放，C4）。
+    let open_uri_tx = {
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let daemon_tx = command_tx.clone();
+        tokio::spawn(async move {
+            while let Some(uri) = rx.recv().await {
+                let _ = daemon_tx.send(Request::OpenUri(uri));
+            }
+        });
+        tx
+    };
+    match hmp_mpris::MprisService::start_with_capabilities_and_uri(
+        cmd_tx,
+        playback_rx,
+        Some(caps_rx),
+        Some(open_uri_tx),
+    )
+    .await
     {
         Ok(service) => Some(service),
         Err(e) => {
