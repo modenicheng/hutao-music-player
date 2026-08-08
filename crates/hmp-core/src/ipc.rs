@@ -11,7 +11,7 @@ use crate::queue::QueueSnapshot;
 /// 单帧最大字节数（含 4 字节长度前缀）。
 pub const MAX_FRAME: usize = 1 << 20;
 
-/// 播放源请求（曲目 / 歌单 / 专辑）。
+/// 播放源请求（曲目 / 歌单 / 专辑 / 本地）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PlayRequest {
     /// 单曲。
@@ -20,6 +20,67 @@ pub enum PlayRequest {
     Playlist(PlaylistId),
     /// 专辑。
     Album(AlbumId),
+    /// 本地文件（id 形如 `local:/绝对路径`；媒体库重构 C1）。
+    Local(TrackId),
+}
+
+/// 曲目来源提供方。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrackProvider {
+    /// QQ 音乐（网络取流）。
+    QqMusic,
+    /// 本地文件（`file://`）。
+    Local,
+}
+
+impl TrackProvider {
+    /// 依据 id 前缀识别来源（`local:` 前缀 → 本地）。
+    pub fn from_id(id: &str) -> Self {
+        if let Some(rest) = id.strip_prefix("local:") {
+            if !rest.is_empty() {
+                return Self::Local;
+            }
+        }
+        Self::QqMusic
+    }
+}
+
+/// 曲目引用（provider + id，媒体库重构 C1）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackRef {
+    pub provider: TrackProvider,
+    pub id: String,
+}
+
+impl TrackRef {
+    /// 从播放请求映射。
+    pub fn from_play_request(r: &PlayRequest) -> Self {
+        match r {
+            PlayRequest::Local(id) => Self {
+                provider: TrackProvider::Local,
+                id: id.0.clone(),
+            },
+            PlayRequest::Track(id) => Self {
+                provider: TrackProvider::QqMusic,
+                id: id.0.clone(),
+            },
+            PlayRequest::Playlist(id) => Self {
+                provider: TrackProvider::QqMusic,
+                id: id.0.clone(),
+            },
+            PlayRequest::Album(id) => Self {
+                provider: TrackProvider::QqMusic,
+                id: id.0.clone(),
+            },
+        }
+    }
+
+    /// 本地路径（仅当 provider=Local 且 id 以 `local:` 前缀）。
+    pub fn local_path(&self) -> Option<&str> {
+        (self.provider == TrackProvider::Local)
+            .then(|| self.id.strip_prefix("local:"))
+            .flatten()
+    }
 }
 
 /// 客户端 → 后端请求。
@@ -43,6 +104,8 @@ pub enum Request {
     Status,
     /// 订阅状态事件流（推送 `Event` 帧）。
     Subscribe,
+    /// 播放 URI（MPRIS `OpenUri`；`file://` → 本地，其余 → 内部错误）。
+    OpenUri(String),
     /// 优雅退出后端。
     Quit,
 }
@@ -219,5 +282,28 @@ mod tests {
         let msg = Request::Status;
         let frame = encode_frame(&msg).unwrap();
         assert!(decode_frame::<Request>(&frame[..frame.len() - 2]).is_err());
+    }
+
+    #[test]
+    fn local_play_request_roundtrip() {
+        // PlayRequest::Local 序列化 round-trip + provider 识别。
+        let msg = Request::Play(PlayRequest::Local(TrackId::new("local:/tmp/x.mp3")));
+        let frame = encode_frame(&msg).unwrap();
+        let back: Request = decode_frame(&frame).unwrap();
+        assert_eq!(back, msg);
+
+        assert_eq!(
+            TrackProvider::from_id("local:/tmp/x.mp3"),
+            TrackProvider::Local
+        );
+        assert_eq!(TrackProvider::from_id("mid123"), TrackProvider::QqMusic);
+        assert_eq!(TrackProvider::from_id("local:"), TrackProvider::QqMusic);
+
+        let r = TrackRef::from_play_request(&PlayRequest::Local(TrackId::new("local:/a.mp3")));
+        assert_eq!(r.provider, TrackProvider::Local);
+        assert_eq!(r.local_path(), Some("/a.mp3"));
+        let r = TrackRef::from_play_request(&PlayRequest::Track(TrackId::new("m")));
+        assert_eq!(r.provider, TrackProvider::QqMusic);
+        assert_eq!(r.local_path(), None);
     }
 }
