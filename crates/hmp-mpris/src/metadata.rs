@@ -157,7 +157,7 @@ mod tests {
         assert!(map.contains_key("mpris:artUrl"));
         assert!(map.contains_key("xesam:url"));
         assert_eq!(
-            map["xesam:url"].downcast_ref::<String>().map(|s| s.clone()),
+            map["xesam:url"].downcast_ref::<String>().cloned(),
             Ok("https://example.com/stream.mp3".to_owned())
         );
         let album_artists = map["xesam:albumArtist"]

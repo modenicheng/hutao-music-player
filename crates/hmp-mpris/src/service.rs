@@ -592,6 +592,6 @@ mod tests {
         let mut iface = iface();
         let mut changed: HashMap<&str, Value> = HashMap::new();
         iface.update_props(&state(false), &mut changed);
-        assert!(changed.get("Shuffle").is_none());
+        assert!(!changed.contains_key("Shuffle"));
     }
 }
