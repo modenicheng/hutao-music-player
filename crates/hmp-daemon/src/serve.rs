@@ -55,6 +55,11 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
         });
     }
     let server_handle = tokio::spawn(server::serve(listener, handle.clone()));
+    // 桌面集成（spec §4.2）：系统托盘 + MPRIS（feature 门控；无会话时跳过不 panic）。
+    #[cfg(feature = "tray")]
+    let tray = crate::tray::spawn_tray(&handle);
+    #[cfg(feature = "mpris")]
+    let mpris = crate::mpris::start_mpris(handle.command_tx.clone(), handle.state_rx.clone()).await;
     // 等待退出信号：信号任务（SIGINT/SIGTERM）或引擎终止（`hmp quit` / tray 退出 →
     // 引擎 run() 退出 → terminated 置位）任一触发即优雅退出（spec §6：停播 + 清理 socket）。
     let terminated = handle.terminated.clone();
@@ -62,9 +67,15 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
         _ = quit_rx.recv() => {}
         _ = terminated.notified() => {}
     }
-    // 停服务器（监听关闭）+ 清理
+    // 停服务器（监听关闭）+ 清理 + 关 tray / 释放 MPRIS bus 名（优雅退出，spec §6）。
     server_handle.abort();
     let _ = tokio::fs::remove_file(&path).await;
+    #[cfg(feature = "tray")]
+    if let Some(tray) = tray {
+        tray.shutdown();
+    }
+    #[cfg(feature = "mpris")]
+    drop(mpris);
     tracing::info!("后端已退出");
     Ok(())
 }
