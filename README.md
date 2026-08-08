@@ -34,6 +34,10 @@ hmp login                    # 终端 ASCII 二维码登录
 hmp auth                     # 显示登录状况
 hmp search "歌曲名"           # 搜索
 hmp play <track-id>          # 后台播放（自动拉起常驻 daemon）
+hmp quality flac             # 音质策略（auto/master/hires/atmos/flac/aac/320/128）
+hmp scan ~/Music             # 扫描本地音乐入库
+hmp play local:/path/x.flac  # 播放本地文件（无需登录）
+hmp history                  # 最近播放
 hmp status                   # 状态
 hmp pause / next / seek 60   # 遥控
 hmp quit                     # 退出后端

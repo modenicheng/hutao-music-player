@@ -132,6 +132,19 @@ playerctl -p hmp ...  │        (127.0.0.1 本机)          │
 - **加密音质**（`.mflac`/`.mgg`/`.mmp4` 等，FLAC 及以上）：daemon 用接口 `ekey` 经本地回环解密代理（127.0.0.1 随机端口，Range 按需解密）**流式播放**，边下边播、支持即时 Seek；CDN 不支持 Range 时回退整文件解密缓存；
 - OGG 系列（`O8M1` 等）尚未纳入回退链（后续项）。
 
+## 6.5 本地音乐（媒体库）
+
+本地音乐走 **provider 模型**：`qq:<mid>` 网络取流，`local:<路径>` 本地文件
+（`file://`），播放 URI 恒为路径本身、**不依赖 QQ 登录**。
+
+```bash
+hmp scan ~/Music            # 递归扫描入库（标签元数据 + 文件名回退，幂等）
+hmp play local:/home/user/Music/x.flac   # 播放本地文件（未登录也可）
+hmp history                 # 最近播放（会话粒度：开始/结束/收听时长/原因）
+```
+
+MPRIS `OpenUri`（`playerctl open file:///...`）经同一路径播放。
+
 ## 7. 系统集成：MPRIS / 托盘
 
 - **MPRIS**：daemon 注册 `org.mpris.MediaPlayer2.hmp`；用标准工具控制：
