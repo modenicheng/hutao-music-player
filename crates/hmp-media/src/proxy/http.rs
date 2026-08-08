@@ -275,6 +275,9 @@ async fn write_error(
 }
 
 /// 写入 status + headers，然后流式写入 chunks 作为 body。
+///
+/// 在写入任何响应头之前先拉取首个分块，确保源不可达时能返回
+/// 502 而非截断的 200/206。
 async fn stream_range_body(
     writer: &mut (impl AsyncWriteExt + Unpin),
     code: u16,
@@ -284,33 +287,68 @@ async fn stream_range_body(
     head_only: bool,
     chunks: impl Stream<Item = io::Result<Vec<u8>>>,
 ) -> io::Result<()> {
-    write_status_headers(
-        writer,
-        code,
-        content_length,
-        content_range,
-        connection_close,
-    )
-    .await?;
-
-    if head_only {
-        return writer.flush().await;
-    }
-
     pin_mut!(chunks);
-    while let Some(chunk_result) = chunks.next().await {
-        match chunk_result {
-            Ok(chunk) => {
-                writer.write_all(&chunk).await?;
+
+    // 在写入任何响应头之前拉取首个分块。
+    // 源不可达时，必须返回 502 而非截断的 200/206。
+    let first = chunks.next().await;
+
+    match first {
+        None => {
+            // 流为空：写入头部但不写 body。
+            write_status_headers(
+                writer,
+                code,
+                content_length,
+                content_range,
+                connection_close,
+            )
+            .await?;
+            writer.flush().await
+        }
+        Some(Err(e)) => {
+            // 首个分块即失败 → 返回干净的 502。
+            debug!(%e, "首个分块读取失败，返回 502");
+            let body = b"Bad Gateway";
+            write_status_headers(writer, 502, body.len() as u64, None, true).await?;
+            if !head_only {
+                writer.write_all(body).await?;
             }
-            Err(e) => {
-                debug!(%e, "读取音频分块失败，断开连接");
-                return Err(e);
+            writer.flush().await?;
+            Ok(())
+        }
+        Some(Ok(first_data)) => {
+            // 首个分块到达 —— 写入头部，然后流式输出剩余分块。
+            write_status_headers(
+                writer,
+                code,
+                content_length,
+                content_range,
+                connection_close,
+            )
+            .await?;
+
+            if head_only {
+                return writer.flush().await;
             }
+
+            writer.write_all(&first_data).await?;
+
+            while let Some(chunk_result) = chunks.next().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                        writer.write_all(&chunk).await?;
+                    }
+                    Err(e) => {
+                        debug!(%e, "读取音频分块失败，断开连接");
+                        return Err(e);
+                    }
+                }
+            }
+
+            writer.flush().await
         }
     }
-
-    writer.flush().await
 }
 
 /// 返回 HTTP 状态码对应的 reason phrase。
@@ -773,18 +811,14 @@ mod tests {
             .await
             .unwrap();
 
-        let (code, _headers, body) = read_response(&mut stream).await;
+        let (code, headers, body) = read_response(&mut stream).await;
+        assert_eq!(code, 502, "首个分块失败应在写入头部前返回 502");
+        assert_eq!(&body, b"Bad Gateway");
         assert_eq!(
-            code, 200,
-            "FailingSource err after headers are written — status is 200"
+            headers.get("content-length").map(|v| v.as_str()),
+            Some("11")
         );
-        // The error occurs only when the body is streamed; headers are already sent.
-        // The connection then closes without a complete body.
-        assert!(
-            body.len() < 100,
-            "body should be truncated because stream fails: {}",
-            body.len()
-        );
+        assert_eq!(headers.get("connection").map(|v| v.as_str()), Some("close"));
     }
 
     #[tokio::test]
@@ -800,12 +834,37 @@ mod tests {
             .await
             .unwrap();
 
-        let (code, _headers, body) = read_response(&mut stream).await;
+        let (code, headers, body) = read_response(&mut stream).await;
+        assert_eq!(code, 502, "Range 请求首个分块失败应在写入头部前返回 502");
+        assert_eq!(&body, b"Bad Gateway");
         assert_eq!(
-            code, 206,
-            "FailingSource err after headers are written — status is 206"
+            headers.get("content-length").map(|v| v.as_str()),
+            Some("11")
         );
-        assert!(body.len() < 10, "body should be truncated: {}", body.len());
+        assert_eq!(headers.get("connection").map(|v| v.as_str()), Some("close"));
+    }
+
+    #[tokio::test]
+    async fn serve_502_on_head_source_error() {
+        let source = Arc::new(FailingSource::new(100));
+        let (addr, _stop) = spawn_server(Arc::clone(&source)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("连接失败");
+        stream
+            .write_all(b"HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+
+        let (code, headers, body) = read_response(&mut stream).await;
+        assert_eq!(code, 502, "HEAD on FailingSource should produce 502");
+        assert!(body.is_empty(), "HEAD response must not include a body");
+        assert_eq!(
+            headers.get("content-length").map(|v| v.as_str()),
+            Some("11")
+        );
+        assert_eq!(headers.get("connection").map(|v| v.as_str()), Some("close"));
     }
 
     // ── HEAD keep-alive 测试 ─────────────────────────────────
