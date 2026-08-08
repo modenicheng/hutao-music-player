@@ -115,18 +115,10 @@ impl QualityPref {
 }
 
 /// 顶层配置。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub quality: QualityPref,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            quality: QualityPref::default(),
-        }
-    }
 }
 
 impl Config {
