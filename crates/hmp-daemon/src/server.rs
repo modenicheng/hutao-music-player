@@ -14,7 +14,8 @@ use tokio::sync::mpsc;
 
 use crate::engine::EngineHandle;
 
-/// socket 路径：`$XDG_RUNTIME_DIR/hmp.sock`，回退 `/tmp/hmp-{uid}.sock`。
+/// socket 路径：`$XDG_RUNTIME_DIR/hmp.sock`，回退 `/tmp/hmp-{uid}/hmp.sock`
+/// （owner-only 目录，final review Finding 5；与 serve.rs 一致，勿重复实现）。
 pub fn socket_path() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         if !dir.is_empty() {
@@ -24,7 +25,7 @@ pub fn socket_path() -> PathBuf {
     #[cfg(unix)]
     {
         let uid = unsafe { libc::getuid() };
-        PathBuf::from(format!("/tmp/hmp-{uid}.sock"))
+        PathBuf::from(format!("/tmp/hmp-{uid}/hmp.sock"))
     }
     #[cfg(not(unix))]
     {

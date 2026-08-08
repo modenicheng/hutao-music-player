@@ -72,18 +72,10 @@ impl DaemonClient {
     }
 }
 
-/// spawn `hmp serve --background`（新进程组 + 丢弃 stdio）。
+/// spawn `hmp serve --background`：经 `hmp_daemon::serve::spawn_detached` 以
+/// `setsid` 脱离会话 + 丢弃 stdio（final review Finding 8，单一 detach 点）。
 fn spawn_daemon() -> Result<(), CliError> {
-    let exe = std::env::current_exe().map_err(|e| CliError::Connect(e.to_string()))?;
-    use std::os::unix::process::CommandExt;
-    let _child = std::process::Command::new(&exe)
-        .arg("serve")
-        .arg("--background")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .process_group(0)
-        .spawn()
+    hmp_daemon::serve::spawn_detached(&["serve", "--background"])
         .map_err(|e| CliError::Connect(format!("拉起后端失败: {e}")))?;
     Ok(())
 }

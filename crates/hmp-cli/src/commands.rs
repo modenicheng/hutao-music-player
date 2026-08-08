@@ -52,10 +52,16 @@ async fn send(client: &mut DaemonClient, req: Request) -> Result<Response, CliEr
 
 /// `hmp play <track-id|playlist:xxx|album:xxx>`（前缀识别源类型）。
 pub async fn cmd_play(client: &mut DaemonClient, src: &str) -> Result<(), CliError> {
+    // 命令边界（final review Finding 1）：记录当前 seq，Play 受理后轮询
+    // 直到 seq 前进（引擎已处理本命令），才按最终状态判定成败。
+    let seq0 = match send(client, Request::Status).await? {
+        Response::Status(s) => s.seq,
+        _ => return Err(CliError::Protocol("Status 响应异常".into())),
+    };
     let req = Request::Play(parse_source(src));
     let resp = send(client, req).await?;
     match resp {
-        Response::Ok => await_playing(client).await,
+        Response::Ok => await_playing(client, seq0).await,
         Response::Err { code, message } => Err(CliError::Response { code, message }),
         _ => Err(CliError::Protocol("意外响应".into())),
     }
@@ -63,23 +69,40 @@ pub async fn cmd_play(client: &mut DaemonClient, src: &str) -> Result<(), CliErr
 
 /// `hmp playnext <track-id|playlist:xxx|album:xxx>`（插队并立即播放）。
 pub async fn cmd_playnext(client: &mut DaemonClient, src: &str) -> Result<(), CliError> {
+    let seq0 = match send(client, Request::Status).await? {
+        Response::Status(s) => s.seq,
+        _ => return Err(CliError::Protocol("Status 响应异常".into())),
+    };
     let req = Request::PlayNext(parse_source(src));
     let resp = send(client, req).await?;
     match resp {
-        Response::Ok => await_playing(client).await,
+        Response::Ok => await_playing(client, seq0).await,
         Response::Err { code, message } => Err(CliError::Response { code, message }),
         _ => Err(CliError::Protocol("意外响应".into())),
     }
 }
 
-/// 短轮询确认（≤15s）：等到非 Loading。
-async fn await_playing(client: &mut DaemonClient) -> Result<(), CliError> {
+/// 短轮询确认（≤15s）：先等 seq 越过命令前边界（本命令已被引擎处理），
+/// 再按最终状态判定：Playing/Paused → 成功；Error/Empty → 失败（携带后端
+/// 映射的 last_error，Finding 2）。不得把 seq 前进前的旧状态当终态。
+async fn await_playing(client: &mut DaemonClient, seq0: u64) -> Result<(), CliError> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         let st = match send(client, Request::Status).await? {
             Response::Status(s) => s,
             _ => return Err(CliError::Protocol("Status 响应异常".into())),
         };
+        if st.seq <= seq0 {
+            // 命令尚未被引擎处理：旧状态（Empty/旧的 Playing）不是本命令的结果。
+            if tokio::time::Instant::now() >= deadline {
+                return Err(CliError::Response {
+                    code: IpcErrorCode::Internal,
+                    message: "播放确认超时（15s）".into(),
+                });
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            continue;
+        }
         use hmp_core::PlaybackStatus as S;
         match st.playback.status {
             S::Playing | S::Paused => {
@@ -96,16 +119,19 @@ async fn await_playing(client: &mut DaemonClient) -> Result<(), CliError> {
                 out.flush()?;
                 return Ok(());
             }
-            S::Error => {
-                return Err(CliError::Response {
+            S::Error | S::Empty => {
+                // 终态失败：优先报告后端映射的错误（code + message，Finding 2）。
+                let info = st.last_error.unwrap_or(hmp_core::ErrorInfo {
                     code: IpcErrorCode::Internal,
-                    message: "播放失败（见后端日志）".into(),
+                    message: if st.playback.status == S::Error {
+                        "播放失败（见后端日志）".into()
+                    } else {
+                        "后端空闲，播放未启动".into()
+                    },
                 });
-            }
-            S::Empty => {
                 return Err(CliError::Response {
-                    code: IpcErrorCode::Internal,
-                    message: "后端空闲，播放未启动".into(),
+                    code: info.code,
+                    message: info.message,
                 });
             }
             _ => {}
@@ -256,6 +282,8 @@ mod tests {
             },
             queue: Default::default(),
             caps: Default::default(),
+            seq: 0,
+            last_error: None,
         };
         let s = format_status(&st);
         assert!(s.contains("稻香"));

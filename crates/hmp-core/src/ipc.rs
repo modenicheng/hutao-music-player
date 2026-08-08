@@ -80,6 +80,20 @@ pub struct DaemonState {
     pub queue: QueueSnapshot,
     /// 播放能力（can_go_next 等）。
     pub caps: PlaybackCapabilities,
+    /// 命令代际：换曲操作（Play/PlayNext/Next/Previous）执行前置位，
+    /// CLI 据此建立「命令已处理」边界（spec §6；final review Finding 1）。
+    pub seq: u64,
+    /// 最近一次命令的错误（解析失败等；成功操作时清空，Finding 2）。
+    pub last_error: Option<ErrorInfo>,
+}
+
+/// 最近一次命令的失败详情（final review Finding 2）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorInfo {
+    /// 映射后的 IPC 错误码。
+    pub code: IpcErrorCode,
+    /// 人类可读错误信息。
+    pub message: String,
 }
 
 /// 错误码。
@@ -174,6 +188,11 @@ mod tests {
             playback: Default::default(),
             queue: crate::queue::QueueSnapshot::default(),
             caps: Default::default(),
+            seq: 7,
+            last_error: Some(ErrorInfo {
+                code: IpcErrorCode::TrackNotFound,
+                message: "曲目不存在".into(),
+            }),
         };
         let frame = encode_frame(&st).unwrap();
         let back: DaemonState = decode_frame(&frame).unwrap();

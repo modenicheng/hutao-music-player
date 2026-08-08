@@ -192,9 +192,10 @@ fn detail_ok() -> Value {
 /// 挂载 wiremock QQ API：详情成功；加密音质（GetEVkey）全部失败；
 /// 明文音质 M800（Mp3_320）失败、M500（Mp3_128）成功。
 ///
-/// 回退链（engine.rs `quality_to_file_type`）：Master(AIM0) → HiRes(AIM0)
-/// → Flac(F0M0) → Mp3_320(M800) → Mp3_128(M500)。前四个加密/高码率全部
-/// 失败后，最后一个明文 M500 成功 → 最终音质为 Mp3_128。
+/// 回退链（player.rs `CHAIN` + `quality_to_file_type`）：Master(AIM0) → HiRes(AIM0)
+/// → Atmos(Q0M0) → Flac(F0M0) → Mp3_320(M800) → Mp3_128(M500)。前五个全部失败后，
+/// 最后一个明文 M500 成功 → 最终音质为 Mp3_128。加密各档按文件名前缀分 mock，
+/// 使测试能断言「Atmos 在 Flac 之前被尝试」（回退链回归，final review Finding 3）。
 async fn mount_qq_mocks(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/cgi-bin/musicu.fcg"))
@@ -203,13 +204,21 @@ async fn mount_qq_mocks(server: &MockServer) {
         .mount(server)
         .await;
 
-    // 加密取流（music.vkey.GetEVkey）→ 失败
-    Mock::given(method("POST"))
-        .and(path("/cgi-bin/musicu.fcg"))
-        .and(|req: &wiremock::Request| req0(req)["module"] == json!("music.vkey.GetEVkey"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(urls_fail()))
-        .mount(server)
-        .await;
+    // 加密取流（music.vkey.GetEVkey）：Master/HiRes 同档（AIM0）→ 失败；
+    // Atmos（Q0M0）→ 失败；Flac（F0M0）→ 失败。
+    for prefix in ["AIM0", "Q0M0", "F0M0"] {
+        let prefix = prefix.to_owned();
+        Mock::given(method("POST"))
+            .and(path("/cgi-bin/musicu.fcg"))
+            .and(move |req: &wiremock::Request| {
+                let body = req0(req);
+                let filename = body["param"]["filename"][0].as_str().unwrap_or("");
+                body["module"] == json!("music.vkey.GetEVkey") && filename.starts_with(&prefix)
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(urls_fail()))
+            .mount(server)
+            .await;
+    }
 
     // 明文取流（music.vkey.GetVkey）按文件名前缀区分音质
     Mock::given(method("POST"))
@@ -316,6 +325,35 @@ async fn resolve_track_falls_back_to_plain_via_mock_api() {
         "回退链最终应落在 Mp3_128（M500）"
     );
     assert_eq!(resolved.track.url.as_deref(), Some(resolved.uri.as_str()));
+
+    // 回退链顺序回归（final review Finding 3）：加密档须按
+    // Master/HiRes(AIM0) → Atmos(Q0M0) → Flac(F0M0) 顺序依次尝试。
+    // 若链退化（漏 Atmos），Q0M0 请求不会出现，本断言失败。
+    let evkey_prefixes: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| req0(r)["module"] == json!("music.vkey.GetEVkey"))
+        .filter_map(|r| {
+            let f = req0(r)["param"]["filename"][0]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+            (f.len() >= 4).then(|| f[..4].to_owned())
+        })
+        .collect();
+    let prefixes: Vec<&str> = evkey_prefixes.iter().map(|s| s.as_str()).collect();
+    assert!(
+        prefixes.contains(&"Q0M0"),
+        "回退链应尝试 Atmos（Q0M0），实际 GetEVkey 序列: {prefixes:?}"
+    );
+    let atmos = prefixes.iter().position(|p| *p == "Q0M0").unwrap();
+    let flac = prefixes.iter().position(|p| *p == "F0M0").unwrap();
+    assert!(
+        atmos < flac,
+        "Atmos（Q0M0）应在 Flac（F0M0）之前尝试，实际序列: {prefixes:?}"
+    );
 }
 
 // ── 测试 2：真实 GStreamer × fakesink × 本地 wav ──────────────────────
@@ -519,9 +557,16 @@ async fn play_then_end_advances_queue_with_gst() {
         "整段播放不得出错"
     );
 
-    // 8) 优雅退出（引擎终止 → 驱动 shutdown）
+    // 8) 优雅退出（引擎终止 → 驱动 shutdown；sticky watch，Finding 7）
     handle.cmd(Request::Quit).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), handle.terminated.notified())
-        .await
-        .expect("Quit 后引擎应终止");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut term = handle.terminated.clone();
+        if *term.borrow() {
+            return;
+        }
+        let _ = term.changed().await;
+        assert!(*term.borrow());
+    })
+    .await
+    .expect("Quit 后引擎应终止");
 }

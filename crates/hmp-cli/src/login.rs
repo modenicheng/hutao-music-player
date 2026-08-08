@@ -39,6 +39,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let overall_deadline = Instant::now() + OVERALL_LIMIT;
 
     loop {
+        // 剩余墙钟时间为零 → 不再等待（final review Finding 10）。
+        let Some(wait_timeout) = wait_timeout(&overall_deadline) else {
+            return Err("登录超时（10 分钟上限）".into());
+        };
         let qr = login.get_qrcode(QRLoginType::Qq).await?;
         let qr_path = std::env::temp_dir().join("hmp-qr.png");
         std::fs::write(&qr_path, &qr.data)?;
@@ -51,7 +55,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         out.flush()?;
 
         match login
-            .wait_qrcode_login(&qr, Default::default(), QR_TIMEOUT, None)
+            .wait_qrcode_login(&qr, Default::default(), wait_timeout, None)
             .await
         {
             Ok(credential) => {
@@ -92,10 +96,24 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// 判定是否应自动刷新二维码（超时类错误且未到总墙钟上限）。
+/// 单次等待上限：`QR_TIMEOUT` 与总墙钟剩余时间的较小值（final review Finding 10）。
+/// 剩余时间为零时返回 None → 调用方直接退出循环（不再等待）。
+fn wait_timeout(deadline: &Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
+    Some(remaining.min(QR_TIMEOUT))
+}
+
+/// 判定是否应自动刷新二维码（仅超时类错误且未到总墙钟上限；
+/// final review Finding 10：用户拒绝/取消不刷新）。
 fn should_refresh(err: &hmp_qqmusic_api::QqMusicError, now: Instant, deadline: Instant) -> bool {
     use hmp_qqmusic_api::QqMusicError;
-    let is_timeout = matches!(err, QqMusicError::Login { code: -1, .. });
+    let is_timeout = matches!(
+        err,
+        QqMusicError::Login { code: -1, message } if message.contains("超时")
+    );
     is_timeout && now < deadline
 }
 
@@ -114,6 +132,49 @@ mod tests {
             Instant::now(),
             Instant::now() + Duration::from_secs(100)
         ));
+    }
+
+    /// Finding 10：用户拒绝（非超时）不得刷新。
+    #[test]
+    fn refusal_does_not_refresh() {
+        let err = hmp_qqmusic_api::QqMusicError::Login {
+            code: -1,
+            message: "用户拒绝了登录请求".into(),
+        };
+        assert!(!should_refresh(
+            &err,
+            Instant::now(),
+            Instant::now() + Duration::from_secs(100)
+        ));
+    }
+
+    /// Finding 10：用户取消（非超时）不得刷新。
+    #[test]
+    fn cancel_does_not_refresh() {
+        let err = hmp_qqmusic_api::QqMusicError::Login {
+            code: -1,
+            message: "登录已取消".into(),
+        };
+        assert!(!should_refresh(
+            &err,
+            Instant::now(),
+            Instant::now() + Duration::from_secs(100)
+        ));
+    }
+
+    /// Finding 10：单次等待上限被剩余墙钟时间截断；剩余为零 → None。
+    #[test]
+    fn wait_timeout_capped_by_overall_remaining() {
+        // 剩余远超 QR_TIMEOUT → 上限即 QR_TIMEOUT
+        let far = Instant::now() + Duration::from_secs(1000);
+        assert_eq!(wait_timeout(&far), Some(QR_TIMEOUT));
+        // 剩余不足 QR_TIMEOUT → 截断为剩余值
+        let near = Instant::now() + Duration::from_secs(30);
+        let t = wait_timeout(&near).expect("剩余非零应有超时");
+        assert!(t <= Duration::from_secs(30) && t > Duration::ZERO);
+        // 已过上限 → None（直接退出循环）
+        let past = Instant::now() - Duration::from_secs(1);
+        assert_eq!(wait_timeout(&past), None);
     }
 
     #[test]

@@ -266,7 +266,17 @@ pub async fn resolve_track_impl(
     });
     let title = detail.track.name.clone();
 
-    // 音质回退链
+    // 音质回退链：文档化链（docs/PROJECT.md §7.3，final review Finding 3）。
+    // 显式枚举而非 `AudioQuality::Master.fallback_chain()`：后者漏掉 Atmos。
+    // 裁决：Aac 不入链（文档化链不含 Aac）。
+    const CHAIN: [AudioQuality; 6] = [
+        AudioQuality::Master,
+        AudioQuality::HiRes,
+        AudioQuality::Atmos,
+        AudioQuality::Flac,
+        AudioQuality::Mp3_320,
+        AudioQuality::Mp3_128,
+    ];
     let file_info = SongFileInfo {
         mid: track_id.as_ref().to_owned(),
         file_type: None,
@@ -274,7 +284,7 @@ pub async fn resolve_track_impl(
         media_mid: Some(media_mid),
     };
     let mut last_error = None;
-    for quality in AudioQuality::Master.fallback_chain() {
+    for quality in CHAIN {
         let Some(file_type) = quality_to_file_type(&quality) else {
             continue;
         };
@@ -415,5 +425,64 @@ fn quality_from_file_type(t: &SongFileType) -> AudioQuality {
         ("C600", _) => AudioQuality::Aac,
         ("M800", _) => AudioQuality::Mp3_320,
         _ => AudioQuality::Mp3_128,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 显式回退链（final review Finding 3）须覆盖全部 6 档且不含 Aac：
+    /// Master → HiRes → Atmos → Flac → Mp3_320 → Mp3_128。
+    #[test]
+    fn explicit_fallback_chain_has_atmos_no_aac() {
+        const CHAIN: [AudioQuality; 6] = [
+            AudioQuality::Master,
+            AudioQuality::HiRes,
+            AudioQuality::Atmos,
+            AudioQuality::Flac,
+            AudioQuality::Mp3_320,
+            AudioQuality::Mp3_128,
+        ];
+        assert_eq!(CHAIN.len(), 6);
+        assert!(CHAIN.contains(&AudioQuality::Atmos));
+        assert!(!CHAIN.contains(&AudioQuality::Aac));
+        // 与文档化链（docs/PROJECT.md §7.3）一致
+        assert_eq!(CHAIN[0], AudioQuality::Master);
+        assert_eq!(CHAIN[2], AudioQuality::Atmos);
+        assert_eq!(CHAIN[5], AudioQuality::Mp3_128);
+    }
+
+    /// 音质 → 文件类型映射：Atmos 必须可映射（链中尝试时不会因 None 跳过）。
+    #[test]
+    fn quality_to_file_type_maps_atmos_and_aac() {
+        assert_eq!(
+            quality_to_file_type(&AudioQuality::Atmos),
+            Some(SongFileType::ATMOS_2)
+        );
+        assert_eq!(
+            quality_to_file_type(&AudioQuality::Aac),
+            Some(SongFileType::AAC_192)
+        );
+        assert_eq!(
+            quality_to_file_type(&AudioQuality::Master),
+            Some(SongFileType::MASTER)
+        );
+        assert_eq!(
+            quality_to_file_type(&AudioQuality::Flac),
+            Some(SongFileType::FLAC)
+        );
+        assert_eq!(
+            quality_to_file_type(&AudioQuality::Mp3_320),
+            Some(SongFileType::MP3_320)
+        );
+        assert_eq!(
+            quality_to_file_type(&AudioQuality::Mp3_128),
+            Some(SongFileType::MP3_128)
+        );
+        assert_eq!(
+            quality_to_file_type(&AudioQuality::Unknown("X".into())),
+            None
+        );
     }
 }

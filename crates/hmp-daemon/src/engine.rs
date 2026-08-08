@@ -8,12 +8,13 @@
 use std::sync::Arc;
 
 use hmp_core::{
-    DaemonState, LoopMode, PlayRequest, PlaybackState, PlayerCommand, Request, TrackId,
+    DaemonState, ErrorInfo, IpcErrorCode, LoopMode, PlayRequest, PlaybackCapabilities,
+    PlaybackState, PlayerCommand, Request, TrackId,
 };
 use hmp_player_gst::PlayerEvent;
 use tokio::sync::{mpsc, watch};
 
-use crate::player::{PlaybackDriver, SourceResolver};
+use crate::player::{EngineError, PlaybackDriver, SourceResolver};
 
 /// 引擎句柄（服务器 / tray / MPRIS 持有；可 Clone）。
 #[derive(Clone)]
@@ -24,8 +25,10 @@ pub struct EngineHandle {
     pub state_rx: watch::Receiver<DaemonState>,
     /// 凭证前置校验（服务器对 Play 类请求同步检查，spec §6）。
     pub credential_ok: Arc<dyn Fn() -> bool + Send + Sync>,
-    /// 引擎终止信号（`run()` 退出时置位；serve 据此优雅退出清理 socket，spec §6）。
-    pub terminated: Arc<tokio::sync::Notify>,
+    /// 引擎终止信号（sticky watch：`run()` 退出时置 true；serve 据此优雅退出清理 socket，spec §6）。
+    pub terminated: watch::Receiver<bool>,
+    /// 播放能力（MPRIS CanGoNext/CanGoPrevious，随 publish 同步发布，Finding 9）。
+    pub caps_rx: watch::Receiver<PlaybackCapabilities>,
 }
 
 impl EngineHandle {
@@ -44,6 +47,14 @@ pub struct PlaybackEngine {
     state_rx: watch::Receiver<PlaybackState>,
     cmd_rx: mpsc::UnboundedReceiver<Request>,
     active_media: Option<hmp_media::PreparedMedia>,
+    /// 命令代际（换曲操作执行前置位，Finding 1）。
+    seq: u64,
+    /// 最近一次命令错误（解析失败等；成功换曲时清空，Finding 2）。
+    last_error: Option<ErrorInfo>,
+    /// 播放能力发布（MPRIS 订阅，Finding 9）。
+    caps_tx: watch::Sender<PlaybackCapabilities>,
+    /// 终止信号发布（sticky，Finding 7）。
+    term_tx: watch::Sender<bool>,
 }
 
 impl PlaybackEngine {
@@ -56,7 +67,9 @@ impl PlaybackEngine {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (state_tx, state_rx) = watch::channel(DaemonState::default());
         let playback_rx = driver.subscribe_state();
-        let terminated = Arc::new(tokio::sync::Notify::new());
+        let (caps_tx, caps_rx) = watch::channel(PlaybackCapabilities::default());
+        // sticky 终止信号：晚到的接收者立即可见（watch 保留当前值，Finding 7）。
+        let (term_tx, term_rx) = watch::channel(false);
         let mut engine = Self {
             driver,
             resolver,
@@ -65,18 +78,22 @@ impl PlaybackEngine {
             state_rx: playback_rx,
             cmd_rx,
             active_media: None,
+            seq: 0,
+            last_error: None,
+            caps_tx,
+            term_tx,
         };
-        let engine_terminated = terminated.clone();
         tokio::spawn(async move {
             engine.run().await;
-            // 引擎退出（含 `hmp quit`）→ 通知编排层收尾（spec §6）。
-            engine_terminated.notify_waiters();
+            // 引擎退出（含 `hmp quit`）→ 置位 sticky 终止信号通知编排层收尾（spec §6；Finding 7）。
+            let _ = engine.term_tx.send(true);
         });
         EngineHandle {
             command_tx: cmd_tx,
             state_rx,
             credential_ok,
-            terminated,
+            terminated: term_rx,
+            caps_rx,
         }
     }
 
@@ -93,15 +110,45 @@ impl PlaybackEngine {
                             break;
                         }
                         Request::Command(cmd) => self.handle_player_command(cmd).await,
-                        Request::Play(src) => self.play_source(src, false).await,
-                        Request::PlayNext(src) => self.play_source(src, true).await,
+                        Request::Play(src) => {
+                            // 换曲操作前置位命令代际（Finding 1）：CLI 以 seq 前进作为边界。
+                            self.seq += 1;
+                            self.play_source(src, false).await;
+                        }
+                        Request::PlayNext(src) => {
+                            self.seq += 1;
+                            self.play_source(src, true).await;
+                        }
                         Request::QueueAppend(src) => {
-                            if let Ok(ids) = self.resolver.resolve_source_ids(&src).await {
-                                self.queue.append(ids);
-                                self.publish();
+                            match self.resolver.resolve_source_ids(&src).await {
+                                Ok(ids) => {
+                                    self.queue.append(ids);
+                                    self.publish();
+                                }
+                                Err(e) => {
+                                    self.last_error = Some(error_info(&e));
+                                    self.publish();
+                                }
                             }
                         }
-                        Request::QueueRemove(i) if self.queue.remove(i) => self.publish(),
+                        Request::QueueRemove(i) => {
+                            // 移除当前曲：立即播放接替曲（或空队列停止），避免仲裁失步（Finding 4）。
+                            let was_current = self.queue.snapshot().current == Some(i);
+                            if self.queue.remove(i) {
+                                if was_current {
+                                    self.publish();
+                                    if let Some(id) = self.queue.current().cloned() {
+                                        self.load_and_play(id).await;
+                                    } else {
+                                        self.last_error = None;
+                                        self.driver.stop();
+                                        self.publish();
+                                    }
+                                } else {
+                                    self.publish();
+                                }
+                            }
+                        }
                         Request::QueueClear => {
                             self.queue.clear();
                             self.publish();
@@ -125,22 +172,50 @@ impl PlaybackEngine {
     }
 
     /// 发布复合状态（playback 来自驱动 watch，queue 来自队列核心）。
+    /// 同时把精确的播放能力发布到 `caps_tx`（MPRIS 消费，Finding 9）。
     fn publish(&self) {
-        let state = DaemonState {
-            playback: self.state_rx.borrow().clone(),
-            queue: self.queue.snapshot(),
-            caps: hmp_core::PlaybackCapabilities {
-                can_go_next: self.queue.snapshot().tracks.len() > 1,
-                can_go_previous: true,
+        let queue = self.queue.snapshot();
+        let len = queue.tracks.len();
+        let cur = queue.current;
+        let caps = PlaybackCapabilities {
+            can_go_next: if len == 0 {
+                false
+            } else {
+                match queue.loop_mode {
+                    LoopMode::Track | LoopMode::List => true,
+                    LoopMode::None => cur.is_some_and(|c| c + 1 < len),
+                }
+            },
+            can_go_previous: if len == 0 {
+                false
+            } else {
+                match queue.loop_mode {
+                    LoopMode::Track | LoopMode::List => true,
+                    LoopMode::None => cur.is_some_and(|c| c > 0),
+                }
             },
         };
+        let state = DaemonState {
+            playback: self.state_rx.borrow().clone(),
+            queue,
+            caps,
+            seq: self.seq,
+            last_error: self.last_error.clone(),
+        };
         let _ = self.state_tx.send(state);
+        let _ = self.caps_tx.send(caps);
     }
 
     async fn handle_player_command(&mut self, cmd: PlayerCommand) {
         match cmd {
-            PlayerCommand::Next => self.navigate_next().await,
-            PlayerCommand::Previous => self.navigate_prev().await,
+            PlayerCommand::Next => {
+                self.seq += 1;
+                self.navigate_next().await;
+            }
+            PlayerCommand::Previous => {
+                self.seq += 1;
+                self.navigate_prev().await;
+            }
             PlayerCommand::SetLoopMode(m) => {
                 self.queue.set_loop_mode(m);
                 self.driver.command(PlayerCommand::SetLoopMode(m));
@@ -174,11 +249,18 @@ impl PlaybackEngine {
 
     /// Play / PlayNext：解析源 → 替换/插入队列 → 加载当前。
     async fn play_source(&mut self, src: PlayRequest, playnext: bool) {
-        let Ok(ids) = self.resolver.resolve_source_ids(&src).await else {
-            self.publish();
-            return;
+        let ids = match self.resolver.resolve_source_ids(&src).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                // 解析失败 → 发布错误详情（Finding 2）。
+                self.last_error = Some(error_info(&e));
+                self.publish();
+                return;
+            }
         };
         if ids.is_empty() {
+            self.last_error = None;
+            self.publish();
             return;
         }
         if playnext {
@@ -210,6 +292,8 @@ impl PlaybackEngine {
 
     /// 解析 + 解密 + 加载 + 播放。
     async fn load_and_play(&mut self, id: TrackId) {
+        // 成功路径：清除旧错误（Finding 2）。
+        self.last_error = None;
         match self.resolver.resolve_track(&id).await {
             Ok(res) => {
                 self.active_media = res.media; // 旧 guard 自动 Drop → 旧代理停止
@@ -230,10 +314,26 @@ impl PlaybackEngine {
             }
             Err(e) => {
                 tracing::error!(%e, "解析失败: {id}");
-                // 队列位置保持；状态由驱动/状态呈现
+                // 队列位置保持；错误详情进入复合状态（Finding 2）。
+                self.last_error = Some(error_info(&e));
                 self.publish();
             }
         }
+    }
+}
+
+/// 引擎错误 → IPC 错误码 + 人类可读消息（Finding 2）。
+fn error_info(e: &EngineError) -> ErrorInfo {
+    let code = match e {
+        EngineError::NotLoggedIn => IpcErrorCode::NotLoggedIn,
+        EngineError::TrackNotFound => IpcErrorCode::TrackNotFound,
+        EngineError::PlaylistNotFound(_) => IpcErrorCode::PlaylistNotFound,
+        EngineError::QualityUnavailable(_) => IpcErrorCode::QualityUnavailable,
+        EngineError::Internal(_) => IpcErrorCode::Internal,
+    };
+    ErrorInfo {
+        code,
+        message: e.to_string(),
     }
 }
 
@@ -288,7 +388,9 @@ mod tests {
         fn play(&self) {}
         fn pause(&self) {}
         fn seek(&self, _p: std::time::Duration) {}
-        fn stop(&self) {}
+        fn stop(&self) {
+            self.commands.lock().unwrap().push(PlayerCommand::Stop);
+        }
         fn set_volume(&self, _v: f64) {}
         fn command(&self, cmd: PlayerCommand) {
             self.commands.lock().unwrap().push(cmd);
@@ -347,10 +449,49 @@ mod tests {
         }
     }
 
+    /// 源解析即失败的解析器（Finding 2 测试）。
+    pub struct FailResolver {
+        pub err: EngineError,
+    }
+
+    /// 测试用 `EngineError` 克隆（Error 未派生 Clone）。
+    fn clone_error(e: &EngineError) -> EngineError {
+        match e {
+            EngineError::NotLoggedIn => EngineError::NotLoggedIn,
+            EngineError::TrackNotFound => EngineError::TrackNotFound,
+            EngineError::PlaylistNotFound(m) => EngineError::PlaylistNotFound(m.clone()),
+            EngineError::QualityUnavailable(m) => EngineError::QualityUnavailable(m.clone()),
+            EngineError::Internal(m) => EngineError::Internal(m.clone()),
+        }
+    }
+
+    impl FailResolver {
+        pub fn new(err: EngineError) -> Arc<Self> {
+            Arc::new(Self { err })
+        }
+    }
+
+    impl SourceResolver for FailResolver {
+        fn resolve_source_ids(
+            &self,
+            _src: &hmp_core::PlayRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
+            let err = clone_error(&self.err);
+            Box::pin(async move { Err(err) })
+        }
+        fn resolve_track(
+            &self,
+            _id: &TrackId,
+        ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+            let err = clone_error(&self.err);
+            Box::pin(async move { Err(err) })
+        }
+    }
+
     /// 测试用 engine 启动辅助。
     async fn start_engine(
         driver: Arc<FakeDriver>,
-        resolver: Arc<FakeResolver>,
+        resolver: Arc<dyn SourceResolver>,
     ) -> (EngineHandle, watch::Receiver<hmp_core::DaemonState>) {
         let handle = PlaybackEngine::start(driver, resolver, Arc::new(|| true));
         let st = handle.state_rx.clone();
@@ -556,21 +697,170 @@ mod tests {
     }
 
     /// `hmp quit`（Request::Quit）→ 引擎退出 → 终止信号置位（serve 据此优雅退出，spec §6）。
+    /// Finding 7：终止信号为 sticky watch——晚到/先建的接收者都能立即看到 true。
     #[tokio::test]
     async fn quit_shuts_down_engine() {
         let (driver, _sr, _er) = FakeDriver::new();
         let resolver = FakeResolver::new(vec![]);
         let (handle, _st) = start_engine(driver.clone(), resolver).await;
         handle.cmd(Request::Quit).await.unwrap();
-        // 引擎退出后终止信号须在 1s 内置位（`run()` 退出路径 notify_waiters）。
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            handle.terminated.notified(),
-        )
+        // 引擎退出后终止信号须在 1s 内置位（`run()` 退出路径 send(true)）。
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let mut term = handle.terminated.clone();
+            if *term.borrow() {
+                return;
+            }
+            let _ = term.changed().await;
+            assert!(*term.borrow(), "终止信号应为 true");
+        })
         .await
         .expect("quit 后引擎终止信号 1s 内未置位");
         // 引擎退出后向命令通道发消息不再成功（发送端仍可发，但引擎不再消费——不断言；
         // 断言驱动已 shutdown）
         assert!(driver.commands.lock().unwrap().is_empty()); // shutdown 不产生命令
+    }
+
+    /// Finding 1：Play/PlayNext/Next/Previous 前置位 seq（命令代际边界）。
+    #[tokio::test]
+    async fn play_and_navigation_bump_seq() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![
+            vec![TrackId::new("a"), TrackId::new("b")],
+            vec![TrackId::new("x")],
+        ]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        assert_eq!(handle.state_rx.borrow().seq, 0);
+
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(handle.state_rx.borrow().seq, 1);
+
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(handle.state_rx.borrow().seq, 2);
+
+        handle
+            .cmd(Request::Command(PlayerCommand::Previous))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(handle.state_rx.borrow().seq, 3);
+
+        handle
+            .cmd(Request::PlayNext(PlayRequest::Track(TrackId::new("x"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(handle.state_rx.borrow().seq, 4);
+    }
+
+    /// Finding 2：源解析失败 → DaemonState.last_error 携带映射后的错误码与消息。
+    #[tokio::test]
+    async fn resolution_failure_publishes_last_error() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FailResolver::new(EngineError::PlaylistNotFound("歌单为空".into()));
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Playlist(
+                hmp_core::PlaylistId::new("p1"),
+            )))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert_eq!(st.seq, 1);
+        let info = st.last_error.as_ref().expect("解析失败应发布 last_error");
+        assert_eq!(info.code, IpcErrorCode::PlaylistNotFound);
+        assert!(info.message.contains("歌单为空"));
+        assert_eq!(st.queue.tracks.len(), 0, "失败后队列不应变化");
+    }
+
+    /// Finding 2：成功换曲清空上次错误。
+    #[tokio::test]
+    async fn successful_play_clears_last_error() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FailResolver::new(EngineError::PlaylistNotFound("歌单为空".into()));
+        let (handle, _st) = start_engine(driver.clone(), resolver.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Playlist(
+                hmp_core::PlaylistId::new("p1"),
+            )))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert!(handle.state_rx.borrow().last_error.is_some());
+        // 换成功解析器后再次 Play：错误须清空（同一引擎启动即固定解析器，故新建引擎）。
+        let resolver2 = FakeResolver::new(vec![vec![TrackId::new("a")]]);
+        let handle2 = PlaybackEngine::start(driver.clone(), resolver2, Arc::new(|| true));
+        handle2
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert!(handle2.state_rx.borrow().last_error.is_none());
+        assert_eq!(handle2.state_rx.borrow().queue.tracks.len(), 1);
+    }
+
+    /// Finding 4：移除当前曲 → 立即播放接替曲（仲裁不失步）。
+    #[tokio::test]
+    async fn remove_current_plays_replacement_immediately() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![
+            TrackId::new("a"),
+            TrackId::new("b"),
+            TrackId::new("c"),
+        ]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(handle.state_rx.borrow().queue.current, Some(0)); // 播放 a
+        assert_eq!(driver.loads.lock().unwrap().clone(), vec!["fake://a"]);
+
+        handle.cmd(Request::QueueRemove(0)).await.unwrap(); // 移除正在播的 a
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert_eq!(st.queue.tracks, vec![TrackId::new("b"), TrackId::new("c")]);
+        assert_eq!(st.queue.current, Some(0)); // 接替曲 b 占据 0
+        assert_eq!(
+            driver.loads.lock().unwrap().clone(),
+            vec!["fake://a", "fake://b"],
+            "移除当前曲应立即加载接替曲"
+        );
+    }
+
+    /// Finding 4：移除当前曲且队列变空 → 停止播放。
+    #[tokio::test]
+    async fn remove_current_to_empty_stops_playback() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(driver.loads.lock().unwrap().len(), 1);
+        handle.cmd(Request::QueueRemove(0)).await.unwrap();
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert!(st.queue.tracks.is_empty());
+        assert_eq!(st.queue.current, None);
+        assert!(
+            driver
+                .commands
+                .lock()
+                .unwrap()
+                .contains(&PlayerCommand::Stop)
+        );
+        assert_eq!(driver.loads.lock().unwrap().len(), 1, "空队列不应再加载");
     }
 }
