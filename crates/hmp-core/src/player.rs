@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::TrackId;
-use crate::media::Track;
+use crate::media::{AudioQuality, Track};
 
 /// 播放状态机（docs/PROJECT.md §8.1）。
 ///
@@ -64,6 +64,9 @@ pub struct PlaybackState {
     pub can_seek: bool,
     /// 缓冲进度（0.0..=1.0，None=未缓冲）。
     pub buffering: Option<f64>,
+    /// 实际播放音质（本次解析选定档位；媒体库重构 B3）。
+    #[serde(default)]
+    pub actual_quality: Option<AudioQuality>,
 }
 
 impl Default for PlaybackState {
@@ -78,6 +81,7 @@ impl Default for PlaybackState {
             shuffle: false,
             can_seek: false,
             buffering: None,
+            actual_quality: None,
         }
     }
 }

@@ -32,6 +32,10 @@ pub fn format_status(st: &DaemonState) -> String {
         None => s.push_str(&format!("进度: {}\n", fmt_duration(st.playback.position))),
     }
     s.push_str(&format!("音量: {:.0}%\n", st.playback.volume * 100.0));
+    match st.playback.actual_quality.as_ref() {
+        Some(q) => s.push_str(&format!("音质: {}\n", q.to_alias())),
+        None => s.push_str("音质: （无）\n"),
+    }
     s.push_str(&format!(
         "循环: {:?}  随机: {}\n",
         st.playback.loop_mode, st.playback.shuffle
@@ -274,7 +278,7 @@ mod tests {
                     duration: Some(std::time::Duration::from_secs(300)),
                     cover: None,
                     url: Some("fake://m1".into()),
-                    qualities: vec![],
+                    available_qualities: vec![],
                 }),
                 position: std::time::Duration::from_secs(30),
                 duration: Some(std::time::Duration::from_secs(300)),

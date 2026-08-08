@@ -186,8 +186,9 @@ pub struct Track {
     pub cover: Option<CoverRef>,
     /// 当前可播放 URL（取流成功后填充，供 MPRIS `xesam:url`）。
     pub url: Option<String>,
-    /// 可用音质（从高到低）。
-    pub qualities: Vec<AudioQuality>,
+    /// 可用音质（从高到低；探测自 QQ size 字段 + 本次解析成功档位）。
+    #[serde(alias = "qualities")]
+    pub available_qualities: Vec<AudioQuality>,
 }
 
 impl Track {
@@ -201,7 +202,7 @@ impl Track {
             duration: None,
             cover: None,
             url: None,
-            qualities: Vec::new(),
+            available_qualities: Vec::new(),
         }
     }
 

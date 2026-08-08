@@ -80,6 +80,10 @@ struct EnvGuard {
     xdg_config: Option<OsString>,
 }
 
+/// 串行化修改环境变量的 resolve 测试（`Config::load` 读 `XDG_CONFIG_HOME`，
+/// 与 `resolve_track_falls_back_to_plain_via_mock_api` 共享环境）。
+static CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl EnvGuard {
     /// 设置 file 凭证后端 + 临时配置目录，返回还原句柄。
     fn install(dir: &std::path::Path) -> Self {
@@ -252,6 +256,7 @@ async fn mount_qq_mocks(server: &MockServer) {
 /// 不触网、不依赖 GStreamer；验证 daemon 对 QQ API 响应的解析契约。
 #[tokio::test]
 async fn resolve_track_falls_back_to_plain_via_mock_api() {
+    let _lock = CONFIG_ENV_LOCK.lock().unwrap();
     // 1) 凭证隔离：file 后端 + 临时 XDG_CONFIG_HOME（真实 daemon 的环境变量路径）
     let dir = tempfile::tempdir().unwrap();
     let _env = EnvGuard::install(dir.path());
@@ -320,7 +325,7 @@ async fn resolve_track_falls_back_to_plain_via_mock_api() {
     assert_eq!(resolved.track.duration, Some(Duration::from_secs(270)));
     assert!(resolved.track.cover.is_some());
     assert_eq!(
-        resolved.track.qualities,
+        resolved.track.available_qualities,
         vec![AudioQuality::Mp3_128],
         "回退链最终应落在 Mp3_128（M500）"
     );
@@ -405,10 +410,11 @@ impl SourceResolver for LocalWavResolver {
                     duration: Some(Duration::from_secs(1)),
                     cover: None,
                     url: Some(format!("file://{wav}")),
-                    qualities: vec![AudioQuality::Mp3_128],
+                    available_qualities: vec![AudioQuality::Mp3_128],
                 },
                 uri: format!("file://{wav}"),
                 media: None,
+                quality: AudioQuality::Mp3_128,
             })
         })
     }
@@ -467,6 +473,96 @@ async fn wait_next_ended(
 /// （首曲可能不触发 EOS、紧接 EOS 的换曲可能停在 Stopped）；
 /// `fakeaudiosink` 是仓库 headless 约定（hmp-player-gst 既有测试），
 /// 顺序加载与 EOS 行为确定。
+/// 固定音质策略（`hmp quality flac`）：回退链从 FLAC 起，不再尝试 Master/HiRes/Atmos。
+/// 断言：GetEVkey 序列只含 F0M0（Q0M0/AIM0 不出现）→ 加密失败后明文 M500 兜底。
+#[tokio::test]
+async fn resolve_track_respects_fixed_quality_config() {
+    let _lock = CONFIG_ENV_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::install(dir.path());
+    // 写配置：固定 FLAC + 允许回退。
+    let cfg_dir = dir.path().join("hmp");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(
+        cfg_dir.join("config.toml"),
+        "[quality]\nmode = \"flac\"\nfallback = true\n",
+    )
+    .unwrap();
+
+    let store: Store = store_from_env();
+    store
+        .save(&Credential {
+            uin: "10001".into(),
+            music_id: "10001".into(),
+            music_key: "secret-key".into(),
+            refresh_key: None,
+            raw_cookie: String::new(),
+            str_musicid: "10001".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/cgi-bin/musicu.fcg"))
+        .and(|req: &wiremock::Request| req0(req)["method"] == json!("get_song_detail_yqq"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(detail_ok()))
+        .mount(&server)
+        .await;
+    // FLAC（F0M0，加密）失败 → 回退 M800 失败 → M500 明文成功。
+    for (prefix, body) in [("F0M0", urls_fail()), ("M800", urls_fail())] {
+        let prefix = prefix.to_owned();
+        Mock::given(method("POST"))
+            .and(path("/cgi-bin/musicu.fcg"))
+            .and(move |req: &wiremock::Request| {
+                let body = req0(req);
+                let filename = body["param"]["filename"][0].as_str().unwrap_or("");
+                body["module"] == json!("music.vkey.GetEVkey") && filename.starts_with(&prefix)
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/cgi-bin/musicu.fcg"))
+        .and(|req: &wiremock::Request| {
+            let body = req0(req);
+            let filename = body["param"]["filename"][0].as_str().unwrap_or("");
+            filename.starts_with("M500")
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(urls_ok(
+            &format!("M500{TRACK_MEDIA_MID}.mp3"),
+            &format!("M500{TRACK_MEDIA_MID}.mp3?guid=abc&vkey=testvkey"),
+        )))
+        .mount(&server)
+        .await;
+
+    let resolver = QqSourceResolver::new(client_for(&server.uri()), store);
+    let resolved = resolver
+        .resolve_track(&TrackId::new(TRACK_MID))
+        .await
+        .unwrap();
+    assert_eq!(resolved.quality, AudioQuality::Mp3_128); // 固定 FLAC 失败 → 回退到 128
+
+    // 链从 FLAC 开始：Master(AIM0)/HiRes(AIM0)/Atmos(Q0M0) 从未被请求。
+    let prefixes: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| req0(r)["module"] == json!("music.vkey.GetEVkey"))
+        .filter_map(|r| {
+            req0(r)["param"]["filename"][0]
+                .as_str()
+                .map(|s| s[..4].to_string())
+        })
+        .collect();
+    assert_eq!(
+        prefixes,
+        vec!["F0M0"],
+        "固定 FLAC 只应尝试 F0M0，实际: {prefixes:?}"
+    );
+}
+
 #[tokio::test]
 async fn play_then_end_advances_queue_with_gst() {
     // 1) 本地 1s wav（两首，验证续播）

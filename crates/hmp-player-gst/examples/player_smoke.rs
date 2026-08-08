@@ -156,7 +156,7 @@ trait TestExt {
 }
 impl TestExt for Track {
     fn with_quality(mut self, q: AudioQuality) -> Self {
-        self.qualities.push(q);
+        self.available_qualities.push(q);
         self
     }
 }

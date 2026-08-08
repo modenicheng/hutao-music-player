@@ -258,6 +258,7 @@ async fn drive(
                         // 加载即播放（docs/PROJECT.md §8.2：设置 URI → Loading → Playing）
                         state.status = PlaybackStatus::Loading;
                         state.current = Some(req.track);
+                        state.actual_quality = Some(req.quality);
                         state.position = Duration::ZERO;
                         state.duration = None;
                         state.buffering = None;

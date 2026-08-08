@@ -968,7 +968,7 @@ async fn resolve_play_request(
             )
             .await
             .ok_or_else(|| format!("all qualities unavailable for {}", item.mid))?;
-            item.track.qualities = vec![quality_from_file_type(resolved.file_type)];
+            item.track.available_qualities = vec![quality_from_file_type(resolved.file_type)];
             Ok(ResolvedPlayback {
                 index,
                 songs: Some(songs),
@@ -989,7 +989,7 @@ async fn resolve_play_request(
             )
             .await
             .ok_or_else(|| format!("all qualities unavailable for {}", item.mid))?;
-            item.track.qualities = vec![quality_from_file_type(resolved.file_type)];
+            item.track.available_qualities = vec![quality_from_file_type(resolved.file_type)];
             Ok(ResolvedPlayback {
                 index,
                 songs: None,
@@ -1015,7 +1015,7 @@ fn queue_item_from_search_song(song: &hmp_qqmusic_api::protocol::search::QuickSo
             duration: None,
             cover: None,
             url: None,
-            qualities: Vec::new(),
+            available_qualities: Vec::new(),
         },
         mid: song.mid.clone(),
         media_mid: String::new(),

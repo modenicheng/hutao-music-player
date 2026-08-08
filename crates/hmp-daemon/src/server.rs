@@ -273,10 +273,11 @@ mod tests {
                         duration: Some(std::time::Duration::from_secs(60)),
                         cover: None,
                         url: Some(format!("fake://{id}")),
-                        qualities: vec![],
+                        available_qualities: vec![],
                     },
                     uri: format!("fake://{id}"),
                     media: None,
+                    quality: hmp_core::AudioQuality::Mp3_128,
                 })
             })
         }

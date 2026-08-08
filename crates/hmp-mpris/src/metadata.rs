@@ -81,7 +81,7 @@ pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedValue)> {
             OwnedValue::try_from(Value::from(us)).expect("u64"),
         ));
     }
-    if let Some(q) = track.qualities.first() {
+    if let Some(q) = track.available_qualities.first() {
         meta.push((
             "xesam:audioQuality",
             OwnedValue::try_from(Value::from(quality_label(q))).expect("str"),
@@ -126,7 +126,7 @@ mod tests {
                 url: "https://example.com/cover.jpg".into(),
             }),
             url: Some("https://example.com/stream.mp3".into()),
-            qualities: vec![AudioQuality::Flac],
+            available_qualities: vec![AudioQuality::Flac],
         }
     }
 

@@ -97,6 +97,8 @@ pub struct ResolvedTrack {
     pub uri: String,
     /// 解密代理 guard（明文播放期间必须持有；换曲时被引擎替换 Drop）。
     pub media: Option<hmp_media::PreparedMedia>,
+    /// 本次实际选定的音质（媒体库重构 B3：actual vs available 分离）。
+    pub quality: AudioQuality,
 }
 
 impl std::fmt::Debug for ResolvedTrack {
@@ -266,17 +268,12 @@ pub async fn resolve_track_impl(
     });
     let title = detail.track.name.clone();
 
-    // 音质回退链：文档化链（docs/PROJECT.md §7.3，final review Finding 3）。
-    // 显式枚举而非 `AudioQuality::Master.fallback_chain()`：后者漏掉 Atmos。
-    // 裁决：Aac 不入链（文档化链不含 Aac）。
-    const CHAIN: [AudioQuality; 6] = [
-        AudioQuality::Master,
-        AudioQuality::HiRes,
-        AudioQuality::Atmos,
-        AudioQuality::Flac,
-        AudioQuality::Mp3_320,
-        AudioQuality::Mp3_128,
-    ];
+    // 可用音质初值：QQ size 字段（确定映射的档位），从高到低去重。
+    let mut available = available_from_sizes(&detail.track.file);
+
+    // 音质回退链：来自持久化偏好（`hmp quality`；Auto = 文档化链
+    // Master→HiRes→Atmos→Flac→Mp3_320→Mp3_128，固定档位则从该档起降级）。
+    let chain = hmp_storage::Config::load().quality.chain();
     let file_info = SongFileInfo {
         mid: track_id.as_ref().to_owned(),
         file_type: None,
@@ -284,7 +281,7 @@ pub async fn resolve_track_impl(
         media_mid: Some(media_mid),
     };
     let mut last_error = None;
-    for quality in CHAIN {
+    for quality in chain {
         let Some(file_type) = quality_to_file_type(&quality) else {
             continue;
         };
@@ -335,6 +332,17 @@ pub async fn resolve_track_impl(
             }
         }
         if let Some((file_type, uri, media)) = found {
+            // 成功档位并入可用列表（探测结果）。
+            let q = quality_from_file_type(&file_type);
+            if !available.contains(&q) {
+                available.push(q.clone());
+            }
+            available.sort_by_key(|q| {
+                AudioQuality::ordered()
+                    .iter()
+                    .position(|x| x == q)
+                    .unwrap_or(usize::MAX)
+            });
             let track = Track {
                 id: track_id.clone(),
                 title,
@@ -348,9 +356,14 @@ pub async fn resolve_track_impl(
                     .map(std::time::Duration::from_millis),
                 cover,
                 url: Some(uri.clone()),
-                qualities: vec![quality_from_file_type(&file_type)],
+                available_qualities: available,
             };
-            return Ok(ResolvedTrack { track, uri, media });
+            return Ok(ResolvedTrack {
+                track,
+                uri,
+                media,
+                quality: q,
+            });
         }
     }
     Err(EngineError::QualityUnavailable(
@@ -421,6 +434,24 @@ pub async fn resolve_source_ids_impl(
     }
 }
 
+/// 从 QQ size 字段探测可用音质（确定映射的档位，从高到低；媒体库重构 B3）。
+pub fn available_from_sizes(f: &hmp_qqmusic_api::models::File) -> Vec<AudioQuality> {
+    let mut available = Vec::new();
+    if f.size_dolby > 0 {
+        available.push(AudioQuality::Atmos);
+    }
+    if f.size_flac > 0 {
+        available.push(AudioQuality::Flac);
+    }
+    if f.size_320mp3 > 0 {
+        available.push(AudioQuality::Mp3_320);
+    }
+    if f.size_128mp3 > 0 {
+        available.push(AudioQuality::Mp3_128);
+    }
+    available
+}
+
 /// 分页收集安全上限（100 页 × 100 首/页 = 1 万首，防服务端异常死循环）。
 pub const MAX_PAGES: i64 = 100;
 
@@ -480,6 +511,42 @@ mod tests {
         assert_eq!(CHAIN[0], AudioQuality::Master);
         assert_eq!(CHAIN[2], AudioQuality::Atmos);
         assert_eq!(CHAIN[5], AudioQuality::Mp3_128);
+    }
+
+    /// size 字段 → 可用音质（从高到低；缺失档位不出现）。
+    #[test]
+    fn available_from_sizes_maps_definite_qualities() {
+        let f = hmp_qqmusic_api::models::File {
+            media_mid: "m".into(),
+            size_128mp3: 1,
+            size_320mp3: 1,
+            size_flac: 0,
+            size_dolby: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            available_from_sizes(&f),
+            vec![AudioQuality::Mp3_320, AudioQuality::Mp3_128]
+        );
+        let all = hmp_qqmusic_api::models::File {
+            media_mid: "m".into(),
+            size_128mp3: 1,
+            size_320mp3: 1,
+            size_flac: 1,
+            size_dolby: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            available_from_sizes(&all),
+            vec![
+                AudioQuality::Atmos,
+                AudioQuality::Flac,
+                AudioQuality::Mp3_320,
+                AudioQuality::Mp3_128
+            ]
+        );
+        let none = hmp_qqmusic_api::models::File::default();
+        assert!(available_from_sizes(&none).is_empty());
     }
 
     /// 分页：以服务端 hasmore/total 为终止条件，超过 3 页也能取全（旧代码 3×100 截断）。

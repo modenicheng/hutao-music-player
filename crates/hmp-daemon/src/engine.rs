@@ -278,12 +278,7 @@ impl PlaybackEngine {
             Ok(res) => {
                 self.active_media = res.media; // 旧 guard 自动 Drop → 旧代理停止
                 let uri = res.uri.clone();
-                let quality = res
-                    .track
-                    .qualities
-                    .first()
-                    .cloned()
-                    .unwrap_or(hmp_core::AudioQuality::Mp3_128);
+                let quality = res.quality;
                 self.driver.load(hmp_player_gst::LoadRequest {
                     track: res.track,
                     uri,
@@ -420,10 +415,11 @@ mod tests {
                         duration: Some(std::time::Duration::from_secs(60)),
                         cover: None,
                         url: Some(format!("fake://{id}")),
-                        qualities: vec![],
+                        available_qualities: vec![],
                     },
                     uri: format!("fake://{id}"),
                     media: None,
+                    quality: hmp_core::AudioQuality::Mp3_128,
                 })
             })
         }
