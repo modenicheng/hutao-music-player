@@ -260,12 +260,19 @@ enum PlayRequest {
     },
 }
 
+struct ResolvedStream {
+    file_type: SongFileType,
+    uri: String,
+    media: Option<hmp_media::PreparedMedia>,
+}
+
 struct ResolvedPlayback {
     index: usize,
     songs: Option<Vec<hmp_qqmusic_api::protocol::search::QuickSong>>,
     item: QueueItem,
     file_type: SongFileType,
     uri: String,
+    media: Option<hmp_media::PreparedMedia>,
 }
 
 struct PlayResult {
@@ -408,6 +415,7 @@ pub struct AppCore {
     login_updates_rx: mpsc::UnboundedReceiver<LoginUpdate>,
     login_generation: u64,
     login_cancel: Option<CancellationToken>,
+    active_media: Option<hmp_media::PreparedMedia>,
     _mpris: Option<MprisService>,
 }
 
@@ -477,6 +485,7 @@ impl AppCore {
             login_updates_rx,
             login_generation: 0,
             login_cancel: None,
+            active_media: None,
             _mpris: mpris,
         })
     }
@@ -566,6 +575,9 @@ impl AppCore {
                         break;
                     }
                     let state = self.state_rx.borrow().clone();
+                    if state.status == PlaybackStatus::Ended {
+                        self.active_media = None;
+                    }
                     self.publish_queue_if_changed(state);
                 }
             }
@@ -747,6 +759,7 @@ impl AppCore {
             return;
         };
         self.queue_index = resolved.index;
+        self.active_media = resolved.media;
         *queue_item = resolved.item;
         let mut item = queue_item.clone();
         // 供 MPRIS `xesam:url` 使用
@@ -946,7 +959,7 @@ async fn resolve_play_request(
                 .ok_or_else(|| format!("search index out of range: {index}"))?;
             let mut item = queue_item_from_search_song(song);
             resolve_queue_item(client, &mut item).await?;
-            let (file_type, uri) = resolve_stream(
+            let resolved = resolve_stream(
                 client,
                 credential,
                 &item.mid,
@@ -955,18 +968,19 @@ async fn resolve_play_request(
             )
             .await
             .ok_or_else(|| format!("all qualities unavailable for {}", item.mid))?;
-            item.track.qualities = vec![quality_from_file_type(file_type)];
+            item.track.qualities = vec![quality_from_file_type(resolved.file_type)];
             Ok(ResolvedPlayback {
                 index,
                 songs: Some(songs),
                 item,
-                file_type,
-                uri,
+                file_type: resolved.file_type,
+                uri: resolved.uri,
+                media: resolved.media,
             })
         }
         PlayRequest::Queue { index, mut item } => {
             resolve_queue_item(client, &mut item).await?;
-            let (file_type, uri) = resolve_stream(
+            let resolved = resolve_stream(
                 client,
                 credential,
                 &item.mid,
@@ -975,13 +989,14 @@ async fn resolve_play_request(
             )
             .await
             .ok_or_else(|| format!("all qualities unavailable for {}", item.mid))?;
-            item.track.qualities = vec![quality_from_file_type(file_type)];
+            item.track.qualities = vec![quality_from_file_type(resolved.file_type)];
             Ok(ResolvedPlayback {
                 index,
                 songs: None,
                 item,
-                file_type,
-                uri,
+                file_type: resolved.file_type,
+                uri: resolved.uri,
+                media: resolved.media,
             })
         }
     }
@@ -1090,7 +1105,7 @@ async fn resolve_stream(
     mid: &str,
     media_mid: &str,
     song_type: i64,
-) -> Option<(SongFileType, String)> {
+) -> Option<ResolvedStream> {
     let song_api = SongApi::new(client);
     let info = SongFileInfo {
         mid: mid.to_owned(),
@@ -1111,25 +1126,31 @@ async fn resolve_stream(
                     if item.result == 0 && !item.purl.is_empty() {
                         let remote_uri =
                             format!("https://isure.stream.qqmusic.qq.com/{}", item.purl);
-                        let uri = if file_type.is_encrypted {
-                            let result = if item.ekey.is_empty() {
-                                hmp_media::prepare_playable_embedded(&remote_uri, None).await
+                        let (uri, media) = if file_type.is_encrypted {
+                            let ekey_arg = if item.ekey.is_empty() {
+                                None
                             } else {
-                                hmp_media::prepare_playable(&remote_uri, Some(&item.ekey), None)
-                                    .await
+                                Some(item.ekey.as_str())
                             };
-                            match result {
-                                Ok(uri) => uri,
+                            match hmp_media::prepare_stream(&remote_uri, ekey_arg, None).await {
+                                Ok(prepared) => {
+                                    let uri = prepared.uri.clone();
+                                    (uri, Some(prepared))
+                                }
                                 Err(error) => {
                                     tracing::debug!(quality = ?quality, "QMC2 decrypt failed: {error}");
                                     continue;
                                 }
                             }
                         } else {
-                            remote_uri
+                            (remote_uri, None)
                         };
                         tracing::info!(quality = ?quality, "stream resolved");
-                        return Some((file_type, uri));
+                        return Some(ResolvedStream {
+                            file_type,
+                            uri,
+                            media,
+                        });
                     }
                 }
             }
