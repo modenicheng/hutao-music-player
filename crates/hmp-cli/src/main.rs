@@ -14,7 +14,9 @@ use clap::{Parser, Subcommand};
 mod auth;
 mod client;
 mod commands;
+mod history;
 mod login;
+mod quality;
 mod search;
 
 use hmp_core::{LoopMode, Request};
@@ -33,6 +35,19 @@ enum Command {
     Login,
     /// 显示登录状况（本地凭证检查）。
     Auth,
+    /// 音质策略：无参显示；`auto|master|hires|atmos|flac|aac|320|128` 设置。
+    Quality {
+        /// 音质别名（缺省 = 仅显示）。
+        alias: Option<String>,
+        /// 禁止向下降级回退（仅尝试指定档位）。
+        #[arg(long)]
+        no_fallback: bool,
+    },
+    /// 最近播放（直读媒体库）。
+    History {
+        /// 条数（默认 10）。
+        count: Option<u32>,
+    },
     /// 搜索歌曲。
     Search { keyword: String },
     /// 播放（单曲 / playlist:<id> / album:<id>；遥控后端）。
@@ -89,6 +104,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Login => login::run().await,
         Command::Auth => auth::run().await,
+        Command::Quality { alias, no_fallback } => quality::run(alias, no_fallback).await,
+        Command::History { count } => history::run(count).await,
         Command::Search { keyword } => search::run(&keyword).await,
         Command::Play { source } => {
             let mut c = client::DaemonClient::connect_or_spawn().await?;
