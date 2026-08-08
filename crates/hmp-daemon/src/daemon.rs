@@ -27,7 +27,13 @@ impl Daemon {
             let resolver = Arc::clone(&resolver);
             Arc::new(move || resolver.has_credential())
         };
-        let handle = PlaybackEngine::start(driver, resolver, credential_ok);
+        // 媒体库（`$XDG_DATA_HOME/hmp/library.sqlite3`）；不可用仅告警不阻断播放。
+        let library =
+            hmp_storage::LibraryDb::open(&hmp_storage::data_dir().join("library.sqlite3"))
+                .map(|db| Arc::new(std::sync::Mutex::new(db)))
+                .map_err(|e| tracing::warn!(%e, "媒体库打开失败，播放历史不落库"))
+                .ok();
+        let handle = PlaybackEngine::start_with_library(driver, resolver, credential_ok, library);
         Ok(Self { handle })
     }
 }

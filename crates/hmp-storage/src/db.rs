@@ -179,7 +179,7 @@ impl LibraryDb {
                WHERE id = (
                  SELECT id FROM play_events
                  WHERE track_id = ?1 AND ended_at IS NULL
-                 ORDER BY started_at DESC LIMIT 1
+                 ORDER BY started_at DESC, id DESC LIMIT 1
                )"#,
             params![e.track_id, e.ended_at, e.listened_ms, e.reason],
         )?;
@@ -198,7 +198,7 @@ impl LibraryDb {
             r#"SELECT p.track_id, t.title, t.artist, p.started_at, p.ended_at,
                       p.listened_ms, COALESCE(p.end_reason, '')
                FROM play_events p JOIN tracks t ON t.id = p.track_id
-               ORDER BY p.started_at DESC LIMIT ?1"#,
+               ORDER BY p.started_at DESC, p.id DESC LIMIT ?1"#,
         )?;
         let rows = stmt.query_map(params![limit as i64], |r| {
             Ok(RecentPlay {
@@ -213,8 +213,6 @@ impl LibraryDb {
         })?;
         rows.collect()
     }
-
-    /// 按 (source, source_key) 查询曲目 id。
     pub fn track_id(&mut self, source: &str, source_key: &str) -> rusqlite::Result<Option<i64>> {
         self.conn
             .query_row(

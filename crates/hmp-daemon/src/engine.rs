@@ -55,6 +55,10 @@ pub struct PlaybackEngine {
     caps_tx: watch::Sender<PlaybackCapabilities>,
     /// 终止信号发布（sticky，Finding 7）。
     term_tx: watch::Sender<bool>,
+    /// 媒体库（播放会话写库；不可用时为 None，播放不阻断）。
+    library: Option<std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>>,
+    /// 当前播放会话的 DB track id（供会话结束回写）。
+    current_db_track: Option<i64>,
 }
 
 impl PlaybackEngine {
@@ -63,6 +67,16 @@ impl PlaybackEngine {
         driver: Arc<dyn PlaybackDriver>,
         resolver: Arc<dyn SourceResolver>,
         credential_ok: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> EngineHandle {
+        Self::start_with_library(driver, resolver, credential_ok, None)
+    }
+
+    /// 启动引擎并挂载媒体库（B4：播放会话写库）。
+    pub fn start_with_library(
+        driver: Arc<dyn PlaybackDriver>,
+        resolver: Arc<dyn SourceResolver>,
+        credential_ok: Arc<dyn Fn() -> bool + Send + Sync>,
+        library: Option<std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>>,
     ) -> EngineHandle {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (state_tx, state_rx) = watch::channel(DaemonState::default());
@@ -82,6 +96,8 @@ impl PlaybackEngine {
             last_error: None,
             caps_tx,
             term_tx,
+            library,
+            current_db_track: None,
         };
         tokio::spawn(async move {
             engine.run().await;
@@ -106,6 +122,7 @@ impl PlaybackEngine {
                 Some(req) = self.cmd_rx.recv() => {
                     match req {
                         Request::Quit => {
+                            self.end_session("quit");
                             self.driver.shutdown();
                             break;
                         }
@@ -136,6 +153,7 @@ impl PlaybackEngine {
                             let was_current = self.queue.snapshot().current == Some(i);
                             if self.queue.remove(i) {
                                 if was_current {
+                                    self.end_session("manual");
                                     self.publish();
                                     if let Some(id) = self.queue.current().cloned() {
                                         self.load_and_play(id).await;
@@ -210,6 +228,11 @@ impl PlaybackEngine {
                 self.driver.command(PlayerCommand::SetShuffle(b));
                 self.publish();
             }
+            PlayerCommand::Stop => {
+                self.end_session("stop");
+                self.driver.command(PlayerCommand::Stop);
+                self.publish();
+            }
             PlayerCommand::LoadAndPlay(_) => {
                 // 队列场景不使用（CLI/桌面按 id 走 Play 请求）；忽略。
             }
@@ -218,6 +241,7 @@ impl PlaybackEngine {
     }
 
     async fn navigate_next(&mut self) {
+        self.end_session("next");
         if let Some(id) = self.queue.skip_next() {
             self.publish();
             self.load_and_play(id).await;
@@ -225,6 +249,7 @@ impl PlaybackEngine {
     }
 
     async fn navigate_prev(&mut self) {
+        self.end_session("previous");
         if let Some(id) = self.queue.prev_track() {
             self.publish();
             self.load_and_play(id).await;
@@ -247,6 +272,8 @@ impl PlaybackEngine {
             self.publish();
             return;
         }
+        // 换曲：结束当前播放会话（新会话在 load 成功后开启）。
+        self.end_session("manual");
         if playnext {
             // 整片插入当前曲之后（多曲目；空队列按 replace 建队）。
             if let Some(at) = self.queue.insert_after_current(ids.clone()) {
@@ -262,11 +289,52 @@ impl PlaybackEngine {
     }
 
     async fn on_ended(&mut self) {
+        self.end_session("ended");
         if let Some(id) = self.queue.advance_on_eos() {
             self.publish();
             self.load_and_play(id).await;
         } else {
             self.publish();
+        }
+    }
+
+    /// 媒体库：upsert 曲目并开启播放会话（B4 会话粒度：INSERT play_events）。
+    /// 库不可用/写失败不阻断播放（仅 warn 级）。
+    fn start_session(&mut self, track: &hmp_core::Track) {
+        let Some(library) = &self.library else {
+            return;
+        };
+        let mut library = library.lock().unwrap();
+        let row = track_row(track);
+        match library.upsert_track(&row) {
+            Ok(track_id) => {
+                if library.record_play_start(track_id, now_unix()).is_ok() {
+                    self.current_db_track = Some(track_id);
+                }
+            }
+            Err(e) => tracing::warn!(%e, "媒体库 upsert 失败"),
+        }
+    }
+
+    /// 媒体库：结束当前播放会话（UPDATE play_events + 播放次数）。
+    /// 收听时长 = 当前播放位置（位置无时长上限时原样记录）。
+    fn end_session(&mut self, reason: &'static str) {
+        let Some(track_id) = self.current_db_track.take() else {
+            return;
+        };
+        let Some(library) = &self.library else {
+            return;
+        };
+        let listened_ms = self.state_rx.borrow().position.as_millis() as i64;
+        let mut library = library.lock().unwrap();
+        let end = hmp_storage::PlayEnd {
+            track_id,
+            ended_at: now_unix(),
+            listened_ms,
+            reason,
+        };
+        if let Err(e) = library.record_play_end(&end) {
+            tracing::warn!(%e, "媒体库会话结束回写失败");
         }
     }
 
@@ -280,11 +348,13 @@ impl PlaybackEngine {
                 let uri = res.uri.clone();
                 let quality = res.quality;
                 self.driver.load(hmp_player_gst::LoadRequest {
-                    track: res.track,
+                    track: res.track.clone(),
                     uri,
                     quality,
                 });
                 self.driver.play();
+                // 媒体库：upsert 曲目 + 开启播放会话（B4）。
+                self.start_session(&res.track);
                 self.publish();
             }
             Err(e) => {
@@ -294,6 +364,30 @@ impl PlaybackEngine {
                 self.publish();
             }
         }
+    }
+}
+
+/// 当前 unix 时间戳（秒）。
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// `hmp_core::Track` → 媒体库行（窄投影：只存稳定身份与元数据，不存播放 URL）。
+fn track_row(t: &hmp_core::Track) -> hmp_storage::TrackRow {
+    hmp_storage::TrackRow {
+        source: "qq",
+        source_key: t.id.0.clone(),
+        title: t.title.clone(),
+        album: t.album.as_ref().map(|a| a.name.clone()),
+        artist: {
+            let names = t.artist_names();
+            (!names.is_empty()).then_some(names)
+        },
+        duration_ms: t.duration.map(|d| d.as_millis() as i64),
+        cover_uri: t.cover.as_ref().map(|c| c.url.clone()),
     }
 }
 
@@ -470,6 +564,18 @@ mod tests {
         resolver: Arc<dyn SourceResolver>,
     ) -> (EngineHandle, watch::Receiver<hmp_core::DaemonState>) {
         let handle = PlaybackEngine::start(driver, resolver, Arc::new(|| true));
+        let st = handle.state_rx.clone();
+        (handle, st)
+    }
+
+    /// 带媒体库的引擎（B4 会话写库测试）。
+    async fn start_engine_with_library(
+        driver: Arc<FakeDriver>,
+        resolver: Arc<dyn SourceResolver>,
+        library: std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>,
+    ) -> (EngineHandle, watch::Receiver<hmp_core::DaemonState>) {
+        let handle =
+            PlaybackEngine::start_with_library(driver, resolver, Arc::new(|| true), Some(library));
         let st = handle.state_rx.clone();
         (handle, st)
     }
@@ -753,6 +859,60 @@ mod tests {
             driver.loads.lock().unwrap().last(),
             Some(&"fake://x".to_string())
         );
+    }
+
+    /// 媒体库写库（B4）：Play 开启会话 → Next 关闭(reason=next)并开启新会话 → Quit 关闭(reason=quit)。
+    #[tokio::test]
+    async fn play_sessions_persist_to_library() {
+        use hmp_storage::LibraryDb;
+
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![
+            vec![TrackId::new("a"), TrackId::new("b")],
+            vec![TrackId::new("c")],
+        ]);
+        let library = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let (handle, _st) =
+            start_engine_with_library(driver.clone(), resolver, library.clone()).await;
+
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        {
+            let mut lib = library.lock().unwrap();
+            let recent = lib.recent_plays(10).unwrap();
+            assert_eq!(recent.len(), 1);
+            assert_eq!(recent[0].title, "t-a");
+            assert_eq!(recent[0].ended_at, None, "会话未结束");
+        }
+
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        {
+            let mut lib = library.lock().unwrap();
+            let recent = lib.recent_plays(10).unwrap();
+            assert_eq!(recent.len(), 2);
+            // 最新（b）未结束；a 的会话以 next 关闭。
+            assert_eq!(recent[0].title, "t-b");
+            assert_eq!(recent[0].ended_at, None);
+            assert_eq!(recent[1].title, "t-a");
+            assert_eq!(recent[1].reason, "next");
+            assert!(recent[1].ended_at.is_some());
+        }
+
+        handle.cmd(Request::Quit).await.unwrap();
+        wait_idle().await;
+        {
+            let mut lib = library.lock().unwrap();
+            let recent = lib.recent_plays(10).unwrap();
+            assert_eq!(recent[0].reason, "quit", "退出时关闭当前会话");
+            assert!(recent[0].ended_at.is_some());
+        }
     }
 
     /// `hmp quit`（Request::Quit）→ 引擎退出 → 终止信号置位（serve 据此优雅退出，spec §6）。
