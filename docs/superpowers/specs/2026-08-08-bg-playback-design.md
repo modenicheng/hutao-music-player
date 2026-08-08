@@ -78,7 +78,7 @@ pub enum Request {
     Play(PlayRequest),
     PlayNext(PlayRequest),
     QueueAppend(PlayRequest),
-    QueueRemove(usize),          // 队列位置
+    QueueRemove(usize),          // 队列位置（0 基索引）
     QueueClear,
     Queue,                       // 查询队列
     Command(PlayerCommand),      // Play/Pause/Stop/Seek/Volume/Loop/Shuffle/Next/Previous
@@ -105,11 +105,11 @@ pub struct DaemonState {
 }
 
 pub enum IpcErrorCode {
-    NotLoggedIn, PlaylistNotFound, QualityUnavailable, BadRequest, Internal,
+    NotLoggedIn, TrackNotFound, PlaylistNotFound, QualityUnavailable, BadRequest, Internal,
 }
 ```
 
-> `TrackNotFound` 合并入 `Internal`？否——保留独立码 `TrackNotFound`（见 §7 错误码全集）。播放器自身错误（如格式不支持）以 `PlaybackStatus::Error` 状态呈现，不走 RPC 错误。
+播放器自身错误（如格式不支持）以 `PlaybackStatus::Error` 状态呈现，不走 RPC 错误。
 
 ### 4.2 hmp-daemon 新增 crate（后端，不引用任何前端类型）
 
