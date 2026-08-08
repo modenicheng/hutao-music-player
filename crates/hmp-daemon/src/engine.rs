@@ -607,6 +607,43 @@ mod tests {
         assert_eq!(driver.loads.lock().unwrap().len(), 1); // 只加载过一次
     }
 
+    /// caps：shuffle 开启时队尾仍可 Next（引擎可回绕），MPRIS 不再误报 false。
+    #[tokio::test]
+    async fn caps_allow_next_at_tail_when_shuffled() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![
+            TrackId::new("a"),
+            TrackId::new("b"),
+            TrackId::new("c"),
+        ]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        // 走到队尾 c
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(handle.state_rx.borrow().queue.current, Some(2));
+        assert!(!handle.state_rx.borrow().caps.can_go_next); // None 模式队尾不可
+        handle
+            .cmd(Request::Command(PlayerCommand::SetShuffle(true)))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert!(handle.state_rx.borrow().caps.can_go_next); // 洗牌可回绕
+        assert!(handle.state_rx.borrow().caps.can_go_previous);
+    }
+
     /// List 循环：Ended 后回绕到第一首。
     #[tokio::test]
     async fn list_loop_wraps_on_ended() {
