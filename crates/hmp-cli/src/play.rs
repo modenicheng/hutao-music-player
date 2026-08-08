@@ -68,6 +68,7 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut chosen: Option<(SongFileType, String)> = None;
     let mut last_error: Option<String> = None;
+    let mut _media: Option<hmp_media::PreparedMedia> = None;
 
     'quality: for quality in AudioQuality::Master.fallback_chain() {
         let Some(file_type) = quality_to_file_type(quality.clone()) else {
@@ -87,50 +88,40 @@ pub async fn run(track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
                         let remote_uri =
                             format!("https://isure.stream.qqmusic.qq.com/{}", item.purl);
                         let uri = if file_type.is_encrypted {
-                            let ekey = (!item.ekey.is_empty()).then_some(item.ekey.as_str());
-                            match ekey {
-                                Some(key) => {
-                                    println!("解密中…（QMC2）");
-                                    let (progress_tx, progress_rx) =
-                                        tokio::sync::watch::channel(Some(0.0f64));
-                                    let progress_handle = tokio::spawn(async move {
-                                        let mut rx = progress_rx;
-                                        while rx.changed().await.is_ok() {
-                                            if let Some(p) = *rx.borrow() {
-                                                print!("\r解密进度: {:.0}%", p * 100.0);
-                                                let _ = std::io::stdout().flush();
-                                            }
-                                        }
-                                    });
-                                    let prepared = hmp_media::prepare_playable(
-                                        &remote_uri,
-                                        Some(key),
-                                        Some(&progress_tx),
-                                    )
-                                    .await;
-                                    drop(progress_tx);
-                                    let _ = progress_handle.await;
-                                    match prepared {
-                                        Ok(prepared) => prepared,
-                                        Err(error) => {
-                                            last_error =
-                                                Some(format!("QMC2 decrypt failed: {error}"));
-                                            continue;
-                                        }
+                            println!("解密中…（QMC2 流式）");
+                            let (progress_tx, progress_rx) =
+                                tokio::sync::watch::channel(Some(0.0f64));
+                            let progress_handle = tokio::spawn(async move {
+                                let mut rx = progress_rx;
+                                while rx.changed().await.is_ok() {
+                                    if let Some(p) = *rx.borrow() {
+                                        print!("\r解密进度: {:.0}%", p * 100.0);
+                                        let _ = std::io::stdout().flush();
                                     }
                                 }
-                                None => {
-                                    match hmp_media::prepare_playable_embedded(&remote_uri, None)
-                                        .await
-                                    {
-                                        Ok(prepared) => prepared,
-                                        Err(error) => {
-                                            last_error = Some(format!(
-                                                "embedded QMC2 decrypt failed: {error}"
-                                            ));
-                                            continue;
-                                        }
+                            });
+                            let prepared = hmp_media::prepare_stream(
+                                &remote_uri,
+                                (!item.ekey.is_empty()).then_some(item.ekey.as_str()),
+                                Some(&progress_tx),
+                            )
+                            .await;
+                            drop(progress_tx);
+                            let _ = progress_handle.await;
+                            match prepared {
+                                Ok(p) => {
+                                    let uri = p.uri.clone();
+                                    if uri.starts_with("http://127.0.0.1") {
+                                        println!("流式播放（QMC2 解密代理）");
+                                    } else {
+                                        println!("解密完成，播放本地缓存");
                                     }
+                                    _media = Some(p);
+                                    uri
+                                }
+                                Err(error) => {
+                                    last_error = Some(format!("QMC2 decrypt failed: {error}"));
+                                    continue;
                                 }
                             }
                         } else {
