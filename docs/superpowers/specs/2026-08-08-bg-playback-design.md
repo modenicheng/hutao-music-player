@@ -16,6 +16,7 @@
 4. CLI 遥控面 = 基础控制 + 队列管理 + `playnext` + 歌单/专辑播放。
 5. tray 最小化：播放/暂停、上一首、下一首、停止、退出（MPRIS 已存在，tray 不臃肿）。
 6. 队列 = 标准全功能；`prev` 一律跳上一首（不做 >3s 回开头）。
+7. **登录增强**：`hmp login` 将二维码图片解析并渲染为**终端 ASCII 艺术**，用户直接在终端扫码，无需手动打开图片文件。
 
 非目标（YAGNI，明确不做）：歌词、封面落地、`hmp watch` 持续跟随命令、CLI JSON 输出、播放列表持久化、systemd unit、桌面端接入（后续项）、无缝拼接（gapless）。
 
@@ -129,8 +130,15 @@ pub enum IpcErrorCode {
 | 模块 | 职责 |
 |---|---|
 | `client.rs` | 连接 socket + 请求/响应；未运行则自动 spawn daemon（`hmp serve --background`）并轮询 socket 就绪（≤3s）；处理 `ECONNREFUSED` 残留清理 |
+| `qr_ascii.rs` | 登录二维码终端渲染：解码 `QR.data`（`image` crate，png/jpeg）→ 降采样到终端宽度（环境 `COLUMNS` 或默认 ~60，上下限 32..=120）→ 2:1 纵横比校正（终端字符高≈宽×2，半块 Unicode 字符 `▀▄█` + 空格，每字符承载 2×2 像素）→ 亮度映射输出到 stdout |
 | 子命令 | `play/playnext/queue(show\|add\|remove\|clear)/playlist/album` + `pause/resume/next/prev/stop/seek/volume/loop/shuffle/status/quit` + `serve` |
 | 保留 | `login`（交互式，仍在 CLI）、`search`（本地搜索，输出 track-id 供 `hmp play` 使用） |
+
+**`hmp login` 增强流程**（`qr_ascii.rs`）：
+
+1. `get_qrcode` 后先尝试解码图像并渲染 ASCII 到 stdout（不依赖 tty 检测，非 tty 也打印）；
+2. PNG 仍保存到临时目录（`hmp-qr.png`）作**兜底**：图像解码失败或渲染异常时提示用户手动打开该文件；
+3. 渲染成功后正常进入 `wait_qrcode_login` 轮询（扫码结果提示沿用现有逻辑）。
 
 ## 5. 协议与数据流
 
@@ -163,13 +171,13 @@ pub enum IpcErrorCode {
   - 协议集成：真实 socket + 真协议客户端，多客户端并发、订阅 fan-out、畸形帧；
   - wiremock 端到端（真实 gst + 本地生成 wav + 假 QQ API）验证 Play→详情→回退→解密→播放→Ended→下一首 闭环；
   - tray/MPRIS 默认 features 开关——无桌面环境（CI）下跑 backend-only。
-- **CLI**：client 单测（ENOENT 拉起、ECONNREFUSED 恢复、超时）；集成：起 daemon → `hmp status`/`hmp pause` 断言。
+- **CLI**：client 单测（ENOENT 拉起、ECONNREFUSED 恢复、超时）；`qr_ascii` 渲染单测（已知像素图 → 断言输出字符序列、宽度钳位 32..=120、纵横比 2:1、解码失败走 PNG 兜底）；集成：起 daemon → `hmp status`/`hmp pause` 断言。
 
 ## 9. 里程碑拆分建议（供 writing-plans 细化）
 
 1. **hmp-core**：`QueueCore` + `ipc` 消息（含单测）。
 2. **hmp-daemon 后端**：`PlaybackDriver` + `daemon.rs` + `player.rs`（fake driver 单测）。
 3. **hmp-daemon 传输**：`server.rs` socket 服务器 + 协议集成测试。
-4. **CLI 接入**：`client.rs` + 子命令 + spawn 逻辑 + 集成测试。
+4. **CLI 接入**：`client.rs` + 子命令 + spawn 逻辑 + 集成测试；`qr_ascii.rs` 终端二维码渲染（`image` crate 解码 + 半块字符映射）。
 5. **tray + MPRIS 搬入**：ksni tray + mpris 适配 + 优雅退出。
 6. **端到端 + 文档**：wiremock 闭环测试、PROJECT.md/README 更新。
