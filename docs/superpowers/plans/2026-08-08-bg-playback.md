@@ -1346,7 +1346,7 @@ Run: `cargo test -p hmp-core queue`  Expected: 通过
 
 - [ ] **Step 8: 运行引擎测试确认通过**
 
-Run: `cargo test -p hmp-daemon --no-default-features`  Expected: 引擎 9 个测试通过
+Run: `cargo test -p hmp-daemon --no-default-features`  Expected: 引擎 7 个测试通过
 
 - [ ] **Step 9: daemon.rs 组装（本任务范围）**
 
@@ -1871,23 +1871,140 @@ Ok(req) => {
 - [ ] **Step 6: 服务器测试（真 socket）补全 + 验证**
 
 ```rust
-// server.rs tests
-#[tokio::test]
-async fn status_and_queue_queries() { /* Status → Response::Status；Queue → Response::Queue */ }
-#[tokio::test]
-async fn subscribe_receives_initial_and_events() {
-    // 连接 → Subscribe → 收初始 Event → 触发状态变更（引擎命令）→ 收后续 Event
+// server.rs tests（自包含：本模块内建最小 fake driver/resolver）
+use super::*;
+use crate::engine::PlaybackEngine;
+use crate::player::{EngineError, ResolvedTrack, SourceResolver};
+use hmp_core::ipc::{Event, Request, Response};
+use hmp_core::{IpcErrorCode, PlayRequest, PlaybackState, PlaybackStatus, Track, TrackId};
+use std::sync::Arc;
+use tokio::sync::{broadcast, watch};
+
+struct SDriver {
+    state_tx: watch::Sender<PlaybackState>,
+    events_tx: broadcast::Sender<PlayerEvent>,
 }
+impl PlaybackDriver for SDriver {
+    fn load(&self, _r: LoadRequest) {}
+    fn play(&self) {}
+    fn pause(&self) {}
+    fn seek(&self, _p: std::time::Duration) {}
+    fn stop(&self) {}
+    fn set_volume(&self, _v: f64) {}
+    fn command(&self, _c: PlayerCommand) {}
+    fn shutdown(&self) {}
+    fn subscribe_state(&self) -> watch::Receiver<PlaybackState> { self.state_tx.subscribe() }
+    fn subscribe_events(&self) -> broadcast::Receiver<PlayerEvent> { self.events_tx.subscribe() }
+}
+struct SResolver;
+impl SourceResolver for SResolver {
+    async fn resolve_source_ids(&self, _s: &PlayRequest) -> Result<Vec<TrackId>, EngineError> {
+        Ok(vec![TrackId::new("a")])
+    }
+    async fn resolve_track(&self, id: &TrackId) -> Result<ResolvedTrack, EngineError> {
+        Ok(ResolvedTrack {
+            track: Track {
+                id: id.clone(),
+                title: format!("t-{id}"),
+                artists: vec![],
+                album: None,
+                duration: Some(std::time::Duration::from_secs(60)),
+                cover: None,
+                url: Some(format!("fake://{id}")),
+                qualities: vec![],
+            },
+            uri: format!("fake://{id}"),
+            media: None,
+        })
+    }
+}
+
+async fn test_engine(cred_ok: bool) -> EngineHandle {
+    let (state_tx, _) = watch::channel(PlaybackState::default());
+    let (events_tx, _) = broadcast::channel(16);
+    let driver = Arc::new(SDriver { state_tx, events_tx });
+    PlaybackEngine::start(driver, Arc::new(SResolver), Arc::new(move || cred_ok))
+}
+
+async fn temp_socket() -> (PathBuf, UnixListener) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hmp-test.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    (path, listener)
+}
+
+async fn request(sock: &PathBuf, req: &Request) -> Response {
+    let mut stream = UnixStream::connect(sock).await.unwrap();
+    stream.write_all(&encode_frame(req).unwrap()).await.unwrap();
+    let mut buf = vec![0u8; 65536];
+    let n = stream.read(&mut buf).await.unwrap();
+    decode_frame::<Response>(&buf[..n]).unwrap()
+}
+
+#[tokio::test]
+async fn status_returns_daemon_state() {
+    let (sock, listener) = temp_socket().await;
+    let handle = test_engine(true).await;
+    tokio::spawn(async move { serve(listener, handle).await });
+    let resp = request(&sock, &Request::Status).await;
+    assert!(matches!(resp, Response::Status(_)));
+}
+
+#[tokio::test]
+async fn queue_query_returns_snapshot() {
+    let (sock, listener) = temp_socket().await;
+    let handle = test_engine(true).await;
+    tokio::spawn(async move { serve(listener, handle).await });
+    let resp = request(&sock, &Request::Queue).await;
+    assert!(matches!(resp, Response::Queue(_)));
+}
+
+#[tokio::test]
+async fn subscribe_pushes_initial_and_changes() {
+    let (sock, listener) = temp_socket().await;
+    let (state_tx, _) = watch::channel(PlaybackState::default());
+    let (events_tx, _) = broadcast::channel(16);
+    let driver = Arc::new(SDriver { state_tx: state_tx.clone(), events_tx });
+    let handle = PlaybackEngine::start(driver.clone(), Arc::new(SResolver), Arc::new(|| true));
+    tokio::spawn(async move { serve(listener, handle).await });
+    let mut stream = UnixStream::connect(&sock).await.unwrap();
+    stream.write_all(&encode_frame(&Request::Subscribe).unwrap()).await.unwrap();
+    let mut buf = vec![0u8; 65536];
+    let n = stream.read(&mut buf).await.unwrap();
+    let ev: Event = decode_frame(&buf[..n]).unwrap();
+    assert!(matches!(ev, Event::StateChanged(_)));
+    // 触发状态变更 → 订阅帧（select 轮询间隔 100ms，等 300ms）
+    state_tx.send_modify(|s| s.status = PlaybackStatus::Paused);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let n = stream.read(&mut buf).await.unwrap();
+    let ev2: Event = decode_frame(&buf[..n]).unwrap();
+    assert!(matches!(ev2, Event::StateChanged(_)));
+}
+
 #[tokio::test]
 async fn malformed_frame_gets_bad_request() {
-    // 写非法帧（长度前缀与内容不符）→ 收 Response::Err{BadRequest}
+    let (sock, listener) = temp_socket().await;
+    let handle = test_engine(true).await;
+    tokio::spawn(async move { serve(listener, handle).await });
+    let mut stream = UnixStream::connect(&sock).await.unwrap();
+    // 长度 4 + 非法 JSON（非 Request）→ decode 失败 → BadRequest
+    stream.write_all(&[4, 0, 0, 0, b'j', b'u', b'n', b'k']).await.unwrap();
+    let mut buf = vec![0u8; 65536];
+    let n = stream.read(&mut buf).await.unwrap();
+    let resp: Response = decode_frame(&buf[..n]).unwrap();
+    assert!(matches!(resp, Response::Err { code: IpcErrorCode::BadRequest, .. }));
 }
+
 #[tokio::test]
 async fn play_without_credentials_returns_not_logged_in() {
-    // 未登录环境（清空凭证）→ Play → Response::Err{NotLoggedIn}
+    let (sock, listener) = temp_socket().await;
+    let handle = test_engine(false).await;
+    tokio::spawn(async move { serve(listener, handle).await });
+    let resp = request(&sock, &Request::Play(PlayRequest::Track(TrackId::new("m1")))).await;
+    assert!(matches!(resp, Response::Err { code: IpcErrorCode::NotLoggedIn, .. }));
 }
 ```
-> 测试用 `tempfile` 的临时目录 + `HMP_CREDENTIAL_*` 环境变量（hmp-storage 的 `store_from_env`/`BackendKind::from_env` 支持 env 配置，见 login.rs 用法）隔离凭证。引擎测试用 FakeDriver + 真实 client（不触网，因为不走解析路径）。
+> 测试需 `tempfile`（已在 Cargo.toml dev-dependencies）。`LoadRequest`/`PlayerCommand` 从 `hmp_player_gst`/`hmp_core` 导入。订阅测试依赖服务器 select 轮询间隔（100ms）→ 等待 300ms 保证帧到达。
 
 - [ ] **Step 7: 全量验证 + 提交**
 
