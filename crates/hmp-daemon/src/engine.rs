@@ -1591,6 +1591,40 @@ mod tests {
         );
     }
 
+    /// G2：EOS 续播同样消费预解析缓存（零额外 resolve）。
+    #[tokio::test]
+    async fn preload_consumed_on_eos() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(resolver.resolve_calls(), 2, "a + 预解析 b");
+        // EOS（当前代 gen=1）→ 续播 b，消费预解析缓存。
+        driver.emit(PlayerEvent::PlaybackEnded { load_gen: 1 });
+        wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(
+            resolver.resolve_calls(),
+            2,
+            "EOS 续播应消费预解析缓存，不再次 resolve"
+        );
+        assert_eq!(
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref()),
+            Some("b")
+        );
+    }
+
     /// G2：RG 增益在装载时叠加到用户音量；SetVolume 后仍叠加；换曲自动切换。
     #[tokio::test]
     // 锁仅用于串行化改 env 的测试；引擎任务从不获取该锁，无死锁风险。
