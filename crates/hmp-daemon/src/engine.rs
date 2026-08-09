@@ -25,6 +25,13 @@ struct AppliedLoad {
     load_gen: u64,
 }
 
+/// 当前播放会话（媒体库写回锚点：event id 精确闭合）。
+#[derive(Clone)]
+struct PlaybackSession {
+    track_id: i64,
+    event_id: i64,
+}
+
 /// 引擎句柄（服务器 / tray / MPRIS 持有；可 Clone）。
 #[derive(Clone)]
 pub struct EngineHandle {
@@ -76,8 +83,8 @@ pub struct PlaybackEngine {
     term_tx: watch::Sender<bool>,
     /// 媒体库（播放会话写库；不可用时为 None，播放不阻断）。
     library: Option<std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>>,
-    /// 当前播放会话的 DB track id（供会话结束回写）。
-    current_db_track: Option<i64>,
+    /// 当前播放会话（媒体库写回锚点：event id 精确闭合）。
+    session: Option<PlaybackSession>,
     /// 最近一次成功装载（失败回滚用）。
     last_load: Option<AppliedLoad>,
     /// 等待驱动应用装载的超时（测试注入短超时）。
@@ -139,7 +146,7 @@ impl PlaybackEngine {
             caps_tx,
             term_tx,
             library,
-            current_db_track: None,
+            session: None,
             last_load: None,
             load_timeout,
         };
@@ -201,14 +208,18 @@ impl PlaybackEngine {
                             let saved = self.queue.save_state();
                             if self.queue.remove(i) {
                                 if was_current {
-                                    let old_db_track = self.current_db_track;
+                                    // 装载前捕获旧会话与旧位置（listened_ms 用换曲时刻位置）。
+                                    let old_session = self.session.clone();
+                                    let old_position = self.state_rx.borrow().position;
                                     if let Some(id) = self.queue.current().cloned() {
                                         if self.load_and_play(id).await.is_ok() {
-                                            // 装载成功：关闭命令前的旧会话（同曲延续则跳过）。
-                                            if let Some(old) = old_db_track {
-                                                if self.current_db_track != Some(old) {
-                                                    self.close_session(old, "manual");
-                                                }
+                                            // 装载成功：关闭命令前的旧会话。
+                                            if let Some(old) = old_session {
+                                                self.close_session(
+                                                    &old,
+                                                    "manual",
+                                                    old_position.as_millis() as i64,
+                                                );
                                             }
                                         } else {
                                             // 装载失败：回滚队列（被删曲目回到原位，
@@ -361,13 +372,13 @@ impl PlaybackEngine {
         let Some(id) = self.queue.skip_next() else {
             return;
         };
-        let old_db_track = self.current_db_track;
+        // 装载前捕获旧会话与旧位置（listened_ms 用换曲时刻位置，非新曲 ~0）。
+        let old_session = self.session.clone();
+        let old_position = self.state_rx.borrow().position;
         if self.load_and_play(id).await.is_ok() {
-            // 装载成功才切换会话：关闭命令前打开的会话（同曲连续播放则延续）。
-            if let Some(old) = old_db_track {
-                if self.current_db_track != Some(old) {
-                    self.close_session(old, "next");
-                }
+            // 装载成功才切换会话：关闭命令前打开的会话。
+            if let Some(old) = old_session {
+                self.close_session(&old, "next", old_position.as_millis() as i64);
             }
         } else {
             // 装载失败：回滚队列位置（原曲继续播放，状态一致）。
@@ -381,12 +392,11 @@ impl PlaybackEngine {
         let Some(id) = self.queue.prev_track() else {
             return;
         };
-        let old_db_track = self.current_db_track;
+        let old_session = self.session.clone();
+        let old_position = self.state_rx.borrow().position;
         if self.load_and_play(id).await.is_ok() {
-            if let Some(old) = old_db_track {
-                if self.current_db_track != Some(old) {
-                    self.close_session(old, "previous");
-                }
+            if let Some(old) = old_session {
+                self.close_session(&old, "previous", old_position.as_millis() as i64);
             }
         } else {
             self.queue.restore_state(saved);
@@ -431,14 +441,14 @@ impl PlaybackEngine {
         // 列表元数据批量缓存进媒体库（投影层查询用；库不可用不阻断播放）。
         self.cache_stubs(&stubs);
         let ids: Vec<TrackId> = stubs.iter().map(|s| s.id.clone()).collect();
-        let old_db_track = self.current_db_track;
+        // 装载前捕获旧会话与旧位置（listened_ms 用换曲时刻位置，非新曲 ~0）。
+        let old_session = self.session.clone();
+        let old_position = self.state_rx.borrow().position;
         match self.load_and_play(ids[0].clone()).await {
             Ok(()) => {
-                // 提交：关闭命令前打开的旧会话（同曲连续播放则延续）。
-                if let Some(old) = old_db_track {
-                    if self.current_db_track != Some(old) {
-                        self.close_session(old, "manual");
-                    }
+                // 提交：关闭命令前打开的旧会话。
+                if let Some(old) = old_session {
+                    self.close_session(&old, "manual", old_position.as_millis() as i64);
                 }
                 if playnext {
                     // 整片插入当前曲之后（多曲目；空队列按 replace 建队）。
@@ -482,8 +492,8 @@ impl PlaybackEngine {
 
     /// 媒体库：upsert 曲目并开启播放会话（B4 会话粒度：INSERT play_events）。
     /// 库不可用/写失败不阻断播放（仅 warn 级）。
-    /// 同曲目连续播放（重播/循环）不新建会话——会话延续，避免同一曲目
-    /// 留下两条未闭合记录（P1 会话一致性）。
+    /// 媒体库：upsert 曲目并开启播放会话（B4 会话粒度：INSERT play_events 返回
+    /// event id）。每次播放动作独立会话（同曲重播也新建——listened_ms 各自记录）。
     fn start_session(&mut self, track: &hmp_core::Track) {
         let Some(library) = &self.library else {
             return;
@@ -491,40 +501,38 @@ impl PlaybackEngine {
         let mut library = library.lock().unwrap();
         let row = track_row(track);
         match library.upsert_track(&row) {
-            Ok(track_id) => {
-                if self.current_db_track == Some(track_id) {
-                    return; // 同曲延续
+            Ok(track_id) => match library.record_play_start(track_id, now_unix()) {
+                Ok(event_id) => {
+                    self.session = Some(PlaybackSession { track_id, event_id });
                 }
-                if library.record_play_start(track_id, now_unix()).is_ok() {
-                    self.current_db_track = Some(track_id);
-                }
-            }
+                Err(e) => tracing::warn!(%e, "媒体库会话开启失败"),
+            },
             Err(e) => tracing::warn!(%e, "媒体库 upsert 失败"),
         }
     }
 
-    /// 媒体库：结束当前播放会话（UPDATE play_events + 播放次数）。
+    /// 媒体库：结束当前播放会话（按 event id 精确闭合 + 播放次数）。
     /// 收听时长 = 当前播放位置（位置无时长上限时原样记录）。
     fn end_session(&mut self, reason: &'static str) {
-        if let Some(track_id) = self.current_db_track.take() {
-            self.close_session(track_id, reason);
+        if let Some(s) = self.session.take() {
+            let listened_ms = self.state_rx.borrow().position.as_millis() as i64;
+            self.close_session(&s, reason, listened_ms);
         }
     }
 
-    /// 按曲目 id 关闭播放会话（事务提交路径用：先装载成功、后关闭旧会话）。
-    fn close_session(&self, track_id: i64, reason: &'static str) {
+    /// 按事件 id 关闭播放会话（事务提交路径用：换曲前捕获的旧位置作 listened_ms）。
+    fn close_session(&self, s: &PlaybackSession, reason: &'static str, listened_ms: i64) {
         let Some(library) = &self.library else {
             return;
         };
-        let listened_ms = self.state_rx.borrow().position.as_millis() as i64;
         let mut library = library.lock().unwrap();
         let end = hmp_storage::PlayEnd {
-            track_id,
+            track_id: s.track_id,
             ended_at: now_unix(),
             listened_ms,
             reason,
         };
-        if let Err(e) = library.record_play_end(&end) {
+        if let Err(e) = library.record_play_end(s.event_id, &end) {
             tracing::warn!(%e, "媒体库会话结束回写失败");
         }
     }
@@ -2169,9 +2177,10 @@ mod tests {
         );
     }
 
-    /// 同曲重播（Play 同一曲目）：会话延续，不新建未闭合记录。
+    /// Task 5：同曲重播 = 两条独立会话（不再按 track 延续合并）；
+    /// 旧会话闭合用换曲时刻的旧位置作 listened_ms。
     #[tokio::test]
-    async fn same_track_replay_continues_session() {
+    async fn replay_same_track_creates_two_sessions() {
         use hmp_storage::LibraryDb;
 
         let (driver, _sr, _er) = FakeDriver::new();
@@ -2184,6 +2193,9 @@ mod tests {
             .await
             .unwrap();
         wait_idle().await;
+        driver
+            .state_tx
+            .send_modify(|s| s.position = std::time::Duration::from_secs(30));
         handle
             .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
             .await
@@ -2191,8 +2203,54 @@ mod tests {
         wait_idle().await;
         let mut lib = library.lock().unwrap();
         let recent = lib.recent_plays(10).unwrap();
-        assert_eq!(recent.len(), 1, "同曲重播不得新建会话");
-        assert_eq!(recent[0].ended_at, None, "会话保持打开");
+        assert_eq!(
+            recent.len(),
+            2,
+            "同曲重播 = 两条独立会话（不再按 track 延续合并）"
+        );
+        // recent_plays 按 started_at DESC：recent[0] 为第二次播放（open），
+        // recent[1] 为第一次（以换曲时刻位置 30s 闭合）。
+        assert!(recent[1].ended_at.is_some() && recent[1].listened_ms == 30_000);
+        assert_eq!(recent[1].reason, "manual");
+        assert!(recent[0].ended_at.is_none());
+    }
+
+    /// Task 5：手动换曲——旧会话闭合用换曲时刻的旧位置（而非新曲刚装载的 ~0）。
+    #[tokio::test]
+    async fn manual_change_closes_old_session_with_old_position() {
+        use hmp_storage::LibraryDb;
+
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("b")]]);
+        let library = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let (handle, _st) =
+            start_engine_with_library(driver.clone(), resolver, library.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        // 位置前进到 90s（模拟播放中）。
+        driver
+            .state_tx
+            .send_modify(|s| s.position = std::time::Duration::from_secs(90));
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let mut lib = library.lock().unwrap();
+        let recent = lib.recent_plays(10).unwrap();
+        assert_eq!(recent.len(), 2, "两条独立会话");
+        // recent_plays 按 started_at DESC：recent[0] 为新曲 b（open），
+        // recent[1] 为旧曲 a（以换曲时刻位置 90s 闭合）。
+        assert!(recent[1].ended_at.is_some(), "旧会话已闭合");
+        assert_eq!(
+            recent[1].listened_ms, 90_000,
+            "旧会话 listened_ms 用换曲时刻位置"
+        );
+        assert_eq!(recent[1].reason, "manual");
+        assert!(recent[0].ended_at.is_none(), "新会话保持 open");
     }
 
     /// P1 #5：track_row 按 provider 写 source（本地曲目不得写成 qq）。

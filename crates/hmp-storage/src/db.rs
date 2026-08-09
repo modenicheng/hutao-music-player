@@ -244,28 +244,25 @@ impl LibraryDb {
         )
     }
 
-    /// 记录播放会话开始（INSERT play_events）。
-    pub fn record_play_start(&mut self, track_id: i64, started_at: i64) -> rusqlite::Result<()> {
+    /// 记录播放会话开始（INSERT play_events），返回事件 id（供结束按 id 精确
+    /// 闭合——同一曲目连续播放产生独立会话，不再按 track_id 猜测）。
+    pub fn record_play_start(&mut self, track_id: i64, started_at: i64) -> rusqlite::Result<i64> {
         self.conn.execute(
             "INSERT INTO play_events (track_id, started_at) VALUES (?1, ?2)",
             params![track_id, started_at],
         )?;
-        Ok(())
+        Ok(self.conn.last_insert_rowid())
     }
 
-    /// 结束播放会话：闭合最近一条未结束的事件（按 track + 最新 started_at），
+    /// 结束播放会话：按事件 id 精确闭合（同曲重播各自独立闭合），
     /// 累加播放次数与最近播放时间（两 SQL 同事务：历史闭合失败则计数不更新）。
-    pub fn record_play_end(&mut self, e: &PlayEnd) -> rusqlite::Result<()> {
+    pub fn record_play_end(&mut self, event_id: i64, e: &PlayEnd) -> rusqlite::Result<()> {
         self.conn.execute_batch("BEGIN")?;
         let result = (|| -> rusqlite::Result<()> {
             let updated = self.conn.execute(
                 r#"UPDATE play_events SET ended_at = ?2, listened_ms = ?3, end_reason = ?4
-                   WHERE id = (
-                     SELECT id FROM play_events
-                     WHERE track_id = ?1 AND ended_at IS NULL
-                     ORDER BY started_at DESC, id DESC LIMIT 1
-                   )"#,
-                params![e.track_id, e.ended_at, e.listened_ms, e.reason],
+                   WHERE id = ?1 AND ended_at IS NULL"#,
+                params![event_id, e.ended_at, e.listened_ms, e.reason],
             )?;
             if updated > 0 {
                 self.conn.execute(
@@ -1488,13 +1485,16 @@ mod tests {
     fn play_session_roundtrip() {
         let mut db = LibraryDb::open_in_memory().unwrap();
         let id = db.upsert_track(&row()).unwrap();
-        db.record_play_start(id, 1000).unwrap();
-        db.record_play_end(&PlayEnd {
-            track_id: id,
-            ended_at: 1000 + 120,
-            listened_ms: 115_000,
-            reason: "ended",
-        })
+        let event_id = db.record_play_start(id, 1000).unwrap();
+        db.record_play_end(
+            event_id,
+            &PlayEnd {
+                track_id: id,
+                ended_at: 1000 + 120,
+                listened_ms: 115_000,
+                reason: "ended",
+            },
+        )
         .unwrap();
         let recent = db.recent_plays(10).unwrap();
         assert_eq!(recent.len(), 1);
@@ -1528,13 +1528,16 @@ mod tests {
         let mut db = LibraryDb::open_in_memory().unwrap();
         let id = db.upsert_track(&row()).unwrap();
         db.record_play_start(id, 1000).unwrap();
-        db.record_play_start(id, 2000).unwrap(); // 换曲又回来（两段会话）
-        db.record_play_end(&PlayEnd {
-            track_id: id,
-            ended_at: 2100,
-            listened_ms: 90_000,
-            reason: "ended",
-        })
+        let id2 = db.record_play_start(id, 2000).unwrap(); // 换曲又回来（两段会话）
+        db.record_play_end(
+            id2,
+            &PlayEnd {
+                track_id: id,
+                ended_at: 2100,
+                listened_ms: 90_000,
+                reason: "ended",
+            },
+        )
         .unwrap();
         let recent = db.recent_plays(10).unwrap();
         assert_eq!(recent.len(), 2);
@@ -1572,6 +1575,57 @@ mod tests {
         assert!(db.is_favorite(id).unwrap());
         db.remove_favorite(id).unwrap();
         assert!(!db.is_favorite(id).unwrap());
+    }
+
+    /// 每次 record_play_start 返回独立事件 id；record_play_end 按 id 精确闭合
+    /// （同曲多段会话互不影响）；重复闭合同 id 幂等（不重复累加播放次数）。
+    #[test]
+    fn play_start_returns_id_and_end_closes_by_id() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let id = db.upsert_track(&row()).unwrap();
+        let id1 = db.record_play_start(id, 1000).unwrap();
+        let id2 = db.record_play_start(id, 2000).unwrap();
+        assert_ne!(id1, id2, "每次开始都返回独立事件 id");
+        // 按 id1 精确闭合：只影响第一条。
+        db.record_play_end(
+            id1,
+            &PlayEnd {
+                track_id: id,
+                ended_at: 3000,
+                listened_ms: 500,
+                reason: "ended",
+            },
+        )
+        .unwrap();
+        let open: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM play_events WHERE ended_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 1, "只有第二条仍 open");
+        // 重复闭合同 id：幂等（updated=0，play_count 不重复累加）。
+        db.record_play_end(
+            id1,
+            &PlayEnd {
+                track_id: id,
+                ended_at: 3000,
+                listened_ms: 500,
+                reason: "ended",
+            },
+        )
+        .unwrap();
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT play_count FROM tracks WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "重复闭合不重复累加");
     }
 
     /// 启动恢复：遗留 open session 全部闭合（end_reason='interrupted'），幂等。
