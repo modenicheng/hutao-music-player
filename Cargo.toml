@@ -55,6 +55,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 url = "2"
+notify = "6"
 hmp-core = { path = "crates/hmp-core" }
 hmp-storage = { path = "crates/hmp-storage" }
 

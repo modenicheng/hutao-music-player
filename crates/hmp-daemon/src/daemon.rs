@@ -17,6 +17,8 @@ pub struct DaemonConfig {
 /// 组装后端并返回引擎句柄（服务器/tray/MPRIS 由 Task 3/5/6 接入）。
 pub struct Daemon {
     pub handle: EngineHandle,
+    /// 本地目录监听（保活：drop 即停止；serve.rs 持 Daemon 到进程结束）。
+    _watcher: Option<crate::watcher::LocalWatcher>,
 }
 
 impl Daemon {
@@ -66,7 +68,9 @@ impl Daemon {
             store_from_env(),
             library.clone(),
         ));
-        handle.library = Some(library);
+        handle.library = Some(library.clone());
+        // 本地目录监听（E2）：scan_roots 变化自动入库；无 root 时静默不启动。
+        let watcher = crate::watcher::LocalWatcher::spawn(library);
         // 已登录则启动即拉一次 QQ 用户库快照（spec §4：daemon 启动有凭证时 reconcile）。
         if store_from_env()
             .load()
@@ -76,6 +80,9 @@ impl Daemon {
         {
             sync_handle.reconcile();
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            _watcher: watcher,
+        })
     }
 }

@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 libc = "0.2"
 url = "2"
+notify = { workspace = true }
 
 [features]
 default = ["tray", "mpris"]

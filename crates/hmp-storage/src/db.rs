@@ -1006,6 +1006,23 @@ impl LibraryDb {
         rows.collect()
     }
 
+    /// 路径所属扫描根（canonical 前缀匹配）→ (root_id, 当前 generation)。
+    /// 供 watcher 事件处理：单文件入库用 root 当前代际，不推进 generation。
+    pub fn scan_root_for(&mut self, path: &Path) -> rusqlite::Result<Option<(i64, i64)>> {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let roots: Vec<(i64, String, i64)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, path, generation FROM scan_roots")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        Ok(roots
+            .into_iter()
+            .find(|(_, root, _)| canonical.starts_with(std::path::Path::new(root)))
+            .map(|(id, _, generation)| (id, generation)))
+    }
+
     /// 收藏曲目（upsert 曲目行 + 收藏；幂等）。
     /// `source`/`source_key` 与播放历史一致（qq → mid；local → `local:<path>`）。
     /// 收藏曲目（本地先提交：upsert 曲目行 + relations(track,liked,desired=true)）。
