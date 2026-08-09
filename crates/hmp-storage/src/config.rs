@@ -119,6 +119,15 @@ impl QualityPref {
 pub struct Config {
     #[serde(default)]
     pub quality: QualityPref,
+    #[serde(default)]
+    pub audio: AudioPref,
+}
+
+/// 音频输出偏好（`[audio]` 段；`sink` = GStreamer sink 元素名，None = 系统默认）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioPref {
+    #[serde(default)]
+    pub sink: Option<String>,
 }
 
 impl Config {
@@ -204,10 +213,37 @@ mod tests {
     }
 
     #[test]
+    fn audio_sink_roundtrips_and_defaults() {
+        with_isolated_config(|| {
+            // [audio] 段 → sink 读取。
+            let path = Config::path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "[audio]\nsink = \"fakesink\"\n").unwrap();
+            let c = Config::load();
+            assert_eq!(c.audio.sink.as_deref(), Some("fakesink"));
+            // 无 [audio] 段 → None（旧配置兼容）。
+            std::fs::write(&path, "[quality]\nmode = \"auto\"\n").unwrap();
+            let c2 = Config::load();
+            assert_eq!(c2.audio.sink, None);
+            // 序列化往返。
+            let c3 = Config {
+                audio: AudioPref {
+                    sink: Some("pulsesink".into()),
+                },
+                ..Default::default()
+            };
+            let text = toml::to_string(&c3).unwrap();
+            let back: Config = toml::from_str(&text).unwrap();
+            assert_eq!(back.audio.sink.as_deref(), Some("pulsesink"));
+        });
+    }
+
+    #[test]
     fn save_load_roundtrip() {
         with_isolated_config(|| {
             let c = Config {
                 quality: QualityPref::from_mode(QualityMode::Fixed(AudioQuality::Flac), false),
+                ..Default::default()
             };
             c.save().unwrap();
             let loaded = Config::load();

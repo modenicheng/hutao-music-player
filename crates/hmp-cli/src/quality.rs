@@ -29,7 +29,10 @@ pub fn set(alias: &str, fallback: bool) -> Result<String, String> {
         QualityMode::Fixed(q)
     };
     let pref = QualityPref::from_mode(mode, fallback);
-    let config = Config { quality: pref };
+    let config = Config {
+        quality: pref,
+        ..Default::default()
+    };
     config.save().map_err(|e| format!("写入配置失败: {e}"))?;
     Ok(format!(
         "已设置: {}\n生效链: {}",

@@ -38,7 +38,18 @@ pub fn spawn_detached(args: &[&str]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 合并输出设备：显式注入优先，否则用 config.toml `[audio] sink`（无 → None）。
+/// 里程碑 G：输出设备选择（`config.toml [audio] sink` → GstDriver）。
+fn merge_audio_sink(injected: Option<&str>, configured: Option<String>) -> Option<String> {
+    injected.map(|s| s.to_string()).or(configured)
+}
+
 async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // 里程碑 G：输出设备来自 config.toml `[audio] sink`（显式注入优先；无段 → 系统默认）。
+    let audio = hmp_storage::Config::load().audio;
+    let cfg = DaemonConfig {
+        audio_sink: merge_audio_sink(cfg.audio_sink.as_deref(), audio.sink),
+    };
     let path = server::socket_path();
     // 父目录（XDG_RUNTIME_DIR 已存在；/tmp/hmp-{uid} 回退目录须创建且仅属本用户，
     // final review Finding 5）。
@@ -137,4 +148,27 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
     drop(mpris);
     tracing::info!("后端已退出");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 里程碑 G：输出设备合并——显式注入优先于配置；配置缺失 → None。
+    #[test]
+    fn audio_sink_config_merges_with_injection() {
+        assert_eq!(
+            merge_audio_sink(Some("injected"), Some("configed".into())),
+            Some("injected".to_string())
+        );
+        assert_eq!(
+            merge_audio_sink(None, Some("configed".into())),
+            Some("configed".to_string())
+        );
+        assert_eq!(merge_audio_sink(None, None), None);
+        assert_eq!(
+            merge_audio_sink(Some("injected"), None),
+            Some("injected".to_string())
+        );
+    }
 }
