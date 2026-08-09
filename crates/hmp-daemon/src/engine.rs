@@ -168,6 +168,9 @@ pub struct PlaybackEngine {
     user_volume: f64,
     /// 当前曲 ReplayGain 增益因子（无标签/关闭 = 1.0）。
     rg_factor: f64,
+    /// 当前曲 ReplayGain 标签增益（dB 原值，未 clamp；无标签 → None）。
+    /// 打磨：随 DaemonState 发布供 CLI status 展示。
+    current_rg_db: Option<f64>,
     /// 等待驱动应用装载的超时（测试注入短超时）。
     load_timeout: std::time::Duration,
     /// 完整队列快照（仅结构变化时发送；position tick 不触发——O(1) publish）。
@@ -286,6 +289,7 @@ impl PlaybackEngine {
             preload_slot: Arc::new(Mutex::new(None)),
             user_volume: restored_volume.unwrap_or(1.0),
             rg_factor: 1.0,
+            current_rg_db: None,
             load_timeout,
             queue_tx,
             last_queue_rev: 0,
@@ -479,6 +483,7 @@ impl PlaybackEngine {
             caps,
             seq: self.seq,
             last_error: self.last_error.clone(),
+            replaygain_db: self.current_rg_db,
             phase: self.phase,
         };
         let _ = self.state_tx.send(state);
@@ -875,6 +880,8 @@ impl PlaybackEngine {
     /// [0.25, 4.0]（±12dB，防异常标签）；配置 `[audio] replaygain=false`
     /// 时恒为 1.0。驱动音量 = 用户音量 × 因子（用户调音量不丢补偿）。
     fn apply_gain(&mut self, replaygain_db: Option<f64>) {
+        // 打磨：记录标签 dB 原值（随 DaemonState 发布供 CLI 展示）。
+        self.current_rg_db = replaygain_db;
         let enabled = hmp_storage::Config::load().audio.replaygain;
         self.rg_factor = if enabled {
             match replaygain_db {
@@ -1781,6 +1788,43 @@ mod tests {
         unsafe {
             std::env::remove_var("XDG_CONFIG_HOME");
         }
+    }
+
+    /// 打磨：DaemonState 携带当前曲 RG 增益（CLI status 展示用）。
+    #[tokio::test]
+    // 锁仅用于串行化改 env 的测试；引擎任务从不获取该锁，无死锁风险。
+    #[allow(clippy::await_holding_lock)]
+    async fn state_exposes_replaygain_db() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        resolver
+            .replaygain
+            .lock()
+            .unwrap()
+            .push((TrackId::new("a"), -6.5));
+        let (handle, _st) = start_engine(driver.clone(), resolver.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(
+            handle.state_rx.borrow().replaygain_db,
+            Some(-6.5),
+            "当前曲应携带 RG 标签 dB"
+        );
+        // Next 到无 RG 曲目 → None。
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(
+            handle.state_rx.borrow().replaygain_db,
+            None,
+            "无 RG 曲目应为 None"
+        );
     }
 
     /// prev 恒跳上一首（不做 >3s 回开头）。

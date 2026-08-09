@@ -37,6 +37,11 @@ pub fn format_status(st: &DaemonState) -> String {
         Some(q) => s.push_str(&format!("音质: {}\n", q.to_alias())),
         None => s.push_str("音质: （无）\n"),
     }
+    // 打磨：当前曲 ReplayGain（无标签/QQ 曲目 → 无）。
+    match st.replaygain_db {
+        Some(db) => s.push_str(&format!("增益: {:+.1} dB\n", db)),
+        None => s.push_str("增益: （无）\n"),
+    }
     s.push_str(&format!(
         "循环: {:?}  随机: {}\n",
         st.playback.loop_mode, st.playback.shuffle
@@ -427,12 +432,14 @@ mod tests {
             caps: Default::default(),
             seq: 0,
             last_error: None,
+            replaygain_db: Some(6.0),
             phase: hmp_core::EnginePhase::Playing,
         };
         let s = format_status(&st);
         assert!(s.contains("稻香"));
         assert!(s.contains("Playing"));
         assert!(s.contains("00:30 / 05:00"));
+        assert!(s.contains("增益: +6.0 dB"));
     }
 
     #[test]
@@ -511,6 +518,7 @@ mod tests {
             caps: Default::default(),
             seq,
             last_error: None,
+            replaygain_db: None,
             phase: hmp_core::EnginePhase::Idle,
         }
     }

@@ -211,6 +211,9 @@ pub struct DaemonState {
     pub seq: u64,
     /// 最近一次命令的错误（解析失败等；成功操作时清空，Finding 2）。
     pub last_error: Option<ErrorInfo>,
+    /// 当前曲 ReplayGain 标签增益（dB，未 clamp 原值；无标签/QQ 曲目 → None）。
+    /// 打磨：CLI status 展示用（MPRIS 无 RG 标准字段，不做非标扩展）。
+    pub replaygain_db: Option<f64>,
     /// 播放引擎阶段。
     pub phase: EnginePhase,
 }
@@ -456,6 +459,7 @@ mod tests {
                 code: IpcErrorCode::TrackNotFound,
                 message: "曲目不存在".into(),
             }),
+            replaygain_db: Some(-6.5),
             phase: EnginePhase::Playing,
         };
         let frame = encode_frame(&st).unwrap();
