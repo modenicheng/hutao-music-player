@@ -770,6 +770,7 @@ impl AppCore {
             uri: resolved.uri,
             track: item.track.clone(),
             quality,
+            load_gen: 0, // 桌面端直连驱动，无代际过滤需求
         });
         self.current_lyrics = Some((item.mid.clone(), item.song_type));
         self.start_lyrics_load(item.mid.clone(), item.song_type);

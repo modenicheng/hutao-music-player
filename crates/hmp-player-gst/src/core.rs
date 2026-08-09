@@ -315,15 +315,18 @@ async fn drive(
                         pending_error = Some(msg.clone());
                         state.status = PlaybackStatus::Error;
                         let _ = state_tx.send(state.clone());
-                        let _ = events_tx.send(PlayerEvent::Error(
-                            HmpError::Playback(msg),
-                        ));
+                        let _ = events_tx.send(PlayerEvent::Error {
+                            load_gen: loaded_gen,
+                            error: HmpError::Playback(msg),
+                        });
                     }
                     BusEvent::Eos => {
                         state.status = PlaybackStatus::Ended;
                         state.position = state.duration.unwrap_or(state.position);
                         let _ = state_tx.send(state.clone());
-                        let _ = events_tx.send(PlayerEvent::PlaybackEnded);
+                        let _ = events_tx.send(PlayerEvent::PlaybackEnded {
+                            load_gen: loaded_gen,
+                        });
                     }
                     BusEvent::Position(pos) => {
                         if let Some(ct) = pos {
@@ -476,7 +479,7 @@ mod tests {
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_millis(50)).await;
             if let Ok(e) = ev.try_recv() {
-                if matches!(e, PlayerEvent::Error(_)) {
+                if matches!(e, PlayerEvent::Error { .. }) {
                     saw_error = true;
                 }
             }
@@ -488,6 +491,30 @@ mod tests {
             }
         }
         assert!(saw_error, "missing file should produce error");
+        core.shutdown();
+    }
+
+    #[tokio::test]
+    async fn error_event_carries_loaded_gen() {
+        let core = PlayerCore::new_with_sink(Some("fakeaudiosink")).expect("init");
+        let mut ev = core.subscribe_events();
+        let mut req = load_req(sample_track(), "file:///definitely/missing/file.aiff");
+        req.load_gen = 7;
+        core.load(req);
+        core.play();
+        let mut got: Option<u64> = None;
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Ok(e) = ev.try_recv() {
+                if let PlayerEvent::Error { load_gen, .. } = e {
+                    got = Some(load_gen);
+                }
+            }
+            if got.is_some() {
+                break;
+            }
+        }
+        assert_eq!(got, Some(7), "Error 事件必须携带装载代际 7");
         core.shutdown();
     }
 }

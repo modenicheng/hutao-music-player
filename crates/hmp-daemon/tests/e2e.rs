@@ -473,7 +473,7 @@ async fn wait_next_ended(
     tokio::time::timeout(timeout, async {
         loop {
             match events.recv().await {
-                Ok(hmp_player_gst::PlayerEvent::PlaybackEnded) => return,
+                Ok(hmp_player_gst::PlayerEvent::PlaybackEnded { .. }) => return,
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {

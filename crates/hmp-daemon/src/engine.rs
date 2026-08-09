@@ -244,7 +244,7 @@ impl PlaybackEngine {
                 }
                 ev = events_rx.recv() => {
                     match ev {
-                        Ok(PlayerEvent::PlaybackEnded) => {
+                        Ok(PlayerEvent::PlaybackEnded { load_gen: _ }) => {
                             // 滞后事件防护（spec §7）：新曲装载中（Loading）或装载完成
                             // 500ms 内到达的 EOS 属旧曲目 → 忽略，不触发换曲。
                             if self.phase == hmp_core::EnginePhase::Loading
@@ -257,7 +257,7 @@ impl PlaybackEngine {
                                 self.on_ended().await;
                             }
                         }
-                        Ok(PlayerEvent::Error(_)) => {
+                        Ok(PlayerEvent::Error { .. }) => {
                             // 不自动跳歌（spec §7）；装载窗口内的错误事件属旧曲 → 忽略
                             // （装载结果由 load_and_play 决定）。
                             if self.phase == hmp_core::EnginePhase::Loading {
@@ -1032,7 +1032,7 @@ mod tests {
         wait_idle().await;
         tokio::time::sleep(std::time::Duration::from_millis(600)).await; // 滞后窗口外
         tokio::time::sleep(std::time::Duration::from_millis(600)).await; // 滞后窗口外
-        driver.emit(PlayerEvent::PlaybackEnded);
+        driver.emit(PlayerEvent::PlaybackEnded { load_gen: 0 });
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(1));
         assert_eq!(
@@ -1053,7 +1053,7 @@ mod tests {
             .unwrap();
         wait_idle().await;
         tokio::time::sleep(std::time::Duration::from_millis(600)).await; // 滞后窗口外
-        driver.emit(PlayerEvent::PlaybackEnded);
+        driver.emit(PlayerEvent::PlaybackEnded { load_gen: 0 });
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(0));
         assert_eq!(driver.loads.lock().unwrap().len(), 1); // 只加载过一次
@@ -1159,10 +1159,10 @@ mod tests {
             .unwrap();
         wait_idle().await;
         tokio::time::sleep(std::time::Duration::from_millis(600)).await; // 滞后窗口外
-        driver.emit(PlayerEvent::PlaybackEnded); // a → b
+        driver.emit(PlayerEvent::PlaybackEnded { load_gen: 0 }); // a → b
         wait_idle().await;
         tokio::time::sleep(std::time::Duration::from_millis(600)).await; // 滞后窗口外
-        driver.emit(PlayerEvent::PlaybackEnded); // b → a（回绕）
+        driver.emit(PlayerEvent::PlaybackEnded { load_gen: 0 }); // b → a（回绕）
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(0));
         assert_eq!(
@@ -1491,7 +1491,7 @@ mod tests {
             hmp_core::EnginePhase::Loading,
             "装载窗口内 phase 应为 Loading"
         );
-        driver.inner.emit(PlayerEvent::PlaybackEnded);
+        driver.inner.emit(PlayerEvent::PlaybackEnded { load_gen: 0 });
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         let st = handle.state_rx.borrow();
         assert_eq!(st.queue.current, Some(0), "滞后 EOS 不得触发换曲");
@@ -1519,7 +1519,7 @@ mod tests {
             .unwrap();
         wait_idle().await;
         // 装载完成后的迟到 EOS（<500ms）：忽略。
-        driver.emit(PlayerEvent::PlaybackEnded);
+        driver.emit(PlayerEvent::PlaybackEnded { load_gen: 0 });
         wait_idle().await;
         assert_eq!(
             handle.state_rx.borrow().queue.current,
@@ -1528,7 +1528,7 @@ mod tests {
         );
         // 窗口外（>500ms）的 EOS：正常续播。
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        driver.emit(PlayerEvent::PlaybackEnded);
+        driver.emit(PlayerEvent::PlaybackEnded { load_gen: 0 });
         wait_idle().await;
         assert_eq!(
             handle.state_rx.borrow().queue.current,

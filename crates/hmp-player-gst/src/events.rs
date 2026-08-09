@@ -7,10 +7,10 @@ use hmp_core::HmpError;
 pub enum PlayerEvent {
     /// 已加载新曲目（URI 已设置）。
     TrackChanged,
-    /// 播放到结尾（EOS）。
-    PlaybackEnded,
-    /// 播放出错。
-    Error(HmpError),
+    /// 播放到结尾（EOS）；携带装载代际（engine 过滤旧代）。
+    PlaybackEnded { load_gen: u64 },
+    /// 播放出错；携带装载代际。
+    Error { load_gen: u64, error: HmpError },
     /// 缓冲进度变化（0.0..=1.0，None=结束缓冲）。
     BufferingChanged(Option<f64>),
 }

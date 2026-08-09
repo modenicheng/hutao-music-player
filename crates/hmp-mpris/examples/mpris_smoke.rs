@@ -113,6 +113,7 @@ async fn main() {
         uri: format!("file://{}", aiff.display()),
         track,
         quality: AudioQuality::Mp3_128,
+        load_gen: 0,
     });
     core.play();
 
