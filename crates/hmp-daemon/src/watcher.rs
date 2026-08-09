@@ -13,10 +13,17 @@ use std::time::Duration;
 use hmp_storage::{LibraryDb, read_meta};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-/// 监听器句柄（drop = 停止监听与批处理任务）。
+/// 监听器句柄（drop = 终止批处理任务；任务持有的 watcher 随之释放，监听停止）。
 pub struct LocalWatcher {
     _watcher: Arc<Mutex<RecommendedWatcher>>,
     _task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for LocalWatcher {
+    fn drop(&mut self) {
+        // 终止批处理任务：任务持有 watcher 副本，abort 后监听随 runtime 释放停止。
+        self._task.abort();
+    }
 }
 
 /// 事件批处理队列（notify handler 线程只收集；后台任务每 1s 消费）。
@@ -111,18 +118,17 @@ impl LocalWatcher {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
                 let paths = task_queue.drain();
-                if paths.is_empty() {
-                    continue;
-                }
-                {
+                // 按文件短锁：拷贝大目录时每文件 1MB 指纹读不长时间阻塞 engine/sync。
+                for p in paths {
                     let mut lib = match task_library.lock() {
                         Ok(l) => l,
                         Err(_) => continue,
                     };
-                    for p in paths {
-                        Self::handle_event(&mut lib, &p);
-                    }
+                    Self::handle_event(&mut lib, &p);
+                    drop(lib);
                 }
+                // 每轮无条件刷新：空闲时新增 scan_roots（CLI 新扫描目录/外接盘恢复）
+                // 也能在 1s 内注册监听。
                 Self::refresh_roots(&task_library, &task_watcher, &mut watched_task).await;
             }
         });
@@ -147,7 +153,10 @@ impl LocalWatcher {
                 Err(_) => return,
             };
             let size = md.len();
-            let fp = hmp_storage::scan::file_fingerprint(p, size).unwrap_or_default();
+            // 指纹读失败：跳过该事件（空指纹会污染 find_by_fingerprint 候选）。
+            let Ok(fp) = hmp_storage::scan::file_fingerprint(p, size) else {
+                return;
+            };
             let local_meta = read_meta(p);
             let cover_uri = match &local_meta {
                 Some(m) => m

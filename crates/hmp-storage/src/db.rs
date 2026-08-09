@@ -1019,7 +1019,9 @@ impl LibraryDb {
         };
         Ok(roots
             .into_iter()
-            .find(|(_, root, _)| canonical.starts_with(std::path::Path::new(root)))
+            .filter(|(_, root, _)| canonical.starts_with(std::path::Path::new(root)))
+            // 最长前缀：嵌套扫描根（/music 与 /music/inner）取最内层。
+            .max_by_key(|(_, root, _)| root.len())
             .map(|(id, _, generation)| (id, generation)))
     }
 
@@ -2884,5 +2886,25 @@ mod tests {
         assert!(rows.iter().find(|r| r.track_id == 2).unwrap().missing);
         // scan_roots 查询
         assert!(db.scan_roots().unwrap().is_empty());
+    }
+
+    #[test]
+    fn scan_root_for_picks_longest_prefix() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("hmp-sr-{}", std::process::id()));
+        let inner = dir.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        let (rid1, gen1) = db.begin_scan(&dir).unwrap();
+        let (rid2, gen2) = db.begin_scan(&inner).unwrap();
+        // 嵌套 root：/music/inner/x.mp3 应命中内层 root。
+        let f = inner.join("x.mp3");
+        std::fs::write(&f, b"x").unwrap();
+        let hit = db.scan_root_for(&f).unwrap().unwrap();
+        assert_eq!(hit, (rid2, gen2), "嵌套 root 取最长前缀");
+        // 外层文件命中外层 root。
+        let outer = dir.join("y.mp3");
+        std::fs::write(&outer, b"y").unwrap();
+        let hit2 = db.scan_root_for(&outer).unwrap().unwrap();
+        assert_eq!(hit2, (rid1, gen1));
     }
 }
