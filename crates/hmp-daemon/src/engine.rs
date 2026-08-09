@@ -131,7 +131,10 @@ impl PlaybackEngine {
                         Request::PlayNext(src) => self.play_source(src, true).await,
                         Request::QueueAppend(src) => {
                             match self.resolver.resolve_source_ids(&src).await {
-                                Ok(ids) => {
+                                Ok(stubs) => {
+                                    self.cache_stubs(&stubs);
+                                    let ids: Vec<TrackId> =
+                                        stubs.into_iter().map(|s| s.id).collect();
                                     self.queue.append(ids);
                                     self.publish();
                                 }
@@ -332,8 +335,8 @@ impl PlaybackEngine {
     /// 队列变更与会话切换；装载失败则保持旧队列/旧会话/旧曲继续播放，
     /// 仅发布错误——CLI 不再把旧曲目当成新请求成功。
     async fn play_source(&mut self, src: PlayRequest, playnext: bool) {
-        let ids = match self.resolver.resolve_source_ids(&src).await {
-            Ok(ids) => ids,
+        let stubs = match self.resolver.resolve_source_ids(&src).await {
+            Ok(stubs) => stubs,
             Err(e) => {
                 // 解析失败 → 发布错误详情（Finding 2）+ 推进命令代际。
                 self.last_error = Some(error_info(&e));
@@ -342,7 +345,7 @@ impl PlaybackEngine {
                 return;
             }
         };
-        if ids.is_empty() {
+        if stubs.is_empty() {
             // 空源是确定性失败：携带错误，CLI 不用等到超时。
             self.last_error = Some(ErrorInfo {
                 code: IpcErrorCode::Internal,
@@ -352,6 +355,9 @@ impl PlaybackEngine {
             self.publish();
             return;
         }
+        // 列表元数据批量缓存进媒体库（投影层查询用；库不可用不阻断播放）。
+        self.cache_stubs(&stubs);
+        let ids: Vec<TrackId> = stubs.iter().map(|s| s.id.clone()).collect();
         let old_db_track = self.current_db_track;
         match self.load_and_play(ids[0].clone()).await {
             Ok(()) => {
@@ -445,6 +451,19 @@ impl PlaybackEngine {
         }
     }
 
+    /// 列表解析元数据批量缓存进媒体库（stub → tracks 行，单事务；投影层查询用）。
+    /// 库不可用/写失败仅 warn，不阻断播放（与 `start_session` 同一原则）。
+    fn cache_stubs(&self, stubs: &[hmp_core::TrackStub]) {
+        let Some(library) = &self.library else {
+            return;
+        };
+        let rows: Vec<hmp_storage::TrackRow> = stubs.iter().map(stub_row).collect();
+        let mut library = library.lock().unwrap();
+        if let Err(e) = library.upsert_tracks_batch(&rows) {
+            tracing::warn!(%e, "媒体库批量缓存失败");
+        }
+    }
+
     /// 解析 + 解密 + 加载 + 播放。装载失败返回错误（调用方决定回滚/保持）。
     async fn load_and_play(&mut self, id: TrackId) -> Result<(), EngineError> {
         // 成功路径：清除旧错误（Finding 2）。
@@ -529,6 +548,24 @@ fn track_row(t: &hmp_core::Track) -> hmp_storage::TrackRow {
         },
         duration_ms: t.duration.map(|d| d.as_millis() as i64),
         cover_uri: t.cover.as_ref().map(|c| c.url.clone()),
+    }
+}
+
+/// stub → 媒体库行（批量缓存；source 规则与 `track_row` 一致）。
+fn stub_row(s: &hmp_core::TrackStub) -> hmp_storage::TrackRow {
+    let source = if hmp_core::TrackProvider::from_id(&s.id.0) == hmp_core::TrackProvider::Local {
+        "local"
+    } else {
+        "qq"
+    };
+    hmp_storage::TrackRow {
+        source,
+        source_key: s.id.to_string(),
+        title: s.title.clone(),
+        album: s.album.clone(),
+        artist: (!s.artists.is_empty()).then(|| s.artists.join(", ")),
+        duration_ms: s.duration_ms,
+        cover_uri: None,
     }
 }
 
@@ -624,23 +661,45 @@ mod tests {
     /// 固定返回曲目列表的解析器（不触网）。
     #[derive(Debug)]
     pub struct FakeResolver {
-        pub ids: Mutex<Vec<Vec<TrackId>>>, // 每次 resolve_source_ids 弹出一个列表
+        pub stubs: Mutex<Vec<Vec<hmp_core::TrackStub>>>, // 每次 resolve_source_ids 弹出一个列表
     }
 
     impl FakeResolver {
+        /// 便捷构造：TrackId 列表（stub 元数据自动生成，title=id）。
         pub fn new(ids: Vec<Vec<TrackId>>) -> Arc<Self> {
             Arc::new(Self {
-                ids: Mutex::new(ids),
+                stubs: Mutex::new(ids.into_iter().map(stub_list).collect()),
             })
         }
+
+        /// 带元数据的构造（投影层测试用）。
+        pub fn new_stubs(stubs: Vec<Vec<hmp_core::TrackStub>>) -> Arc<Self> {
+            Arc::new(Self {
+                stubs: Mutex::new(stubs),
+            })
+        }
+    }
+
+    /// TrackId 列表 → stub 列表（title 回退 id）。
+    fn stub_list(ids: Vec<TrackId>) -> Vec<hmp_core::TrackStub> {
+        ids.into_iter()
+            .map(|id| hmp_core::TrackStub {
+                id: id.clone(),
+                title: id.to_string(),
+                artists: Vec::new(),
+                album: None,
+                duration_ms: None,
+            })
+            .collect()
     }
 
     impl SourceResolver for FakeResolver {
         fn resolve_source_ids(
             &self,
             _src: &hmp_core::PlayRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
-            Box::pin(async { Ok(self.ids.lock().unwrap().remove(0)) })
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(self.stubs.lock().unwrap().remove(0)) })
         }
         fn resolve_track(
             &self,
@@ -695,7 +754,8 @@ mod tests {
         fn resolve_source_ids(
             &self,
             _src: &hmp_core::PlayRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+        {
             let err = clone_error(&self.err);
             Box::pin(async move { Err(err) })
         }
@@ -711,7 +771,7 @@ mod tests {
     /// 源解析成功、但指定曲目 resolve_track 失败的解析器（装载失败事务测试）。
     #[derive(Debug)]
     pub struct PartialFailResolver {
-        pub ids: Mutex<Vec<Vec<TrackId>>>,
+        pub stubs: Mutex<Vec<Vec<hmp_core::TrackStub>>>,
         pub fail_ids: Vec<TrackId>,
         pub err: EngineError,
     }
@@ -719,7 +779,7 @@ mod tests {
     impl PartialFailResolver {
         pub fn new(ids: Vec<Vec<TrackId>>, fail_ids: Vec<TrackId>) -> Arc<Self> {
             Arc::new(Self {
-                ids: Mutex::new(ids),
+                stubs: Mutex::new(ids.into_iter().map(stub_list).collect()),
                 fail_ids,
                 err: EngineError::TrackNotFound,
             })
@@ -730,8 +790,9 @@ mod tests {
         fn resolve_source_ids(
             &self,
             _src: &hmp_core::PlayRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
-            Box::pin(async { Ok(self.ids.lock().unwrap().remove(0)) })
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(self.stubs.lock().unwrap().remove(0)) })
         }
         fn resolve_track(
             &self,
@@ -1252,7 +1313,8 @@ mod tests {
         fn resolve_source_ids(
             &self,
             src: &PlayRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+        {
             let inner = self.inner.clone();
             let delay = self.delay;
             let src = src.clone();
@@ -1628,6 +1690,43 @@ mod tests {
                 .unwrap()
                 .contains(&PlayerCommand::Stop),
             "clear --all 应停止播放"
+        );
+    }
+
+    /// 列表解析元数据随 Play 批量缓存进媒体库（投影层查询用）。
+    /// upsert 语义：详情（resolve_track）无条件覆盖 title；artist/album/duration
+    /// 走 COALESCE——stub 补充详情缺失字段（本测试 fake 详情无歌手/专辑 → 保留 stub）。
+    #[tokio::test]
+    async fn play_source_caches_stub_metadata() {
+        use hmp_storage::LibraryDb;
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new_stubs(vec![vec![hmp_core::TrackStub {
+            id: TrackId::new("mid-1"),
+            title: "夜曲".into(),
+            artists: vec!["周杰伦".into()],
+            album: Some("十一月的萧邦".into()),
+            duration_ms: Some(193_000),
+        }]]);
+        let library = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let (handle, _st) =
+            start_engine_with_library(driver.clone(), resolver, library.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("mid-1"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let metas = library
+            .lock()
+            .unwrap()
+            .track_meta_batch("qq", &["mid-1".to_string()])
+            .unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].title, "t-mid-1", "详情标题覆盖 stub");
+        assert_eq!(metas[0].artist.as_deref(), Some("周杰伦"), "stub 歌手保留");
+        assert_eq!(
+            metas[0].album.as_deref(),
+            Some("十一月的萧邦"),
+            "stub 专辑保留"
         );
     }
 

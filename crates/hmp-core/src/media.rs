@@ -169,6 +169,25 @@ impl AudioQuality {
     }
 }
 
+/// 源解析中间产物：稳定 ID + 轻量元数据（列表解析附带返回，供媒体库缓存）。
+///
+/// 播放队列只持有 [`TrackId`]；解析器拿到列表时把 stub 批量缓存进媒体库，
+/// 查询投影层（`hmp queue list` 等）再经 SQLite 一次查询映射出标题/歌手——
+/// 不在 IPC 里搬运完整 rich metadata，也不在列表查询时逐曲发 song detail。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrackStub {
+    /// 稳定 ID（QQ mid / `local:<path>`）。
+    pub id: TrackId,
+    /// 标题（未知时回退为 id 字符串）。
+    pub title: String,
+    /// 歌手列表。
+    pub artists: Vec<String>,
+    /// 专辑名（可选）。
+    pub album: Option<String>,
+    /// 时长毫秒（可选）。
+    pub duration_ms: Option<i64>,
+}
+
 /// 曲目（docs/PROJECT.md §7.1）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {

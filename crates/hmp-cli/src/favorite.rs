@@ -2,41 +2,18 @@
 //!
 //! 用法：
 //! ```text
-//! hmp favorite                     # 列出收藏
-//! hmp favorite add <track-id>      # 收藏（QQ mid 或 local:<path>）
-//! hmp favorite remove <track-id>   # 取消收藏
+//! hmp favorite list                     # 列出收藏
+//! hmp favorite add <track-id>           # 收藏（QQ mid 或 local:<path>）
+//! hmp favorite remove <track-id>        # 取消收藏
 //! ```
 
 use std::io::Write;
 
-use hmp_storage::LibraryDb;
-
 use super::library::{open_library, provider_of};
 
-/// 运行入口。
-pub async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = open_library()?;
-    let Some(action) = args.first().map(|s| s.as_str()) else {
-        return list(&mut db, 100);
-    };
-    match action {
-        "add" => {
-            let id = args
-                .get(1)
-                .ok_or("用法: hmp favorite add <track-id>（QQ mid 或 local:<path>）")?;
-            add(&mut db, id)
-        }
-        "remove" | "rm" => {
-            let id = args.get(1).ok_or("用法: hmp favorite remove <track-id>")?;
-            remove(&mut db, id)
-        }
-        "list" | "ls" => list(&mut db, 100),
-        _ => Err(format!("未知操作 `{action}`（add|remove|list）").into()),
-    }
-}
-
 /// 收藏（幂等）。
-fn add(db: &mut LibraryDb, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn add(id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = open_library()?;
     let (source, source_key) = provider_of(id);
     let tid = db.add_favorite(source, &source_key, id)?;
     println!("已收藏: {id} (id={tid})");
@@ -44,7 +21,8 @@ fn add(db: &mut LibraryDb, id: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 取消收藏。
-fn remove(db: &mut LibraryDb, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn remove(id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = open_library()?;
     let (source, source_key) = provider_of(id);
     match db.track_id(source, &source_key)? {
         Some(tid) => {
@@ -64,8 +42,9 @@ fn remove(db: &mut LibraryDb, id: &str) -> Result<(), Box<dyn std::error::Error>
 }
 
 /// 列出收藏。
-fn list(db: &mut LibraryDb, limit: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let rows = db.list_favorites(limit)?;
+pub async fn list() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = open_library()?;
+    let rows = db.list_favorites(100)?;
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
         writeln!(stdout, "暂无收藏（hmp favorite add <track-id>）")?;
@@ -80,7 +59,8 @@ fn list(db: &mut LibraryDb, limit: u32) -> Result<(), Box<dyn std::error::Error>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::provider_of;
+    use hmp_storage::LibraryDb;
 
     #[test]
     fn provider_of_maps_local_and_qq() {

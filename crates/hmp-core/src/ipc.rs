@@ -101,6 +101,13 @@ pub enum Request {
     },
     /// 查询队列快照。
     Queue,
+    /// 分页查询队列（防大队列整包超帧上限；元数据投影在客户端侧经媒体库批量查询）。
+    QueueList {
+        /// 起始偏移。
+        offset: usize,
+        /// 页大小。
+        limit: usize,
+    },
     /// 基础播放器命令（Play/Pause/Stop/Seek/Volume/Loop/Shuffle/Next/Previous）。
     Command(PlayerCommand),
     /// 查询全量状态。
@@ -126,6 +133,8 @@ pub enum Response {
     Status(DaemonState),
     /// `Queue` 的响应。
     Queue(QueueSnapshot),
+    /// `QueueList` 的响应。
+    QueueList(QueuePage),
     /// 错误。
     Err { code: IpcErrorCode, message: String },
 }
@@ -151,6 +160,27 @@ pub struct DaemonState {
     pub seq: u64,
     /// 最近一次命令的错误（解析失败等；成功操作时清空，Finding 2）。
     pub last_error: Option<ErrorInfo>,
+}
+
+/// 队列分页条目（纯 ID + 位置；标题/歌手由客户端经媒体库批量投影，
+/// 不在 IPC 里搬运完整 rich metadata）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QueueEntry {
+    /// 曲目 ID。
+    pub track_id: TrackId,
+    /// 是否当前播放曲。
+    pub is_current: bool,
+}
+
+/// 队列分页响应。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QueuePage {
+    /// 队列总曲目数。
+    pub total: usize,
+    /// 本页起始偏移。
+    pub offset: usize,
+    /// 本页条目。
+    pub items: Vec<QueueEntry>,
 }
 
 /// 最近一次命令的失败详情（final review Finding 2）。

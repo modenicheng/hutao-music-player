@@ -50,6 +50,44 @@ impl LocalSourceResolver {
         }
     }
 
+    /// 列表解析用的轻量 stub：canonicalize + 读文件元数据（与 `resolve_local`
+    /// 同一提取逻辑；title 回退文件名）。供媒体库批量缓存与队列投影。
+    fn local_stub(&self, id: &TrackId) -> hmp_core::TrackStub {
+        let id = Self::canonical_id(id.clone());
+        let (title, artists, album, duration_ms) = match Self::path_of(&id) {
+            Ok(p) => {
+                let meta = hmp_storage::read_meta(std::path::Path::new(p));
+                let title = meta
+                    .as_ref()
+                    .map(|m| m.title.clone())
+                    .filter(|t| !t.is_empty())
+                    .or_else(|| {
+                        std::path::Path::new(p)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| id.to_string());
+                let artists = meta
+                    .as_ref()
+                    .and_then(|m| m.artist.clone())
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let album = meta.as_ref().and_then(|m| m.album.clone());
+                let duration_ms = meta.as_ref().and_then(|m| m.duration_ms);
+                (title, artists, album, duration_ms)
+            }
+            Err(_) => (id.to_string(), Vec::new(), None, None),
+        };
+        hmp_core::TrackStub {
+            id,
+            title,
+            artists,
+            album,
+            duration_ms,
+        }
+    }
+
     /// 按本地 id 解析（入库 + 构造 ResolvedTrack）。
     async fn resolve_local(&self, id: TrackId) -> Result<ResolvedTrack, EngineError> {
         let id = Self::canonical_id(id);
@@ -116,11 +154,12 @@ impl SourceResolver for LocalSourceResolver {
     fn resolve_source_ids(
         &self,
         src: &PlayRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
         match src {
             PlayRequest::Local(id) => {
-                let id = id.clone();
-                Box::pin(async move { Ok(vec![Self::canonical_id(id)]) })
+                let stub = self.local_stub(id);
+                Box::pin(async move { Ok(vec![stub]) })
             }
             _ => Box::pin(async {
                 Err(EngineError::Internal("本地解析器仅支持 local 源".into()))
@@ -201,7 +240,8 @@ impl SourceResolver for CompositeSourceResolver {
     fn resolve_source_ids(
         &self,
         src: &PlayRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
         match src {
             PlayRequest::Local(_) => self.local.resolve_source_ids(src),
             _ => self.qq.resolve_source_ids(src),

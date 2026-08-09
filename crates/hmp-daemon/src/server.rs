@@ -139,6 +139,28 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             let resp = Response::Queue(handle.state_rx.borrow().queue.clone());
             write_frame(wr, &resp).await?;
         }
+        Ok(Request::QueueList { offset, limit }) => {
+            // 纯 ID 分页（server 无媒体库引用；标题投影在 CLI 侧）。
+            let snap = handle.state_rx.borrow().queue.clone();
+            let total = snap.tracks.len();
+            let items = snap
+                .tracks
+                .iter()
+                .enumerate()
+                .skip(offset)
+                .take(limit)
+                .map(|(i, t)| hmp_core::QueueEntry {
+                    track_id: t.clone(),
+                    is_current: snap.current == Some(i),
+                })
+                .collect();
+            let resp = Response::QueueList(hmp_core::QueuePage {
+                total,
+                offset,
+                items,
+            });
+            write_frame(wr, &resp).await?;
+        }
         Ok(Request::Subscribe) => {
             *subscribed = true;
             // 先推初始快照，并标记为已见：防止引擎启动发布的 pending 版本让
@@ -266,8 +288,17 @@ mod tests {
         fn resolve_source_ids(
             &self,
             _s: &PlayRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
-            Box::pin(async { Ok(vec![TrackId::new("a")]) })
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+        {
+            Box::pin(async {
+                Ok(vec![hmp_core::TrackStub {
+                    id: TrackId::new("a"),
+                    title: "a".into(),
+                    artists: Vec::new(),
+                    album: None,
+                    duration_ms: None,
+                }])
+            })
         }
         fn resolve_track(
             &self,
@@ -340,6 +371,50 @@ mod tests {
         tokio::spawn(async move { serve(listener, handle).await });
         let resp = request(&sock, &Request::Queue).await;
         assert!(matches!(resp, Response::Queue(_)));
+    }
+
+    #[tokio::test]
+    async fn queue_list_pages_with_current_marker() {
+        let (sock, listener) = temp_socket().await;
+        let handle = test_engine(true).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        // 队列 [a]；等引擎发布后查询分页。
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::spawn(async move { serve(listener, handle).await });
+
+        let resp = request(
+            &sock,
+            &Request::QueueList {
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .await;
+        let Response::QueueList(page) = resp else {
+            panic!("期望 QueueList 响应");
+        };
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].track_id.as_ref(), "a");
+        assert!(page.items[0].is_current, "当前曲应标记");
+
+        // 越界页：空 items、total 不变。
+        let resp = request(
+            &sock,
+            &Request::QueueList {
+                offset: 5,
+                limit: 10,
+            },
+        )
+        .await;
+        let Response::QueueList(page) = resp else {
+            panic!("期望 QueueList 响应");
+        };
+        assert_eq!(page.total, 1);
+        assert!(page.items.is_empty());
     }
 
     #[tokio::test]

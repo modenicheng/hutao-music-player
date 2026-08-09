@@ -19,7 +19,7 @@ pub mod xdg;
 pub use config::{Config, QualityMode, QualityPref};
 pub use credential::{BackendKind, CredentialStore, FileStore, SecretServiceStore};
 pub use db::{
-    FavoriteRow, LibraryDb, PlayEnd, PlaylistRow, PlaylistTrackRow, RecentPlay, TrackRow,
+    FavoriteRow, LibraryDb, PlayEnd, PlaylistRow, PlaylistTrackRow, RecentPlay, TrackMeta, TrackRow,
 };
 pub use local::{LocalMeta, is_audio_ext, read_meta};
 pub use xdg::{cache_dir, config_dir, data_dir};

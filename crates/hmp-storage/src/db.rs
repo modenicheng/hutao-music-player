@@ -27,6 +27,16 @@ pub struct TrackRow {
     pub cover_uri: Option<String>,
 }
 
+/// 批量元数据查询结果（投影层，`track_meta_batch`）。
+#[derive(Clone, Debug)]
+pub struct TrackMeta {
+    pub source: String,
+    pub source_key: String,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
 /// 播放会话结束记录。
 #[derive(Clone, Debug)]
 pub struct PlayEnd {
@@ -249,6 +259,65 @@ impl LibraryDb {
                 |r| r.get(0),
             )
             .optional()
+    }
+
+    /// 批量 upsert（单事务）：列表解析的元数据缓存（1500 曲歌单避免逐条提交）。
+    /// 不返回 id（缓存场景不需要）；失败整体回滚。
+    pub fn upsert_tracks_batch(&mut self, rows: &[TrackRow]) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        for row in rows {
+            tx.execute(
+                r#"INSERT INTO tracks (source, source_key, title, album, artist, duration_ms, cover_uri)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                   ON CONFLICT(source, source_key) DO UPDATE SET
+                     title = excluded.title,
+                     album = COALESCE(excluded.album, tracks.album),
+                     artist = COALESCE(excluded.artist, tracks.artist),
+                     duration_ms = COALESCE(excluded.duration_ms, tracks.duration_ms),
+                     cover_uri = COALESCE(excluded.cover_uri, tracks.cover_uri)"#,
+                params![
+                    row.source,
+                    row.source_key,
+                    row.title,
+                    row.album,
+                    row.artist,
+                    row.duration_ms,
+                    row.cover_uri
+                ],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// 批量查询曲目元数据（投影层：queue list 等把 ID 列表一次映射成标题/歌手）。
+    /// 同一 source 的 key 列表；SQLite 变量上限 999 → 按 500 分片。
+    pub fn track_meta_batch(
+        &mut self,
+        source: &str,
+        keys: &[String],
+    ) -> rusqlite::Result<Vec<TrackMeta>> {
+        let mut out = Vec::with_capacity(keys.len());
+        for chunk in keys.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT source, source_key, title, artist, album FROM tracks \
+                 WHERE source = ?1 AND source_key IN ({placeholders})"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&source];
+            params.extend(chunk.iter().map(|k| k as &dyn rusqlite::ToSql));
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+                Ok(TrackMeta {
+                    source: r.get(0)?,
+                    source_key: r.get(1)?,
+                    title: r.get(2)?,
+                    artist: r.get(3)?,
+                    album: r.get(4)?,
+                })
+            })?;
+            out.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
+        Ok(out)
     }
 
     /// 本地文件入库：upsert tracks(source='local', source_key=`local:<path>`) +
@@ -664,5 +733,91 @@ mod tests {
         drop(db);
         // WAL 伴生文件存在（关闭后可清理）
         let _ = path;
+    }
+
+    #[test]
+    fn batch_upsert_then_meta_batch_roundtrip() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let mut rows = vec![
+            TrackRow {
+                source: "qq",
+                source_key: "mid-1".into(),
+                title: "夜曲".into(),
+                album: Some("十一月的萧邦".into()),
+                artist: Some("周杰伦".into()),
+                duration_ms: Some(180_000),
+                cover_uri: None,
+            },
+            TrackRow {
+                source: "qq",
+                source_key: "mid-2".into(),
+                title: "mid-2".into(),
+                album: None,
+                artist: None,
+                duration_ms: None,
+                cover_uri: None,
+            },
+            TrackRow {
+                source: "local",
+                source_key: "local:/m/a.flac".into(),
+                title: "a.flac".into(),
+                album: None,
+                artist: None,
+                duration_ms: None,
+                cover_uri: None,
+            },
+        ];
+        db.upsert_tracks_batch(&rows).unwrap();
+
+        // 分 provider 批量投影；缺失 key 不返回行。
+        let metas = db
+            .track_meta_batch(
+                "qq",
+                &[
+                    "mid-1".to_string(),
+                    "mid-2".to_string(),
+                    "mid-missing".to_string(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(metas.len(), 2);
+        assert_eq!(metas[0].title, "夜曲");
+        assert_eq!(metas[0].artist.as_deref(), Some("周杰伦"));
+        let locals = db
+            .track_meta_batch("local", &["local:/m/a.flac".to_string()])
+            .unwrap();
+        assert_eq!(locals[0].title, "a.flac");
+
+        // 幂等重 upsert：更新标题，不重复建行。
+        rows[0].title = "夜曲 2".into();
+        db.upsert_tracks_batch(&rows).unwrap();
+        let metas = db.track_meta_batch("qq", &["mid-1".to_string()]).unwrap();
+        assert_eq!(metas[0].title, "夜曲 2");
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3, "重复批量 upsert 不建重复行");
+    }
+
+    #[test]
+    fn track_meta_batch_slices_beyond_variable_limit() {
+        // SQLite 变量上限 999：>999 keys 应分片查询不报错。
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let rows: Vec<TrackRow> = (0..1200)
+            .map(|i| TrackRow {
+                source: "qq",
+                source_key: format!("mid-{i}"),
+                title: format!("t{i}"),
+                album: None,
+                artist: None,
+                duration_ms: None,
+                cover_uri: None,
+            })
+            .collect();
+        db.upsert_tracks_batch(&rows).unwrap();
+        let keys: Vec<String> = (0..1200).map(|i| format!("mid-{i}")).collect();
+        let metas = db.track_meta_batch("qq", &keys).unwrap();
+        assert_eq!(metas.len(), 1200);
     }
 }

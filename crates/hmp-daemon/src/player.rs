@@ -133,11 +133,13 @@ pub enum EngineError {
 /// 会使 trait 失去 dyn 兼容性（E0038），而引擎以 `Arc<dyn SourceResolver>`
 /// 持有本接缝（见计划 Task 2 Step 3 的备选说明）。
 pub trait SourceResolver: Send + Sync + std::fmt::Debug {
-    /// 解析源为 TrackId 列表（单曲=1 个；歌单/专辑=分页拉取）。
+    /// 解析源为曲目列表（单曲=1 个；歌单/专辑=分页拉取）。
+    /// 返回 [`hmp_core::TrackStub`]：列表解析已带出标题/歌手/时长，
+    /// 由引擎批量缓存进媒体库（投影层查询用），不再丢弃为纯 ID。
     fn resolve_source_ids(
         &self,
         src: &hmp_core::PlayRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>;
 
     /// 解析单曲为可播放 URI + 元数据（音质回退 + QMC2 解密）。
     fn resolve_track(
@@ -198,7 +200,8 @@ impl SourceResolver for QqSourceResolver {
     fn resolve_source_ids(
         &self,
         src: &hmp_core::PlayRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
         // 克隆 src：让 future 持有数据，不借用参数（返回类型生命周期为 `&self`）。
         let src = src.clone();
         Box::pin(async move {
@@ -390,9 +393,9 @@ pub async fn resolve_track_impl(
 pub async fn resolve_source_ids_impl(
     client: &QqMusicClient,
     src: &hmp_core::PlayRequest,
-) -> Result<Vec<TrackId>, EngineError> {
+) -> Result<Vec<hmp_core::TrackStub>, EngineError> {
     match src {
-        hmp_core::PlayRequest::Track(id) => Ok(vec![id.clone()]),
+        hmp_core::PlayRequest::Track(id) => Ok(vec![id_stub(id)]),
         hmp_core::PlayRequest::Local(_) => Err(EngineError::Internal(
             "QQ 解析器不支持本地源（组合解析器负责分发）".into(),
         )),
@@ -409,13 +412,8 @@ pub async fn resolve_source_ids_impl(
                         .get_detail(list_id, 0, 100, page, true, false, false)
                         .await
                         .map_err(|e| EngineError::PlaylistNotFound(e.to_string()))?;
-                    let mids = resp
-                        .songs
-                        .iter()
-                        .filter(|s| !s.mid.is_empty())
-                        .map(|s| TrackId::new(s.mid.clone()))
-                        .collect();
-                    Ok((mids, resp.hasmore != 0, resp.total))
+                    let stubs = resp.songs.iter().filter_map(song_stub).collect();
+                    Ok((stubs, resp.hasmore != 0, resp.total))
                 }
             })
             .await?;
@@ -433,13 +431,8 @@ pub async fn resolve_source_ids_impl(
                         .get_song(id.as_ref(), 100, page)
                         .await
                         .map_err(|e| EngineError::PlaylistNotFound(e.to_string()))?;
-                    let mids = resp
-                        .song_list
-                        .iter()
-                        .filter(|s| !s.mid.is_empty())
-                        .map(|s| TrackId::new(s.mid.clone()))
-                        .collect();
-                    Ok((mids, true, resp.total_num))
+                    let stubs = resp.song_list.iter().filter_map(song_stub).collect();
+                    Ok((stubs, true, resp.total_num))
                 }
             })
             .await?;
@@ -449,6 +442,40 @@ pub async fn resolve_source_ids_impl(
             Ok(out)
         }
     }
+}
+
+/// 单曲源：无列表元数据，title 回退为 id（播放/收藏时由详情/投影补充）。
+fn id_stub(id: &TrackId) -> hmp_core::TrackStub {
+    hmp_core::TrackStub {
+        id: id.clone(),
+        title: id.to_string(),
+        artists: Vec::new(),
+        album: None,
+        duration_ms: None,
+    }
+}
+
+/// QQ `Song` → [`hmp_core::TrackStub`]（列表解析附带元数据，供媒体库批量缓存）。
+fn song_stub(s: &hmp_qqmusic_api::models::Song) -> Option<hmp_core::TrackStub> {
+    if s.mid.is_empty() {
+        return None;
+    }
+    let title = if s.name.is_empty() {
+        if s.title.is_empty() {
+            s.mid.clone()
+        } else {
+            s.title.clone()
+        }
+    } else {
+        s.name.clone()
+    };
+    Some(hmp_core::TrackStub {
+        id: hmp_core::TrackId::new(s.mid.clone()),
+        title,
+        artists: s.singer.iter().map(|x| x.name.clone()).collect(),
+        album: (!s.album.name.is_empty()).then(|| s.album.name.clone()),
+        duration_ms: (s.interval > 0).then(|| s.interval * 1000),
+    })
 }
 
 /// 从 QQ size 字段探测可用音质（确定映射的档位，从高到低；媒体库重构 B3）。
@@ -473,12 +500,12 @@ pub fn available_from_sizes(f: &hmp_qqmusic_api::models::File) -> Vec<AudioQuali
 pub const MAX_PAGES: i64 = 100;
 
 /// 分页收集：以服务端终止条件收尾，而非固定页数。
-/// `fetch(page)` 返回 (mids, hasmore, total)；hasmore=false、
+/// `fetch(page)` 返回 (stubs, hasmore, total)；hasmore=false、
 /// 已收集 ≥ total、或超过 `MAX_PAGES` 页时停止。
-pub async fn collect_paged<F, Fut>(mut fetch: F) -> Result<Vec<TrackId>, EngineError>
+pub async fn collect_paged<F, Fut>(mut fetch: F) -> Result<Vec<hmp_core::TrackStub>, EngineError>
 where
     F: FnMut(i64) -> Fut,
-    Fut: Future<Output = Result<(Vec<TrackId>, bool, i64), EngineError>>,
+    Fut: Future<Output = Result<(Vec<hmp_core::TrackStub>, bool, i64), EngineError>>,
 {
     let mut out = Vec::new();
     let mut page = 1i64;
@@ -599,11 +626,17 @@ mod tests {
                     calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let page = page as u32;
                     let start = (page - 1) * 100;
-                    let mids = (start..start + 100)
-                        .map(|i| TrackId::new(i.to_string()))
+                    let stubs = (start..start + 100)
+                        .map(|i| hmp_core::TrackStub {
+                            id: TrackId::new(i.to_string()),
+                            title: format!("t{i}"),
+                            artists: Vec::new(),
+                            album: None,
+                            duration_ms: None,
+                        })
                         .collect();
                     // 4 页共 400 首，前三页 hasmore=1
-                    Ok((mids, page < 4, 400))
+                    Ok((stubs, page < 4, 400))
                 }
             })
             .await
@@ -611,7 +644,7 @@ mod tests {
         };
         assert_eq!(ids.len(), 400, "应取全部 400 首而非 3 页截断");
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 4);
-        assert_eq!(ids[399].as_ref(), "399");
+        assert_eq!(ids[399].id.as_ref(), "399");
     }
 
     /// 分页：hasmore=false 提前终止，不取多余页。
@@ -625,8 +658,14 @@ mod tests {
                 async move {
                     calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let page = page as u32;
-                    let mids = vec![TrackId::new(format!("p{page}"))];
-                    Ok((mids, page < 2, 9999)) // total 很大但 hasmore=false 即停
+                    let stubs = vec![hmp_core::TrackStub {
+                        id: TrackId::new(format!("p{page}")),
+                        title: format!("p{page}"),
+                        artists: Vec::new(),
+                        album: None,
+                        duration_ms: None,
+                    }];
+                    Ok((stubs, page < 2, 9999)) // total 很大但 hasmore=false 即停
                 }
             })
             .await
@@ -647,10 +686,16 @@ mod tests {
                 async move {
                     calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let page = page as u32;
-                    let mids = (0..50)
-                        .map(|i| TrackId::new(format!("p{page}-{i}")))
+                    let stubs = (0..50)
+                        .map(|i| hmp_core::TrackStub {
+                            id: TrackId::new(format!("p{page}-{i}")),
+                            title: format!("p{page}-{i}"),
+                            artists: Vec::new(),
+                            album: None,
+                            duration_ms: None,
+                        })
                         .collect();
-                    Ok((mids, true, 150)) // 3 页 × 50 = 150
+                    Ok((stubs, true, 150)) // 3 页 × 50 = 150
                 }
             })
             .await
@@ -658,6 +703,42 @@ mod tests {
         };
         assert_eq!(ids.len(), 150);
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    /// QQ `Song` → stub：列表解析附带元数据，标题回退 mid。
+    #[test]
+    fn song_stub_extracts_metadata() {
+        use hmp_qqmusic_api::models::{Album, Singer, Song};
+        let s = Song {
+            mid: "003OUlho2HcRHC".into(),
+            name: "夜曲".into(),
+            singer: vec![Singer {
+                name: "周杰伦".into(),
+                ..Default::default()
+            }],
+            album: Album {
+                name: "十一月的萧邦".into(),
+                ..Default::default()
+            },
+            interval: 193,
+            ..Default::default()
+        };
+        let stub = song_stub(&s).unwrap();
+        assert_eq!(stub.id.as_ref(), "003OUlho2HcRHC");
+        assert_eq!(stub.title, "夜曲");
+        assert_eq!(stub.artists, vec!["周杰伦"]);
+        assert_eq!(stub.album.as_deref(), Some("十一月的萧邦"));
+        assert_eq!(stub.duration_ms, Some(193_000));
+        // 空 mid 丢弃；缺元数据时 title 回退 mid。
+        assert!(song_stub(&Song::default()).is_none());
+        let bare = song_stub(&Song {
+            mid: "mid-x".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(bare.title, "mid-x");
+        assert!(bare.artists.is_empty());
+        assert_eq!(bare.duration_ms, None);
     }
 
     /// 音质 → 文件类型映射：Atmos 必须可映射（链中尝试时不会因 None 跳过）。

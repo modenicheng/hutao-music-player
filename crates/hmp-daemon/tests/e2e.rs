@@ -295,7 +295,10 @@ async fn resolve_track_falls_back_to_plain_via_mock_api() {
         .resolve_source_ids(&PlayRequest::Track(TrackId::new(TRACK_MID)))
         .await
         .unwrap();
-    assert_eq!(ids, vec![TrackId::new(TRACK_MID)]);
+    assert_eq!(
+        ids.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+        vec![TrackId::new(TRACK_MID)]
+    );
 
     // 5) 曲目解析：详情 → 回退（加密全失败）→ 明文 M500 成功
     let resolved = resolver
@@ -383,15 +386,32 @@ impl SourceResolver for LocalWavResolver {
     fn resolve_source_ids(
         &self,
         src: &hmp_core::PlayRequest,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>>
-    {
-        let ids = match src {
-            hmp_core::PlayRequest::Playlist(_) => self.playlist.clone(),
-            hmp_core::PlayRequest::Track(id) => vec![id.clone()],
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>,
+    > {
+        let stubs = match src {
+            hmp_core::PlayRequest::Playlist(_) => self
+                .playlist
+                .iter()
+                .map(|id| hmp_core::TrackStub {
+                    id: id.clone(),
+                    title: id.to_string(),
+                    artists: Vec::new(),
+                    album: None,
+                    duration_ms: None,
+                })
+                .collect(),
+            hmp_core::PlayRequest::Track(id) => vec![hmp_core::TrackStub {
+                id: id.clone(),
+                title: id.to_string(),
+                artists: Vec::new(),
+                album: None,
+                duration_ms: None,
+            }],
             hmp_core::PlayRequest::Album(_) => Vec::new(),
             hmp_core::PlayRequest::Local(_) => Vec::new(),
         };
-        Box::pin(async move { Ok(ids) })
+        Box::pin(async move { Ok(stubs) })
     }
 
     fn resolve_track(
