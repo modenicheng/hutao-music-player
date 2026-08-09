@@ -58,8 +58,12 @@ fn serve_boots_answers_status_and_cleans_up_on_sigterm() {
     });
 
     // 主线程：跑 daemon 到优雅退出。
+    // 注意用 run_foreground：run_background 会 spawn `current_exe()`（测试
+    // 二进制）作为子进程——"serve" 参数变成 test filter，子进程不建 socket，
+    // 该测试将超时失败（预存在缺陷，收尾修复）。前台循环在本进程内跑，
+    // SIGTERM 由交互线程触发，语义与注释一致。
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let res = rt.block_on(async { hmp_daemon::serve::run_background(None).await });
+    let res = rt.block_on(async { hmp_daemon::serve::run_foreground(None).await });
     res.expect("run_background 返回错误");
     interact.join().expect("交互线程 panicked");
     assert!(
