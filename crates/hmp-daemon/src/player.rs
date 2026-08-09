@@ -401,6 +401,9 @@ pub async fn resolve_source_ids_impl(
         hmp_core::PlayRequest::Local(_) => Err(EngineError::Internal(
             "QQ 解析器不支持本地源（组合解析器负责分发）".into(),
         )),
+        hmp_core::PlayRequest::LibraryPlaylist(_) => Err(EngineError::Internal(
+            "QQ 解析器不支持本地歌单（组合解析器负责分发）".into(),
+        )),
         hmp_core::PlayRequest::Playlist(id) => {
             let list_id: i64 = id
                 .as_ref()

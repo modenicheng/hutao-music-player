@@ -22,6 +22,8 @@ pub enum PlayRequest {
     Album(AlbumId),
     /// 本地文件（id 形如 `local:/绝对路径`；媒体库重构 C1）。
     Local(TrackId),
+    /// 本地 SQLite 歌单（playlists 表主键；`playlist:local:<id>`；里程碑 F）。
+    LibraryPlaylist(i64),
 }
 
 /// 曲目来源提供方。
@@ -71,6 +73,12 @@ impl TrackRef {
             PlayRequest::Album(id) => Self {
                 provider: TrackProvider::QqMusic,
                 id: id.0.clone(),
+            },
+            PlayRequest::LibraryPlaylist(_) => Self {
+                provider: TrackProvider::Local,
+                // 本地歌单是复合源（混排 QQ/本地曲目）：单曲映射无意义，
+                // 用占位符（解析路径不经过此映射）。
+                id: String::new(),
             },
         }
     }
@@ -427,6 +435,14 @@ mod tests {
             let back: Request = decode_frame(&frame).unwrap();
             assert_eq!(back, req);
         }
+    }
+
+    #[test]
+    fn library_playlist_roundtrips() {
+        let req = PlayRequest::LibraryPlaylist(7);
+        let frame = encode_frame(&req).unwrap();
+        let back: PlayRequest = decode_frame(&frame).unwrap();
+        assert_eq!(back, PlayRequest::LibraryPlaylist(7));
     }
 
     #[test]

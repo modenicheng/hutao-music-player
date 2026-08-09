@@ -220,9 +220,15 @@ fn decide_await_step(
     }
 }
 
-/// 解析播放源：`playlist:<id>` / `album:<id>` / `local:<路径>` / 其他 = 单曲。
+/// 解析播放源：`playlist:<id>` / `playlist:local:<id>` / `album:<id>` / `local:<路径>` / 其他 = 单曲。
 pub fn parse_source(src: &str) -> hmp_core::PlayRequest {
-    if let Some(id) = src.strip_prefix("playlist:") {
+    if let Some(id) = src.strip_prefix("playlist:local:") {
+        // 里程碑 F：本地 SQLite 歌单（playlists 表主键）。非法 id 回退单曲。
+        match id.parse::<i64>() {
+            Ok(n) => hmp_core::PlayRequest::LibraryPlaylist(n),
+            Err(_) => hmp_core::PlayRequest::Track(hmp_core::TrackId::new(src)),
+        }
+    } else if let Some(id) = src.strip_prefix("playlist:") {
         hmp_core::PlayRequest::Playlist(hmp_core::PlaylistId::new(id))
     } else if let Some(id) = src.strip_prefix("album:") {
         hmp_core::PlayRequest::Album(hmp_core::AlbumId::new(id))
@@ -448,6 +454,19 @@ mod tests {
             parse_source("album:local:某专辑"),
             hmp_core::PlayRequest::Album(hmp_core::AlbumId::new("local:某专辑"))
         );
+    }
+
+    #[test]
+    fn parse_library_playlist_source() {
+        assert_eq!(
+            parse_source("playlist:local:7"),
+            hmp_core::PlayRequest::LibraryPlaylist(7)
+        );
+        // QQ 歌单语义不变。
+        assert!(matches!(
+            parse_source("playlist:9001"),
+            hmp_core::PlayRequest::Playlist(_)
+        ));
     }
 
     #[test]
