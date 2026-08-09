@@ -893,6 +893,12 @@ impl PlaybackEngine {
     /// 指纹 `(队列 revision, 装载代际)` 仅用于**写槽防乱序**（旧任务不得
     /// 覆盖新任务结果，字典序比较）；失败静默（不影响播放）。
     fn schedule_preload(&self, loaded: &TrackId) {
+        // 打磨：Repeat One（Track）EOS 重播当前曲——预解析当前曲冗余
+        //（重复 resolve + 重复解密代理），跳过；手动 Next 不受影响
+        //（用户主动操作走正常 resolve 延迟可接受）。
+        if self.queue.loop_mode() == hmp_core::LoopMode::Track {
+            return;
+        }
         if self.queue.current() != Some(loaded) {
             return;
         }
@@ -1543,6 +1549,29 @@ mod tests {
                 .map(|t| t.id.as_ref()),
             Some("d")
         );
+    }
+
+    /// 打磨：Repeat One（Track 模式）EOS 重播当前曲——预解析当前曲是冗余
+    /// 的（重复 resolve + 重复解密代理），应跳过。
+    #[tokio::test]
+    async fn preload_skipped_in_repeat_one() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver.clone()).await;
+        handle
+            .cmd(Request::Command(PlayerCommand::SetLoopMode(
+                LoopMode::Track,
+            )))
+            .await
+            .unwrap();
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // 装载 a（1 次 resolve）；Track 模式不预解析（保持 1）。
+        assert_eq!(resolver.resolve_calls(), 1, "Repeat One 不应预解析当前曲");
     }
 
     /// G2：预解析失败静默（不影响播放）；Next 时走正常解析（失败语义不变）。
