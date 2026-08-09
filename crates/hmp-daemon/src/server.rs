@@ -243,25 +243,17 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                         },
                         PlaylistWriteOp::Delete { id } => match lib.playlist_relation(id) {
                             Ok(Some(r)) if r == "owned" => {
-                                // 行保留到远端删除成功（op 驱动）。
-                                lib.mark_playlist_pending(id)?;
-                                lib.enqueue_playlist_op(id, "delete_playlist", None, None)?;
+                                // 行保留到远端删除成功（op 驱动）；pending + op 单事务。
+                                lib.mark_pending_with_delete_op(id)?;
                                 trigger_sync = true;
                                 Ok(None)
                             }
                             Ok(Some(r)) if r == "subscribed" => {
-                                // 取消收藏：删本地行 + relations outbox（unfav 同步成功前
-                                // reconcile 不覆盖 pending，不会复活）。
+                                // 取消收藏：删本地行 + relations outbox 单事务
+                                // （unfav 同步成功前 reconcile 不覆盖 pending，不会复活）。
                                 let remote = lib.playlist_remote_id(id)?;
-                                lib.delete_playlist(id)?;
-                                if let Some(remote_id) = remote {
-                                    lib.set_relation(
-                                        "playlist",
-                                        "qq",
-                                        &remote_id,
-                                        "subscribed",
-                                        false,
-                                    )?;
+                                lib.unfavorite_playlist(id, remote.as_deref())?;
+                                if remote.is_some() {
                                     trigger_sync = true;
                                 }
                                 Ok(None)
@@ -288,11 +280,19 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                                 "local" => "local",
                                 _ => "qq",
                             };
-                            lib.add_playlist_track(id, source_static, &key, &title)?;
                             if rel == "owned" {
+                                // 单事务：本地关联 + outbox 入队原子（无窗口）。
                                 let song_id = lib.qq_song_id("qq", &key)?;
-                                lib.enqueue_playlist_op(id, "add", Some(&key), song_id)?;
+                                lib.add_owned_track_with_op(
+                                    id,
+                                    source_static,
+                                    &key,
+                                    &title,
+                                    song_id,
+                                )?;
                                 trigger_sync = true;
+                            } else {
+                                lib.add_playlist_track(id, source_static, &key, &title)?;
                             }
                             Ok(None)
                         }
@@ -302,17 +302,24 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                                 return Err(rusqlite::Error::InvalidQuery);
                             }
                             let song_key = lib.track_key_at(id, position)?;
-                            lib.remove_playlist_track(id, position)?;
                             if rel == "owned" {
                                 if let Some(key) = song_key {
                                     // local 曲目在远端无对应物：只删本地行，不入 outbox
                                     // （否则 song_id 恒 None → 永久 error 重试）。
                                     if !key.starts_with("local:") {
                                         let song_id = lib.qq_song_id("qq", &key)?;
-                                        lib.enqueue_playlist_op(id, "del", Some(&key), song_id)?;
+                                        lib.remove_owned_track_with_op(
+                                            id, position, &key, song_id,
+                                        )?;
                                         trigger_sync = true;
+                                    } else {
+                                        lib.remove_playlist_track(id, position)?;
                                     }
+                                } else {
+                                    lib.remove_playlist_track(id, position)?;
                                 }
+                            } else {
+                                lib.remove_playlist_track(id, position)?;
                             }
                             Ok(None)
                         }
