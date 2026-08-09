@@ -971,6 +971,100 @@ impl LibraryDb {
         rows.collect()
     }
 
+    /// owned 歌单加曲 + outbox 入队（单事务）：任一失败整体回滚，
+    /// 不留"本地已改、远端意图丢失"窗口。
+    pub fn add_owned_track_with_op(
+        &mut self,
+        playlist_id: i64,
+        source: &'static str,
+        source_key: &str,
+        title: &str,
+        song_id: Option<i64>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            self.add_playlist_track(playlist_id, source, source_key, title)?;
+            self.enqueue_playlist_op(playlist_id, "add", Some(source_key), song_id)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                self.conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// owned 歌单删曲 + outbox 入队（单事务）。调用方负责确认 song_key
+    /// 非 local:（远端无对应物时不入队）。
+    pub fn remove_owned_track_with_op(
+        &mut self,
+        playlist_id: i64,
+        position: i64,
+        song_key: &str,
+        song_id: Option<i64>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            self.remove_playlist_track(playlist_id, position)?;
+            self.enqueue_playlist_op(playlist_id, "del", Some(song_key), song_id)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                self.conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// 取消收藏（subscribed 歌单删除）：删本地歌单 + relations unfav（单事务）。
+    /// remote_id 为 None（本地歌单/无远端身份）时只删本地行。
+    pub fn unfavorite_playlist(
+        &mut self,
+        playlist_id: i64,
+        remote_id: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            self.delete_playlist(playlist_id)?;
+            if let Some(rid) = remote_id {
+                self.set_relation("playlist", "qq", rid, "subscribed", false)?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                self.conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// owned 歌单删除：pending 标记 + delete_playlist op 入队（单事务）。
+    pub fn mark_pending_with_delete_op(&mut self, playlist_id: i64) -> rusqlite::Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            self.mark_playlist_pending(playlist_id)?;
+            self.enqueue_playlist_op(playlist_id, "delete_playlist", None, None)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                self.conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     /// 回填 op 行 numeric song id（SyncWorker 详情补全后）。
     pub fn set_op_song_id(&mut self, id: i64, song_id: i64) -> rusqlite::Result<()> {
         self.conn.execute(
@@ -1770,5 +1864,107 @@ mod tests {
         let keys: Vec<String> = (0..1200).map(|i| format!("mid-{i}")).collect();
         let metas = db.track_meta_batch("qq", &keys).unwrap();
         assert_eq!(metas.len(), 1200);
+    }
+
+    /// 组合方法单事务：op 入队失败 → 本地关联整体回滚（无"本地已改、远端意图丢失"窗口）。
+    #[test]
+    fn add_owned_track_with_op_rolls_back_on_op_failure() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let pid = db.create_playlist("p").unwrap();
+        db.upsert_track(&TrackRow {
+            source: "qq",
+            source_key: "mid-x".into(),
+            title: "x".into(),
+            album: None,
+            artist: None,
+            duration_ms: None,
+            cover_uri: None,
+            qq_song_id: None,
+        })
+        .unwrap();
+        // 破坏 outbox 表制造 enqueue 失败（独立内存库，不影响其他测试）。
+        db.conn.execute_batch("DROP TABLE playlist_ops").unwrap();
+        let r = db.add_owned_track_with_op(pid, "qq", "mid-x", "x", Some(1));
+        assert!(r.is_err(), "op 入队失败时组合方法必须报错");
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM playlist_tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "本地曲目关联不得残留（整体回滚）");
+        let t: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            t, 1,
+            "预插的 tracks 行仍在（组合方法未产生额外行）；回滚不误删既有数据"
+        );
+    }
+
+    #[test]
+    fn add_owned_track_with_op_commits_atomically() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let pid = db.create_playlist("p").unwrap();
+        db.add_owned_track_with_op(pid, "qq", "mid-x", "x", Some(1))
+            .unwrap();
+        let pt: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM playlist_tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pt, 1);
+        let ops = db.playlist_ops_pending().unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].op, "add");
+        assert_eq!(ops[0].song_key.as_deref(), Some("mid-x"));
+        assert_eq!(ops[0].song_id, Some(1));
+    }
+
+    #[test]
+    fn unfavorite_playlist_rolls_back_on_relation_failure() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let pid = db.create_playlist("p").unwrap();
+        // 破坏 relations 表制造 set_relation 失败（第二步）。
+        db.conn.execute_batch("DROP TABLE relations").unwrap();
+        let r = db.unfavorite_playlist(pid, Some("disstid-1"));
+        assert!(r.is_err());
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM playlists", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "歌单行必须保留（整体回滚）");
+    }
+
+    #[test]
+    fn unfavorite_playlist_commits_atomically() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let pid = db.create_playlist("p").unwrap();
+        db.set_relation("playlist", "qq", "disstid-1", "subscribed", true)
+            .unwrap();
+        db.unfavorite_playlist(pid, Some("disstid-1")).unwrap();
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM playlists", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "歌单已删除");
+        let rel = db
+            .relation_desired("playlist", "qq", "disstid-1", "subscribed")
+            .unwrap();
+        assert_eq!(rel, Some(false), "取消收藏已入 relations outbox");
+    }
+
+    #[test]
+    fn mark_pending_with_delete_op_rolls_back_on_op_failure() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let pid = db.create_playlist("p").unwrap();
+        db.conn.execute_batch("DROP TABLE playlist_ops").unwrap();
+        let r = db.mark_pending_with_delete_op(pid);
+        assert!(r.is_err());
+        let st: String = db
+            .conn
+            .query_row("SELECT sync_state FROM playlists WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(st, "synced", "pending 标记不得残留（整体回滚）");
     }
 }
