@@ -11,6 +11,7 @@ hmp-core = { path = "../hmp-core" }
 hmp-player-gst = { path = "../hmp-player-gst" }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
 hmp-storage = { path = "../hmp-storage" }
+rusqlite = { workspace = true }
 hmp-media = { path = "../hmp-media" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
 tracing = { workspace = true }

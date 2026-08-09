@@ -54,13 +54,16 @@ pub async fn serve(listener: UnixListener, handle: EngineHandle) {
 }
 
 /// 需要登录态的请求（服务器同步前置校验，spec §6）。
-/// 本地源（`PlayRequest::Local`）不要求 QQ 凭证（媒体库重构 C2）。
+/// 本地源（`PlayRequest::Local`）与收藏/歌单写命令不要求 QQ 凭证
+/// （本地先提交、离线意图合法）；reconcile 拉取 QQ 快照需要。
 fn requires_credential(req: &Request) -> bool {
-    let src = match req {
-        Request::Play(s) | Request::PlayNext(s) | Request::QueueAppend(s) => s,
-        _ => return false,
-    };
-    !matches!(src, hmp_core::PlayRequest::Local(_))
+    match req {
+        Request::Play(s) | Request::PlayNext(s) | Request::QueueAppend(s) => {
+            !matches!(s, hmp_core::PlayRequest::Local(_))
+        }
+        Request::LibrarySync => true,
+        _ => false,
+    }
 }
 
 /// 单连接处理：请求/响应循环 + 订阅事件推送（reader 任务 + channel 并发版）。
@@ -167,6 +170,163 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             // `changed()` 立即再推一帧重复快照（两帧连读导致客户端解码失败）。
             let ev = Event::StateChanged(handle.state_rx.borrow_and_update().clone());
             write_frame(wr, &ev).await?;
+        }
+        // —— 媒体库写命令：本地先提交，QQ 由 SyncWorker 异步同步（spec §3.3）。
+        // 与播放状态正交，server 直接操作媒体库（不经过引擎命令循环）。
+        Ok(Request::Favorite {
+            source,
+            key,
+            title,
+            desired,
+        }) => {
+            let is_local = source == "local";
+            let source_static: &'static str = if is_local { "local" } else { "qq" };
+            let result = handle.library.as_ref().map(|lib| {
+                let mut lib = lib.lock().unwrap();
+                lib.upsert_track(&hmp_storage::TrackRow {
+                    source: source_static,
+                    source_key: key.clone(),
+                    title,
+                    album: None,
+                    artist: None,
+                    duration_ms: None,
+                    cover_uri: None,
+                    qq_song_id: None,
+                })
+                .and_then(|_| lib.set_relation("track", source_static, &key, "liked", desired))
+                .and_then(|_| {
+                    if is_local {
+                        // 本地即事实：不进 outbox。
+                        lib.mark_relation_synced("track", "local", &key, "liked")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .map_err(|e| e.to_string())
+            });
+            let resp = match result {
+                Some(Ok(())) => {
+                    if !is_local {
+                        if let Some(h) = &handle.sync_handle {
+                            h.trigger();
+                        }
+                    }
+                    Response::Ok
+                }
+                Some(Err(message)) => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message,
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "媒体库不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::PlaylistWrite { op }) => {
+            use hmp_core::PlaylistWriteOp;
+            let mut trigger_sync = false;
+            let result = handle
+                .library
+                .as_ref()
+                .map(|lib| -> rusqlite::Result<Option<i64>> {
+                    let mut lib = lib.lock().unwrap();
+                    let r: rusqlite::Result<Option<i64>> = match op {
+                        PlaylistWriteOp::Create { name } => lib.create_playlist(&name).map(Some),
+                        PlaylistWriteOp::Rename { id, name } => match lib.playlist_relation(id) {
+                            Ok(Some(r)) if r == "owned" => Err(rusqlite::Error::InvalidQuery),
+                            Ok(_) => lib.rename_playlist(id, &name).map(|_| None),
+                            Err(e) => Err(e),
+                        },
+                        PlaylistWriteOp::Delete { id } => match lib.playlist_relation(id) {
+                            Ok(Some(r)) if r == "owned" => {
+                                // 行保留到远端删除成功（op 驱动）。
+                                lib.mark_playlist_pending(id)?;
+                                lib.enqueue_playlist_op(id, "delete_playlist", None, None)?;
+                                trigger_sync = true;
+                                Ok(None)
+                            }
+                            Ok(_) => lib.delete_playlist(id).map(|_| None),
+                            Err(e) => Err(e),
+                        },
+                        PlaylistWriteOp::AddTrack {
+                            id,
+                            source,
+                            key,
+                            title,
+                        } => {
+                            let source_static: &'static str = match source.as_str() {
+                                "local" => "local",
+                                _ => "qq",
+                            };
+                            lib.add_playlist_track(id, source_static, &key, &title)?;
+                            if lib.playlist_relation(id)?.as_deref() == Some("owned") {
+                                let song_id = lib.qq_song_id("qq", &key)?;
+                                lib.enqueue_playlist_op(id, "add", Some(&key), song_id)?;
+                                trigger_sync = true;
+                            }
+                            Ok(None)
+                        }
+                        PlaylistWriteOp::RemoveTrack { id, position } => {
+                            let song_key = lib.track_key_at(id, position)?;
+                            lib.remove_playlist_track(id, position)?;
+                            if lib.playlist_relation(id)?.as_deref() == Some("owned") {
+                                if let Some(key) = song_key {
+                                    let song_id = lib.qq_song_id("qq", &key)?;
+                                    lib.enqueue_playlist_op(id, "del", Some(&key), song_id)?;
+                                }
+                                trigger_sync = true;
+                            }
+                            Ok(None)
+                        }
+                    };
+                    r
+                });
+            let resp = match result {
+                Some(Ok(Some(id))) => {
+                    if trigger_sync {
+                        if let Some(h) = &handle.sync_handle {
+                            h.trigger();
+                        }
+                    }
+                    Response::Created(id)
+                }
+                Some(Ok(None)) => {
+                    if trigger_sync {
+                        if let Some(h) = &handle.sync_handle {
+                            h.trigger();
+                        }
+                    }
+                    Response::Ok
+                }
+                Some(Err(rusqlite::Error::InvalidQuery)) => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "QQ 自建歌单暂不支持重命名".into(),
+                },
+                Some(Err(e)) => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: e.to_string(),
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "媒体库不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::LibrarySync) => {
+            let resp = match &handle.sync_handle {
+                Some(h) => {
+                    h.reconcile();
+                    Response::Ok
+                }
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "同步 worker 不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
         }
         Ok(req) => {
             if requires_credential(&req) && !(handle.credential_ok)() {

@@ -43,6 +43,7 @@ pub mod singer;
 pub mod song;
 pub mod songlist;
 pub mod top;
+pub mod user;
 
 pub use album::{
     AlbumApi, AlbumFavWriteResponse, GetAlbumDetailResponse, GetAlbumSongResponse,
@@ -67,3 +68,6 @@ pub use singer::{
 pub use song::{GetSongDetailResponse, GetSongUrlsResponse, SongApi, SongFileInfo, SongFileType};
 pub use songlist::{CreateDeleteSonglistResp, GetSonglistDetailResponse, SonglistApi};
 pub use top::{TopApi, TopCategoryResponse, TopDetailResponse};
+pub use user::{
+    UserApi, UserCreatedSonglistResponse, UserFavAlbumResponse, UserFavSonglistResponse,
+};

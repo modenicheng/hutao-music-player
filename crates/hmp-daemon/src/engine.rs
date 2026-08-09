@@ -29,6 +29,10 @@ pub struct EngineHandle {
     pub terminated: watch::Receiver<bool>,
     /// 播放能力（MPRIS CanGoNext/CanGoPrevious，随 publish 同步发布，Finding 9）。
     pub caps_rx: watch::Receiver<PlaybackCapabilities>,
+    /// 媒体库（server 直操作：收藏/歌单写命令；daemon 层注入）。
+    pub library: Option<std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>>,
+    /// QQ 同步 worker 触发句柄（daemon 层注入）。
+    pub sync_handle: Option<crate::sync::SyncHandle>,
 }
 
 impl EngineHandle {
@@ -110,6 +114,8 @@ impl PlaybackEngine {
             credential_ok,
             terminated: term_rx,
             caps_rx,
+            library: None,
+            sync_handle: None,
         }
     }
 
@@ -548,6 +554,7 @@ fn track_row(t: &hmp_core::Track) -> hmp_storage::TrackRow {
         },
         duration_ms: t.duration.map(|d| d.as_millis() as i64),
         cover_uri: t.cover.as_ref().map(|c| c.url.clone()),
+        qq_song_id: None, // 播放路径无 numeric id；列表解析缓存（stub_row）时写入
     }
 }
 
@@ -566,6 +573,7 @@ fn stub_row(s: &hmp_core::TrackStub) -> hmp_storage::TrackRow {
         artist: (!s.artists.is_empty()).then(|| s.artists.join(", ")),
         duration_ms: s.duration_ms,
         cover_uri: None,
+        qq_song_id: None, // TrackStub 不含 numeric id；后续由列表解析补全
     }
 }
 

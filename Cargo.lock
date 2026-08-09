@@ -2567,6 +2567,7 @@ dependencies = [
  "hmp-storage",
  "ksni 0.2.2",
  "libc",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

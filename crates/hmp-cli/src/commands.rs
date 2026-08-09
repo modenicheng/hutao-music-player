@@ -50,7 +50,7 @@ fn fmt_duration(d: std::time::Duration) -> String {
 }
 
 /// 通用：发命令并打印响应错误。
-async fn send(client: &mut DaemonClient, req: Request) -> Result<Response, CliError> {
+pub(crate) async fn send(client: &mut DaemonClient, req: Request) -> Result<Response, CliError> {
     client.request(&req).await
 }
 

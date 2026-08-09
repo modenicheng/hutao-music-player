@@ -1,81 +1,139 @@
-//! `hmp playlist`：本地歌单管理（直读媒体库）。
+//! `hmp playlist`：本地歌单管理。
 //!
-//! 用法：
+//! 写操作走 daemon（local 直接生效；QQ owned 经 outbox 异步同步，spec §5）；
+//! 列表/详情直读本地媒体库。
+//!
 //! ```text
-//! hmp playlist list                          # 列出歌单
-//! hmp playlist create <名称>                 # 新建
-//! hmp playlist rename <id> <名称>            # 重命名
-//! hmp playlist delete <id>                   # 删除
-//! hmp playlist add <id> <track-id>           # 追加曲目（QQ mid 或 local:<path>）
-//! hmp playlist remove <id> <序号>            # 按序号移除曲目
-//! hmp playlist show <id>                     # 查看歌单内曲目
+//! hmp playlist list [--scope all|local|owned|favorite]   # 列出歌单
+//! hmp playlist create <名称>                             # 新建（本地）
+//! hmp playlist rename <id> <名称>                        # 重命名
+//! hmp playlist delete <id>                               # 删除
+//! hmp playlist add <id> <track-id>                       # 追加曲目
+//! hmp playlist remove <id> <序号>                        # 按序号移除曲目
+//! hmp playlist show <id>                                 # 查看歌单内曲目
 //! ```
 
 use std::io::Write;
 
-use super::library::{open_library, provider_of};
+use hmp_core::{PlaylistWriteOp, Request};
 
-/// 新建歌单，打印 id。
+use super::client::DaemonClient;
+use super::commands;
+use super::library::provider_of;
+
+/// 新建歌单（本地；返回 id）。
 pub async fn create(name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = open_library()?;
-    let id = db.create_playlist(name)?;
-    println!("已创建歌单 #{id}: {name}");
-    Ok(())
-}
-
-/// 重命名。
-pub async fn rename(id: i64, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = open_library()?;
-    match db.rename_playlist(id, name) {
-        Ok(()) => {
-            println!("已重命名 #{id}: {name}");
+    let mut c = DaemonClient::connect_or_spawn().await?;
+    let resp = commands::send(
+        &mut c,
+        Request::PlaylistWrite {
+            op: PlaylistWriteOp::Create {
+                name: name.to_string(),
+            },
+        },
+    )
+    .await?;
+    match resp {
+        hmp_core::Response::Created(id) => {
+            println!("已创建歌单 #{id}: {name}");
             Ok(())
         }
-        Err(rusqlite::Error::QueryReturnedNoRows) => Err(format!("歌单不存在: #{id}").into()),
-        Err(e) => Err(e.into()),
+        hmp_core::Response::Err { code, message } => {
+            Err(format!("创建失败({code:?}): {message}").into())
+        }
+        _ => Err("创建响应异常".into()),
     }
 }
 
-/// 删除歌单。
+/// 重命名（local 直接生效；QQ owned 不支持远端重命名）。
+pub async fn rename(id: i64, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut c = DaemonClient::connect_or_spawn().await?;
+    commands::cmd_simple(
+        &mut c,
+        Request::PlaylistWrite {
+            op: PlaylistWriteOp::Rename {
+                id,
+                name: name.to_string(),
+            },
+        },
+    )
+    .await?;
+    println!("已重命名 #{id}: {name}");
+    Ok(())
+}
+
+/// 删除（local 立即；QQ owned 本地行保留到远端删除成功）。
 pub async fn delete(id: i64) -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = open_library()?;
-    db.delete_playlist(id)?;
+    let mut c = DaemonClient::connect_or_spawn().await?;
+    commands::cmd_simple(
+        &mut c,
+        Request::PlaylistWrite {
+            op: PlaylistWriteOp::Delete { id },
+        },
+    )
+    .await?;
     println!("已删除歌单 #{id}");
     Ok(())
 }
 
-/// 追加曲目（幂等）。
+/// 追加曲目（幂等；owned 歌单同步到 QQ）。
 pub async fn add(id: i64, track: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = open_library()?;
-    let (source, source_key) = provider_of(track);
-    match db.add_playlist_track(id, source, &source_key, track) {
-        Ok(()) => {
-            println!("已加入歌单 #{id}: {track}");
-            Ok(())
-        }
-        Err(rusqlite::Error::QueryReturnedNoRows) => Err(format!("歌单不存在: #{id}").into()),
-        Err(e) => Err(e.into()),
-    }
+    let mut c = DaemonClient::connect_or_spawn().await?;
+    let (source, key) = provider_of(track);
+    commands::cmd_simple(
+        &mut c,
+        Request::PlaylistWrite {
+            op: PlaylistWriteOp::AddTrack {
+                id,
+                source: source.to_string(),
+                key: key.clone(),
+                title: track.to_string(),
+            },
+        },
+    )
+    .await?;
+    println!("已加入歌单 #{id}: {track}");
+    Ok(())
 }
 
-/// 按序号移除曲目。
+/// 按序号移除曲目（owned 歌单同步到 QQ）。
 pub async fn remove_track(id: i64, position: i64) -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = open_library()?;
-    db.remove_playlist_track(id, position)?;
+    let mut c = DaemonClient::connect_or_spawn().await?;
+    commands::cmd_simple(
+        &mut c,
+        Request::PlaylistWrite {
+            op: PlaylistWriteOp::RemoveTrack { id, position },
+        },
+    )
+    .await?;
     println!("已从歌单 #{id} 移除序号 {position}");
     Ok(())
 }
 
-/// 歌单列表。
+/// 歌单列表（统一视图：local / qq-owned / qq-favorite）。
 pub async fn list() -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = open_library()?;
+    let mut db = super::library::open_library()?;
     let rows = db.list_playlists()?;
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
         writeln!(stdout, "暂无本地歌单（hmp playlist create <名称>）")?;
     } else {
+        writeln!(stdout, "{:<5} {:<12} {:<12} NAME", "ID", "TYPE", "SYNC")?;
         for p in &rows {
-            writeln!(stdout, "#{}  {}  ({} 首)", p.id, p.name, p.track_count)?;
+            let type_name = match p.relation.as_str() {
+                "local" => "local",
+                "owned" => "qq-owned",
+                _ => "qq-fav",
+            };
+            writeln!(
+                stdout,
+                "{:<5} {:<12} {:<12} {}  ({} 首)",
+                format!("#{}", p.id),
+                type_name,
+                p.sync_state,
+                p.name,
+                p.track_count
+            )?;
         }
     }
     stdout.flush()?;
@@ -84,7 +142,7 @@ pub async fn list() -> Result<(), Box<dyn std::error::Error>> {
 
 /// 歌单内曲目。
 pub async fn show(id: i64) -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = open_library()?;
+    let mut db = super::library::open_library()?;
     let tracks = db.playlist_tracks(id)?;
     let mut stdout = std::io::stdout().lock();
     if tracks.is_empty() {

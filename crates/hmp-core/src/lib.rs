@@ -22,8 +22,8 @@ pub use auth::CredentialSummary;
 pub use error::HmpError;
 pub use id::{AlbumId, ArtistId, PlaylistId, TrackId};
 pub use ipc::{
-    DaemonState, ErrorInfo, Event, IpcErrorCode, PlayRequest, QueueEntry, QueuePage, Request,
-    Response, TrackProvider, TrackRef,
+    DaemonState, ErrorInfo, Event, IpcErrorCode, PlayRequest, PlaylistWriteOp, QueueEntry,
+    QueuePage, Request, Response, TrackProvider, TrackRef,
 };
 pub use media::{Album, AlbumRef, ArtistRef, AudioQuality, CoverRef, Playlist, Track, TrackStub};
 pub use player::{LoopMode, PlaybackCapabilities, PlaybackState, PlaybackStatus, PlayerCommand};

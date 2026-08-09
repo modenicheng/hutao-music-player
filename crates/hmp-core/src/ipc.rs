@@ -112,6 +112,24 @@ pub enum Request {
     Command(PlayerCommand),
     /// 查询全量状态。
     Status,
+    /// 收藏写操作（本地先提交；QQ 由 SyncWorker 异步同步）。
+    Favorite {
+        /// 来源：`qq` | `local`。
+        source: String,
+        /// 来源身份：QQ mid / `local:<path>`。
+        key: String,
+        /// 标题（未知时用 id）。
+        title: String,
+        /// 收藏 / 取消。
+        desired: bool,
+    },
+    /// 歌单写操作（local 直接生效；qq owned 进 outbox）。
+    PlaylistWrite {
+        /// 操作。
+        op: PlaylistWriteOp,
+    },
+    /// 触发 QQ 用户库 reconcile（library sync；无凭证 → NotLoggedIn）。
+    LibrarySync,
     /// 订阅状态事件流（推送 `Event` 帧）。
     Subscribe,
     /// 播放 URI（MPRIS `OpenUri`；`file://` → 本地，其余 → 内部错误）。
@@ -137,6 +155,8 @@ pub enum Response {
     QueueList(QueuePage),
     /// 错误。
     Err { code: IpcErrorCode, message: String },
+    /// 写操作创建的资源 id（playlist create 等）。
+    Created(i64),
 }
 
 /// 订阅后的事件推送。
@@ -160,6 +180,46 @@ pub struct DaemonState {
     pub seq: u64,
     /// 最近一次命令的错误（解析失败等；成功操作时清空，Finding 2）。
     pub last_error: Option<ErrorInfo>,
+}
+
+/// 歌单写操作（本地先提交 + outbox；spec §3.3/§5）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PlaylistWriteOp {
+    /// 新建本地歌单。
+    Create {
+        /// 名称。
+        name: String,
+    },
+    /// 重命名（local 直接生效；owned 不支持远端重命名）。
+    Rename {
+        /// 歌单 id。
+        id: i64,
+        /// 新名称。
+        name: String,
+    },
+    /// 删除（owned：远端 DelPlaylist 成功后才删本地行）。
+    Delete {
+        /// 歌单 id。
+        id: i64,
+    },
+    /// 追加曲目（owned：本地提交 + playlist_ops outbox）。
+    AddTrack {
+        /// 歌单 id。
+        id: i64,
+        /// 来源：`qq` | `local`。
+        source: String,
+        /// 来源身份。
+        key: String,
+        /// 标题。
+        title: String,
+    },
+    /// 按序号移除曲目（owned：outbox）。
+    RemoveTrack {
+        /// 歌单 id。
+        id: i64,
+        /// 0 基序号。
+        position: i64,
+    },
 }
 
 /// 队列分页条目（纯 ID + 位置；标题/歌手由客户端经媒体库批量投影，
