@@ -193,18 +193,34 @@ enum LibraryCmd {
     Sync,
     /// 待同步意图/错误（直读媒体库）。
     SyncStatus,
-    /// 我喜欢的歌曲（本地事实视图）。
+    /// 本地曲目浏览（默认全部本地曲目；里程碑 E）。
     Tracks {
+        /// 搜索（标题/歌手/专辑子串）。
+        #[arg(long)]
+        search: Option<String>,
+        /// 按歌手过滤（多艺术家命中）。
+        #[arg(long)]
+        artist: Option<String>,
+        /// 按专辑过滤。
+        #[arg(long)]
+        album: Option<String>,
         /// 只看已收藏。
         #[arg(long)]
         liked: bool,
     },
-    /// 我收藏的专辑（本地事实视图）。
+    /// 本地专辑聚合（里程碑 E）。
     Albums {
-        /// 只看已收藏。
+        /// 专辑名子串过滤。
+        #[arg(long)]
+        search: Option<String>,
+        /// 只看已收藏（兼容旧入口）。
         #[arg(long)]
         liked: bool,
     },
+    /// 本地歌手聚合（里程碑 E）。
+    Artists,
+    /// 扫描本地目录入库（注册为扫描根；里程碑 E）。
+    Scan { dir: String },
 }
 
 /// `hmp account` 子命令。
@@ -373,20 +389,33 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             LibraryCmd::History { count } => history::run(count).await,
             LibraryCmd::Sync => library::sync().await,
             LibraryCmd::SyncStatus => library::sync_status().await,
-            LibraryCmd::Tracks { liked } => {
-                if liked {
+            LibraryCmd::Tracks {
+                search,
+                artist,
+                album,
+                liked,
+            } => {
+                if liked && search.is_none() && artist.is_none() && album.is_none() {
                     library::tracks_liked().await
                 } else {
-                    Err("hmp library tracks --liked".into())
+                    library::tracks_local(
+                        search.as_deref(),
+                        artist.as_deref(),
+                        album.as_deref(),
+                        liked,
+                    )
+                    .await
                 }
             }
-            LibraryCmd::Albums { liked } => {
-                if liked {
+            LibraryCmd::Albums { search, liked } => {
+                if liked && search.is_none() {
                     library::albums_liked().await
                 } else {
-                    Err("hmp library albums --liked".into())
+                    library::albums_local(search.as_deref()).await
                 }
             }
+            LibraryCmd::Artists => library::artists_local().await,
+            LibraryCmd::Scan { dir } => scan::run(&dir).await,
         },
         Command::Account(cmd) => match cmd {
             AccountCmd::Profile => account::profile().await,

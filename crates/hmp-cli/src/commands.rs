@@ -443,6 +443,11 @@ mod tests {
             parse_source("album:a1"),
             hmp_core::PlayRequest::Album(hmp_core::AlbumId::new("a1"))
         );
+        // 里程碑 E：本地专辑（`album:local:<名称>` 原样透传，daemon 按名匹配）。
+        assert_eq!(
+            parse_source("album:local:某专辑"),
+            hmp_core::PlayRequest::Album(hmp_core::AlbumId::new("local:某专辑"))
+        );
     }
 
     #[test]

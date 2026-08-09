@@ -128,6 +128,74 @@ pub async fn tracks_liked() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 本地曲目浏览（里程碑 E）：默认全部本地曲目，支持搜索/歌手/专辑/收藏过滤。
+pub async fn tracks_local(
+    search: Option<&str>,
+    artist: Option<&str>,
+    album: Option<&str>,
+    liked: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = super::library::open_library()?;
+    let rows = db.library_tracks(search, artist, album, liked)?;
+    let mut stdout = std::io::stdout().lock();
+    if rows.is_empty() {
+        writeln!(stdout, "本地库无匹配曲目（先 hmp library scan <目录>）")?;
+    } else {
+        for (i, r) in rows.iter().enumerate() {
+            let missing = if r.missing { " [缺失]" } else { "" };
+            writeln!(
+                stdout,
+                "{:>3}. {}{}  {}",
+                i + 1,
+                r.title,
+                missing,
+                r.source_key
+            )?;
+        }
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
+/// 本地专辑聚合（里程碑 E）。
+pub async fn albums_local(search: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = super::library::open_library()?;
+    let rows = db.library_albums(search)?;
+    let mut stdout = std::io::stdout().lock();
+    if rows.is_empty() {
+        writeln!(stdout, "本地库无专辑（先 hmp library scan <目录>）")?;
+    } else {
+        for (i, g) in rows.iter().enumerate() {
+            writeln!(
+                stdout,
+                "{:>3}. {}  {}（{} 首）",
+                i + 1,
+                g.album,
+                g.artist.as_deref().unwrap_or("未知歌手"),
+                g.track_count
+            )?;
+        }
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
+/// 本地歌手聚合（里程碑 E；多艺术家拆行）。
+pub async fn artists_local() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = super::library::open_library()?;
+    let rows = db.library_artists()?;
+    let mut stdout = std::io::stdout().lock();
+    if rows.is_empty() {
+        writeln!(stdout, "本地库无歌手（先 hmp library scan <目录>）")?;
+    } else {
+        for (i, g) in rows.iter().enumerate() {
+            writeln!(stdout, "{:>3}. {}（{} 首）", i + 1, g.artist, g.track_count)?;
+        }
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
 /// 我收藏的专辑（本地事实视图；标题随 sync 补齐前显示 id）。
 pub async fn albums_liked() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;

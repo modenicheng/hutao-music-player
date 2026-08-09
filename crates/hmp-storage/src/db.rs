@@ -178,6 +178,37 @@ pub enum ScanOutcome {
     MissingReset,
 }
 
+/// 本地曲目浏览行（里程碑 E 浏览入口）。
+#[derive(Clone, Debug)]
+pub struct LibraryTrackRow {
+    pub track_id: i64,
+    pub source_key: String,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub year: Option<i64>,
+    pub genre: Option<String>,
+    pub missing: bool,
+}
+
+/// 本地专辑聚合行。
+#[derive(Clone, Debug)]
+pub struct AlbumGroup {
+    pub album: String,
+    pub artist: Option<String>,
+    pub track_count: i64,
+    pub year: Option<i64>,
+    pub cover_uri: Option<String>,
+}
+
+/// 本地歌手聚合行（track_artists 多值拆行）。
+#[derive(Clone, Debug)]
+pub struct ArtistGroup {
+    pub artist: String,
+    pub track_count: i64,
+}
+
 const SCHEMA_V1: &str = r#"
 CREATE TABLE tracks (
   id INTEGER PRIMARY KEY,
@@ -757,6 +788,189 @@ impl LibraryDb {
             )?;
         }
         Ok(())
+    }
+
+    /// LIKE 通配符转义（配合 `ESCAPE '\\'`）。
+    fn escape_like(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    }
+
+    /// 本地曲目浏览：search（标题/歌手/专辑子串）、artist（track_artists 多值命中）、
+    /// album（精确）、liked_only（relations 收藏）。
+    pub fn library_tracks(
+        &mut self,
+        search: Option<&str>,
+        artist: Option<&str>,
+        album: Option<&str>,
+        liked_only: bool,
+    ) -> rusqlite::Result<Vec<LibraryTrackRow>> {
+        let mut sql = String::from(
+            "SELECT t.id, t.source_key, t.title, t.artist, t.album, t.duration_ms, t.year, t.genre, lf.missing
+             FROM tracks t JOIN local_files lf ON lf.track_id = t.id WHERE t.source = 'local'",
+        );
+        let mut conds: Vec<String> = Vec::new();
+        let mut vals: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(s) = search {
+            conds.push(
+                "(t.title LIKE ? ESCAPE '\\' OR COALESCE(t.artist,'') LIKE ? ESCAPE '\\' OR COALESCE(t.album,'') LIKE ? ESCAPE '\\')".into(),
+            );
+            let pat = format!("%{}%", Self::escape_like(s));
+            for _ in 0..3 {
+                vals.push(Box::new(pat.clone()));
+            }
+        }
+        if let Some(a) = artist {
+            conds.push(
+                "EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id AND ta.artist = ?)"
+                    .into(),
+            );
+            vals.push(Box::new(a.to_string()));
+        }
+        if let Some(al) = album {
+            conds.push("t.album = ? COLLATE NOCASE".into());
+            vals.push(Box::new(al.to_string()));
+        }
+        if liked_only {
+            conds.push(
+                "EXISTS (SELECT 1 FROM relations r WHERE r.entity_type='track' AND r.provider='local' AND r.entity_key = t.source_key AND r.relation='liked' AND r.desired_state=1)"
+                    .into(),
+            );
+        }
+        if !conds.is_empty() {
+            sql.push_str(" AND ");
+            sql.push_str(&conds.join(" AND "));
+        }
+        sql.push_str(" ORDER BY t.title");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(vals.iter().map(|v| v.as_ref())),
+            |r| {
+                Ok(LibraryTrackRow {
+                    track_id: r.get(0)?,
+                    source_key: r.get(1)?,
+                    title: r.get(2)?,
+                    artist: r.get(3)?,
+                    album: r.get(4)?,
+                    duration_ms: r.get(5)?,
+                    year: r.get(6)?,
+                    genre: r.get(7)?,
+                    missing: r.get::<_, i64>(8)? != 0,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
+    /// 本地专辑聚合（album 非空；search 子串过滤）。
+    pub fn library_albums(&mut self, search: Option<&str>) -> rusqlite::Result<Vec<AlbumGroup>> {
+        let mut sql = String::from(
+            "SELECT t.album, MAX(t.artist), COUNT(*), MAX(t.year), MAX(t.cover_uri)
+             FROM tracks t JOIN local_files lf ON lf.track_id = t.id
+             WHERE t.source = 'local' AND t.album IS NOT NULL AND t.album <> ''",
+        );
+        let mut vals: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(s) = search {
+            sql.push_str(" AND t.album LIKE ? ESCAPE '\\'");
+            vals.push(Box::new(format!("%{}%", Self::escape_like(s))));
+        }
+        sql.push_str(" GROUP BY t.album ORDER BY t.album");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(vals.iter().map(|v| v.as_ref())),
+            |r| {
+                Ok(AlbumGroup {
+                    album: r.get(0)?,
+                    artist: r.get(1)?,
+                    track_count: r.get(2)?,
+                    year: r.get(3)?,
+                    cover_uri: r.get(4)?,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
+    /// 本地歌手聚合（多值拆行；曲目数按 distinct track 计）。
+    pub fn library_artists(&mut self) -> rusqlite::Result<Vec<ArtistGroup>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ta.artist, COUNT(DISTINCT ta.track_id)
+             FROM track_artists ta
+             JOIN tracks t ON t.id = ta.track_id
+             JOIN local_files lf ON lf.track_id = t.id
+             WHERE t.source = 'local'
+             GROUP BY ta.artist ORDER BY ta.artist",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ArtistGroup {
+                artist: r.get(0)?,
+                track_count: r.get(1)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 按专辑名取本地曲目（播放源；大小写不敏感精确匹配）。
+    pub fn local_tracks_by_album(&mut self, album: &str) -> rusqlite::Result<Vec<LibraryTrackRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.source_key, t.title, t.artist, t.album, t.duration_ms, t.year, t.genre, lf.missing
+             FROM tracks t JOIN local_files lf ON lf.track_id = t.id
+             WHERE t.source = 'local' AND t.album = ?1 COLLATE NOCASE
+             ORDER BY COALESCE(t.track_number, 999), t.title",
+        )?;
+        let rows = stmt.query_map(params![album], |r| {
+            Ok(LibraryTrackRow {
+                track_id: r.get(0)?,
+                source_key: r.get(1)?,
+                title: r.get(2)?,
+                artist: r.get(3)?,
+                album: r.get(4)?,
+                duration_ms: r.get(5)?,
+                year: r.get(6)?,
+                genre: r.get(7)?,
+                missing: r.get::<_, i64>(8)? != 0,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 按歌手名取本地曲目（播放源；track_artists 多值命中）。
+    pub fn local_tracks_by_artist(
+        &mut self,
+        artist: &str,
+    ) -> rusqlite::Result<Vec<LibraryTrackRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT t.id, t.source_key, t.title, t.artist, t.album, t.duration_ms, t.year, t.genre, lf.missing
+             FROM tracks t
+             JOIN track_artists ta ON ta.track_id = t.id
+             JOIN local_files lf ON lf.track_id = t.id
+             WHERE t.source = 'local' AND ta.artist = ?1
+             ORDER BY t.title",
+        )?;
+        let rows = stmt.query_map(params![artist], |r| {
+            Ok(LibraryTrackRow {
+                track_id: r.get(0)?,
+                source_key: r.get(1)?,
+                title: r.get(2)?,
+                artist: r.get(3)?,
+                album: r.get(4)?,
+                duration_ms: r.get(5)?,
+                year: r.get(6)?,
+                genre: r.get(7)?,
+                missing: r.get::<_, i64>(8)? != 0,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 已注册扫描根（watcher/E2 用）。
+    pub fn scan_roots(&mut self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM scan_roots ORDER BY id")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
     }
 
     /// 收藏曲目（upsert 曲目行 + 收藏；幂等）。
@@ -2521,5 +2735,78 @@ mod tests {
             )
             .unwrap();
         assert_eq!(p, new.to_str().unwrap(), "path 已更新");
+    }
+
+    /// 里程碑 E：浏览聚合——tracks 过滤（search/artist/album/liked）、
+    /// albums/artists 聚合、播放源查询（album:local / artist:local）。
+    #[test]
+    fn library_browse_aggregations() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        db.conn
+            .execute_batch(
+                r#"
+            INSERT INTO tracks (source, source_key, title, album, artist, duration_ms, year, genre) VALUES
+              ('local', 'local:/a.mp3', 'A', '专辑X', '歌手1', 1000, 2020, 'Rock'),
+              ('local', 'local:/b.mp3', 'B', '专辑X', '歌手1', 2000, 2020, 'Rock');
+            INSERT INTO local_files (track_id, path, last_seen_generation, missing, scan_root_id) VALUES
+              (1, '/a.mp3', 1, 0, 1),
+              (2, '/b.mp3', 1, 0, 1);
+            INSERT INTO track_artists (track_id, artist, position) VALUES
+              (1, '歌手1', 0), (1, '歌手2', 1), (2, '歌手1', 0);
+        "#,
+            )
+            .unwrap();
+        db.set_relation("track", "local", "local:/b.mp3", "liked", true)
+            .unwrap();
+        // 全量
+        let all = db.library_tracks(None, None, None, false).unwrap();
+        assert_eq!(all.len(), 2);
+        // search
+        let s = db.library_tracks(Some("B"), None, None, false).unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].title, "B");
+        // artist（track_artists 多值命中）
+        let ar = db.library_tracks(None, Some("歌手2"), None, false).unwrap();
+        assert_eq!(ar.len(), 1);
+        assert_eq!(ar[0].title, "A");
+        // album
+        let al = db.library_tracks(None, None, Some("专辑X"), false).unwrap();
+        assert_eq!(al.len(), 2);
+        // liked
+        let lk = db.library_tracks(None, None, None, true).unwrap();
+        assert_eq!(lk.len(), 1);
+        assert_eq!(lk[0].source_key, "local:/b.mp3");
+        // albums 聚合
+        let albums = db.library_albums(None).unwrap();
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].album, "专辑X");
+        assert_eq!(albums[0].track_count, 2);
+        assert_eq!(albums[0].year, Some(2020));
+        // artists 聚合（多值拆行）
+        let artists = db.library_artists().unwrap();
+        assert_eq!(artists.len(), 2);
+        assert!(
+            artists
+                .iter()
+                .any(|a| a.artist == "歌手1" && a.track_count == 2)
+        );
+        assert!(
+            artists
+                .iter()
+                .any(|a| a.artist == "歌手2" && a.track_count == 1)
+        );
+        // 播放源查询
+        let by_album = db.local_tracks_by_album("专辑X").unwrap();
+        assert_eq!(by_album.len(), 2);
+        let by_artist = db.local_tracks_by_artist("歌手2").unwrap();
+        assert_eq!(by_artist.len(), 1);
+        // missing 可见
+        db.conn
+            .execute("UPDATE local_files SET missing=1 WHERE track_id=2", [])
+            .unwrap();
+        let rows = db.library_tracks(None, None, None, false).unwrap();
+        assert!(rows.iter().find(|r| r.track_id == 2).unwrap().missing);
+        // scan_roots 查询
+        assert!(db.scan_roots().unwrap().is_empty());
     }
 }

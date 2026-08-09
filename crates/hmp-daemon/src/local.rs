@@ -161,6 +161,35 @@ impl SourceResolver for LocalSourceResolver {
                 let stub = self.local_stub(id);
                 Box::pin(async move { Ok(vec![stub]) })
             }
+            // 里程碑 E：`album:local:<专辑名>` → 本地专辑曲目列表（按名匹配）。
+            PlayRequest::Album(id) if id.as_ref().starts_with("local:") => {
+                let album = id.as_ref().trim_start_matches("local:").to_string();
+                let lib = self.library.clone();
+                Box::pin(async move {
+                    let mut db = lib
+                        .lock()
+                        .map_err(|e| EngineError::Internal(e.to_string()))?;
+                    let rows = db
+                        .local_tracks_by_album(&album)
+                        .map_err(|e| EngineError::Internal(e.to_string()))?;
+                    if rows.is_empty() {
+                        return Err(EngineError::PlaylistNotFound(format!(
+                            "本地专辑为空: {album}"
+                        )));
+                    }
+                    let stubs = rows
+                        .into_iter()
+                        .map(|r| hmp_core::TrackStub {
+                            id: TrackId::new(r.source_key),
+                            title: r.title,
+                            artists: r.artist.into_iter().collect(),
+                            album: r.album,
+                            duration_ms: r.duration_ms,
+                        })
+                        .collect();
+                    Ok(stubs)
+                })
+            }
             _ => Box::pin(async {
                 Err(EngineError::Internal("本地解析器仅支持 local 源".into()))
             }),
@@ -244,6 +273,10 @@ impl SourceResolver for CompositeSourceResolver {
     {
         match src {
             PlayRequest::Local(_) => self.local.resolve_source_ids(src),
+            // 里程碑 E：本地专辑（`album:local:` 前缀）→ 本地解析器。
+            PlayRequest::Album(id) if id.as_ref().starts_with("local:") => {
+                self.local.resolve_source_ids(src)
+            }
             _ => self.qq.resolve_source_ids(src),
         }
     }
@@ -329,6 +362,43 @@ mod tests {
         let resolved = resolver.resolve_uri(&uri).await.unwrap();
         assert_eq!(resolved.uri, uri, "URI 应原样往返");
         assert_eq!(resolved.track.title, "a b#c 我的歌");
+    }
+
+    /// 里程碑 E：`album:local:<专辑名>` → 按专辑名取本地曲目列表（播放源）。
+    #[tokio::test]
+    async fn resolve_local_album_source() {
+        let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        {
+            let mut db = lib.lock().unwrap();
+            for (path, title, album, artist, dur) in [
+                ("/a.mp3", "A", "某专辑", "歌手1", 1000),
+                ("/b.mp3", "B", "某专辑", "歌手1", 2000),
+                ("/c.mp3", "C", "别的专辑", "歌手2", 3000),
+            ] {
+                db.add_local_file(std::path::Path::new(path), None).unwrap();
+                db.upsert_track(&hmp_storage::TrackRow {
+                    source: "local",
+                    source_key: format!("local:{path}"),
+                    title: title.into(),
+                    album: Some(album.into()),
+                    artist: Some(artist.into()),
+                    duration_ms: Some(dur),
+                    ..Default::default()
+                })
+                .unwrap();
+            }
+        }
+        let resolver = LocalSourceResolver::new(lib);
+        let src = PlayRequest::Album(hmp_core::AlbumId::new("local:某专辑"));
+        let stubs = resolver.resolve_source_ids(&src).await.unwrap();
+        assert_eq!(stubs.len(), 2, "专辑内 2 首");
+        assert!(stubs.iter().all(|s| s.album.as_deref() == Some("某专辑")));
+        assert!(stubs.iter().any(|s| s.title == "A"));
+        assert!(stubs.iter().any(|s| s.title == "B"));
+        // 空结果 → PlaylistNotFound。
+        let src = PlayRequest::Album(hmp_core::AlbumId::new("local:不存在"));
+        let err = resolver.resolve_source_ids(&src).await.unwrap_err();
+        assert!(matches!(err, EngineError::PlaylistNotFound(_)));
     }
 
     /// P1：本地音质如实上报——flac → Flac（旧实现一律 Mp3_128）。
