@@ -54,8 +54,12 @@ impl Daemon {
         let sync_handle =
             crate::sync::SyncWorker::spawn(library.clone(), QqMusicClient::new(), store_from_env());
         let mut handle = handle;
-        handle.library = Some(library);
         handle.sync_handle = Some(sync_handle);
+        handle.comment = Some(crate::comment::CommentService::new(
+            store_from_env(),
+            library.clone(),
+        ));
+        handle.library = Some(library);
         Ok(Self { handle })
     }
 }

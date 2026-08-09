@@ -15,6 +15,7 @@ mod account;
 mod auth;
 mod client;
 mod commands;
+mod comment;
 mod favorite;
 mod history;
 mod library;
@@ -94,6 +95,9 @@ enum Command {
     /// QQ 账号信息。
     #[command(subcommand)]
     Account(AccountCmd),
+    /// 评论（list/post/reply/delete）。
+    #[command(subcommand)]
+    Comment(CommentCmd),
 }
 
 /// `hmp player` 子命令。
@@ -210,6 +214,40 @@ enum AccountCmd {
     Profile,
     /// VIP 信息。
     Vip,
+}
+
+/// `hmp comment` 子命令。
+#[derive(Subcommand)]
+enum CommentCmd {
+    /// 评论列表。
+    List {
+        /// 曲目 mid。
+        mid: String,
+        /// 排序：hot | new | recommend（默认 hot）。
+        #[arg(long, default_value = "hot")]
+        sort: String,
+    },
+    /// 发表评论。
+    Post {
+        /// 曲目 mid。
+        mid: String,
+        /// 评论内容。
+        text: String,
+    },
+    /// 回复评论。
+    Reply {
+        /// 曲目 mid。
+        mid: String,
+        /// 被回复评论 id。
+        cm_id: String,
+        /// 回复内容。
+        text: String,
+    },
+    /// 删除评论。
+    Delete {
+        /// 评论 id。
+        cm_id: String,
+    },
 }
 
 /// `hmp favorite` 子命令。
@@ -353,6 +391,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Account(cmd) => match cmd {
             AccountCmd::Profile => account::profile().await,
             AccountCmd::Vip => account::vip().await,
+        },
+        Command::Comment(cmd) => match cmd {
+            CommentCmd::List { mid, sort } => comment::list(&mid, &sort).await,
+            CommentCmd::Post { mid, text } => comment::post(&mid, &text).await,
+            CommentCmd::Reply { mid, cm_id, text } => comment::reply(&mid, &cm_id, &text).await,
+            CommentCmd::Delete { cm_id } => comment::delete(&cm_id).await,
         },
     }
 }

@@ -130,6 +130,27 @@ pub enum Request {
     },
     /// 触发 QQ 用户库 reconcile（library sync；无凭证 → NotLoggedIn）。
     LibrarySync,
+    /// 评论查询（读；daemon 内存 TTL cache）。
+    CommentList {
+        /// 曲目 mid。
+        mid: String,
+        /// 排序：hot | new | recommend。
+        sort: String,
+    },
+    /// 发表/回复评论（写；直发 QQ）。
+    CommentPost {
+        /// 曲目 mid。
+        mid: String,
+        /// 评论内容。
+        content: String,
+        /// 被回复评论 id（非空即回复）。
+        reply_cmt_id: Option<String>,
+    },
+    /// 删除评论（写）。
+    CommentDelete {
+        /// 评论 id。
+        cm_id: String,
+    },
     /// 订阅状态事件流（推送 `Event` 帧）。
     Subscribe,
     /// 播放 URI（MPRIS `OpenUri`；`file://` → 本地，其余 → 内部错误）。
@@ -157,6 +178,8 @@ pub enum Response {
     Err { code: IpcErrorCode, message: String },
     /// 写操作创建的资源 id（playlist create 等）。
     Created(i64),
+    /// `CommentList` 的响应。
+    CommentList(CommentPage),
 }
 
 /// 订阅后的事件推送。
@@ -220,6 +243,28 @@ pub enum PlaylistWriteOp {
         /// 0 基序号。
         position: i64,
     },
+}
+
+/// 评论条目（展示投影；daemon 经 mid→qq_song_id 解析后返回）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommentItem {
+    /// 评论 id（回复/删除用；QQ `CmId`）。
+    pub cm_id: String,
+    /// 分页游标（QQ `SeqNo`）。
+    pub seq_no: String,
+    pub content: String,
+    pub nickname: String,
+    /// 时间戳（秒）。
+    pub time: i64,
+    pub like_count: i64,
+}
+
+/// 评论页。
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct CommentPage {
+    /// 评论总数。
+    pub total: i64,
+    pub comments: Vec<CommentItem>,
 }
 
 /// 队列分页条目（纯 ID + 位置；标题/歌手由客户端经媒体库批量投影，

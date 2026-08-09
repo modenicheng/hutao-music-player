@@ -33,6 +33,8 @@ pub struct EngineHandle {
     pub library: Option<std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>>,
     /// QQ 同步 worker 触发句柄（daemon 层注入）。
     pub sync_handle: Option<crate::sync::SyncHandle>,
+    /// 评论服务（daemon 层注入；未注入时评论命令报不可用）。
+    pub comment: Option<crate::comment::CommentService>,
 }
 
 impl EngineHandle {
@@ -116,6 +118,7 @@ impl PlaybackEngine {
             caps_rx,
             library: None,
             sync_handle: None,
+            comment: None,
         }
     }
 

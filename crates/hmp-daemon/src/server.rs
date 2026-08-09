@@ -340,6 +340,59 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             };
             write_frame(wr, &resp).await?;
         }
+        // —— 评论（spec §6）：读走 TTL cache；写直发 QQ。
+        Ok(Request::CommentList { mid, sort }) => {
+            let resp = match &handle.comment {
+                Some(svc) => match svc.list(&mid, &sort).await {
+                    Ok(page) => Response::CommentList(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "评论服务不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::CommentPost {
+            mid,
+            content,
+            reply_cmt_id,
+        }) => {
+            let resp = match &handle.comment {
+                Some(svc) => match svc.post(&mid, &content, reply_cmt_id.as_deref()).await {
+                    Ok(_) => Response::Ok,
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "评论服务不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::CommentDelete { cm_id }) => {
+            let resp = match &handle.comment {
+                Some(svc) => match svc.delete(&cm_id).await {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "评论服务不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
         Ok(req) => {
             if requires_credential(&req) && !(handle.credential_ok)() {
                 write_frame(

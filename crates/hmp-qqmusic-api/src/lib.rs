@@ -31,6 +31,7 @@
 pub mod album;
 pub mod algorithms;
 pub mod client;
+pub mod comment;
 pub mod config;
 pub mod credential;
 pub mod error;
@@ -50,6 +51,7 @@ pub use album::{
     GetNewAlbumResponse,
 };
 pub use client::QqMusicClient;
+pub use comment::{AddCommentResponse, Comment, CommentApi, CommentListData, CommentListResponse};
 pub use config::ClientConfig;
 pub use credential::Credential;
 pub use error::QqMusicError;
