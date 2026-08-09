@@ -245,6 +245,7 @@ impl PlaybackEngine {
         let (queue_tx, queue_rx) = watch::channel(QueueSnapshot::default());
         // sticky 终止信号：晚到的接收者立即可见（watch 保留当前值，Finding 7）。
         let (term_tx, term_rx) = watch::channel(false);
+        let queue_rev_after_restore = queue.revision();
         let mut engine = Self {
             driver,
             resolver,
@@ -267,7 +268,13 @@ impl PlaybackEngine {
             last_queue_rev: 0,
             session_path,
             persist_throttle,
-            saved: SessionMirror::default(),
+            // 镜像初始化为恢复后状态：首帧 publish 不因 rev/volume 脏而覆写
+            // 文件（避免启动即退出时丢失恢复值；音量经 driver 异步生效前的窗口）。
+            saved: SessionMirror {
+                queue_rev: queue_rev_after_restore,
+                volume: restored_volume.unwrap_or(1.0),
+                ..SessionMirror::default()
+            },
             restored,
         };
         tokio::spawn(async move {
@@ -484,7 +491,6 @@ impl PlaybackEngine {
         }
         if playing != self.saved.playing {
             dirty = true; // 播放状态翻转（开始/暂停/停止）立即写
-            self.saved.playing = playing;
         }
         if !dirty {
             return;
@@ -498,6 +504,7 @@ impl PlaybackEngine {
             Ok(()) => {
                 self.saved.queue_rev = rev;
                 self.saved.volume = volume;
+                self.saved.playing = playing;
                 self.saved.position = position;
                 self.saved.last_write = Some(std::time::Instant::now());
             }
@@ -2845,7 +2852,7 @@ mod tests {
         assert!(!seeks.is_empty(), "恢复后首次 Play 应发出 Seek 续播");
     }
 
-    /// 节流：位置推进不触发频繁写盘（throttle=5s 时 100ms 内只写有限次数）。
+    /// 节流：播放中位置推进不触发写盘；暂停后位置变化立即写。
     #[tokio::test]
     async fn position_persist_is_throttled() {
         let dir = std::env::temp_dir().join(format!("hmp-session-throttle-{}", std::process::id()));
@@ -2867,9 +2874,26 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let mtime1 = std::fs::metadata(&sp).unwrap().modified().unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // 播放中推进位置（send_modify 触发 state_rx.changed → publish）。
+        driver
+            .state_tx
+            .send_modify(|s| s.position = std::time::Duration::from_secs(30));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let mtime2 = std::fs::metadata(&sp).unwrap().modified().unwrap();
-        assert_eq!(mtime1, mtime2, "节流期内 position 推进不应触发写盘");
+        assert_eq!(mtime1, mtime2, "播放中节流期内 position 推进不应触发写盘");
+        // 暂停（FakeDriver 空实现，用 set_status 模拟状态翻转→立即写盘）后
+        // 再推进位置 → 非 playing 强制写。
+        driver.set_status(hmp_core::PlaybackStatus::Paused);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        driver
+            .state_tx
+            .send_modify(|s| s.position = std::time::Duration::from_secs(31));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let mtime3 = std::fs::metadata(&sp).unwrap().modified().unwrap();
+        assert_ne!(
+            mtime2, mtime3,
+            "暂停后位置变化应立即写盘（非 playing 绕过节流）"
+        );
     }
 
     /// 写盘失败不 panic、不阻断播放。
