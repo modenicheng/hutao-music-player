@@ -296,7 +296,7 @@ pub async fn cmd_queue_list(
                 out,
                 "{mark} {:>3}  {:<20} {:<26} {}",
                 page.offset + i,
-                &key,
+                key,
                 title,
                 artist
             )?;
