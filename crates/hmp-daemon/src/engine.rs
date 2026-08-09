@@ -569,6 +569,13 @@ impl PlaybackEngine {
     }
 
     async fn navigate_prev(&mut self) {
+        // 曲首语义（里程碑 G，审计第 6 步）：当前位置 > 3s → 只回曲首，
+        // 不换曲（与会话记录/队列无交互；与 MPRIS Seek 行为一致）。
+        if self.state_rx.borrow().position > std::time::Duration::from_secs(3) {
+            self.driver
+                .command(PlayerCommand::Seek(std::time::Duration::ZERO));
+            return;
+        }
         let saved = self.queue.save_state();
         let Some(id) = self.queue.prev_track() else {
             return;
@@ -1350,6 +1357,105 @@ mod tests {
         assert_eq!(
             driver.load_uris(),
             vec!["fake://a", "fake://b", "fake://c", "fake://b"]
+        );
+    }
+
+    /// 里程碑 G：Previous 曲首语义——position > 3s 只回曲首，不换曲。
+    #[tokio::test]
+    async fn previous_restarts_track_when_past_three_seconds() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("b")]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        // 位置推进到 >3s。
+        driver
+            .state_tx
+            .send_modify(|s| s.position = std::time::Duration::from_secs(12));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let loads_before = driver.loads.lock().unwrap().len();
+        handle
+            .cmd(Request::Command(PlayerCommand::Previous))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // 不换曲：无新 load。
+        assert_eq!(
+            driver.loads.lock().unwrap().len(),
+            loads_before,
+            ">3s 时 Previous 不应换曲"
+        );
+        // 收到 Seek(0)。
+        let seeks: Vec<PlayerCommand> = driver
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| matches!(c, PlayerCommand::Seek(_)))
+            .cloned()
+            .collect();
+        assert!(
+            seeks
+                .iter()
+                .any(|c| matches!(c, PlayerCommand::Seek(p) if p.is_zero())),
+            "应 Seek(0) 回曲首: {seeks:?}"
+        );
+        // 队列/当前曲未变。
+        assert_eq!(
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref()),
+            Some("a")
+        );
+    }
+
+    /// 里程碑 G：position ≤ 3s → 正常换上一首。
+    #[tokio::test]
+    async fn previous_switches_track_when_within_three_seconds() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        // 位置显式归零（≤3s）→ Previous 换回 a。
+        driver
+            .state_tx
+            .send_modify(|s| s.position = std::time::Duration::ZERO);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let loads_before = driver.loads.lock().unwrap().len();
+        handle
+            .cmd(Request::Command(PlayerCommand::Previous))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            driver.loads.lock().unwrap().len() > loads_before,
+            "≤3s 时 Previous 应换曲"
+        );
+        assert_eq!(
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref()),
+            Some("a")
         );
     }
 
