@@ -725,7 +725,9 @@ impl PlaybackEngine {
             }
             self.publish();
         } else {
-            // 无续播：阶段 → Idle。
+            // 无续播：阶段 → Idle。RG 增益随曲目清空（Review 打磨：
+            // 避免 status 在曲目为空时残留上一曲的增益）。
+            self.current_rg_db = None;
             self.phase = hmp_core::EnginePhase::Idle;
             self.publish();
         }
@@ -1986,15 +1988,28 @@ mod tests {
     async fn ended_with_no_next_stays_idle() {
         let (driver, _sr, _er) = FakeDriver::new();
         let resolver = FakeResolver::new(vec![vec![TrackId::new("a")]]);
+        // 带 RG：播完进入 Idle 时增益应随曲目清空（打磨 review）。
+        resolver
+            .replaygain
+            .lock()
+            .unwrap()
+            .push((TrackId::new("a"), -6.5));
         let (handle, _st) = start_engine(driver.clone(), resolver).await;
         handle
             .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
             .await
             .unwrap();
         wait_idle().await;
+        assert_eq!(handle.state_rx.borrow().replaygain_db, Some(-6.5));
         driver.emit(PlayerEvent::PlaybackEnded { load_gen: 1 }); // 当前代（首载 gen=1）
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(0));
+        assert_eq!(handle.state_rx.borrow().phase, hmp_core::EnginePhase::Idle);
+        assert_eq!(
+            handle.state_rx.borrow().replaygain_db,
+            None,
+            "Idle 后应清空 RG 增益"
+        );
         assert_eq!(driver.loads.lock().unwrap().len(), 1); // 只加载过一次
     }
 
