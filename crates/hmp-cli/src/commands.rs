@@ -289,7 +289,7 @@ pub async fn cmd_queue(client: &mut DaemonClient, args: &[String]) -> Result<(),
                     })?;
             cmd_simple(client, Request::QueueRemove(idx)).await
         }
-        Some("clear") => cmd_simple(client, Request::QueueClear).await,
+        Some("clear") => cmd_simple(client, Request::QueueClear { all: false }).await,
         _ => Err(CliError::Response {
             code: IpcErrorCode::BadRequest,
             message: "未知 queue 子命令".into(),

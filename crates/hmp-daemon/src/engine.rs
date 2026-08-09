@@ -142,15 +142,33 @@ impl PlaybackEngine {
                             }
                         }
                         Request::QueueRemove(i) => {
-                            // 移除当前曲：立即播放接替曲（或空队列停止），避免仲裁失步（Finding 4）。
+                            // 移除当前曲 = 播放接替曲（或空队列停止）。事务式（P1）：
+                            // 先装载接替曲，成功后才关旧会话；装载失败回滚队列，
+                            // 旧曲继续播放——不产生「队列已删、播放器仍播、会话已关」
+                            // 的不一致中间态。
                             let was_current = self.queue.snapshot().current == Some(i);
+                            // 回滚快照须在 remove 之前保存（remove 后队列已变）。
+                            let saved = self.queue.save_state();
                             if self.queue.remove(i) {
                                 if was_current {
-                                    self.end_session("manual");
-                                    self.publish();
+                                    let old_db_track = self.current_db_track;
                                     if let Some(id) = self.queue.current().cloned() {
-                                        let _ = self.load_and_play(id).await;
+                                        if self.load_and_play(id).await.is_ok() {
+                                            // 装载成功：关闭命令前的旧会话（同曲延续则跳过）。
+                                            if let Some(old) = old_db_track {
+                                                if self.current_db_track != Some(old) {
+                                                    self.close_session(old, "manual");
+                                                }
+                                            }
+                                        } else {
+                                            // 装载失败：回滚队列（被删曲目回到原位，
+                                            // 旧曲继续播放）；last_error 已由 load_and_play 发布。
+                                            self.queue.restore_state(saved);
+                                            self.publish(); // 回滚后重新发布（load_and_play 已发布中间态）
+                                        }
                                     } else {
+                                        // 空队列：确定性停止。
+                                        self.end_session("manual");
                                         self.last_error = None;
                                         self.driver.stop();
                                         self.publish();
@@ -160,8 +178,17 @@ impl PlaybackEngine {
                                 }
                             }
                         }
-                        Request::QueueClear => {
-                            self.queue.clear();
+                        Request::QueueClear { all } => {
+                            if all {
+                                // 清空并停止：播放器/会话/队列同步，不留「空队列仍在播」。
+                                self.queue.clear();
+                                self.end_session("stop");
+                                self.last_error = None;
+                                self.driver.stop();
+                            } else {
+                                // 保留当前曲：清除待播曲目，播放/会话不受影响。
+                                self.queue.clear_pending();
+                            }
                             self.publish();
                         }
                         Request::OpenUri(uri) => {
@@ -1503,6 +1530,105 @@ mod tests {
                 .contains(&PlayerCommand::Stop)
         );
         assert_eq!(driver.loads.lock().unwrap().len(), 1, "空队列不应再加载");
+    }
+
+    /// 移除当前曲但接替曲装载失败 → 回滚队列，旧曲继续播放（P1 事务语义）。
+    #[tokio::test]
+    async fn remove_current_rolls_back_on_replacement_load_failure() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        // b 是接替曲：resolve_track(b) 失败。
+        let resolver = PartialFailResolver::new(
+            vec![vec![TrackId::new("a"), TrackId::new("b")]],
+            vec![TrackId::new("b")],
+        );
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(driver.loads.lock().unwrap().clone(), vec!["fake://a"]);
+
+        handle.cmd(Request::QueueRemove(0)).await.unwrap(); // 移除正在播的 a
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert_eq!(
+            st.queue.tracks,
+            vec![TrackId::new("a"), TrackId::new("b")],
+            "装载失败应回滚：被删曲目回到原位"
+        );
+        assert_eq!(st.queue.current, Some(0));
+        assert_eq!(
+            driver.loads.lock().unwrap().clone(),
+            vec!["fake://a"],
+            "接替曲装载失败不得加载"
+        );
+        assert!(
+            st.last_error.is_some(),
+            "装载失败详情应可见（CLI 不再把旧曲当成功）"
+        );
+    }
+
+    /// `queue clear`（all=false）：保留当前曲，清除待播曲目；播放不受影响。
+    #[tokio::test]
+    async fn queue_clear_keeps_current_playing() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![
+            TrackId::new("a"),
+            TrackId::new("b"),
+            TrackId::new("c"),
+        ]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+
+        handle
+            .cmd(Request::QueueClear { all: false })
+            .await
+            .unwrap();
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert_eq!(st.queue.tracks, vec![TrackId::new("a")], "只留当前曲");
+        assert_eq!(st.queue.current, Some(0));
+        assert!(
+            !driver
+                .commands
+                .lock()
+                .unwrap()
+                .contains(&PlayerCommand::Stop),
+            "clear 不停止播放"
+        );
+        assert_eq!(driver.loads.lock().unwrap().len(), 1, "不重新加载");
+    }
+
+    /// `queue clear --all`（all=true）：清空队列并停止（无「空队列仍在播」中间态）。
+    #[tokio::test]
+    async fn queue_clear_all_stops_playback() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+
+        handle.cmd(Request::QueueClear { all: true }).await.unwrap();
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert!(st.queue.tracks.is_empty());
+        assert_eq!(st.queue.current, None);
+        assert!(
+            driver
+                .commands
+                .lock()
+                .unwrap()
+                .contains(&PlayerCommand::Stop),
+            "clear --all 应停止播放"
+        );
     }
 
     /// P1 #4：Play 新曲装载失败 → 旧曲继续播放、队列保持原状、发布错误；

@@ -94,8 +94,11 @@ pub enum Request {
     QueueAppend(PlayRequest),
     /// 移除 0 基位置曲目。
     QueueRemove(usize),
-    /// 清空队列。
-    QueueClear,
+    /// 清空队列。`all=false`：保留当前曲（清除待播）；`all=true`：清空并停止。
+    QueueClear {
+        /// 是否连当前曲一起清空（并停止播放）。
+        all: bool,
+    },
     /// 查询队列快照。
     Queue,
     /// 基础播放器命令（Play/Pause/Stop/Seek/Volume/Loop/Shuffle/Next/Previous）。
@@ -231,7 +234,8 @@ mod tests {
             Request::Play(PlayRequest::Album(AlbumId::new("a1"))),
             Request::QueueAppend(PlayRequest::Track(TrackId::new("m2"))),
             Request::QueueRemove(2),
-            Request::QueueClear,
+            Request::QueueClear { all: false },
+            Request::QueueClear { all: true },
             Request::Queue,
             Request::Command(PlayerCommand::Seek(std::time::Duration::from_secs(30))),
             Request::Status,
