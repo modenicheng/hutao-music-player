@@ -419,6 +419,29 @@ impl QueueCore {
         self.skip_next()
     }
 
+    /// 只读预判下一首（G2 preload 用）：与 [`Self::advance_on_eos`] 返回一致，
+    /// 但**不移动 cursor、不递增 revision**（后台预解析读取用）。
+    pub fn peek_next(&self) -> Option<TrackId> {
+        if self.tracks.is_empty() {
+            return None;
+        }
+        // Track 模式 EOS 重播当前（与 advance_on_eos 的提前返回一致）。
+        if self.loop_mode == LoopMode::Track && self.has_current {
+            return Some(self.tracks[self.order[self.cursor]].clone());
+        }
+        if !self.has_current {
+            return Some(self.tracks[self.order[0]].clone());
+        }
+        if self.cursor + 1 >= self.order.len() {
+            // 到头：None 停止；List/Track 回绕（与 skip_next_inner 一致）。
+            match self.loop_mode {
+                LoopMode::None => return None,
+                _ => return Some(self.tracks[self.order[0]].clone()),
+            }
+        }
+        Some(self.tracks[self.order[self.cursor + 1]].clone())
+    }
+
     /// 上一首：沿播放顺序回退（洗牌下即回到真正刚播过的那首）。
     /// Repeat One 只影响 EOS 续播，不影响手动 Previous：Track 与 None 一致
     /// （回退、队首即停）；仅 List 回绕。
@@ -577,6 +600,42 @@ mod tests {
         assert_eq!(q.prev_track(), Some(t("b")));
         assert_eq!(q.prev_track(), Some(t("a")));
         assert_eq!(q.prev_track(), None); // 无上一首（None 模式）
+    }
+
+    /// G2：peek_next 与 advance_on_eos 返回一致，且不移动 cursor / 不递增 revision。
+    #[test]
+    fn peek_next_matches_advance_without_mutation() {
+        let mut q = QueueCore::new();
+        q.replace(vec![t("a"), t("b"), t("c")], 0);
+        assert_eq!(q.peek_next(), Some(t("b")));
+        assert_eq!(q.peek_next(), Some(t("b"))); // 幂等
+        assert_eq!(q.revision(), 1, "peek 不得变更结构（replace 已 bump 到 1）");
+        assert_eq!(q.advance_on_eos(), Some(t("b")));
+        assert_eq!(q.peek_next(), Some(t("c")));
+
+        // 末尾 + None 模式：advance 返回 None，peek 亦 None。
+        q.advance_on_eos();
+        assert_eq!(q.peek_next(), None);
+        assert_eq!(q.advance_on_eos(), None);
+
+        // List 回绕：peek 也回绕到首曲。
+        q.set_loop_mode(LoopMode::List);
+        assert_eq!(q.peek_next(), Some(t("a")));
+        assert_eq!(q.advance_on_eos(), Some(t("a")));
+
+        // Repeat One：peek 当前曲（EOS 重播）。
+        q.set_loop_mode(LoopMode::Track);
+        assert_eq!(q.peek_next(), Some(t("a")));
+
+        // 无当前曲（append 建队不设当前曲）：peek 首曲，advance 一致。
+        let mut q2 = QueueCore::new();
+        q2.append(vec![t("x"), t("y")]);
+        assert_eq!(q2.peek_next(), Some(t("x")));
+        assert_eq!(q2.advance_on_eos(), Some(t("x")));
+
+        // 空队列。
+        let q3 = QueueCore::new();
+        assert_eq!(q3.peek_next(), None);
     }
 
     #[test]

@@ -14,9 +14,9 @@ use hmp_core::{
     PlaybackStatus, PlayerCommand, QueueSnapshot, Request, TrackId,
 };
 use hmp_player_gst::PlayerEvent;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 
-use crate::player::{EngineError, PlaybackDriver, SourceResolver};
+use crate::player::{EngineError, PlaybackDriver, ResolvedTrack, SourceResolver};
 
 /// 会话持久化文件内容（`$XDG_DATA_HOME/hmp/playback_state.json`）。
 /// 恢复 queue/volume/position；恢复后不自动播放，首次 Play 时续播（里程碑 D）。
@@ -84,6 +84,20 @@ struct AppliedLoad {
     load_gen: u64,
 }
 
+/// 预解析槽（G2 gapless）：后台 resolve 队列下一首，曲间切换时直接消费。
+/// `key = (队列 revision, 装载代际)`：写槽防乱序（旧任务不得覆盖新任务，
+/// 字典序比较）；**消费**只校验代际与曲目 id——队列导航（skip_next/
+/// advance_on_eos）本身会 bump revision，若把 revision 纳入消费条件，
+/// 缓存永远无法命中（曲目 id 已保证不会消费错曲）。
+struct PreloadSlot {
+    /// 触发时指纹：(队列 revision, 装载代际)。
+    key: (u64, u64),
+    /// 预解析的目标曲目（消费时须与请求 id 一致）。
+    id: TrackId,
+    /// 预解析结果（含解密代理 guard；消费时 move 移交）。
+    res: ResolvedTrack,
+}
+
 /// 当前播放会话（媒体库写回锚点：event id 精确闭合）。
 #[derive(Clone)]
 struct PlaybackSession {
@@ -148,6 +162,8 @@ pub struct PlaybackEngine {
     session: Option<PlaybackSession>,
     /// 最近一次成功装载（失败回滚用）。
     last_load: Option<AppliedLoad>,
+    /// 下一首预解析缓存（G2；后台任务写、load_and_play 消费）。
+    preload_slot: Arc<Mutex<Option<PreloadSlot>>>,
     /// 等待驱动应用装载的超时（测试注入短超时）。
     load_timeout: std::time::Duration,
     /// 完整队列快照（仅结构变化时发送；position tick 不触发——O(1) publish）。
@@ -263,6 +279,7 @@ impl PlaybackEngine {
             library,
             session: None,
             last_load: None,
+            preload_slot: Arc::new(Mutex::new(None)),
             load_timeout,
             queue_tx,
             last_queue_rev: 0,
@@ -632,6 +649,8 @@ impl PlaybackEngine {
         // 装载前捕获旧会话与旧位置（listened_ms 用换曲时刻位置，非新曲 ~0）。
         let old_session = self.session.clone();
         let old_position = self.state_rx.borrow().position;
+        // 提交后预解析的锚点（ids 随后被 replace/insert 移走）。
+        let first_id = ids[0].clone();
         match self.load_and_play(ids[0].clone()).await {
             Ok(()) => {
                 // 提交：关闭命令前打开的旧会话。
@@ -658,6 +677,9 @@ impl PlaybackEngine {
                 }
                 self.seq += 1;
                 self.publish();
+                // G2：队列已提交（replace/insert）→ 预解析下一首（装载时队列为空
+                // 无法预判，故在提交后补一次；navigate/EOS 路径由 load_and_play 内触发）。
+                self.schedule_preload(&first_id);
             }
             Err(e) => {
                 // 装载失败：队列/会话/播放均保持原状，仅发布错误（P1）；
@@ -755,66 +777,113 @@ impl PlaybackEngine {
         self.last_error = None;
         self.phase = hmp_core::EnginePhase::Loading;
         self.publish();
-        match self.resolver.resolve_track(&id).await {
-            Ok(res) => {
-                // 捕获上一装载与旧位置（回滚与历史用；此时尚未触碰任何状态）。
-                let prev = self.last_load.clone();
-                let prev_position = self.state_rx.borrow().position;
-                let uri = res.uri.clone();
-                let quality = res.quality;
-                let expected = res.track.id.clone();
-                self.current_gen += 1;
-                let load_gen = self.current_gen;
-                self.driver.load(hmp_player_gst::LoadRequest {
-                    track: res.track.clone(),
-                    uri,
-                    quality: quality.clone(),
-                    load_gen,
-                });
-                self.driver.play();
-                // 等待驱动应用装载（真实驱动为异步管道）：完成前发布的复合状态
-                // 不得携带旧曲目（Bug 2：play-next 后显示旧曲）。超时/通道断开 →
-                // 失败路径（调用方回滚队列、保留旧曲；不创建播放历史）。
-                if let Err(e) = self.wait_current_applied(&expected).await {
-                    // 未确认装载：新解密代理此刻释放；旧 active_media 保持。
-                    drop(res.media);
-                    if let Some(p) = prev {
-                        // 复原代际：回滚后旧曲重新成为当前代（driver loaded_gen 已
-                        // 重载为 prev.load_gen），其 EOS/Error 不得再被误判为旧代
-                        // 忽略（否则播完不续播、会话不闭合）。失败装载 b 的迟到
-                        // 事件 gen=N+1 恰好被过滤，语义正确。
-                        self.current_gen = p.load_gen;
-                        self.rollback_load(p, prev_position).await;
-                    }
+        // 预解析缓存（G2）：代际匹配 + 曲目 id 相符 → 直接消费（跳过网络解析）。
+        // 注意：消费条件**不含队列 revision**——skip_next/advance_on_eos 本身会
+        // bump revision，若纳入则缓存永远无法命中；id 校验已保证不消费错曲。
+        let cached = {
+            let mut slot = self.preload_slot.lock().await;
+            match slot.as_ref() {
+                Some(s) if s.key.1 == self.current_gen && s.id == id => slot.take().map(|s| s.res),
+                _ => None,
+            }
+        };
+        let res = match cached {
+            Some(res) => res,
+            None => match self.resolver.resolve_track(&id).await {
+                Ok(res) => res,
+                Err(e) => {
+                    tracing::error!(%e, "解析失败: {id}");
+                    // 队列位置保持；错误详情进入复合状态（Finding 2）；阶段 → Failed。
                     self.last_error = Some(error_info(&e));
                     self.phase = hmp_core::EnginePhase::Failed;
                     self.publish();
                     return Err(e);
                 }
-                // ACK 成功才提交：替换 active_media（旧代理此刻才释放）、
-                // 记录装载（回滚用）、进入播放阶段、开启播放会话。
-                self.active_media = res.media;
-                self.last_load = Some(AppliedLoad {
-                    track: res.track.clone(),
-                    uri: res.uri,
-                    quality,
-                    load_gen,
-                });
-                self.phase = hmp_core::EnginePhase::Playing;
-                // 媒体库：upsert 曲目 + 开启播放会话（B4）。
-                self.start_session(&res.track);
-                self.publish();
-                Ok(())
+            },
+        };
+        // 捕获上一装载与旧位置（回滚与历史用；此时尚未触碰任何状态）。
+        let prev = self.last_load.clone();
+        let prev_position = self.state_rx.borrow().position;
+        let uri = res.uri.clone();
+        let quality = res.quality;
+        let expected = res.track.id.clone();
+        self.current_gen += 1;
+        let load_gen = self.current_gen;
+        self.driver.load(hmp_player_gst::LoadRequest {
+            track: res.track.clone(),
+            uri,
+            quality: quality.clone(),
+            load_gen,
+        });
+        self.driver.play();
+        // 等待驱动应用装载（真实驱动为异步管道）：完成前发布的复合状态
+        // 不得携带旧曲目（Bug 2：play-next 后显示旧曲）。超时/通道断开 →
+        // 失败路径（调用方回滚队列、保留旧曲；不创建播放历史）。
+        if let Err(e) = self.wait_current_applied(&expected).await {
+            // 未确认装载：新解密代理此刻释放；旧 active_media 保持。
+            drop(res.media);
+            if let Some(p) = prev {
+                // 复原代际：回滚后旧曲重新成为当前代（driver loaded_gen 已
+                // 重载为 prev.load_gen），其 EOS/Error 不得再被误判为旧代
+                // 忽略（否则播完不续播、会话不闭合）。失败装载 b 的迟到
+                // 事件 gen=N+1 恰好被过滤，语义正确。
+                self.current_gen = p.load_gen;
+                self.rollback_load(p, prev_position).await;
             }
-            Err(e) => {
-                tracing::error!(%e, "解析失败: {id}");
-                // 队列位置保持；错误详情进入复合状态（Finding 2）；阶段 → Failed。
-                self.last_error = Some(error_info(&e));
-                self.phase = hmp_core::EnginePhase::Failed;
-                self.publish();
-                Err(e)
-            }
+            self.last_error = Some(error_info(&e));
+            self.phase = hmp_core::EnginePhase::Failed;
+            self.publish();
+            return Err(e);
         }
+        // ACK 成功才提交：替换 active_media（旧代理此刻才释放）、
+        // 记录装载（回滚用）、进入播放阶段、开启播放会话。
+        self.active_media = res.media;
+        self.last_load = Some(AppliedLoad {
+            track: res.track.clone(),
+            uri: res.uri,
+            quality,
+            load_gen,
+        });
+        self.phase = hmp_core::EnginePhase::Playing;
+        // 媒体库：upsert 曲目 + 开启播放会话（B4）。
+        self.start_session(&res.track);
+        // G2：预解析队列下一首（仅成功路径；队列无下一首则跳过）。
+        self.schedule_preload(&res.track.id);
+        self.publish();
+        Ok(())
+    }
+
+    /// G2：后台预解析队列下一首（gapless 加速曲间切换）。
+    /// 仅当装载曲目 == 当前队列 current 时触发（navigate/EOS 已先移动
+    /// cursor；play_source 装载时队列尚未提交 → 跳过，由提交后补触发）。
+    /// 指纹 `(队列 revision, 装载代际)` 仅用于**写槽防乱序**（旧任务不得
+    /// 覆盖新任务结果，字典序比较）；失败静默（不影响播放）。
+    fn schedule_preload(&self, loaded: &TrackId) {
+        if self.queue.current() != Some(loaded) {
+            return;
+        }
+        let Some(next) = self.queue.peek_next() else {
+            return;
+        };
+        let key = (self.queue.revision(), self.current_gen);
+        let resolver = self.resolver.clone();
+        let slot = self.preload_slot.clone();
+        tokio::spawn(async move {
+            match resolver.resolve_track(&next).await {
+                Ok(res) => {
+                    let mut g = slot.lock().await;
+                    // 乱序保护：仅当槽为空或槽的 key 不新于本次（<=）才写入。
+                    let stale_or_same = match g.as_ref() {
+                        None => true,
+                        Some(s) => (s.key.0, s.key.1) <= (key.0, key.1),
+                    };
+                    if stale_or_same {
+                        *g = Some(PreloadSlot { key, id: next, res });
+                    }
+                }
+                Err(e) => tracing::debug!(%e, "预解析失败（不影响播放）"),
+            }
+        });
     }
 
     /// 装载/解析失败后的阶段恢复：旧曲仍在播 → Playing，否则 Idle。
@@ -1081,6 +1150,10 @@ mod tests {
     #[derive(Debug)]
     pub struct FakeResolver {
         pub stubs: Mutex<Vec<Vec<hmp_core::TrackStub>>>, // 每次 resolve_source_ids 弹出一个列表
+        /// resolve_track 调用计数（G2 preload 测试断言）。
+        pub resolve_calls: Mutex<usize>,
+        /// resolve_track 对这些 id 返回 TrackNotFound（预解析失败静默回退测试）。
+        pub fail_ids: Mutex<Vec<TrackId>>,
     }
 
     impl FakeResolver {
@@ -1088,13 +1161,22 @@ mod tests {
         pub fn new(ids: Vec<Vec<TrackId>>) -> Arc<Self> {
             Arc::new(Self {
                 stubs: Mutex::new(ids.into_iter().map(stub_list).collect()),
+                resolve_calls: Mutex::new(0),
+                fail_ids: Mutex::new(Vec::new()),
             })
+        }
+
+        /// resolve_track 被调用次数（含后台预解析调用）。
+        pub fn resolve_calls(&self) -> usize {
+            *self.resolve_calls.lock().unwrap()
         }
 
         /// 带元数据的构造（投影层测试用）。
         pub fn new_stubs(stubs: Vec<Vec<hmp_core::TrackStub>>) -> Arc<Self> {
             Arc::new(Self {
                 stubs: Mutex::new(stubs),
+                resolve_calls: Mutex::new(0),
+                fail_ids: Mutex::new(Vec::new()),
             })
         }
     }
@@ -1126,7 +1208,12 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
             // 克隆 id：让 future 持有数据，不借用参数（返回类型生命周期为 `&self`）。
             let id = id.clone();
+            let fail = self.fail_ids.lock().unwrap().contains(&id);
             Box::pin(async move {
+                *self.resolve_calls.lock().unwrap() += 1;
+                if fail {
+                    return Err(EngineError::TrackNotFound);
+                }
                 Ok(ResolvedTrack {
                     track: Track {
                         id: id.clone(),
@@ -1320,6 +1407,140 @@ mod tests {
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(1));
         assert_eq!(driver.load_uris(), vec!["fake://a", "fake://b"]);
+    }
+
+    /// G2：装载后后台预解析下一首；Next 消费缓存（不二次 resolve）。
+    #[tokio::test]
+    async fn preloads_next_track_and_consumes_cache() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        // 等后台预解析完成。
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(resolver.resolve_calls(), 2, "播放 a 后应预解析 b");
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(
+            resolver.resolve_calls(),
+            2,
+            "Next 到 b 应消费预解析缓存，不再次 resolve"
+        );
+        assert_eq!(
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref()),
+            Some("b")
+        );
+    }
+
+    /// G2：队列整体替换（Play 新源）后，旧预解析不适用于新队列曲目；新预解析正常消费。
+    #[tokio::test]
+    async fn preload_cache_invalidated_by_queue_change() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![
+            vec![TrackId::new("a"), TrackId::new("b")],
+            vec![TrackId::new("c"), TrackId::new("d")],
+        ]);
+        let (handle, _st) = start_engine(driver.clone(), resolver.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(resolver.resolve_calls(), 2, "a + 预解析 b");
+        // 队列整体替换 → 旧预解析 b 不适用于新队列（id 不符 → 不消费）。
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("c"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(resolver.resolve_calls(), 4, "c 装载 + 预解析 d");
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(
+            resolver.resolve_calls(),
+            4,
+            "d 已预解析，Next 不新增 resolve"
+        );
+        assert_eq!(
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref()),
+            Some("d")
+        );
+    }
+
+    /// G2：预解析失败静默（不影响播放）；Next 时走正常解析（失败语义不变）。
+    #[tokio::test]
+    async fn preload_failure_is_silent_and_falls_back() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        resolver.fail_ids.lock().unwrap().push(TrackId::new("b"));
+        let (handle, _st) = start_engine(driver.clone(), resolver.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // 预解析 b 失败（静默）：播放正常、无 last_error。
+        assert_eq!(resolver.resolve_calls(), 2, "a + 预解析 b（失败也计数）");
+        assert!(handle.state_rx.borrow().last_error.is_none());
+        assert_eq!(
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref()),
+            Some("a")
+        );
+        // Next → 缓存未命中（预解析失败）→ 正常 resolve b → 失败 → 回滚（a 继续播）。
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(resolver.resolve_calls(), 3, "Next 应重新 resolve b");
+        assert!(
+            handle.state_rx.borrow().last_error.is_some(),
+            "装载失败应发布 last_error"
+        );
+        assert_eq!(
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref()),
+            Some("a"),
+            "装载失败回滚：a 继续播放"
+        );
     }
 
     /// prev 恒跳上一首（不做 >3s 回开头）。
