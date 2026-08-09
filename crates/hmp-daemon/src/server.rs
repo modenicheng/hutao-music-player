@@ -316,6 +316,18 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             write_frame(wr, &resp).await?;
         }
         Ok(Request::LibrarySync) => {
+            // 前置校验：reconcile 需要登录态（requires_credential 只作用于通用分支）。
+            if !(handle.credential_ok)() {
+                write_frame(
+                    wr,
+                    &Response::Err {
+                        code: IpcErrorCode::NotLoggedIn,
+                        message: "未登录，请先运行 hmp login".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             let resp = match &handle.sync_handle {
                 Some(h) => {
                     h.reconcile();
@@ -575,6 +587,24 @@ mod tests {
         };
         assert_eq!(page.total, 1);
         assert!(page.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn library_sync_requires_login() {
+        let (sock, listener) = temp_socket().await;
+        let handle = test_engine(false).await; // 无凭证
+        tokio::spawn(async move { serve(listener, handle).await });
+        let resp = request(&sock, &Request::LibrarySync).await;
+        assert!(
+            matches!(
+                resp,
+                Response::Err {
+                    code: IpcErrorCode::NotLoggedIn,
+                    ..
+                }
+            ),
+            "未登录时 library sync 应被前置校验拒绝: {resp:?}"
+        );
     }
 
     #[tokio::test]

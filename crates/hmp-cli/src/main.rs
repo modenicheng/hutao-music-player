@@ -11,6 +11,7 @@
 
 use clap::{Parser, Subcommand};
 
+mod account;
 mod auth;
 mod client;
 mod commands;
@@ -87,9 +88,12 @@ enum Command {
     /// 本地歌单管理。
     #[command(subcommand)]
     Playlist(PlaylistCmd),
-    /// 媒体库查询。
+    /// 媒体库查询与 QQ 同步。
     #[command(subcommand)]
     Library(LibraryCmd),
+    /// QQ 账号信息。
+    #[command(subcommand)]
+    Account(AccountCmd),
 }
 
 /// `hmp player` 子命令。
@@ -177,6 +181,31 @@ enum PlaylistCmd {
 enum LibraryCmd {
     /// 最近播放（直读媒体库）。
     History { count: Option<u32> },
+    /// 从 QQ 拉用户库快照 reconcile（需登录）。
+    Sync,
+    /// 待同步意图/错误（直读媒体库）。
+    SyncStatus,
+    /// 我喜欢的歌曲（本地事实视图）。
+    Tracks {
+        /// 只看已收藏。
+        #[arg(long)]
+        liked: bool,
+    },
+    /// 我收藏的专辑（本地事实视图）。
+    Albums {
+        /// 只看已收藏。
+        #[arg(long)]
+        liked: bool,
+    },
+}
+
+/// `hmp account` 子命令。
+#[derive(Subcommand)]
+enum AccountCmd {
+    /// 主页头部（昵称等）。
+    Profile,
+    /// VIP 信息。
+    Vip,
 }
 
 /// `hmp favorite` 子命令。
@@ -300,6 +329,26 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
         Command::Library(cmd) => match cmd {
             LibraryCmd::History { count } => history::run(count).await,
+            LibraryCmd::Sync => library::sync().await,
+            LibraryCmd::SyncStatus => library::sync_status().await,
+            LibraryCmd::Tracks { liked } => {
+                if liked {
+                    library::tracks_liked().await
+                } else {
+                    Err("hmp library tracks --liked".into())
+                }
+            }
+            LibraryCmd::Albums { liked } => {
+                if liked {
+                    library::albums_liked().await
+                } else {
+                    Err("hmp library albums --liked".into())
+                }
+            }
+        },
+        Command::Account(cmd) => match cmd {
+            AccountCmd::Profile => account::profile().await,
+            AccountCmd::Vip => account::vip().await,
         },
     }
 }
