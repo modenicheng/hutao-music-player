@@ -55,6 +55,7 @@ impl Daemon {
             resolver,
             credential_ok,
             Some(library.clone()),
+            Some(hmp_storage::data_dir().join("playback_state.json")),
         );
         // 媒体库同步 worker（本地先提交 + QQ 乐观同步；无凭证时离线意图留存）。
         let sync_handle =

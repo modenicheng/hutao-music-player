@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use hmp_core::{
     DaemonState, ErrorInfo, IpcErrorCode, PlayRequest, PlaybackCapabilities, PlaybackState,
-    PlayerCommand, QueueSnapshot, Request, TrackId,
+    PlaybackStatus, PlayerCommand, QueueSnapshot, Request, TrackId,
 };
 use hmp_player_gst::PlayerEvent;
 use tokio::sync::{mpsc, watch};
@@ -53,6 +53,26 @@ fn write_session_file(path: &std::path::Path, f: &SessionFile) -> std::io::Resul
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// 持久化镜像（脏检查基准）。
+#[derive(Default)]
+struct SessionMirror {
+    queue_rev: u64,
+    volume: f64,
+    /// (曲目 id, 位置 ms) 上次写入值。
+    position: Option<(TrackId, u64)>,
+    /// 上次写盘时刻（位置节流用）。
+    last_write: Option<std::time::Instant>,
+    /// 上次写盘时的播放状态（翻转 → 立即写）。
+    playing: bool,
+}
+
+/// 启动时恢复的会话上下文。
+struct RestoredSession {
+    /// 恢复的当前曲（Play 时若装载同曲则 Seek 续播）。
+    current: TrackId,
+    position_ms: u64,
 }
 
 /// 最近一次成功装载的完整信息（失败回滚用）。
@@ -132,8 +152,16 @@ pub struct PlaybackEngine {
     load_timeout: std::time::Duration,
     /// 完整队列快照（仅结构变化时发送；position tick 不触发——O(1) publish）。
     queue_tx: watch::Sender<QueueSnapshot>,
-    /// 上次发布的队列版本（避免重复发送；publish 为 &self，用内部可变性）。
-    last_queue_rev: std::cell::Cell<u64>,
+    /// 上次发布的队列版本（避免重复发送）。
+    last_queue_rev: u64,
+    /// 会话持久化路径（None = 不持久化）。
+    session_path: Option<std::path::PathBuf>,
+    /// 位置写盘节流。
+    persist_throttle: std::time::Duration,
+    /// 上次写盘时的内存镜像（脏检查）。
+    saved: SessionMirror,
+    /// 恢复的会话（Play 时应用 seek；应用后清除）。
+    restored: Option<RestoredSession>,
 }
 
 impl PlaybackEngine {
@@ -143,15 +171,17 @@ impl PlaybackEngine {
         resolver: Arc<dyn SourceResolver>,
         credential_ok: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> EngineHandle {
-        Self::start_with_library(driver, resolver, credential_ok, None)
+        Self::start_with_library(driver, resolver, credential_ok, None, None)
     }
 
     /// 启动引擎并挂载媒体库（B4：播放会话写库）。
+    /// `session_path`：会话持久化路径（None = 不持久化）。
     pub fn start_with_library(
         driver: Arc<dyn PlaybackDriver>,
         resolver: Arc<dyn SourceResolver>,
         credential_ok: Arc<dyn Fn() -> bool + Send + Sync>,
         library: Option<std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>>,
+        session_path: Option<std::path::PathBuf>,
     ) -> EngineHandle {
         Self::start_with_options(
             driver,
@@ -159,17 +189,55 @@ impl PlaybackEngine {
             credential_ok,
             library,
             std::time::Duration::from_secs(5),
+            session_path,
+            std::time::Duration::from_secs(5),
         )
     }
 
     /// 带装载超时注入的启动（测试用短超时驱动失败路径）。
+    /// `session_path`：会话持久化路径（None = 不持久化）；`persist_throttle`：位置写盘节流。
     pub fn start_with_options(
         driver: Arc<dyn PlaybackDriver>,
         resolver: Arc<dyn SourceResolver>,
         credential_ok: Arc<dyn Fn() -> bool + Send + Sync>,
         library: Option<std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>>,
         load_timeout: std::time::Duration,
+        session_path: Option<std::path::PathBuf>,
+        persist_throttle: std::time::Duration,
     ) -> EngineHandle {
+        // 启动恢复：队列/音量/位置（不自动播放；Play 时续播，里程碑 D）。
+        // 同步读取（run 开始前），避免与首帧发布竞态。
+        let session_file = match &session_path {
+            Some(p) => match read_session_file(p) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(%e, "读取会话文件失败");
+                    None
+                }
+            },
+            None => None,
+        };
+        let mut queue = hmp_core::QueueCore::new();
+        let restored_volume = session_file.as_ref().map(|f| f.volume);
+        let restored = match session_file {
+            Some(f) => {
+                let SessionFile {
+                    queue: q,
+                    volume: _,
+                    position_ms,
+                } = f;
+                queue.restore_state(q);
+                // 仅在有当前曲时保留续播上下文（无当前曲只恢复队列/音量）。
+                queue.current().cloned().map(|cur| RestoredSession {
+                    current: cur,
+                    position_ms,
+                })
+            }
+            None => None,
+        };
+        if let Some(v) = restored_volume {
+            driver.set_volume(v);
+        }
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (state_tx, state_rx) = watch::channel(DaemonState::default());
         let playback_rx = driver.subscribe_state();
@@ -180,7 +248,7 @@ impl PlaybackEngine {
         let mut engine = Self {
             driver,
             resolver,
-            queue: hmp_core::QueueCore::new(),
+            queue,
             state_tx,
             state_rx: playback_rx,
             cmd_rx,
@@ -196,10 +264,16 @@ impl PlaybackEngine {
             last_load: None,
             load_timeout,
             queue_tx,
-            last_queue_rev: std::cell::Cell::new(0),
+            last_queue_rev: 0,
+            session_path,
+            persist_throttle,
+            saved: SessionMirror::default(),
+            restored,
         };
         tokio::spawn(async move {
             engine.run().await;
+            // 退出前最终写（保真位置/队列）；写失败仅告警。
+            engine.persist_session();
             // 引擎退出（含 `hmp quit`）→ 置位 sticky 终止信号通知编排层收尾（spec §6；Finding 7）。
             let _ = engine.term_tx.send(true);
         });
@@ -363,7 +437,8 @@ impl PlaybackEngine {
     /// 发布复合状态（playback 来自驱动 watch，queue 摘要 O(1)）。
     /// 完整队列快照仅在结构变化时发送到 `queue_tx`（position tick 不克隆）。
     /// 同时把精确的播放能力发布到 `caps_tx`（MPRIS 消费，Finding 9）。
-    fn publish(&self) {
+    /// 尾部持久化：脏检查 + 节流写盘（里程碑 D）。
+    fn publish(&mut self) {
         let caps = PlaybackCapabilities {
             can_go_next: self.queue.can_go_next(),
             can_go_previous: self.queue.can_go_previous(),
@@ -377,11 +452,57 @@ impl PlaybackEngine {
             phase: self.phase,
         };
         let _ = self.state_tx.send(state);
-        if self.last_queue_rev.get() != self.queue.revision() {
-            self.last_queue_rev.set(self.queue.revision());
+        if self.last_queue_rev != self.queue.revision() {
+            self.last_queue_rev = self.queue.revision();
             let _ = self.queue_tx.send(self.queue.snapshot());
         }
         let _ = self.caps_tx.send(caps);
+        self.persist_session();
+    }
+
+    /// 脏检查 + 节流写盘（写失败仅告警，不阻断播放）。
+    /// 队列结构变更/音量/播放状态翻转立即写；position 按 `persist_throttle` 节流。
+    fn persist_session(&mut self) {
+        let Some(path) = self.session_path.clone() else {
+            return;
+        };
+        let playback = self.state_rx.borrow().clone();
+        let rev = self.queue.revision();
+        let volume = playback.volume;
+        // 当前曲 id + 位置（无当前曲 → None）。
+        let position = self
+            .queue
+            .current()
+            .map(|id| (id.clone(), playback.position.as_millis() as u64));
+        let playing = playback.status == PlaybackStatus::Playing;
+        let mut dirty = rev != self.saved.queue_rev || (volume - self.saved.volume).abs() > 1e-9;
+        if position != self.saved.position {
+            let now = std::time::Instant::now();
+            let throttled = matches!(self.saved.last_write, Some(t) if now.duration_since(t) < self.persist_throttle);
+            let must_flush = !playing || !throttled;
+            dirty |= must_flush && position.is_some();
+        }
+        if playing != self.saved.playing {
+            dirty = true; // 播放状态翻转（开始/暂停/停止）立即写
+            self.saved.playing = playing;
+        }
+        if !dirty {
+            return;
+        }
+        let f = SessionFile {
+            queue: self.queue.save_state(),
+            volume,
+            position_ms: position.as_ref().map(|(_, ms)| *ms).unwrap_or(0),
+        };
+        match write_session_file(&path, &f) {
+            Ok(()) => {
+                self.saved.queue_rev = rev;
+                self.saved.volume = volume;
+                self.saved.position = position;
+                self.saved.last_write = Some(std::time::Instant::now());
+            }
+            Err(e) => tracing::warn!(%e, "写入会话文件失败"),
+        }
     }
 
     async fn handle_player_command(&mut self, cmd: PlayerCommand) {
@@ -509,7 +630,17 @@ impl PlaybackEngine {
                         self.queue.set_current(at); // 当前曲定位到插入的首曲（开始播放它）
                     }
                 } else {
+                    let first = ids[0].clone();
                     self.queue.replace(ids, 0);
+                    // 会话恢复续播：首次 Play 且装载曲目 == 恢复的 current
+                    // → Seek 到保存位置；随后清除恢复上下文（换曲即弃）。
+                    if let Some(r) = self.restored.take() {
+                        if first == r.current {
+                            self.driver.command(PlayerCommand::Seek(
+                                std::time::Duration::from_millis(r.position_ms),
+                            ));
+                        }
+                    }
                 }
                 self.seq += 1;
                 self.publish();
@@ -910,9 +1041,16 @@ mod tests {
         fn stop(&self) {
             self.commands.lock().unwrap().push(PlayerCommand::Stop);
         }
-        fn set_volume(&self, _v: f64) {}
+        fn set_volume(&self, v: f64) {
+            // 模拟真实驱动：音量变更反映到播放状态（engine 据此持久化）。
+            self.state_tx.send_modify(|s| s.volume = v);
+        }
         fn command(&self, cmd: PlayerCommand) {
-            self.commands.lock().unwrap().push(cmd);
+            self.commands.lock().unwrap().push(cmd.clone());
+            // SetVolume 直通 driver：同步反映到状态（真实驱动亦然）。
+            if let PlayerCommand::SetVolume(v) = cmd {
+                self.state_tx.send_modify(|s| s.volume = v);
+            }
         }
         fn shutdown(&self) {}
         fn subscribe_state(&self) -> watch::Receiver<PlaybackState> {
@@ -1106,8 +1244,13 @@ mod tests {
         resolver: Arc<dyn SourceResolver>,
         library: std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>,
     ) -> (EngineHandle, watch::Receiver<hmp_core::DaemonState>) {
-        let handle =
-            PlaybackEngine::start_with_library(driver, resolver, Arc::new(|| true), Some(library));
+        let handle = PlaybackEngine::start_with_library(
+            driver,
+            resolver,
+            Arc::new(|| true),
+            Some(library),
+            None,
+        );
         let st = handle.state_rx.clone();
         (handle, st)
     }
@@ -1763,6 +1906,8 @@ mod tests {
             Arc::new(|| true),
             None,
             std::time::Duration::from_millis(300),
+            None,
+            std::time::Duration::from_secs(5),
         );
         // 先成功播放 a（gen=1）。
         handle
@@ -1814,6 +1959,8 @@ mod tests {
             Arc::new(|| true),
             None,
             std::time::Duration::from_millis(300),
+            None,
+            std::time::Duration::from_secs(5),
         );
         driver.set_fail_load(true);
         handle
@@ -2456,6 +2603,8 @@ mod tests {
             Arc::new(|| true),
             None,
             std::time::Duration::from_millis(300),
+            None,
+            std::time::Duration::from_secs(5),
         );
         handle
             .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
@@ -2497,6 +2646,8 @@ mod tests {
             Arc::new(|| true),
             None,
             std::time::Duration::from_millis(300),
+            None,
+            std::time::Duration::from_secs(5),
         );
         handle
             .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
@@ -2608,23 +2759,139 @@ mod tests {
     #[test]
     fn session_file_missing_is_none() {
         // 无状态文件 → 恢复为 None（首次启动路径）。
-        assert!(read_session_file("/nonexistent/hmp-test/no-such.json")
-            .unwrap()
-            .is_none());
+        assert!(
+            read_session_file("/nonexistent/hmp-test/no-such.json")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn session_file_corrupt_is_none() {
         // 损坏文件不 panic，视为无会话。
-        let dir = std::env::temp_dir().join(format!(
-            "hmp-session-corrupt-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("hmp-session-corrupt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("playback_state.json");
         std::fs::write(&p, "{ not valid json !!!").unwrap();
         let r = read_session_file(&p);
         assert!(r.is_ok());
         assert!(r.unwrap().is_none());
+    }
+
+    /// 会话恢复集成：重启后队列/音量/位置恢复，不自动播放，Play 后续播。
+    #[tokio::test]
+    async fn session_restores_after_restart() {
+        let dir = std::env::temp_dir().join(format!("hmp-session-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sp = dir.join("playback_state.json");
+        // 第一代引擎：构造队列、设音量、推进位置后"退出"（写盘发生在前台命令+节流）。
+        let (driver, _, _) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("qq:r1")]]);
+        let h1 = PlaybackEngine::start_with_options(
+            driver.clone(),
+            resolver,
+            Arc::new(|| true),
+            None,
+            std::time::Duration::from_secs(5),
+            Some(sp.clone()),
+            std::time::Duration::from_millis(0), // 节流 0 → 每次 publish 都写
+        );
+        h1.cmd(Request::Command(PlayerCommand::SetVolume(0.37)))
+            .await
+            .unwrap();
+        h1.cmd(Request::Play(PlayRequest::Track(TrackId::new("qq:r1"))))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        h1.cmd(Request::Command(PlayerCommand::SetShuffle(true)))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(sp.exists(), "会话文件应已写入");
+        // 第二代引擎：同路径恢复。
+        let (driver2, _, _) = FakeDriver::new();
+        let resolver2 = FakeResolver::new(vec![vec![TrackId::new("qq:r1")]]);
+        let h2 = PlaybackEngine::start_with_options(
+            driver2.clone(),
+            resolver2,
+            Arc::new(|| true),
+            None,
+            std::time::Duration::from_secs(5),
+            Some(sp.clone()),
+            std::time::Duration::from_secs(5),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let st = h2.state_rx.borrow().clone();
+        // 恢复不自动播放。
+        assert_ne!(st.playback.status, PlaybackStatus::Playing);
+        // 队列已恢复（含洗牌开关——QueueState 整体还原）。
+        assert_eq!(h2.queue_rx.borrow().tracks, vec![TrackId::new("qq:r1")]);
+        assert!(h2.queue_rx.borrow().shuffle);
+        // 音量已恢复（start 时 driver.set_volume 已调用）。
+        assert_eq!(st.playback.volume, 0.37);
+        // Play 后从保存位置续播（driver 收到 Seek）。
+        h2.cmd(Request::Play(PlayRequest::Track(TrackId::new("qq:r1"))))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let seeks: Vec<PlayerCommand> = driver2
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| matches!(c, PlayerCommand::Seek(_)))
+            .cloned()
+            .collect();
+        assert!(!seeks.is_empty(), "恢复后首次 Play 应发出 Seek 续播");
+    }
+
+    /// 节流：位置推进不触发频繁写盘（throttle=5s 时 100ms 内只写有限次数）。
+    #[tokio::test]
+    async fn position_persist_is_throttled() {
+        let dir = std::env::temp_dir().join(format!("hmp-session-throttle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sp = dir.join("playback_state.json");
+        let (driver, _, _) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("qq:t1")]]);
+        let h = PlaybackEngine::start_with_options(
+            driver.clone(),
+            resolver,
+            Arc::new(|| true),
+            None,
+            std::time::Duration::from_secs(5),
+            Some(sp.clone()),
+            std::time::Duration::from_secs(5), // 长节流
+        );
+        h.cmd(Request::Play(PlayRequest::Track(TrackId::new("qq:t1"))))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let mtime1 = std::fs::metadata(&sp).unwrap().modified().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let mtime2 = std::fs::metadata(&sp).unwrap().modified().unwrap();
+        assert_eq!(mtime1, mtime2, "节流期内 position 推进不应触发写盘");
+    }
+
+    /// 写盘失败不 panic、不阻断播放。
+    #[tokio::test]
+    async fn session_persist_failure_is_swallowed() {
+        let sp = std::path::PathBuf::from("/nonexistent-dir-hmp/playback_state.json");
+        let (driver, _, _) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("qq:f1")]]);
+        let h = PlaybackEngine::start_with_options(
+            driver.clone(),
+            resolver,
+            Arc::new(|| true),
+            None,
+            std::time::Duration::from_secs(5),
+            Some(sp),
+            std::time::Duration::from_millis(0),
+        );
+        h.cmd(Request::Play(PlayRequest::Track(TrackId::new("qq:f1"))))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let st = h.state_rx.borrow().clone();
+        assert_eq!(st.playback.status, PlaybackStatus::Playing);
     }
 }

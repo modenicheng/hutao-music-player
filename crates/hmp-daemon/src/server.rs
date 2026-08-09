@@ -893,6 +893,7 @@ mod tests {
             Arc::new(SResolver),
             Arc::new(|| true),
             Some(library.clone()),
+            None,
         );
         let mut handle = handle;
         handle.library = Some(library.clone()); // 与 daemon.rs 启动后接线一致
