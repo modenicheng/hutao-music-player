@@ -44,8 +44,22 @@ impl Daemon {
         let local = Arc::new(LocalSourceResolver::new(library.clone()));
         let resolver: Arc<dyn SourceResolver> =
             Arc::new(CompositeSourceResolver::new(resolver, local));
-        let handle =
-            PlaybackEngine::start_with_library(driver, resolver, credential_ok, Some(library));
+        let handle = PlaybackEngine::start_with_library(
+            driver,
+            resolver,
+            credential_ok,
+            Some(library.clone()),
+        );
+        // 媒体库同步 worker（本地先提交 + QQ 乐观同步；无凭证时离线意图留存）。
+        let sync_handle =
+            crate::sync::SyncWorker::spawn(library.clone(), QqMusicClient::new(), store_from_env());
+        let mut handle = handle;
+        handle.sync_handle = Some(sync_handle);
+        handle.comment = Some(crate::comment::CommentService::new(
+            store_from_env(),
+            library.clone(),
+        ));
+        handle.library = Some(library);
         Ok(Self { handle })
     }
 }

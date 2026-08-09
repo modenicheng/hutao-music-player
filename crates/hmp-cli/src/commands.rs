@@ -50,7 +50,7 @@ fn fmt_duration(d: std::time::Duration) -> String {
 }
 
 /// 通用：发命令并打印响应错误。
-async fn send(client: &mut DaemonClient, req: Request) -> Result<Response, CliError> {
+pub(crate) async fn send(client: &mut DaemonClient, req: Request) -> Result<Response, CliError> {
     client.request(&req).await
 }
 
@@ -256,50 +256,111 @@ pub async fn cmd_simple(client: &mut DaemonClient, req: Request) -> Result<(), C
     }
 }
 
-/// `hmp queue show|add <id>|remove <idx>|clear`。
-pub async fn cmd_queue(client: &mut DaemonClient, args: &[String]) -> Result<(), CliError> {
-    match args.first().map(|s| s.as_str()) {
-        None | Some("show") => {
-            let resp = send(client, Request::Queue).await?;
-            if let Response::Queue(q) = resp {
-                let mut out = std::io::stdout().lock();
-                for (i, t) in q.tracks.iter().enumerate() {
-                    let mark = if Some(i) == q.current { "▶" } else { " " };
-                    writeln!(out, "{mark} {i}: {t}")?;
-                }
-                out.flush()?;
-                return Ok(());
-            }
-            Err(CliError::Protocol("Queue 响应异常".into()))
+/// `hmp queue list`：分页拉取队列 → 本地媒体库批量投影标题/歌手 → 打印表格。
+/// 默认 50 首/页；`all=true` 时自动翻页取全量。
+pub async fn cmd_queue_list(
+    client: &mut DaemonClient,
+    all: bool,
+    limit: usize,
+) -> Result<(), CliError> {
+    let mut out = std::io::stdout().lock();
+    let mut total_printed = 0usize;
+    loop {
+        let resp = send(
+            client,
+            Request::QueueList {
+                offset: total_printed,
+                limit,
+            },
+        )
+        .await?;
+        let Response::QueueList(page) = resp else {
+            return Err(CliError::Protocol("QueueList 响应异常".into()));
+        };
+        if total_printed == 0 && page.total > 0 {
+            writeln!(out, "   #  {:<20} {:<26} TITLE", "MID", "ARTIST")?;
         }
-        Some("add") => {
-            let id = args.get(1).ok_or_else(|| CliError::Response {
-                code: IpcErrorCode::BadRequest,
-                message: "queue add 需要曲目 id".into(),
-            })?;
-            cmd_simple(client, Request::QueueAppend(parse_source(id))).await
+        // 本地媒体库批量投影（库缺失/未缓存 → 回退显示 id）。
+        let ids: Vec<String> = page.items.iter().map(|e| e.track_id.to_string()).collect();
+        let meta = project_meta(&ids);
+        for (i, e) in page.items.iter().enumerate() {
+            let mark = if e.is_current { "▶" } else { " " };
+            let key = e.track_id.to_string();
+            let title = meta.get(&key).map(|m| m.title.as_str()).unwrap_or(&key);
+            let artist = meta
+                .get(&key)
+                .and_then(|m| m.artist.as_deref())
+                .unwrap_or("");
+            writeln!(
+                out,
+                "{mark} {:>3}  {:<20} {:<26} {}",
+                page.offset + i,
+                &key,
+                title,
+                artist
+            )?;
         }
-        Some("remove") => {
-            let idx: usize =
-                args.get(1)
-                    .and_then(|s| s.parse().ok())
-                    .ok_or_else(|| CliError::Response {
-                        code: IpcErrorCode::BadRequest,
-                        message: "queue remove 需要 0 基索引".into(),
-                    })?;
-            cmd_simple(client, Request::QueueRemove(idx)).await
+        total_printed += page.items.len();
+        if !all || total_printed >= page.total {
+            break;
         }
-        Some("clear") => cmd_simple(client, Request::QueueClear).await,
-        _ => Err(CliError::Response {
-            code: IpcErrorCode::BadRequest,
-            message: "未知 queue 子命令".into(),
-        }),
     }
+    out.flush()?;
+    Ok(())
+}
+
+/// 队列条目 ID → 本地媒体库元数据映射（投影层；查不到/库不可用返回空表）。
+fn project_meta(ids: &[String]) -> std::collections::HashMap<String, hmp_storage::TrackMeta> {
+    let Ok(mut db) = hmp_storage::LibraryDb::open(&hmp_storage::data_dir().join("library.sqlite3"))
+    else {
+        return std::collections::HashMap::new();
+    };
+    let mut qq = Vec::new();
+    let mut local = Vec::new();
+    for id in ids {
+        if hmp_core::TrackProvider::from_id(id) == hmp_core::TrackProvider::Local {
+            local.push(id.clone());
+        } else {
+            qq.push(id.clone());
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    if let Ok(metas) = db.track_meta_batch("qq", &qq) {
+        for m in metas {
+            out.insert(m.source_key.clone(), m);
+        }
+    }
+    if let Ok(metas) = db.track_meta_batch("local", &local) {
+        for m in metas {
+            out.insert(m.source_key.clone(), m);
+        }
+    }
+    out
 }
 
 /// 便捷构造。
 pub fn pause_req() -> Request {
     Request::Command(PlayerCommand::Pause)
+}
+
+/// 队列追加（`hmp queue add`）。
+pub fn queue_append_req(src: &str) -> Request {
+    Request::QueueAppend(parse_source(src))
+}
+
+/// 插队播放（`hmp queue play-next`）。
+pub fn queue_playnext_req(src: &str) -> Request {
+    Request::PlayNext(parse_source(src))
+}
+
+/// 移除指定位置（`hmp queue remove`）。
+pub fn queue_remove_req(index: usize) -> Request {
+    Request::QueueRemove(index)
+}
+
+/// 清空队列（`hmp queue clear [--all]`）。
+pub fn queue_clear_req(all: bool) -> Request {
+    Request::QueueClear { all }
 }
 pub fn resume_req() -> Request {
     Request::Command(PlayerCommand::Play)

@@ -1,71 +1,62 @@
-//! `hmp favorite`：本地收藏管理（直读媒体库）。
+//! `hmp favorite`：收藏管理。
 //!
-//! 用法：
+//! 写操作（add/remove）走 daemon（本地先提交 + QQ 异步同步，spec §3.3）；
+//! 列表直读本地媒体库。
+//!
 //! ```text
-//! hmp favorite                     # 列出收藏
+//! hmp favorite list                # 列出收藏
 //! hmp favorite add <track-id>      # 收藏（QQ mid 或 local:<path>）
 //! hmp favorite remove <track-id>   # 取消收藏
 //! ```
 
 use std::io::Write;
 
-use hmp_storage::LibraryDb;
+use hmp_core::Request;
 
-use super::library::{open_library, provider_of};
+use super::client::DaemonClient;
+use super::commands;
+use super::library::provider_of;
 
-/// 运行入口。
-pub async fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = open_library()?;
-    let Some(action) = args.first().map(|s| s.as_str()) else {
-        return list(&mut db, 100);
-    };
-    match action {
-        "add" => {
-            let id = args
-                .get(1)
-                .ok_or("用法: hmp favorite add <track-id>（QQ mid 或 local:<path>）")?;
-            add(&mut db, id)
-        }
-        "remove" | "rm" => {
-            let id = args.get(1).ok_or("用法: hmp favorite remove <track-id>")?;
-            remove(&mut db, id)
-        }
-        "list" | "ls" => list(&mut db, 100),
-        _ => Err(format!("未知操作 `{action}`（add|remove|list）").into()),
-    }
-}
-
-/// 收藏（幂等）。
-fn add(db: &mut LibraryDb, id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let (source, source_key) = provider_of(id);
-    let tid = db.add_favorite(source, &source_key, id)?;
-    println!("已收藏: {id} (id={tid})");
+/// 收藏（本地先提交；QQ 由 daemon SyncWorker 异步同步）。
+pub async fn add(id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut c = DaemonClient::connect_or_spawn().await?;
+    let (source, key) = provider_of(id);
+    commands::cmd_simple(
+        &mut c,
+        Request::Favorite {
+            source: source.to_string(),
+            key: key.clone(),
+            title: id.to_string(),
+            desired: true,
+        },
+    )
+    .await?;
+    println!("已收藏: {id}");
     Ok(())
 }
 
-/// 取消收藏。
-fn remove(db: &mut LibraryDb, id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let (source, source_key) = provider_of(id);
-    match db.track_id(source, &source_key)? {
-        Some(tid) => {
-            if db.is_favorite(tid)? {
-                db.remove_favorite(tid)?;
-                println!("已取消收藏: {id}");
-            } else {
-                println!("未收藏: {id}");
-            }
-            Ok(())
-        }
-        None => {
-            println!("库中无此曲目（可能尚未播放/扫描）: {id}");
-            Ok(())
-        }
-    }
+/// 取消收藏（本地先提交；unlike 由 SyncWorker 同步）。
+pub async fn remove(id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut c = DaemonClient::connect_or_spawn().await?;
+    let (source, key) = provider_of(id);
+    commands::cmd_simple(
+        &mut c,
+        Request::Favorite {
+            source: source.to_string(),
+            key: key.clone(),
+            title: id.to_string(),
+            desired: false,
+        },
+    )
+    .await?;
+    println!("已取消收藏: {id}");
+    Ok(())
 }
 
-/// 列出收藏。
-fn list(db: &mut LibraryDb, limit: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let rows = db.list_favorites(limit)?;
+/// 列出收藏（本地事实视图，直读媒体库）。
+pub async fn list() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = super::library::open_library()?;
+    let rows = db.list_favorites(100)?;
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
         writeln!(stdout, "暂无收藏（hmp favorite add <track-id>）")?;
@@ -80,7 +71,8 @@ fn list(db: &mut LibraryDb, limit: u32) -> Result<(), Box<dyn std::error::Error>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::provider_of;
+    use hmp_storage::LibraryDb;
 
     #[test]
     fn provider_of_maps_local_and_qq() {

@@ -29,6 +29,12 @@ pub struct EngineHandle {
     pub terminated: watch::Receiver<bool>,
     /// 播放能力（MPRIS CanGoNext/CanGoPrevious，随 publish 同步发布，Finding 9）。
     pub caps_rx: watch::Receiver<PlaybackCapabilities>,
+    /// 媒体库（server 直操作：收藏/歌单写命令；daemon 层注入）。
+    pub library: Option<std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>>,
+    /// QQ 同步 worker 触发句柄（daemon 层注入）。
+    pub sync_handle: Option<crate::sync::SyncHandle>,
+    /// 评论服务（daemon 层注入；未注入时评论命令报不可用）。
+    pub comment: Option<crate::comment::CommentService>,
 }
 
 impl EngineHandle {
@@ -110,6 +116,9 @@ impl PlaybackEngine {
             credential_ok,
             terminated: term_rx,
             caps_rx,
+            library: None,
+            sync_handle: None,
+            comment: None,
         }
     }
 
@@ -131,7 +140,10 @@ impl PlaybackEngine {
                         Request::PlayNext(src) => self.play_source(src, true).await,
                         Request::QueueAppend(src) => {
                             match self.resolver.resolve_source_ids(&src).await {
-                                Ok(ids) => {
+                                Ok(stubs) => {
+                                    self.cache_stubs(&stubs);
+                                    let ids: Vec<TrackId> =
+                                        stubs.into_iter().map(|s| s.id).collect();
                                     self.queue.append(ids);
                                     self.publish();
                                 }
@@ -142,15 +154,33 @@ impl PlaybackEngine {
                             }
                         }
                         Request::QueueRemove(i) => {
-                            // 移除当前曲：立即播放接替曲（或空队列停止），避免仲裁失步（Finding 4）。
+                            // 移除当前曲 = 播放接替曲（或空队列停止）。事务式（P1）：
+                            // 先装载接替曲，成功后才关旧会话；装载失败回滚队列，
+                            // 旧曲继续播放——不产生「队列已删、播放器仍播、会话已关」
+                            // 的不一致中间态。
                             let was_current = self.queue.snapshot().current == Some(i);
+                            // 回滚快照须在 remove 之前保存（remove 后队列已变）。
+                            let saved = self.queue.save_state();
                             if self.queue.remove(i) {
                                 if was_current {
-                                    self.end_session("manual");
-                                    self.publish();
+                                    let old_db_track = self.current_db_track;
                                     if let Some(id) = self.queue.current().cloned() {
-                                        let _ = self.load_and_play(id).await;
+                                        if self.load_and_play(id).await.is_ok() {
+                                            // 装载成功：关闭命令前的旧会话（同曲延续则跳过）。
+                                            if let Some(old) = old_db_track {
+                                                if self.current_db_track != Some(old) {
+                                                    self.close_session(old, "manual");
+                                                }
+                                            }
+                                        } else {
+                                            // 装载失败：回滚队列（被删曲目回到原位，
+                                            // 旧曲继续播放）；last_error 已由 load_and_play 发布。
+                                            self.queue.restore_state(saved);
+                                            self.publish(); // 回滚后重新发布（load_and_play 已发布中间态）
+                                        }
                                     } else {
+                                        // 空队列：确定性停止。
+                                        self.end_session("manual");
                                         self.last_error = None;
                                         self.driver.stop();
                                         self.publish();
@@ -160,8 +190,17 @@ impl PlaybackEngine {
                                 }
                             }
                         }
-                        Request::QueueClear => {
-                            self.queue.clear();
+                        Request::QueueClear { all } => {
+                            if all {
+                                // 清空并停止：播放器/会话/队列同步，不留「空队列仍在播」。
+                                self.queue.clear();
+                                self.end_session("stop");
+                                self.last_error = None;
+                                self.driver.stop();
+                            } else {
+                                // 保留当前曲：清除待播曲目，播放/会话不受影响。
+                                self.queue.clear_pending();
+                            }
                             self.publish();
                         }
                         Request::OpenUri(uri) => {
@@ -305,8 +344,8 @@ impl PlaybackEngine {
     /// 队列变更与会话切换；装载失败则保持旧队列/旧会话/旧曲继续播放，
     /// 仅发布错误——CLI 不再把旧曲目当成新请求成功。
     async fn play_source(&mut self, src: PlayRequest, playnext: bool) {
-        let ids = match self.resolver.resolve_source_ids(&src).await {
-            Ok(ids) => ids,
+        let stubs = match self.resolver.resolve_source_ids(&src).await {
+            Ok(stubs) => stubs,
             Err(e) => {
                 // 解析失败 → 发布错误详情（Finding 2）+ 推进命令代际。
                 self.last_error = Some(error_info(&e));
@@ -315,7 +354,7 @@ impl PlaybackEngine {
                 return;
             }
         };
-        if ids.is_empty() {
+        if stubs.is_empty() {
             // 空源是确定性失败：携带错误，CLI 不用等到超时。
             self.last_error = Some(ErrorInfo {
                 code: IpcErrorCode::Internal,
@@ -325,6 +364,9 @@ impl PlaybackEngine {
             self.publish();
             return;
         }
+        // 列表元数据批量缓存进媒体库（投影层查询用；库不可用不阻断播放）。
+        self.cache_stubs(&stubs);
+        let ids: Vec<TrackId> = stubs.iter().map(|s| s.id.clone()).collect();
         let old_db_track = self.current_db_track;
         match self.load_and_play(ids[0].clone()).await {
             Ok(()) => {
@@ -418,6 +460,19 @@ impl PlaybackEngine {
         }
     }
 
+    /// 列表解析元数据批量缓存进媒体库（stub → tracks 行，单事务；投影层查询用）。
+    /// 库不可用/写失败仅 warn，不阻断播放（与 `start_session` 同一原则）。
+    fn cache_stubs(&self, stubs: &[hmp_core::TrackStub]) {
+        let Some(library) = &self.library else {
+            return;
+        };
+        let rows: Vec<hmp_storage::TrackRow> = stubs.iter().map(stub_row).collect();
+        let mut library = library.lock().unwrap();
+        if let Err(e) = library.upsert_tracks_batch(&rows) {
+            tracing::warn!(%e, "媒体库批量缓存失败");
+        }
+    }
+
     /// 解析 + 解密 + 加载 + 播放。装载失败返回错误（调用方决定回滚/保持）。
     async fn load_and_play(&mut self, id: TrackId) -> Result<(), EngineError> {
         // 成功路径：清除旧错误（Finding 2）。
@@ -502,6 +557,26 @@ fn track_row(t: &hmp_core::Track) -> hmp_storage::TrackRow {
         },
         duration_ms: t.duration.map(|d| d.as_millis() as i64),
         cover_uri: t.cover.as_ref().map(|c| c.url.clone()),
+        qq_song_id: None, // 播放路径无 numeric id；列表解析缓存（stub_row）时写入
+    }
+}
+
+/// stub → 媒体库行（批量缓存；source 规则与 `track_row` 一致）。
+fn stub_row(s: &hmp_core::TrackStub) -> hmp_storage::TrackRow {
+    let source = if hmp_core::TrackProvider::from_id(&s.id.0) == hmp_core::TrackProvider::Local {
+        "local"
+    } else {
+        "qq"
+    };
+    hmp_storage::TrackRow {
+        source,
+        source_key: s.id.to_string(),
+        title: s.title.clone(),
+        album: s.album.clone(),
+        artist: (!s.artists.is_empty()).then(|| s.artists.join(", ")),
+        duration_ms: s.duration_ms,
+        cover_uri: None,
+        qq_song_id: None, // TrackStub 不含 numeric id；后续由列表解析补全
     }
 }
 
@@ -597,23 +672,45 @@ mod tests {
     /// 固定返回曲目列表的解析器（不触网）。
     #[derive(Debug)]
     pub struct FakeResolver {
-        pub ids: Mutex<Vec<Vec<TrackId>>>, // 每次 resolve_source_ids 弹出一个列表
+        pub stubs: Mutex<Vec<Vec<hmp_core::TrackStub>>>, // 每次 resolve_source_ids 弹出一个列表
     }
 
     impl FakeResolver {
+        /// 便捷构造：TrackId 列表（stub 元数据自动生成，title=id）。
         pub fn new(ids: Vec<Vec<TrackId>>) -> Arc<Self> {
             Arc::new(Self {
-                ids: Mutex::new(ids),
+                stubs: Mutex::new(ids.into_iter().map(stub_list).collect()),
             })
         }
+
+        /// 带元数据的构造（投影层测试用）。
+        pub fn new_stubs(stubs: Vec<Vec<hmp_core::TrackStub>>) -> Arc<Self> {
+            Arc::new(Self {
+                stubs: Mutex::new(stubs),
+            })
+        }
+    }
+
+    /// TrackId 列表 → stub 列表（title 回退 id）。
+    fn stub_list(ids: Vec<TrackId>) -> Vec<hmp_core::TrackStub> {
+        ids.into_iter()
+            .map(|id| hmp_core::TrackStub {
+                id: id.clone(),
+                title: id.to_string(),
+                artists: Vec::new(),
+                album: None,
+                duration_ms: None,
+            })
+            .collect()
     }
 
     impl SourceResolver for FakeResolver {
         fn resolve_source_ids(
             &self,
             _src: &hmp_core::PlayRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
-            Box::pin(async { Ok(self.ids.lock().unwrap().remove(0)) })
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(self.stubs.lock().unwrap().remove(0)) })
         }
         fn resolve_track(
             &self,
@@ -668,7 +765,8 @@ mod tests {
         fn resolve_source_ids(
             &self,
             _src: &hmp_core::PlayRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+        {
             let err = clone_error(&self.err);
             Box::pin(async move { Err(err) })
         }
@@ -684,7 +782,7 @@ mod tests {
     /// 源解析成功、但指定曲目 resolve_track 失败的解析器（装载失败事务测试）。
     #[derive(Debug)]
     pub struct PartialFailResolver {
-        pub ids: Mutex<Vec<Vec<TrackId>>>,
+        pub stubs: Mutex<Vec<Vec<hmp_core::TrackStub>>>,
         pub fail_ids: Vec<TrackId>,
         pub err: EngineError,
     }
@@ -692,7 +790,7 @@ mod tests {
     impl PartialFailResolver {
         pub fn new(ids: Vec<Vec<TrackId>>, fail_ids: Vec<TrackId>) -> Arc<Self> {
             Arc::new(Self {
-                ids: Mutex::new(ids),
+                stubs: Mutex::new(ids.into_iter().map(stub_list).collect()),
                 fail_ids,
                 err: EngineError::TrackNotFound,
             })
@@ -703,8 +801,9 @@ mod tests {
         fn resolve_source_ids(
             &self,
             _src: &hmp_core::PlayRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
-            Box::pin(async { Ok(self.ids.lock().unwrap().remove(0)) })
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(self.stubs.lock().unwrap().remove(0)) })
         }
         fn resolve_track(
             &self,
@@ -1225,7 +1324,8 @@ mod tests {
         fn resolve_source_ids(
             &self,
             src: &PlayRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+        {
             let inner = self.inner.clone();
             let delay = self.delay;
             let src = src.clone();
@@ -1503,6 +1603,142 @@ mod tests {
                 .contains(&PlayerCommand::Stop)
         );
         assert_eq!(driver.loads.lock().unwrap().len(), 1, "空队列不应再加载");
+    }
+
+    /// 移除当前曲但接替曲装载失败 → 回滚队列，旧曲继续播放（P1 事务语义）。
+    #[tokio::test]
+    async fn remove_current_rolls_back_on_replacement_load_failure() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        // b 是接替曲：resolve_track(b) 失败。
+        let resolver = PartialFailResolver::new(
+            vec![vec![TrackId::new("a"), TrackId::new("b")]],
+            vec![TrackId::new("b")],
+        );
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(driver.loads.lock().unwrap().clone(), vec!["fake://a"]);
+
+        handle.cmd(Request::QueueRemove(0)).await.unwrap(); // 移除正在播的 a
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert_eq!(
+            st.queue.tracks,
+            vec![TrackId::new("a"), TrackId::new("b")],
+            "装载失败应回滚：被删曲目回到原位"
+        );
+        assert_eq!(st.queue.current, Some(0));
+        assert_eq!(
+            driver.loads.lock().unwrap().clone(),
+            vec!["fake://a"],
+            "接替曲装载失败不得加载"
+        );
+        assert!(
+            st.last_error.is_some(),
+            "装载失败详情应可见（CLI 不再把旧曲当成功）"
+        );
+    }
+
+    /// `queue clear`（all=false）：保留当前曲，清除待播曲目；播放不受影响。
+    #[tokio::test]
+    async fn queue_clear_keeps_current_playing() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![
+            TrackId::new("a"),
+            TrackId::new("b"),
+            TrackId::new("c"),
+        ]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+
+        handle
+            .cmd(Request::QueueClear { all: false })
+            .await
+            .unwrap();
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert_eq!(st.queue.tracks, vec![TrackId::new("a")], "只留当前曲");
+        assert_eq!(st.queue.current, Some(0));
+        assert!(
+            !driver
+                .commands
+                .lock()
+                .unwrap()
+                .contains(&PlayerCommand::Stop),
+            "clear 不停止播放"
+        );
+        assert_eq!(driver.loads.lock().unwrap().len(), 1, "不重新加载");
+    }
+
+    /// `queue clear --all`（all=true）：清空队列并停止（无「空队列仍在播」中间态）。
+    #[tokio::test]
+    async fn queue_clear_all_stops_playback() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+
+        handle.cmd(Request::QueueClear { all: true }).await.unwrap();
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert!(st.queue.tracks.is_empty());
+        assert_eq!(st.queue.current, None);
+        assert!(
+            driver
+                .commands
+                .lock()
+                .unwrap()
+                .contains(&PlayerCommand::Stop),
+            "clear --all 应停止播放"
+        );
+    }
+
+    /// 列表解析元数据随 Play 批量缓存进媒体库（投影层查询用）。
+    /// upsert 语义：详情（resolve_track）无条件覆盖 title；artist/album/duration
+    /// 走 COALESCE——stub 补充详情缺失字段（本测试 fake 详情无歌手/专辑 → 保留 stub）。
+    #[tokio::test]
+    async fn play_source_caches_stub_metadata() {
+        use hmp_storage::LibraryDb;
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new_stubs(vec![vec![hmp_core::TrackStub {
+            id: TrackId::new("mid-1"),
+            title: "夜曲".into(),
+            artists: vec!["周杰伦".into()],
+            album: Some("十一月的萧邦".into()),
+            duration_ms: Some(193_000),
+        }]]);
+        let library = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let (handle, _st) =
+            start_engine_with_library(driver.clone(), resolver, library.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("mid-1"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let metas = library
+            .lock()
+            .unwrap()
+            .track_meta_batch("qq", &["mid-1".to_string()])
+            .unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].title, "t-mid-1", "详情标题覆盖 stub");
+        assert_eq!(metas[0].artist.as_deref(), Some("周杰伦"), "stub 歌手保留");
+        assert_eq!(
+            metas[0].album.as_deref(),
+            Some("十一月的萧邦"),
+            "stub 专辑保留"
+        );
     }
 
     /// P1 #4：Play 新曲装载失败 → 旧曲继续播放、队列保持原状、发布错误；

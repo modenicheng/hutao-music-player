@@ -31,6 +31,7 @@
 pub mod album;
 pub mod algorithms;
 pub mod client;
+pub mod comment;
 pub mod config;
 pub mod credential;
 pub mod error;
@@ -43,12 +44,14 @@ pub mod singer;
 pub mod song;
 pub mod songlist;
 pub mod top;
+pub mod user;
 
 pub use album::{
     AlbumApi, AlbumFavWriteResponse, GetAlbumDetailResponse, GetAlbumSongResponse,
     GetNewAlbumResponse,
 };
 pub use client::QqMusicClient;
+pub use comment::{AddCommentResponse, Comment, CommentApi, CommentListData, CommentListResponse};
 pub use config::ClientConfig;
 pub use credential::Credential;
 pub use error::QqMusicError;
@@ -67,3 +70,6 @@ pub use singer::{
 pub use song::{GetSongDetailResponse, GetSongUrlsResponse, SongApi, SongFileInfo, SongFileType};
 pub use songlist::{CreateDeleteSonglistResp, GetSonglistDetailResponse, SonglistApi};
 pub use top::{TopApi, TopCategoryResponse, TopDetailResponse};
+pub use user::{
+    UserApi, UserCreatedSonglistResponse, UserFavAlbumResponse, UserFavSonglistResponse,
+};

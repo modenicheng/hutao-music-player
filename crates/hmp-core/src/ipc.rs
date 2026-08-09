@@ -94,14 +94,63 @@ pub enum Request {
     QueueAppend(PlayRequest),
     /// 移除 0 基位置曲目。
     QueueRemove(usize),
-    /// 清空队列。
-    QueueClear,
+    /// 清空队列。`all=false`：保留当前曲（清除待播）；`all=true`：清空并停止。
+    QueueClear {
+        /// 是否连当前曲一起清空（并停止播放）。
+        all: bool,
+    },
     /// 查询队列快照。
     Queue,
+    /// 分页查询队列（防大队列整包超帧上限；元数据投影在客户端侧经媒体库批量查询）。
+    QueueList {
+        /// 起始偏移。
+        offset: usize,
+        /// 页大小。
+        limit: usize,
+    },
     /// 基础播放器命令（Play/Pause/Stop/Seek/Volume/Loop/Shuffle/Next/Previous）。
     Command(PlayerCommand),
     /// 查询全量状态。
     Status,
+    /// 收藏写操作（本地先提交；QQ 由 SyncWorker 异步同步）。
+    Favorite {
+        /// 来源：`qq` | `local`。
+        source: String,
+        /// 来源身份：QQ mid / `local:<path>`。
+        key: String,
+        /// 标题（未知时用 id）。
+        title: String,
+        /// 收藏 / 取消。
+        desired: bool,
+    },
+    /// 歌单写操作（local 直接生效；qq owned 进 outbox）。
+    PlaylistWrite {
+        /// 操作。
+        op: PlaylistWriteOp,
+    },
+    /// 触发 QQ 用户库 reconcile（library sync；无凭证 → NotLoggedIn）。
+    LibrarySync,
+    /// 评论查询（读；daemon 内存 TTL cache）。
+    CommentList {
+        /// 曲目 mid。
+        mid: String,
+        /// 排序：hot | new | recommend。
+        sort: String,
+    },
+    /// 发表/回复评论（写；直发 QQ）。
+    CommentPost {
+        /// 曲目 mid。
+        mid: String,
+        /// 评论内容。
+        content: String,
+        /// 被回复评论 id（非空即回复）。
+        reply_cmt_id: Option<String>,
+    },
+    /// 删除评论（写）。
+    CommentDelete {
+        /// 评论 id。
+        cm_id: String,
+    },
     /// 订阅状态事件流（推送 `Event` 帧）。
     Subscribe,
     /// 播放 URI（MPRIS `OpenUri`；`file://` → 本地，其余 → 内部错误）。
@@ -123,8 +172,14 @@ pub enum Response {
     Status(DaemonState),
     /// `Queue` 的响应。
     Queue(QueueSnapshot),
+    /// `QueueList` 的响应。
+    QueueList(QueuePage),
     /// 错误。
     Err { code: IpcErrorCode, message: String },
+    /// 写操作创建的资源 id（playlist create 等）。
+    Created(i64),
+    /// `CommentList` 的响应。
+    CommentList(CommentPage),
 }
 
 /// 订阅后的事件推送。
@@ -148,6 +203,89 @@ pub struct DaemonState {
     pub seq: u64,
     /// 最近一次命令的错误（解析失败等；成功操作时清空，Finding 2）。
     pub last_error: Option<ErrorInfo>,
+}
+
+/// 歌单写操作（本地先提交 + outbox；spec §3.3/§5）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PlaylistWriteOp {
+    /// 新建本地歌单。
+    Create {
+        /// 名称。
+        name: String,
+    },
+    /// 重命名（local 直接生效；owned 不支持远端重命名）。
+    Rename {
+        /// 歌单 id。
+        id: i64,
+        /// 新名称。
+        name: String,
+    },
+    /// 删除（owned：远端 DelPlaylist 成功后才删本地行）。
+    Delete {
+        /// 歌单 id。
+        id: i64,
+    },
+    /// 追加曲目（owned：本地提交 + playlist_ops outbox）。
+    AddTrack {
+        /// 歌单 id。
+        id: i64,
+        /// 来源：`qq` | `local`。
+        source: String,
+        /// 来源身份。
+        key: String,
+        /// 标题。
+        title: String,
+    },
+    /// 按序号移除曲目（owned：outbox）。
+    RemoveTrack {
+        /// 歌单 id。
+        id: i64,
+        /// 0 基序号。
+        position: i64,
+    },
+}
+
+/// 评论条目（展示投影；daemon 经 mid→qq_song_id 解析后返回）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommentItem {
+    /// 评论 id（回复/删除用；QQ `CmId`）。
+    pub cm_id: String,
+    /// 分页游标（QQ `SeqNo`）。
+    pub seq_no: String,
+    pub content: String,
+    pub nickname: String,
+    /// 时间戳（秒）。
+    pub time: i64,
+    pub like_count: i64,
+}
+
+/// 评论页。
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct CommentPage {
+    /// 评论总数。
+    pub total: i64,
+    pub comments: Vec<CommentItem>,
+}
+
+/// 队列分页条目（纯 ID + 位置；标题/歌手由客户端经媒体库批量投影，
+/// 不在 IPC 里搬运完整 rich metadata）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QueueEntry {
+    /// 曲目 ID。
+    pub track_id: TrackId,
+    /// 是否当前播放曲。
+    pub is_current: bool,
+}
+
+/// 队列分页响应。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QueuePage {
+    /// 队列总曲目数。
+    pub total: usize,
+    /// 本页起始偏移。
+    pub offset: usize,
+    /// 本页条目。
+    pub items: Vec<QueueEntry>,
 }
 
 /// 最近一次命令的失败详情（final review Finding 2）。
@@ -231,7 +369,8 @@ mod tests {
             Request::Play(PlayRequest::Album(AlbumId::new("a1"))),
             Request::QueueAppend(PlayRequest::Track(TrackId::new("m2"))),
             Request::QueueRemove(2),
-            Request::QueueClear,
+            Request::QueueClear { all: false },
+            Request::QueueClear { all: true },
             Request::Queue,
             Request::Command(PlayerCommand::Seek(std::time::Duration::from_secs(30))),
             Request::Status,

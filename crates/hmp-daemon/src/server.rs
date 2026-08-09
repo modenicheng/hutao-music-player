@@ -54,13 +54,16 @@ pub async fn serve(listener: UnixListener, handle: EngineHandle) {
 }
 
 /// 需要登录态的请求（服务器同步前置校验，spec §6）。
-/// 本地源（`PlayRequest::Local`）不要求 QQ 凭证（媒体库重构 C2）。
+/// 本地源（`PlayRequest::Local`）与收藏/歌单写命令不要求 QQ 凭证
+/// （本地先提交、离线意图合法）；reconcile 拉取 QQ 快照需要。
 fn requires_credential(req: &Request) -> bool {
-    let src = match req {
-        Request::Play(s) | Request::PlayNext(s) | Request::QueueAppend(s) => s,
-        _ => return false,
-    };
-    !matches!(src, hmp_core::PlayRequest::Local(_))
+    match req {
+        Request::Play(s) | Request::PlayNext(s) | Request::QueueAppend(s) => {
+            !matches!(s, hmp_core::PlayRequest::Local(_))
+        }
+        Request::LibrarySync => true,
+        _ => false,
+    }
 }
 
 /// 单连接处理：请求/响应循环 + 订阅事件推送（reader 任务 + channel 并发版）。
@@ -139,12 +142,256 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             let resp = Response::Queue(handle.state_rx.borrow().queue.clone());
             write_frame(wr, &resp).await?;
         }
+        Ok(Request::QueueList { offset, limit }) => {
+            // 纯 ID 分页（server 无媒体库引用；标题投影在 CLI 侧）。
+            let snap = handle.state_rx.borrow().queue.clone();
+            let total = snap.tracks.len();
+            let items = snap
+                .tracks
+                .iter()
+                .enumerate()
+                .skip(offset)
+                .take(limit)
+                .map(|(i, t)| hmp_core::QueueEntry {
+                    track_id: t.clone(),
+                    is_current: snap.current == Some(i),
+                })
+                .collect();
+            let resp = Response::QueueList(hmp_core::QueuePage {
+                total,
+                offset,
+                items,
+            });
+            write_frame(wr, &resp).await?;
+        }
         Ok(Request::Subscribe) => {
             *subscribed = true;
             // 先推初始快照，并标记为已见：防止引擎启动发布的 pending 版本让
             // `changed()` 立即再推一帧重复快照（两帧连读导致客户端解码失败）。
             let ev = Event::StateChanged(handle.state_rx.borrow_and_update().clone());
             write_frame(wr, &ev).await?;
+        }
+        // —— 媒体库写命令：本地先提交，QQ 由 SyncWorker 异步同步（spec §3.3）。
+        // 与播放状态正交，server 直接操作媒体库（不经过引擎命令循环）。
+        Ok(Request::Favorite {
+            source,
+            key,
+            title,
+            desired,
+        }) => {
+            let is_local = source == "local";
+            let source_static: &'static str = if is_local { "local" } else { "qq" };
+            let result = handle.library.as_ref().map(|lib| {
+                let mut lib = lib.lock().unwrap();
+                lib.upsert_track(&hmp_storage::TrackRow {
+                    source: source_static,
+                    source_key: key.clone(),
+                    title,
+                    album: None,
+                    artist: None,
+                    duration_ms: None,
+                    cover_uri: None,
+                    qq_song_id: None,
+                })
+                .and_then(|_| lib.set_relation("track", source_static, &key, "liked", desired))
+                .and_then(|_| {
+                    if is_local {
+                        // 本地即事实：不进 outbox。
+                        lib.mark_relation_synced("track", "local", &key, "liked")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .map_err(|e| e.to_string())
+            });
+            let resp = match result {
+                Some(Ok(())) => {
+                    if !is_local {
+                        if let Some(h) = &handle.sync_handle {
+                            h.trigger();
+                        }
+                    }
+                    Response::Ok
+                }
+                Some(Err(message)) => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message,
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "媒体库不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::PlaylistWrite { op }) => {
+            use hmp_core::PlaylistWriteOp;
+            let mut trigger_sync = false;
+            let result = handle
+                .library
+                .as_ref()
+                .map(|lib| -> rusqlite::Result<Option<i64>> {
+                    let mut lib = lib.lock().unwrap();
+                    let r: rusqlite::Result<Option<i64>> = match op {
+                        PlaylistWriteOp::Create { name } => lib.create_playlist(&name).map(Some),
+                        PlaylistWriteOp::Rename { id, name } => match lib.playlist_relation(id) {
+                            Ok(Some(r)) if r == "owned" => Err(rusqlite::Error::InvalidQuery),
+                            Ok(_) => lib.rename_playlist(id, &name).map(|_| None),
+                            Err(e) => Err(e),
+                        },
+                        PlaylistWriteOp::Delete { id } => match lib.playlist_relation(id) {
+                            Ok(Some(r)) if r == "owned" => {
+                                // 行保留到远端删除成功（op 驱动）。
+                                lib.mark_playlist_pending(id)?;
+                                lib.enqueue_playlist_op(id, "delete_playlist", None, None)?;
+                                trigger_sync = true;
+                                Ok(None)
+                            }
+                            Ok(_) => lib.delete_playlist(id).map(|_| None),
+                            Err(e) => Err(e),
+                        },
+                        PlaylistWriteOp::AddTrack {
+                            id,
+                            source,
+                            key,
+                            title,
+                        } => {
+                            let source_static: &'static str = match source.as_str() {
+                                "local" => "local",
+                                _ => "qq",
+                            };
+                            lib.add_playlist_track(id, source_static, &key, &title)?;
+                            if lib.playlist_relation(id)?.as_deref() == Some("owned") {
+                                let song_id = lib.qq_song_id("qq", &key)?;
+                                lib.enqueue_playlist_op(id, "add", Some(&key), song_id)?;
+                                trigger_sync = true;
+                            }
+                            Ok(None)
+                        }
+                        PlaylistWriteOp::RemoveTrack { id, position } => {
+                            let song_key = lib.track_key_at(id, position)?;
+                            lib.remove_playlist_track(id, position)?;
+                            if lib.playlist_relation(id)?.as_deref() == Some("owned") {
+                                if let Some(key) = song_key {
+                                    let song_id = lib.qq_song_id("qq", &key)?;
+                                    lib.enqueue_playlist_op(id, "del", Some(&key), song_id)?;
+                                }
+                                trigger_sync = true;
+                            }
+                            Ok(None)
+                        }
+                    };
+                    r
+                });
+            let resp = match result {
+                Some(Ok(Some(id))) => {
+                    if trigger_sync {
+                        if let Some(h) = &handle.sync_handle {
+                            h.trigger();
+                        }
+                    }
+                    Response::Created(id)
+                }
+                Some(Ok(None)) => {
+                    if trigger_sync {
+                        if let Some(h) = &handle.sync_handle {
+                            h.trigger();
+                        }
+                    }
+                    Response::Ok
+                }
+                Some(Err(rusqlite::Error::InvalidQuery)) => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "QQ 远端歌单只读（subscribed 仅可取消收藏；owned 不可重命名）".into(),
+                },
+                Some(Err(e)) => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: e.to_string(),
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "媒体库不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::LibrarySync) => {
+            // 前置校验：reconcile 需要登录态（requires_credential 只作用于通用分支）。
+            if !(handle.credential_ok)() {
+                write_frame(
+                    wr,
+                    &Response::Err {
+                        code: IpcErrorCode::NotLoggedIn,
+                        message: "未登录，请先运行 hmp login".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            let resp = match &handle.sync_handle {
+                Some(h) => {
+                    h.reconcile();
+                    Response::Ok
+                }
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "同步 worker 不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        // —— 评论（spec §6）：读走 TTL cache；写直发 QQ。
+        Ok(Request::CommentList { mid, sort }) => {
+            let resp = match &handle.comment {
+                Some(svc) => match svc.list(&mid, &sort).await {
+                    Ok(page) => Response::CommentList(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "评论服务不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::CommentPost {
+            mid,
+            content,
+            reply_cmt_id,
+        }) => {
+            let resp = match &handle.comment {
+                Some(svc) => match svc.post(&mid, &content, reply_cmt_id.as_deref()).await {
+                    Ok(_) => Response::Ok,
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "评论服务不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::CommentDelete { cm_id }) => {
+            let resp = match &handle.comment {
+                Some(svc) => match svc.delete(&cm_id).await {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "评论服务不可用".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
         }
         Ok(req) => {
             if requires_credential(&req) && !(handle.credential_ok)() {
@@ -266,8 +513,17 @@ mod tests {
         fn resolve_source_ids(
             &self,
             _s: &PlayRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackId>, EngineError>> + Send + '_>> {
-            Box::pin(async { Ok(vec![TrackId::new("a")]) })
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+        {
+            Box::pin(async {
+                Ok(vec![hmp_core::TrackStub {
+                    id: TrackId::new("a"),
+                    title: "a".into(),
+                    artists: Vec::new(),
+                    album: None,
+                    duration_ms: None,
+                }])
+            })
         }
         fn resolve_track(
             &self,
@@ -340,6 +596,68 @@ mod tests {
         tokio::spawn(async move { serve(listener, handle).await });
         let resp = request(&sock, &Request::Queue).await;
         assert!(matches!(resp, Response::Queue(_)));
+    }
+
+    #[tokio::test]
+    async fn queue_list_pages_with_current_marker() {
+        let (sock, listener) = temp_socket().await;
+        let handle = test_engine(true).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        // 队列 [a]；等引擎发布后查询分页。
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::spawn(async move { serve(listener, handle).await });
+
+        let resp = request(
+            &sock,
+            &Request::QueueList {
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .await;
+        let Response::QueueList(page) = resp else {
+            panic!("期望 QueueList 响应");
+        };
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].track_id.as_ref(), "a");
+        assert!(page.items[0].is_current, "当前曲应标记");
+
+        // 越界页：空 items、total 不变。
+        let resp = request(
+            &sock,
+            &Request::QueueList {
+                offset: 5,
+                limit: 10,
+            },
+        )
+        .await;
+        let Response::QueueList(page) = resp else {
+            panic!("期望 QueueList 响应");
+        };
+        assert_eq!(page.total, 1);
+        assert!(page.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn library_sync_requires_login() {
+        let (sock, listener) = temp_socket().await;
+        let handle = test_engine(false).await; // 无凭证
+        tokio::spawn(async move { serve(listener, handle).await });
+        let resp = request(&sock, &Request::LibrarySync).await;
+        assert!(
+            matches!(
+                resp,
+                Response::Err {
+                    code: IpcErrorCode::NotLoggedIn,
+                    ..
+                }
+            ),
+            "未登录时 library sync 应被前置校验拒绝: {resp:?}"
+        );
     }
 
     #[tokio::test]

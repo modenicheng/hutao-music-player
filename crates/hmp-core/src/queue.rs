@@ -198,11 +198,26 @@ impl QueueCore {
     }
 
     /// 清空队列。
+    /// 清空队列（连当前曲一起）。
     pub fn clear(&mut self) {
         self.tracks.clear();
         self.order.clear();
         self.cursor = 0;
         self.has_current = false;
+    }
+
+    /// 清除待播曲目，保留当前曲（`queue clear` 语义）：
+    /// 不产生「队列已空但 current 正在播」的中间态——当前曲继续播放，
+    /// 队列只剩它一首。无当前曲时等价于 [`Self::clear`]。
+    pub fn clear_pending(&mut self) {
+        let Some(current) = self.current_idx() else {
+            self.clear();
+            return;
+        };
+        self.tracks = vec![self.tracks[current].clone()];
+        self.order = vec![0];
+        self.cursor = 0;
+        self.has_current = true;
     }
 
     /// 当前曲目（规范顺序视图）。
@@ -342,7 +357,8 @@ impl QueueCore {
     }
 
     /// 上一首：沿播放顺序回退（洗牌下即回到真正刚播过的那首）。
-    /// Track 模式保持当前；List 回绕；**None 模式队首即停**（shuffle 不隐含循环）。
+    /// Repeat One 只影响 EOS 续播，不影响手动 Previous：Track 与 None 一致
+    /// （回退、队首即停）；仅 List 回绕。
     pub fn prev_track(&mut self) -> Option<TrackId> {
         if self.tracks.is_empty() {
             return None;
@@ -353,12 +369,11 @@ impl QueueCore {
             return Some(self.tracks[self.order[0]].clone());
         }
         match self.loop_mode {
-            LoopMode::Track => Some(self.tracks[self.order[self.cursor]].clone()),
             LoopMode::List => {
                 self.cursor = (self.cursor + self.order.len() - 1) % self.order.len();
                 Some(self.tracks[self.order[self.cursor]].clone())
             }
-            LoopMode::None => {
+            LoopMode::Track | LoopMode::None => {
                 if self.cursor == 0 {
                     None
                 } else {
@@ -378,13 +393,13 @@ impl QueueCore {
             || (self.has_current && self.cursor + 1 < self.order.len())
     }
 
-    /// 播放能力：CanGoPrevious（Track/List 恒可；None 视位置；shuffle 不额外放行）。
+    /// 播放能力：CanGoPrevious（List 恒可——回绕；Track 与 None 一致，
+    /// Repeat One 不放大手动 Previous 能力——视位置）。
     pub fn can_go_previous(&self) -> bool {
         if self.tracks.is_empty() {
             return false;
         }
-        matches!(self.loop_mode, LoopMode::Track | LoopMode::List)
-            || (self.has_current && self.cursor > 0)
+        matches!(self.loop_mode, LoopMode::List) || (self.has_current && self.cursor > 0)
     }
 
     /// （重新）生成播放顺序：洗牌 → Fisher-Yates 排列；否则恒等排列。
@@ -498,6 +513,34 @@ mod tests {
         q.replace(vec![t("a"), t("b")], 0);
         q.set_loop_mode(LoopMode::List);
         assert_eq!(q.prev_track(), Some(t("b")));
+    }
+
+    #[test]
+    fn prev_in_track_mode_goes_back_not_replay() {
+        // Repeat One 只影响 EOS：Track 模式手动 Previous 回退上一曲，队首即停。
+        let mut q = QueueCore::new();
+        q.replace(vec![t("a"), t("b"), t("c")], 2);
+        q.set_loop_mode(LoopMode::Track);
+        assert_eq!(q.prev_track(), Some(t("b")));
+        assert_eq!(q.prev_track(), Some(t("a")));
+        assert_eq!(q.prev_track(), None); // 队首：无上一首
+        assert!(!q.can_go_previous());
+    }
+
+    #[test]
+    fn clear_pending_keeps_current_only() {
+        let mut q = QueueCore::new();
+        q.replace(vec![t("a"), t("b"), t("c")], 1); // current = b
+        q.clear_pending();
+        let snap = q.snapshot();
+        assert_eq!(snap.tracks, vec![t("b")]);
+        assert_eq!(snap.current, Some(0));
+        assert_eq!(q.current(), Some(&t("b")));
+        // 无当前曲（空队列）时等价于 clear。
+        let mut q2 = QueueCore::new();
+        q2.clear_pending();
+        assert!(q2.snapshot().tracks.is_empty());
+        assert_eq!(q2.snapshot().current, None);
     }
 
     #[test]
