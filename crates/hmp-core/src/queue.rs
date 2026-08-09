@@ -28,6 +28,21 @@ pub struct QueueSnapshot {
     pub shuffle: bool,
 }
 
+/// 队列摘要（O(1)，随 DaemonState 发布；完整内容走 QueueList/queue watch）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueueSummary {
+    /// 队列结构版本（每次变更 +1；position tick 不递增）。
+    pub revision: u64,
+    /// 队列总曲目数。
+    pub len: usize,
+    /// 当前曲目位置（规范下标）。
+    pub current: Option<usize>,
+    /// 循环模式。
+    pub loop_mode: LoopMode,
+    /// 是否洗牌。
+    pub shuffle: bool,
+}
+
 /// 队列完整内部状态（含播放顺序排列；引擎事务回滚用，见 [`QueueCore::save_state`]）。
 #[doc(hidden)]
 #[derive(Clone, Debug)]
@@ -69,6 +84,8 @@ pub struct QueueCore {
     loop_mode: LoopMode,
     shuffle: bool,
     rng: XorShift,
+    /// 结构版本（变更方法自动递增；position tick 不递增）。
+    revision: u64,
 }
 
 impl Default for QueueCore {
@@ -88,6 +105,7 @@ impl QueueCore {
             loop_mode: LoopMode::None,
             shuffle: false,
             rng: XorShift(0x9E37_79B9_7F4A_7C15),
+            revision: 0,
         }
     }
 
@@ -119,11 +137,15 @@ impl QueueCore {
 
     /// 追加到队尾（不改变当前曲）。
     pub fn append(&mut self, tracks: Vec<TrackId>) {
+        if tracks.is_empty() {
+            return;
+        }
         let base = self.tracks.len();
         self.tracks.extend(tracks);
         for i in base..self.tracks.len() {
             self.order.push(i);
         }
+        self.revision += 1;
     }
 
     /// 把整片曲目插到当前曲之后（playnext 多曲目；顺序保持，非逐条反插）。
@@ -160,6 +182,7 @@ impl QueueCore {
         // 实现：对 order 中插入点之后且原值 >= at 的条目，在原值已被占用时递增。
         // 简化正确做法：重建 order（保序平移）。
         self.rebuild_order_after_insert(at, ids.len());
+        self.revision += 1;
         Some(at)
     }
 
@@ -194,16 +217,21 @@ impl QueueCore {
                 self.cursor -= 1;
             }
         }
+        self.revision += 1;
         true
     }
 
     /// 清空队列。
     /// 清空队列（连当前曲一起）。
     pub fn clear(&mut self) {
+        let changed = !self.tracks.is_empty();
         self.tracks.clear();
         self.order.clear();
         self.cursor = 0;
         self.has_current = false;
+        if changed {
+            self.revision += 1;
+        }
     }
 
     /// 清除待播曲目，保留当前曲（`queue clear` 语义）：
@@ -218,6 +246,7 @@ impl QueueCore {
         self.order = vec![0];
         self.cursor = 0;
         self.has_current = true;
+        self.revision += 1;
     }
 
     /// 当前曲目（规范顺序视图）。
@@ -243,6 +272,23 @@ impl QueueCore {
         if let Some(p) = self.order.iter().position(|&x| x == canonical) {
             self.cursor = p;
             self.has_current = true;
+            self.revision += 1;
+        }
+    }
+
+    /// 当前结构版本（变更方法自动递增；position tick 不递增）。
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// O(1) 摘要（随 DaemonState 发布；完整内容经 QueueList/queue watch）。
+    pub fn summary(&self) -> QueueSummary {
+        QueueSummary {
+            revision: self.revision,
+            len: self.tracks.len(),
+            current: self.current_idx(),
+            loop_mode: self.loop_mode,
+            shuffle: self.shuffle,
         }
     }
 
@@ -278,6 +324,7 @@ impl QueueCore {
         self.has_current = s.has_current;
         self.loop_mode = s.loop_mode;
         self.shuffle = s.shuffle;
+        self.revision += 1;
     }
 
     /// 循环模式。
@@ -288,6 +335,7 @@ impl QueueCore {
     /// 设置循环模式。
     pub fn set_loop_mode(&mut self, mode: LoopMode) {
         self.loop_mode = mode;
+        self.revision += 1;
     }
 
     /// 是否洗牌。
@@ -319,11 +367,21 @@ impl QueueCore {
                 }
             }
         }
+        self.revision += 1;
     }
 
     /// 用户主动下一首。Repeat One **不**阻止跳歌（Track 模式按回绕处理）；
     /// List 循环回绕；**None 模式到头即停**（shuffle 只决定顺序，不隐含列表循环）。
     pub fn skip_next(&mut self) -> Option<TrackId> {
+        let out = self.skip_next_inner();
+        if out.is_some() {
+            self.revision += 1;
+        }
+        out
+    }
+
+    /// `skip_next` 的结构变更内核（revision 由外层统一递增）。
+    fn skip_next_inner(&mut self) -> Option<TrackId> {
         if self.tracks.is_empty() {
             return None;
         }
@@ -350,6 +408,7 @@ impl QueueCore {
         if self.tracks.is_empty() {
             return None;
         }
+        // Track 模式重播当前：结构未变，revision 不递增（其余路径走 skip_next 递增）。
         if self.loop_mode == LoopMode::Track && self.has_current {
             return Some(self.tracks[self.order[self.cursor]].clone());
         }
@@ -360,6 +419,15 @@ impl QueueCore {
     /// Repeat One 只影响 EOS 续播，不影响手动 Previous：Track 与 None 一致
     /// （回退、队首即停）；仅 List 回绕。
     pub fn prev_track(&mut self) -> Option<TrackId> {
+        let out = self.prev_track_inner();
+        if out.is_some() {
+            self.revision += 1;
+        }
+        out
+    }
+
+    /// `prev_track` 的结构变更内核（revision 由外层统一递增）。
+    fn prev_track_inner(&mut self) -> Option<TrackId> {
         if self.tracks.is_empty() {
             return None;
         }
@@ -794,5 +862,44 @@ mod tests {
         let _ = q.skip_next();
         assert_eq!(q.skip_next(), Some(first), "List + shuffle 周期末回绕");
         assert!(q.can_go_next());
+    }
+
+    #[test]
+    fn revision_bumps_on_structure_changes() {
+        let mut q = QueueCore::new();
+        assert_eq!(q.revision(), 0);
+        q.append(vec![t("a"), t("b")]);
+        assert_eq!(q.revision(), 1);
+        q.set_current(0);
+        assert_eq!(q.revision(), 2);
+        q.remove(1);
+        assert_eq!(q.revision(), 3);
+        q.set_loop_mode(LoopMode::Track);
+        assert_eq!(q.revision(), 4);
+        q.set_shuffle(true);
+        assert_eq!(q.revision(), 5);
+        // 快照与保存不递增（结构未变）。
+        let r = q.revision();
+        let _ = q.snapshot();
+        let s = q.save_state();
+        assert_eq!(q.revision(), r);
+        // restore 改变结构 → 递增。
+        q.restore_state(s);
+        assert_eq!(q.revision(), r + 1);
+    }
+
+    #[test]
+    fn summary_is_o1_and_reflects_state() {
+        let mut q = QueueCore::new();
+        q.append(vec![t("a"), t("b"), t("c")]);
+        q.set_current(1);
+        q.set_loop_mode(LoopMode::List);
+        q.set_shuffle(true);
+        let s = q.summary();
+        assert_eq!(s.revision, q.revision());
+        assert_eq!(s.len, 3);
+        assert_eq!(s.current, Some(1));
+        assert_eq!(s.loop_mode, LoopMode::List);
+        assert!(s.shuffle);
     }
 }
