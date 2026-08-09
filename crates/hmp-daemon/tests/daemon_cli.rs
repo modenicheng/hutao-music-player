@@ -59,7 +59,7 @@ fn serve_boots_answers_status_and_cleans_up_on_sigterm() {
 
     // 主线程：跑 daemon 到优雅退出。
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let res = rt.block_on(async { hmp_daemon::serve::run_background().await });
+    let res = rt.block_on(async { hmp_daemon::serve::run_background(None).await });
     res.expect("run_background 返回错误");
     interact.join().expect("交互线程 panicked");
     assert!(

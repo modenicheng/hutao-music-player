@@ -11,14 +11,19 @@ use crate::daemon::{Daemon, DaemonConfig};
 use crate::server;
 
 /// 前台运行（调试；Ctrl+C 优雅退出）。也是后台 detached 子进程的 daemon 循环。
-pub async fn run_foreground() -> Result<(), Box<dyn std::error::Error>> {
-    run_inner(DaemonConfig { audio_sink: None }).await
+/// `sink`：GStreamer 输出元素名（`--sink` 命令行覆盖 config.toml；None = 配置/默认）。
+pub async fn run_foreground(sink: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    run_inner(DaemonConfig {
+        audio_sink: sink.map(|s| s.to_string()),
+    })
+    .await
 }
 
 /// 后台运行：`setsid` 完全脱离当前会话启动子进程（无控制终端、丢弃 stdio），
 /// 子进程运行前台 daemon 循环；本函数随即返回（final review Finding 8）。
-pub async fn run_background() -> Result<(), Box<dyn std::error::Error>> {
-    spawn_detached(&["serve"])?;
+/// `sink` 经命令行 `--sink NAME` 透传给子进程（打磨）。
+pub async fn run_background(sink: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    spawn_detached(&background_args(sink))?;
     Ok(())
 }
 
@@ -42,6 +47,16 @@ pub fn spawn_detached(args: &[&str]) -> std::io::Result<()> {
 /// 里程碑 G：输出设备选择（`config.toml [audio] sink` → GstDriver）。
 fn merge_audio_sink(injected: Option<&str>, configured: Option<String>) -> Option<String> {
     injected.map(|s| s.to_string()).or(configured)
+}
+
+/// 打磨：`serve --background` 的子进程参数（含 `--sink NAME` 时透传）。
+fn background_args(sink: Option<&str>) -> Vec<&str> {
+    let mut args = vec!["serve"];
+    if let Some(s) = sink {
+        args.push("--sink");
+        args.push(s);
+    }
+    args
 }
 
 async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -169,6 +184,16 @@ mod tests {
         assert_eq!(
             merge_audio_sink(Some("injected"), None),
             Some("injected".to_string())
+        );
+    }
+
+    /// 打磨：`--sink` 命令行参数 → detached 子进程参数透传。
+    #[test]
+    fn background_args_include_sink_when_given() {
+        assert_eq!(background_args(None), vec!["serve"]);
+        assert_eq!(
+            background_args(Some("fakesink")),
+            vec!["serve", "--sink", "fakesink"]
         );
     }
 }
