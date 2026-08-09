@@ -25,3 +25,6 @@ third_party/
 # 临时文件
 /tmp/
 .superpowers/sdd/
+
+# git worktree（本地隔离工作区，绝不提交）
+.worktrees/
