@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use hmp_core::{
     DaemonState, ErrorInfo, IpcErrorCode, PlayRequest, PlaybackCapabilities, PlaybackState,
-    PlayerCommand, Request, TrackId,
+    PlayerCommand, QueueSnapshot, Request, TrackId,
 };
 use hmp_player_gst::PlayerEvent;
 use tokio::sync::{mpsc, watch};
@@ -45,6 +45,8 @@ pub struct EngineHandle {
     pub terminated: watch::Receiver<bool>,
     /// 播放能力（MPRIS CanGoNext/CanGoPrevious，随 publish 同步发布，Finding 9）。
     pub caps_rx: watch::Receiver<PlaybackCapabilities>,
+    /// 完整队列（结构变更时更新；消费方：server 的 Queue/QueueList）。
+    pub queue_rx: watch::Receiver<QueueSnapshot>,
     /// 媒体库（server 直操作：收藏/歌单写命令；daemon 层注入）。
     pub library: Option<std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>>,
     /// QQ 同步 worker 触发句柄（daemon 层注入）。
@@ -89,6 +91,10 @@ pub struct PlaybackEngine {
     last_load: Option<AppliedLoad>,
     /// 等待驱动应用装载的超时（测试注入短超时）。
     load_timeout: std::time::Duration,
+    /// 完整队列快照（仅结构变化时发送；position tick 不触发——O(1) publish）。
+    queue_tx: watch::Sender<QueueSnapshot>,
+    /// 上次发布的队列版本（避免重复发送；publish 为 &self，用内部可变性）。
+    last_queue_rev: std::cell::Cell<u64>,
 }
 
 impl PlaybackEngine {
@@ -129,6 +135,7 @@ impl PlaybackEngine {
         let (state_tx, state_rx) = watch::channel(DaemonState::default());
         let playback_rx = driver.subscribe_state();
         let (caps_tx, caps_rx) = watch::channel(PlaybackCapabilities::default());
+        let (queue_tx, queue_rx) = watch::channel(QueueSnapshot::default());
         // sticky 终止信号：晚到的接收者立即可见（watch 保留当前值，Finding 7）。
         let (term_tx, term_rx) = watch::channel(false);
         let mut engine = Self {
@@ -149,6 +156,8 @@ impl PlaybackEngine {
             session: None,
             last_load: None,
             load_timeout,
+            queue_tx,
+            last_queue_rev: std::cell::Cell::new(0),
         };
         tokio::spawn(async move {
             engine.run().await;
@@ -161,6 +170,7 @@ impl PlaybackEngine {
             credential_ok,
             terminated: term_rx,
             caps_rx,
+            queue_rx,
             library: None,
             sync_handle: None,
             comment: None,
@@ -313,21 +323,27 @@ impl PlaybackEngine {
 
     /// 发布复合状态（playback 来自驱动 watch，queue 来自队列核心）。
     /// 同时把精确的播放能力发布到 `caps_tx`（MPRIS 消费，Finding 9）。
+    /// 发布复合状态（playback 来自驱动 watch，queue 摘要 O(1)）。
+    /// 完整队列快照仅在结构变化时发送到 `queue_tx`（position tick 不克隆）。
+    /// 同时把精确的播放能力发布到 `caps_tx`（MPRIS 消费，Finding 9）。
     fn publish(&self) {
-        let queue = self.queue.snapshot();
         let caps = PlaybackCapabilities {
             can_go_next: self.queue.can_go_next(),
             can_go_previous: self.queue.can_go_previous(),
         };
         let state = DaemonState {
             playback: self.state_rx.borrow().clone(),
-            queue,
+            queue: self.queue.summary(),
             caps,
             seq: self.seq,
             last_error: self.last_error.clone(),
             phase: self.phase,
         };
         let _ = self.state_tx.send(state);
+        if self.last_queue_rev.get() != self.queue.revision() {
+            self.last_queue_rev.set(self.queue.revision());
+            let _ = self.queue_tx.send(self.queue.snapshot());
+        }
         let _ = self.caps_tx.send(caps);
     }
 
@@ -1082,7 +1098,7 @@ mod tests {
             .unwrap();
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(0));
-        assert_eq!(handle.state_rx.borrow().queue.tracks.len(), 3);
+        assert_eq!(handle.queue_rx.borrow().tracks.len(), 3);
         assert_eq!(driver.load_uris(), vec!["fake://a"]);
     }
 
@@ -1193,9 +1209,11 @@ mod tests {
             .await
             .unwrap();
         wait_idle().await;
-        let state = handle.state_rx.borrow();
-        assert_eq!(state.queue.tracks.len(), 1);
-        assert_eq!(state.queue.tracks[0].as_ref(), "local:/tmp/x.mp3");
+        assert_eq!(handle.queue_rx.borrow().tracks.len(), 1);
+        assert_eq!(
+            handle.queue_rx.borrow().tracks[0].as_ref(),
+            "local:/tmp/x.mp3"
+        );
         assert_eq!(
             driver.load_uris().last(),
             Some(&"fake://local:/tmp/x.mp3".to_string())
@@ -1215,7 +1233,7 @@ mod tests {
         wait_idle().await;
         let state = handle.state_rx.borrow();
         assert!(state.last_error.is_some());
-        assert!(state.queue.tracks.is_empty());
+        assert!(handle.queue_rx.borrow().tracks.is_empty());
     }
 
     /// caps：shuffle 与循环正交——None 模式队尾开 shuffle 仍不可 Next（不再隐含列表循环）；
@@ -1317,7 +1335,7 @@ mod tests {
         let state = handle.state_rx.borrow();
         assert_eq!(state.queue.current, Some(2)); // 指向插入的 x
         assert_eq!(
-            state.queue.tracks,
+            handle.queue_rx.borrow().tracks,
             vec![
                 TrackId::new("a"),
                 TrackId::new("b"),
@@ -1359,7 +1377,7 @@ mod tests {
         let state = handle.state_rx.borrow();
         // 整片插入：x y z 全在队列且紧跟 a 之后，当前播放 x。
         assert_eq!(
-            state.queue.tracks,
+            handle.queue_rx.borrow().tracks,
             vec![
                 TrackId::new("a"),
                 TrackId::new("x"),
@@ -1860,7 +1878,7 @@ mod tests {
                 let s = st.borrow();
                 if s.seq > seq0 {
                     assert!(s.last_error.is_some(), "空源应有错误详情");
-                    assert!(s.queue.tracks.is_empty());
+                    assert!(handle.queue_rx.borrow().tracks.is_empty());
                     break;
                 }
             }
@@ -1927,7 +1945,11 @@ mod tests {
         let info = st.last_error.as_ref().expect("解析失败应发布 last_error");
         assert_eq!(info.code, IpcErrorCode::PlaylistNotFound);
         assert!(info.message.contains("歌单为空"));
-        assert_eq!(st.queue.tracks.len(), 0, "失败后队列不应变化");
+        assert_eq!(
+            handle.queue_rx.borrow().tracks.len(),
+            0,
+            "失败后队列不应变化"
+        );
     }
 
     /// Finding 2：成功换曲清空上次错误。
@@ -1953,7 +1975,7 @@ mod tests {
             .unwrap();
         wait_idle().await;
         assert!(handle2.state_rx.borrow().last_error.is_none());
-        assert_eq!(handle2.state_rx.borrow().queue.tracks.len(), 1);
+        assert_eq!(handle2.queue_rx.borrow().tracks.len(), 1);
     }
 
     /// Finding 4：移除当前曲 → 立即播放接替曲（仲裁不失步）。
@@ -1977,7 +1999,10 @@ mod tests {
         handle.cmd(Request::QueueRemove(0)).await.unwrap(); // 移除正在播的 a
         wait_idle().await;
         let st = handle.state_rx.borrow();
-        assert_eq!(st.queue.tracks, vec![TrackId::new("b"), TrackId::new("c")]);
+        assert_eq!(
+            handle.queue_rx.borrow().tracks,
+            vec![TrackId::new("b"), TrackId::new("c")]
+        );
         assert_eq!(st.queue.current, Some(0)); // 接替曲 b 占据 0
         assert_eq!(
             driver.load_uris(),
@@ -2001,7 +2026,7 @@ mod tests {
         handle.cmd(Request::QueueRemove(0)).await.unwrap();
         wait_idle().await;
         let st = handle.state_rx.borrow();
-        assert!(st.queue.tracks.is_empty());
+        assert!(handle.queue_rx.borrow().tracks.is_empty());
         assert_eq!(st.queue.current, None);
         assert!(
             driver
@@ -2034,7 +2059,7 @@ mod tests {
         wait_idle().await;
         let st = handle.state_rx.borrow();
         assert_eq!(
-            st.queue.tracks,
+            handle.queue_rx.borrow().tracks,
             vec![TrackId::new("a"), TrackId::new("b")],
             "装载失败应回滚：被删曲目回到原位"
         );
@@ -2072,7 +2097,11 @@ mod tests {
             .unwrap();
         wait_idle().await;
         let st = handle.state_rx.borrow();
-        assert_eq!(st.queue.tracks, vec![TrackId::new("a")], "只留当前曲");
+        assert_eq!(
+            handle.queue_rx.borrow().tracks,
+            vec![TrackId::new("a")],
+            "只留当前曲"
+        );
         assert_eq!(st.queue.current, Some(0));
         assert!(
             !driver
@@ -2100,7 +2129,7 @@ mod tests {
         handle.cmd(Request::QueueClear { all: true }).await.unwrap();
         wait_idle().await;
         let st = handle.state_rx.borrow();
-        assert!(st.queue.tracks.is_empty());
+        assert!(handle.queue_rx.borrow().tracks.is_empty());
         assert_eq!(st.queue.current, None);
         assert!(
             driver
@@ -2187,7 +2216,7 @@ mod tests {
         assert!(st.last_error.is_some(), "应发布装载失败详情");
         // 队列未替换、旧曲仍在播：状态一致，CLI 不会误报成功。
         assert_eq!(
-            st.queue.tracks,
+            handle.queue_rx.borrow().tracks,
             vec![TrackId::new("a")],
             "装载失败不得替换队列"
         );

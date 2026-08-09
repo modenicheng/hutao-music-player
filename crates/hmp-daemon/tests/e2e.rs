@@ -617,12 +617,12 @@ async fn play_then_end_advances_queue_with_gst() {
 
     // 5) 首曲进入 Playing（当前 = 队列 0，队列 2 首）
     let st = wait_state(handle.state_rx.clone(), Duration::from_secs(10), |st| {
-        st.queue.tracks.len() == 2
+        st.queue.len == 2
             && st.queue.current == Some(0)
             && st.playback.status == PlaybackStatus::Playing
     })
     .await;
-    assert_eq!(st.queue.tracks[0], TrackId::new(WAV_ID_1));
+    assert_eq!(handle.queue_rx.borrow().tracks[0], TrackId::new(WAV_ID_1));
     assert_eq!(
         st.playback
             .current

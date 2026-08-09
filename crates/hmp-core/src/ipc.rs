@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::{AlbumId, PlaylistId, TrackId};
 use crate::player::{PlaybackCapabilities, PlaybackState, PlayerCommand};
-use crate::queue::QueueSnapshot;
+use crate::queue::{QueueSnapshot, QueueSummary};
 
 /// 单帧最大字节数（含 4 字节长度前缀）。
 pub const MAX_FRAME: usize = 1 << 20;
@@ -194,8 +194,8 @@ pub enum Event {
 pub struct DaemonState {
     /// 播放器状态。
     pub playback: PlaybackState,
-    /// 队列快照。
-    pub queue: QueueSnapshot,
+    /// 队列摘要（O(1)；完整内容经 QueueList / queue watch）。
+    pub queue: QueueSummary,
     /// 播放能力（can_go_next 等）。
     pub caps: PlaybackCapabilities,
     /// 命令代际：换曲操作（Play/PlayNext/Next/Previous）执行前置位，
@@ -433,7 +433,7 @@ mod tests {
     fn daemon_state_roundtrips() {
         let st = DaemonState {
             playback: Default::default(),
-            queue: crate::queue::QueueSnapshot::default(),
+            queue: crate::queue::QueueSummary::default(),
             caps: Default::default(),
             seq: 7,
             last_error: Some(ErrorInfo {

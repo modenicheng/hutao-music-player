@@ -139,12 +139,12 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             write_frame(wr, &resp).await?;
         }
         Ok(Request::Queue) => {
-            let resp = Response::Queue(handle.state_rx.borrow().queue.clone());
+            let resp = Response::Queue(handle.queue_rx.borrow().clone());
             write_frame(wr, &resp).await?;
         }
         Ok(Request::QueueList { offset, limit }) => {
             // 纯 ID 分页（server 无媒体库引用；标题投影在 CLI 侧）。
-            let snap = handle.state_rx.borrow().queue.clone();
+            let snap = handle.queue_rx.borrow().clone();
             let total = snap.tracks.len();
             let items = snap
                 .tracks

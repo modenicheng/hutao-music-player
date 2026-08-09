@@ -41,7 +41,7 @@ pub fn format_status(st: &DaemonState) -> String {
         "循环: {:?}  随机: {}\n",
         st.playback.loop_mode, st.playback.shuffle
     ));
-    s.push_str(&format!("队列: {} 首\n", st.queue.tracks.len()));
+    s.push_str(&format!("队列: {} 首\n", st.queue.len));
     s
 }
 

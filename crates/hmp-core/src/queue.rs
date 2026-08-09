@@ -133,6 +133,7 @@ impl QueueCore {
         } else {
             self.cursor = 0;
         }
+        self.revision += 1;
     }
 
     /// 追加到队尾（不改变当前曲）。
@@ -886,6 +887,15 @@ mod tests {
         // restore 改变结构 → 递增。
         q.restore_state(s);
         assert_eq!(q.revision(), r + 1);
+    }
+
+    #[test]
+    fn replace_bumps_revision() {
+        let mut q = QueueCore::new();
+        q.replace(vec![t("a"), t("b")], 0);
+        assert_eq!(q.revision(), 1);
+        q.replace(vec![], 0);
+        assert_eq!(q.revision(), 2, "空队列 replace 也改变结构");
     }
 
     #[test]
