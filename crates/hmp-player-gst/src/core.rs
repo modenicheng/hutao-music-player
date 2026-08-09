@@ -505,10 +505,8 @@ mod tests {
         let mut got: Option<u64> = None;
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            if let Ok(e) = ev.try_recv() {
-                if let PlayerEvent::Error { load_gen, .. } = e {
-                    got = Some(load_gen);
-                }
+            if let Ok(PlayerEvent::Error { load_gen, .. }) = ev.try_recv() {
+                got = Some(load_gen);
             }
             if got.is_some() {
                 break;
