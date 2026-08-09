@@ -333,8 +333,11 @@ impl QueueCore {
         self.loop_mode
     }
 
-    /// 设置循环模式。
+    /// 设置循环模式（同值 no-op，不 bump——与 `set_shuffle` 一致）。
     pub fn set_loop_mode(&mut self, mode: LoopMode) {
+        if self.loop_mode == mode {
+            return;
+        }
         self.loop_mode = mode;
         self.revision += 1;
     }

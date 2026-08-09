@@ -321,8 +321,6 @@ impl PlaybackEngine {
         }
     }
 
-    /// 发布复合状态（playback 来自驱动 watch，queue 来自队列核心）。
-    /// 同时把精确的播放能力发布到 `caps_tx`（MPRIS 消费，Finding 9）。
     /// 发布复合状态（playback 来自驱动 watch，queue 摘要 O(1)）。
     /// 完整队列快照仅在结构变化时发送到 `queue_tx`（position tick 不克隆）。
     /// 同时把精确的播放能力发布到 `caps_tx`（MPRIS 消费，Finding 9）。
