@@ -159,6 +159,16 @@ pub struct PlaylistTrackRow {
     pub source_key: String,
 }
 
+/// 本地歌单曲目（播放源投影，里程碑 F）。
+#[derive(Clone, Debug)]
+pub struct LocalPlaylistRow {
+    pub source_key: String,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<i64>,
+}
+
 /// 媒体库（进程内单一连接；跨任务共享用 `Arc<Mutex<LibraryDb>>`，WAL 允许
 /// 多进程并发读写——daemon 写入、CLI 读取）。
 pub struct LibraryDb {
@@ -1746,6 +1756,28 @@ impl LibraryDb {
         rows.collect()
     }
 
+    /// 本地歌单曲目（播放源，里程碑 F）：按 position 排序；JOIN tracks 带完整元数据。
+    pub fn local_playlist_stubs(
+        &mut self,
+        playlist_id: i64,
+    ) -> rusqlite::Result<Vec<LocalPlaylistRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.source_key, t.title, t.artist, t.album, t.duration_ms
+             FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
+             WHERE pt.playlist_id = ?1 ORDER BY pt.position, pt.rowid",
+        )?;
+        let rows = stmt.query_map(params![playlist_id], |r| {
+            Ok(LocalPlaylistRow {
+                source_key: r.get(0)?,
+                title: r.get(1)?,
+                artist: r.get(2)?,
+                album: r.get(3)?,
+                duration_ms: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// 往歌单追加曲目（幂等：同曲不重复；曲目行按需 upsert）。
     /// 歌单不存在 → QueryReturnedNoRows。
     pub fn add_playlist_track(
@@ -2906,5 +2938,22 @@ mod tests {
         std::fs::write(&outer, b"y").unwrap();
         let hit2 = db.scan_root_for(&outer).unwrap().unwrap();
         assert_eq!(hit2, (rid1, gen1));
+    }
+
+    #[test]
+    fn local_playlist_stubs_lists_ordered_tracks() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let pid = db.create_playlist("本地歌单").unwrap();
+        // 混排：QQ 曲目 + 本地曲目。
+        db.add_playlist_track(pid, "qq", "mid-1", "QQ 歌").unwrap();
+        db.add_playlist_track(pid, "local", "local:/a.mp3", "本地歌")
+            .unwrap();
+        let rows = db.local_playlist_stubs(pid).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].source_key, "mid-1");
+        assert_eq!(rows[0].title, "QQ 歌");
+        assert_eq!(rows[1].source_key, "local:/a.mp3");
+        // 不存在 → 空列表。
+        assert!(db.local_playlist_stubs(999).unwrap().is_empty());
     }
 }

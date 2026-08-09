@@ -410,6 +410,7 @@ impl SourceResolver for LocalWavResolver {
             }],
             hmp_core::PlayRequest::Album(_) => Vec::new(),
             hmp_core::PlayRequest::Local(_) => Vec::new(),
+            hmp_core::PlayRequest::LibraryPlaylist(_) => Vec::new(),
         };
         Box::pin(async move { Ok(stubs) })
     }

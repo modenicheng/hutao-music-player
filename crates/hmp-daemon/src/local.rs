@@ -190,6 +190,35 @@ impl SourceResolver for LocalSourceResolver {
                     Ok(stubs)
                 })
             }
+            // 里程碑 F：`playlist:local:<id>` → 本地歌单曲目（JOIN tracks，混排 QQ/本地）。
+            PlayRequest::LibraryPlaylist(id) => {
+                let lib = self.library.clone();
+                let id = *id;
+                Box::pin(async move {
+                    let mut db = lib
+                        .lock()
+                        .map_err(|e| EngineError::Internal(e.to_string()))?;
+                    let rows = db
+                        .local_playlist_stubs(id)
+                        .map_err(|e| EngineError::Internal(e.to_string()))?;
+                    if rows.is_empty() {
+                        return Err(EngineError::PlaylistNotFound(format!(
+                            "本地歌单为空或不存在: {id}"
+                        )));
+                    }
+                    let stubs = rows
+                        .into_iter()
+                        .map(|r| hmp_core::TrackStub {
+                            id: TrackId::new(r.source_key),
+                            title: r.title,
+                            artists: r.artist.into_iter().collect(),
+                            album: r.album,
+                            duration_ms: r.duration_ms,
+                        })
+                        .collect();
+                    Ok(stubs)
+                })
+            }
             _ => Box::pin(async {
                 Err(EngineError::Internal("本地解析器仅支持 local 源".into()))
             }),
@@ -273,6 +302,8 @@ impl SourceResolver for CompositeSourceResolver {
     {
         match src {
             PlayRequest::Local(_) => self.local.resolve_source_ids(src),
+            // 里程碑 F：本地 SQLite 歌单（`playlist:local:<id>`）→ 本地解析器。
+            PlayRequest::LibraryPlaylist(_) => self.local.resolve_source_ids(src),
             // 里程碑 E：本地专辑（`album:local:` 前缀）→ 本地解析器。
             PlayRequest::Album(id) if id.as_ref().starts_with("local:") => {
                 self.local.resolve_source_ids(src)
@@ -397,6 +428,35 @@ mod tests {
         assert!(stubs.iter().any(|s| s.title == "B"));
         // 空结果 → PlaylistNotFound。
         let src = PlayRequest::Album(hmp_core::AlbumId::new("local:不存在"));
+        let err = resolver.resolve_source_ids(&src).await.unwrap_err();
+        assert!(matches!(err, EngineError::PlaylistNotFound(_)));
+    }
+
+    /// 里程碑 F：`playlist:local:<id>` → 本地 SQLite 歌单曲目（混排 QQ/本地）。
+    #[tokio::test]
+    async fn resolve_library_playlist_source() {
+        let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        {
+            let mut db = lib.lock().unwrap();
+            let pid = db.create_playlist("p").unwrap();
+            db.add_playlist_track(pid, "qq", "mid-1", "QQ 歌").unwrap();
+            db.add_playlist_track(pid, "local", "local:/x.mp3", "本地歌")
+                .unwrap();
+        }
+        let resolver = LocalSourceResolver::new(lib);
+        let src = hmp_core::PlayRequest::LibraryPlaylist(1);
+        let stubs = resolver.resolve_source_ids(&src).await.unwrap();
+        assert_eq!(stubs.len(), 2);
+        assert_eq!(stubs[0].id.as_ref(), "mid-1");
+        assert_eq!(stubs[1].id.as_ref(), "local:/x.mp3");
+        assert_eq!(stubs[0].title, "QQ 歌");
+    }
+
+    #[tokio::test]
+    async fn resolve_library_playlist_missing_is_not_found() {
+        let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let resolver = LocalSourceResolver::new(lib);
+        let src = hmp_core::PlayRequest::LibraryPlaylist(999);
         let err = resolver.resolve_source_ids(&src).await.unwrap_err();
         assert!(matches!(err, EngineError::PlaylistNotFound(_)));
     }
