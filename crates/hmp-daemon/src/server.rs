@@ -59,7 +59,12 @@ pub async fn serve(listener: UnixListener, handle: EngineHandle) {
 fn requires_credential(req: &Request) -> bool {
     match req {
         Request::Play(s) | Request::PlayNext(s) | Request::QueueAppend(s) => {
-            !matches!(s, hmp_core::PlayRequest::Local(_))
+            // 本地源（Local/本地歌单）免凭证：离线意图合法；
+            // 歌单内 QQ 曲目在曲目级 resolve_track 时再按凭证拦截。
+            !matches!(
+                s,
+                hmp_core::PlayRequest::Local(_) | hmp_core::PlayRequest::LibraryPlaylist(_)
+            )
         }
         Request::LibrarySync => true,
         _ => false,

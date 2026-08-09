@@ -99,3 +99,111 @@ fn daemon_lifecycle_end_to_end() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// 里程碑 F：本地歌单播放全链路（真实 daemon + 真实音频）。
+/// 建歌单 → 加本地 wav → `hmp play playlist:local:<id>` → status 显示播放中。
+/// 数据目录隔离：XDG_DATA_HOME 指向临时目录（避免污染真实库）。
+#[test]
+#[ignore = "需要真实 GStreamer/音频环境（真机验收项）"]
+fn library_playlist_plays_locally() {
+    let base = std::env::temp_dir().join(format!("hmp-cli-pl-{}", std::process::id()));
+    std::fs::create_dir_all(&base).unwrap();
+    let socket = base.join("hmp.sock");
+    // 隔离运行时/数据/配置目录（测试写真实库会污染用户数据）。
+    let data = base.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let config = base.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+
+    let mut daemon = Command::new(hmp_bin())
+        .args(["serve", "--background"])
+        .env("XDG_RUNTIME_DIR", &base)
+        .env("XDG_DATA_HOME", &data)
+        .env("XDG_CONFIG_HOME", &config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn hmp serve --background 失败");
+    assert!(
+        wait_for_socket(&socket, Duration::from_secs(15)),
+        "daemon socket 未就绪"
+    );
+
+    // 本地 wav（GStreamer 可播，无需凭证）。
+    let wav = base.join("tone.wav");
+    write_wav(&wav);
+
+    let run = |args: &[&str]| {
+        let out = Command::new(hmp_bin())
+            .args(args)
+            .env("XDG_RUNTIME_DIR", &base)
+            .env("XDG_DATA_HOME", &data)
+            .env("XDG_CONFIG_HOME", &config)
+            .output()
+            .expect("运行 hmp 失败");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // 建歌单 → 加本地曲目 → 播放。
+    let created = run(&["playlist", "create", "集成测试歌单"]);
+    assert!(created.contains("歌单"), "创建歌单失败: {created}");
+    let pid: i64 = created
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|s| !s.is_empty())
+        .map(|s| s.parse().unwrap())
+        .expect("解析歌单 id 失败");
+    run(&[
+        "playlist",
+        "add",
+        &pid.to_string(),
+        &format!("local:{}", wav.display()),
+    ]);
+    let out = run(&["play", &format!("playlist:local:{pid}")]);
+    assert!(out.contains("已开始播放"), "play 应报告开始播放: {out}");
+    // 轮询 status：进入播放（本地源免凭证，离线可播）。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut saw_playing = false;
+    while std::time::Instant::now() < deadline {
+        let st = run(&["status"]);
+        if st.contains("播放中") || st.contains("Playing") {
+            saw_playing = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    assert!(saw_playing, "本地歌单应开始播放");
+
+    run(&["quit"]);
+    wait_until(
+        || !socket.exists(),
+        Duration::from_secs(5),
+        "quit 后 socket 清理",
+    );
+    let status = daemon.wait().expect("等待 daemon 退出失败");
+    assert!(status.success(), "daemon 退出码异常: {status:?}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// 最小 wav 文件（8kHz 单声道 1 秒，GStreamer 可直接播放）。
+fn write_wav(path: &std::path::Path) {
+    let sample_rate = 8000u32;
+    let n = sample_rate as usize;
+    let mut data = Vec::with_capacity(44 + n * 2);
+    data.extend_from_slice(b"RIFF");
+    data.extend_from_slice(&((36 + n * 2) as u32).to_le_bytes());
+    data.extend_from_slice(b"WAVEfmt ");
+    data.extend_from_slice(&16u32.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&sample_rate.to_le_bytes());
+    data.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    data.extend_from_slice(&2u16.to_le_bytes());
+    data.extend_from_slice(&16u16.to_le_bytes());
+    data.extend_from_slice(b"data");
+    data.extend_from_slice(&((n * 2) as u32).to_le_bytes());
+    for _ in 0..n {
+        data.extend_from_slice(&0u16.to_le_bytes()); // 静音（避免噪音）
+    }
+    std::fs::write(path, data).unwrap();
+}
