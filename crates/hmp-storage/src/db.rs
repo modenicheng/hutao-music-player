@@ -484,6 +484,12 @@ impl LibraryDb {
             },
         };
         let source_key = format!("local:{}", path.display());
+        // 多艺术家口径与扫描路径一致（先播放后扫描的曲目也能被 artists 聚合命中）。
+        let artists: Vec<String> = if meta.artists.is_empty() {
+            meta.artist.iter().cloned().collect()
+        } else {
+            meta.artists.clone()
+        };
         let id = self.upsert_track(&TrackRow {
             source: "local",
             source_key,
@@ -495,6 +501,9 @@ impl LibraryDb {
             qq_song_id: None,
             ..Default::default()
         })?;
+        if !artists.is_empty() {
+            self.write_track_artists(id, &artists)?;
+        }
         let md = std::fs::metadata(path).ok();
         self.conn.execute(
             r#"INSERT INTO local_files (track_id, path, file_size, mtime, format, bitrate, sample_rate)
@@ -560,16 +569,19 @@ impl LibraryDb {
         meta: Option<&crate::local::LocalMeta>,
         fingerprint: &str,
     ) -> rusqlite::Result<ScanOutcome> {
-        let path_str = path.display().to_string();
-        let md = std::fs::metadata(path).ok();
-        let mtime_ns = md
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as i64);
-        let size = md.as_ref().map(|m| m.len() as i64);
+        // 单事务：新增/更新/复用路径均多段语句，中途失败不留孤儿行（Review）。
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<ScanOutcome> {
+            let path_str = path.display().to_string();
+            let md = std::fs::metadata(path).ok();
+            let mtime_ns = md
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as i64);
+            let size = md.as_ref().map(|m| m.len() as i64);
 
-        let existing: Option<(i64, Option<i64>, Option<i64>, i64)> = self
+            let existing: Option<(i64, Option<i64>, Option<i64>, i64)> = self
             .conn
             .query_row(
                 "SELECT track_id, mtime_ns, file_size, missing FROM local_files WHERE path = ?1",
@@ -578,58 +590,58 @@ impl LibraryDb {
             )
             .optional()?;
 
-        if let Some((track_id, old_ns, old_size, missing)) = existing {
-            if old_ns == mtime_ns && old_size == size {
-                // 增量跳过：刷新代际 + 清 missing（若曾缺失）。
-                self.conn.execute(
+            if let Some((track_id, old_ns, old_size, missing)) = existing {
+                if old_ns == mtime_ns && old_size == size {
+                    // 增量跳过：刷新代际 + 清 missing（若曾缺失）。
+                    self.conn.execute(
                     "UPDATE local_files SET last_seen_generation = ?1, missing = 0 WHERE track_id = ?2",
                     params![generation, track_id],
                 )?;
-                return Ok(if missing == 1 {
-                    ScanOutcome::MissingReset
-                } else {
-                    ScanOutcome::Skipped
-                });
-            }
-            // 变化：更新元数据 + 文件行。
-            if let Some(m) = meta {
-                self.apply_local_meta(track_id, m)?;
-            }
-            self.conn.execute(
-                "UPDATE local_files SET file_size = ?1, mtime = ?2, mtime_ns = ?3,
+                    return Ok(if missing == 1 {
+                        ScanOutcome::MissingReset
+                    } else {
+                        ScanOutcome::Skipped
+                    });
+                }
+                // 变化：更新元数据 + 文件行。
+                if let Some(m) = meta {
+                    self.apply_local_meta(track_id, m)?;
+                }
+                self.conn.execute(
+                    "UPDATE local_files SET file_size = ?1, mtime = ?2, mtime_ns = ?3,
                         format = COALESCE(?4, format), bitrate = COALESCE(?5, bitrate),
                         sample_rate = COALESCE(?6, sample_rate), fingerprint = ?7,
                         last_seen_generation = ?8, missing = 0, scan_root_id = ?9
                  WHERE track_id = ?10",
-                params![
-                    size,
-                    mtime_ns.map(|n| n / 1_000_000_000),
-                    mtime_ns,
-                    meta.and_then(|m| m.format.clone()),
-                    meta.and_then(|m| m.bitrate),
-                    meta.and_then(|m| m.sample_rate),
-                    fingerprint,
-                    generation,
-                    root_id,
-                    track_id
-                ],
-            )?;
-            return Ok(ScanOutcome::Updated);
-        }
+                    params![
+                        size,
+                        mtime_ns.map(|n| n / 1_000_000_000),
+                        mtime_ns,
+                        meta.and_then(|m| m.format.clone()),
+                        meta.and_then(|m| m.bitrate),
+                        meta.and_then(|m| m.sample_rate),
+                        fingerprint,
+                        generation,
+                        root_id,
+                        track_id
+                    ],
+                )?;
+                return Ok(ScanOutcome::Updated);
+            }
 
-        // path 不存在：指纹命中 → 复用行（移动/改名；指纹含内容+size，命中后
-        // 再校验 mtime 一致——内容相同但写入时刻不同的文件不复用）。
-        if let Some((tid, _orig)) = self.find_by_fingerprint(fingerprint)? {
-            let row_mtime: Option<Option<i64>> = self
-                .conn
-                .query_row(
-                    "SELECT mtime_ns FROM local_files WHERE track_id = ?1",
-                    params![tid],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if row_mtime.flatten() == mtime_ns {
-                self.conn.execute(
+            // path 不存在：指纹命中 → 复用行（移动/改名；指纹含内容+size，命中后
+            // 再校验 mtime 一致——内容相同但写入时刻不同的文件不复用）。
+            if let Some((tid, _orig)) = self.find_by_fingerprint(fingerprint)? {
+                let row_mtime: Option<Option<i64>> = self
+                    .conn
+                    .query_row(
+                        "SELECT mtime_ns FROM local_files WHERE track_id = ?1",
+                        params![tid],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if row_mtime.flatten() == mtime_ns {
+                    self.conn.execute(
                     "UPDATE local_files SET path = ?1, file_size = ?2, mtime = ?3, mtime_ns = ?4,
                             fingerprint = ?5, last_seen_generation = ?6, missing = 0, scan_root_id = ?7
                      WHERE track_id = ?8",
@@ -644,49 +656,49 @@ impl LibraryDb {
                         tid
                     ],
                 )?;
-                // 同步 tracks 身份：`local:<旧路径>` → `local:<新路径>`（播放/查询用）。
-                self.conn.execute(
-                    "UPDATE tracks SET source_key = ?1 WHERE id = ?2",
-                    params![format!("local:{path_str}"), tid],
-                )?;
-                if let Some(m) = meta {
-                    self.apply_local_meta(tid, m)?;
+                    // 同步 tracks 身份：`local:<旧路径>` → `local:<新路径>`（播放/查询用）。
+                    self.conn.execute(
+                        "UPDATE tracks SET source_key = ?1 WHERE id = ?2",
+                        params![format!("local:{path_str}"), tid],
+                    )?;
+                    if let Some(m) = meta {
+                        self.apply_local_meta(tid, m)?;
+                    }
+                    return Ok(ScanOutcome::Updated);
                 }
-                return Ok(ScanOutcome::Updated);
             }
-        }
 
-        // 全新：upsert track + local_files + track_artists。
-        let meta_owned = meta.cloned();
-        let title = meta_owned
-            .as_ref()
-            .map(|m| m.title.clone())
-            .unwrap_or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("未知")
-                    .to_string()
-            });
-        let tid = self.upsert_track(&TrackRow {
-            source: "local",
-            source_key: format!("local:{path_str}"),
-            title,
-            album: meta_owned.as_ref().and_then(|m| m.album.clone()),
-            artist: meta_owned.as_ref().and_then(|m| m.artist.clone()),
-            duration_ms: meta_owned.as_ref().and_then(|m| m.duration_ms),
-            cover_uri: None,
-            qq_song_id: None,
-            album_artist: meta_owned.as_ref().and_then(|m| m.album_artist.clone()),
-            track_number: meta_owned
+            // 全新：upsert track + local_files + track_artists。
+            let meta_owned = meta.cloned();
+            let title = meta_owned
                 .as_ref()
-                .and_then(|m| m.track_number.map(|n| n as i64)),
-            disc_number: meta_owned
-                .as_ref()
-                .and_then(|m| m.disc_number.map(|n| n as i64)),
-            year: meta_owned.as_ref().and_then(|m| m.year),
-            genre: meta_owned.as_ref().and_then(|m| m.genre.clone()),
-        })?;
-        self.conn.execute(
+                .map(|m| m.title.clone())
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("未知")
+                        .to_string()
+                });
+            let tid = self.upsert_track(&TrackRow {
+                source: "local",
+                source_key: format!("local:{path_str}"),
+                title,
+                album: meta_owned.as_ref().and_then(|m| m.album.clone()),
+                artist: meta_owned.as_ref().and_then(|m| m.artist.clone()),
+                duration_ms: meta_owned.as_ref().and_then(|m| m.duration_ms),
+                cover_uri: None,
+                qq_song_id: None,
+                album_artist: meta_owned.as_ref().and_then(|m| m.album_artist.clone()),
+                track_number: meta_owned
+                    .as_ref()
+                    .and_then(|m| m.track_number.map(|n| n as i64)),
+                disc_number: meta_owned
+                    .as_ref()
+                    .and_then(|m| m.disc_number.map(|n| n as i64)),
+                year: meta_owned.as_ref().and_then(|m| m.year),
+                genre: meta_owned.as_ref().and_then(|m| m.genre.clone()),
+            })?;
+            self.conn.execute(
             r#"INSERT INTO local_files (track_id, path, file_size, mtime, mtime_ns, format, bitrate, sample_rate, fingerprint, last_seen_generation, missing, scan_root_id)
                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0,?11)"#,
             params![
@@ -703,10 +715,21 @@ impl LibraryDb {
                 root_id
             ],
         )?;
-        if let Some(m) = &meta_owned {
-            self.write_track_artists(tid, &m.artists)?;
+            if let Some(m) = &meta_owned {
+                self.write_track_artists(tid, &m.artists)?;
+            }
+            Ok(ScanOutcome::Added)
+        })();
+        match result {
+            Ok(out) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(out)
+            }
+            Err(err) => {
+                self.conn.execute_batch("ROLLBACK").ok();
+                Err(err)
+            }
         }
-        Ok(ScanOutcome::Added)
     }
 
     /// 扫描收尾：本代际未见到的文件标 missing（不删行；返回新标记数）。
@@ -875,7 +898,7 @@ impl LibraryDb {
             sql.push_str(" AND t.album LIKE ? ESCAPE '\\'");
             vals.push(Box::new(format!("%{}%", Self::escape_like(s))));
         }
-        sql.push_str(" GROUP BY t.album ORDER BY t.album");
+        sql.push_str(" GROUP BY t.album COLLATE NOCASE ORDER BY t.album COLLATE NOCASE");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
             rusqlite::params_from_iter(vals.iter().map(|v| v.as_ref())),
