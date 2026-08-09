@@ -45,7 +45,7 @@ pub struct QueueSummary {
 
 /// 队列完整内部状态（含播放顺序排列；引擎事务回滚用，见 [`QueueCore::save_state`]）。
 #[doc(hidden)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueueState {
     pub tracks: Vec<TrackId>,
     pub order: Vec<usize>,

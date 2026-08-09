@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use hmp_core::{
     DaemonState, ErrorInfo, IpcErrorCode, PlayRequest, PlaybackCapabilities, PlaybackState,
     PlayerCommand, QueueSnapshot, Request, TrackId,
@@ -15,6 +17,43 @@ use hmp_player_gst::PlayerEvent;
 use tokio::sync::{mpsc, watch};
 
 use crate::player::{EngineError, PlaybackDriver, SourceResolver};
+
+/// 会话持久化文件内容（`$XDG_DATA_HOME/hmp/playback_state.json`）。
+/// 恢复 queue/volume/position；恢复后不自动播放，首次 Play 时续播（里程碑 D）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionFile {
+    /// 队列完整内部状态（restore_state 直接还原）。
+    queue: hmp_core::queue::QueueState,
+    /// 音量 0.0..=1.0。
+    volume: f64,
+    /// 当前曲播放位置（毫秒；has_current 时有效）。
+    position_ms: u64,
+}
+
+/// 读取会话文件（不存在/损坏 → None，不报错）。
+fn read_session_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Option<SessionFile>> {
+    let path = path.as_ref();
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(f) => Ok(Some(f)),
+            Err(e) => {
+                tracing::warn!(%e, "会话文件损坏，忽略");
+                Ok(None)
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// 原子写会话文件（tmp + rename）。
+fn write_session_file(path: &std::path::Path, f: &SessionFile) -> std::io::Result<()> {
+    let json = serde_json::to_vec(f).map_err(std::io::Error::other)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
 
 /// 最近一次成功装载的完整信息（失败回滚用）。
 #[derive(Clone)]
@@ -2538,5 +2577,54 @@ mod tests {
         );
         // 完整队列仍可经 queue_rx 取到。
         assert_eq!(handle.queue_rx.borrow().tracks.len(), 10_000);
+    }
+
+    // ---- 会话持久化（里程碑 D） ----
+
+    #[test]
+    fn session_file_roundtrips() {
+        let mut q = hmp_core::QueueCore::new();
+        q.append(vec![TrackId::new("qq:a"), TrackId::new("local:/x.mp3")]);
+        q.set_current(1);
+        q.set_loop_mode(LoopMode::List);
+        q.set_shuffle(true);
+        let f = SessionFile {
+            queue: q.save_state(),
+            volume: 0.42,
+            position_ms: 12_345,
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: SessionFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.queue.tracks, f.queue.tracks);
+        assert_eq!(back.queue.order, f.queue.order);
+        assert_eq!(back.queue.cursor, 1);
+        assert!(back.queue.has_current);
+        assert_eq!(back.queue.loop_mode, LoopMode::List);
+        assert!(back.queue.shuffle);
+        assert_eq!(back.volume, 0.42);
+        assert_eq!(back.position_ms, 12_345);
+    }
+
+    #[test]
+    fn session_file_missing_is_none() {
+        // 无状态文件 → 恢复为 None（首次启动路径）。
+        assert!(read_session_file("/nonexistent/hmp-test/no-such.json")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn session_file_corrupt_is_none() {
+        // 损坏文件不 panic，视为无会话。
+        let dir = std::env::temp_dir().join(format!(
+            "hmp-session-corrupt-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("playback_state.json");
+        std::fs::write(&p, "{ not valid json !!!").unwrap();
+        let r = read_session_file(&p);
+        assert!(r.is_ok());
+        assert!(r.unwrap().is_none());
     }
 }
