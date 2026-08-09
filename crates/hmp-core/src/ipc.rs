@@ -478,6 +478,20 @@ mod tests {
     }
 
     #[test]
+    fn queue_summary_roundtrips() {
+        let s = crate::queue::QueueSummary {
+            revision: 9,
+            len: 3,
+            current: Some(1),
+            loop_mode: crate::player::LoopMode::Track,
+            shuffle: true,
+        };
+        let frame = encode_frame(&s).unwrap();
+        let back: crate::queue::QueueSummary = decode_frame(&frame).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
     fn frame_prefix_is_u32_le_length() {
         let msg = Request::Status;
         let frame = encode_frame(&msg).unwrap();

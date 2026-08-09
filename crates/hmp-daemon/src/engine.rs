@@ -2515,4 +2515,30 @@ mod tests {
         assert_eq!(qq_row.source, "qq");
         assert_eq!(local_row.source_key, "local:/home/u/music/a.flac");
     }
+
+    /// 万级队列：DaemonState 发布体积必须远小于 MAX_FRAME（队列内容不走状态帧）。
+    #[tokio::test]
+    async fn large_queue_publish_stays_small() {
+        let (driver, _, _) = FakeDriver::new();
+        let ids: Vec<TrackId> = (0..10_000)
+            .map(|i| TrackId::new(format!("mid-{i}")))
+            .collect();
+        let resolver = FakeResolver::new(vec![ids.clone()]);
+        let handle = PlaybackEngine::start(driver.clone(), resolver, Arc::new(|| true));
+        handle
+            .cmd(Request::Play(PlayRequest::Track(ids[0].clone())))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let st = handle.state_rx.borrow().clone();
+        assert_eq!(st.queue.len, 10_000);
+        let frame = hmp_core::ipc::encode_frame(&st).unwrap();
+        assert!(
+            frame.len() < hmp_core::ipc::MAX_FRAME / 4,
+            "万级队列状态帧应保持小体积，实际 {} 字节",
+            frame.len()
+        );
+        // 完整队列仍可经 queue_rx 取到。
+        assert_eq!(handle.queue_rx.borrow().tracks.len(), 10_000);
+    }
 }
