@@ -32,7 +32,13 @@ impl Daemon {
         // （播放历史不持久，播放不受阻断）。
         let library =
             match hmp_storage::LibraryDb::open(&hmp_storage::data_dir().join("library.sqlite3")) {
-                Ok(db) => Arc::new(std::sync::Mutex::new(db)),
+                Ok(mut db) => {
+                    // 启动恢复：闭合上次异常退出遗留的 open session（幂等）。
+                    if let Err(e) = db.close_stale_sessions() {
+                        tracing::warn!(%e, "闭合遗留播放会话失败");
+                    }
+                    Arc::new(std::sync::Mutex::new(db))
+                }
                 Err(e) => {
                     tracing::warn!(%e, "媒体库打开失败，回退内存库（历史不持久）");
                     Arc::new(std::sync::Mutex::new(

@@ -279,6 +279,11 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                             if rel == "subscribed" {
                                 return Err(rusqlite::Error::InvalidQuery);
                             }
+                            // QQ owned 歌单只接受 QQ 曲目：local 曲目无 QQ song id，
+                            // 写入 outbox 会永久 error/重试（本地行也会成幽灵）。
+                            if rel == "owned" && source == "local" {
+                                return Err(rusqlite::Error::InvalidQuery);
+                            }
                             let source_static: &'static str = match source.as_str() {
                                 "local" => "local",
                                 _ => "qq",
@@ -300,10 +305,14 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                             lib.remove_playlist_track(id, position)?;
                             if rel == "owned" {
                                 if let Some(key) = song_key {
-                                    let song_id = lib.qq_song_id("qq", &key)?;
-                                    lib.enqueue_playlist_op(id, "del", Some(&key), song_id)?;
+                                    // local 曲目在远端无对应物：只删本地行，不入 outbox
+                                    // （否则 song_id 恒 None → 永久 error 重试）。
+                                    if !key.starts_with("local:") {
+                                        let song_id = lib.qq_song_id("qq", &key)?;
+                                        lib.enqueue_playlist_op(id, "del", Some(&key), song_id)?;
+                                        trigger_sync = true;
+                                    }
                                 }
-                                trigger_sync = true;
                             }
                             Ok(None)
                         }
@@ -499,7 +508,7 @@ mod tests {
     use hmp_player_gst::{LoadRequest, PlayerEvent};
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::{broadcast, watch};
 
     /// 最小 fake 播放驱动（本模块测试专用）。
@@ -856,5 +865,87 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// QQ owned 歌单只接受 QQ 曲目：AddTrack local 被拒；
+    /// RemoveTrack local 曲目只删本地行、不入 outbox。
+    #[tokio::test]
+    async fn owned_playlist_rejects_local_tracks() {
+        let (sock, listener) = temp_socket().await;
+        let (state_tx, _) = watch::channel(PlaybackState::default());
+        let (events_tx, _) = broadcast::channel(16);
+        let driver = Arc::new(SDriver {
+            state_tx,
+            events_tx,
+        });
+        let library = Arc::new(Mutex::new(
+            hmp_storage::LibraryDb::open_in_memory().unwrap(),
+        ));
+        let handle = PlaybackEngine::start_with_library(
+            driver,
+            Arc::new(SResolver),
+            Arc::new(|| true),
+            Some(library.clone()),
+        );
+        let mut handle = handle;
+        handle.library = Some(library.clone()); // 与 daemon.rs 启动后接线一致
+        tokio::spawn(async move { serve(listener, handle).await });
+
+        // 构造 owned 歌单（reconcile 路径：remote_id + relation=owned）。
+        let owned_id = {
+            let mut lib = library.lock().unwrap();
+            lib.reconcile_playlist("dir-1", "我的歌单", "owned")
+                .unwrap()
+        };
+
+        // AddTrack local → 拒绝（InvalidQuery 映射为 Err）。
+        let resp = request(
+            &sock,
+            &Request::PlaylistWrite {
+                op: hmp_core::PlaylistWriteOp::AddTrack {
+                    id: owned_id,
+                    source: "local".into(),
+                    key: "local:/tmp/a.flac".into(),
+                    title: "a".into(),
+                },
+            },
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::Err { .. }),
+            "local 曲目进 owned 歌单应被拒: {resp:?}"
+        );
+
+        // 直接落一条 local 曲目（模拟历史数据），RemoveTrack 只删本地行。
+        {
+            let mut lib = library.lock().unwrap();
+            lib.add_playlist_track(owned_id, "local", "local:/tmp/a.flac", "a")
+                .unwrap();
+        }
+        let resp = request(
+            &sock,
+            &Request::PlaylistWrite {
+                op: hmp_core::PlaylistWriteOp::RemoveTrack {
+                    id: owned_id,
+                    position: 0,
+                },
+            },
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::Ok),
+            "本地曲目移除应成功（不入 outbox）: {resp:?}"
+        );
+        let mut lib = library.lock().unwrap();
+        assert_eq!(
+            lib.playlist_ops_pending().unwrap().len(),
+            0,
+            "local 曲目不得产生远端 op"
+        );
+        assert_eq!(
+            lib.playlist_tracks(owned_id).unwrap().len(),
+            0,
+            "本地行应被删除"
+        );
     }
 }

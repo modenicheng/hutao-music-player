@@ -33,6 +33,8 @@ pub enum MprisError {
 /// 根接口（`org.mpris.MediaPlayer2`）。
 pub struct MprisRoot {
     identity: String,
+    /// Quit 转发通道（上层 daemon 退出；None = 不支持）。
+    quit_tx: Option<mpsc::UnboundedSender<()>>,
 }
 
 #[zbus::interface(name = "org.mpris.MediaPlayer2")]
@@ -55,12 +57,33 @@ impl MprisRoot {
 
     #[zbus(property)]
     fn supported_mime_types(&self) -> Vec<&str> {
-        vec![]
+        // 与本地扫描器 is_audio_ext 对齐（GStreamer/lofty 实际支持的容器）。
+        vec![
+            "audio/mpeg",
+            "audio/flac",
+            "audio/ogg",
+            "audio/mp4",
+            "audio/wav",
+            "audio/aac",
+            "audio/x-ape",
+            "audio/x-aiff",
+        ]
     }
 
     #[zbus(property)]
     fn can_quit(&self) -> bool {
-        false
+        // daemon 提供 `hmp quit`（Request::Quit）：有转发通道即可退出。
+        self.quit_tx.is_some()
+    }
+
+    /// 退出播放器（转发到上层 `Request::Quit`）。
+    fn quit(&self) -> zbus::fdo::Result<()> {
+        match &self.quit_tx {
+            Some(tx) => tx
+                .send(())
+                .map_err(|_| zbus::fdo::Error::Failed("退出转发通道关闭".into())),
+            None => Err(zbus::fdo::Error::NotSupported("退出不可用".into())),
+        }
     }
 
     #[zbus(property)]
@@ -99,6 +122,8 @@ pub struct MprisPlayer {
     pending_seek: bool,
     /// OpenUri 转发通道（上层播放 URI；None = 不支持）。
     open_uri_tx: Option<mpsc::UnboundedSender<String>>,
+    /// 当前曲目领域 id（SetPosition 的 stale TrackId 校验）。
+    current_track_id: Option<String>,
 }
 
 #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
@@ -134,8 +159,17 @@ impl MprisPlayer {
     }
 
     /// 相对跳转（偏移微秒，MPRIS spec）。
+    /// 越过曲尾 → 等价于下一首（spec）；否则 clamp 到 [0, 曲长] 后 Seek。
     async fn seek(&mut self, offset_us: i64) -> zbus::fdo::Result<()> {
-        let new_pos = (self.position_us + offset_us).max(0);
+        let new_pos = self.position_us + offset_us;
+        if let Some(len) = self.length_us() {
+            if new_pos > len {
+                self.pending_seek = false;
+                let _ = self.cmd_tx.send(PlayerCommand::Next);
+                return Ok(());
+            }
+        }
+        let new_pos = new_pos.max(0);
         self.position_us = new_pos;
         self.pending_seek = true;
         let _ = self
@@ -146,19 +180,37 @@ impl MprisPlayer {
         Ok(())
     }
 
-    /// 绝对定位（轨道 ID 校验由上层完成）。
+    /// 绝对定位。MPRIS spec：stale TrackId 忽略；位置 <0 或超过曲长不处理；
+    /// CanSeek=false 时返回 NotSupported。
     async fn set_position(
         &mut self,
-        _track_id: zbus::zvariant::ObjectPath<'_>,
+        track_id: zbus::zvariant::ObjectPath<'_>,
         position_us: i64,
     ) -> zbus::fdo::Result<()> {
-        let pos = position_us.max(0);
-        self.position_us = pos;
+        // stale TrackId：与当前曲目对象路径不一致 → 忽略。
+        if let Some(cur) = &self.current_track_id {
+            let expected = metadata::track_id_object_path(cur);
+            if expected.as_str() != track_id.as_str() {
+                return Ok(());
+            }
+        }
+        if !self.can_seek {
+            return Err(zbus::fdo::Error::NotSupported("当前曲目不支持跳转".into()));
+        }
+        if position_us < 0 {
+            return Ok(());
+        }
+        if let Some(len) = self.length_us() {
+            if position_us > len {
+                return Ok(());
+            }
+        }
+        self.position_us = position_us;
         self.pending_seek = true;
         let _ = self
             .cmd_tx
             .send(PlayerCommand::Seek(std::time::Duration::from_micros(
-                pos as u64,
+                position_us as u64,
             )));
         Ok(())
     }
@@ -222,6 +274,19 @@ impl MprisPlayer {
     #[zbus(property)]
     fn rate(&self) -> f64 {
         self.rate
+    }
+
+    /// Rate 可写（MPRIS 定义为 Read/Write）；播放器仅支持 1.0x，
+    /// 其余取值按规范返回 NotSupported。
+    #[zbus(property)]
+    fn set_rate(&mut self, rate: f64) -> zbus::fdo::Result<()> {
+        if (rate - 1.0).abs() > f64::EPSILON {
+            return Err(zbus::fdo::Error::NotSupported(
+                "仅支持 1.0x 播放速率".into(),
+            ));
+        }
+        self.rate = rate;
+        Ok(())
     }
 
     #[zbus(property)]
@@ -326,12 +391,33 @@ impl MprisService {
         capabilities_rx: Option<watch::Receiver<PlaybackCapabilities>>,
         open_uri_tx: Option<mpsc::UnboundedSender<String>>,
     ) -> Result<Self, MprisError> {
+        Self::start_with_capabilities_uri_and_quit(
+            cmd_tx,
+            state_rx,
+            capabilities_rx,
+            open_uri_tx,
+            None,
+        )
+        .await
+    }
+
+    /// 启动 MPRIS 服务并挂载 OpenUri 与 Quit 转发通道。
+    /// `quit_tx` 存在时 CanQuit=true 且根接口 `Quit` 方法可用（上层转发
+    /// `Request::Quit`）；None 时 CanQuit=false。
+    pub async fn start_with_capabilities_uri_and_quit(
+        cmd_tx: mpsc::UnboundedSender<PlayerCommand>,
+        state_rx: watch::Receiver<PlaybackState>,
+        capabilities_rx: Option<watch::Receiver<PlaybackCapabilities>>,
+        open_uri_tx: Option<mpsc::UnboundedSender<String>>,
+        quit_tx: Option<mpsc::UnboundedSender<()>>,
+    ) -> Result<Self, MprisError> {
         let connection = zbus::connection::Builder::session()?
             .name(BUS_NAME.to_owned())?
             .serve_at(
                 OBJECT_PATH,
                 MprisRoot {
                     identity: "胡桃音乐播放器".into(),
+                    quit_tx: quit_tx.clone(),
                 },
             )?
             .serve_at(
@@ -355,6 +441,7 @@ impl MprisService {
                     can_control: true,
                     pending_seek: false,
                     open_uri_tx,
+                    current_track_id: None,
                 },
             )?
             .build()
@@ -471,6 +558,13 @@ impl MprisPlayer {
         self.position_us = position_us;
     }
 
+    /// 当前曲长（微秒；无 metadata 时 None）。
+    fn length_us(&self) -> Option<i64> {
+        self.metadata
+            .get("mpris:length")
+            .and_then(|v| v.downcast_ref::<i64>().ok())
+    }
+
     /// 处理一次位置同步：更新 position；返回是否应发 Seeked。
     /// 规则：仅当位置**变化**且存在用户 seek 意图（pending_seek）时才发——
     /// 普通播放进度 tick 不发送 Seeked（MPRIS spec：Seeked = 不连续跳变）。
@@ -509,10 +603,7 @@ impl MprisPlayer {
             self.can_seek = can_seek;
             changed.insert("CanSeek", Value::Bool(can_seek));
         }
-        let can_play = !matches!(
-            state.status,
-            PlaybackStatus::Empty | PlaybackStatus::Stopped
-        );
+        let can_play = !matches!(state.status, PlaybackStatus::Empty);
         if self.can_play != can_play {
             self.can_play = can_play;
             changed.insert("CanPlay", Value::Bool(can_play));
@@ -527,6 +618,10 @@ impl MprisPlayer {
         }
         // Metadata 变更
         if let Some(track) = &state.current {
+            // SetPosition 的 stale TrackId 校验基准（领域 id）。
+            if self.current_track_id.as_deref() != Some(track.id.as_ref()) {
+                self.current_track_id = Some(track.id.0.clone());
+            }
             let new_meta: HashMap<String, OwnedValue> = metadata::metadata_from_track(track)
                 .into_iter()
                 .map(|(k, v)| (k.to_owned(), v))
@@ -537,6 +632,7 @@ impl MprisPlayer {
             }
         } else if !self.metadata.is_empty() {
             self.metadata = HashMap::new();
+            self.current_track_id = None;
             changed.insert(
                 "Metadata",
                 Value::from(HashMap::<String, OwnedValue>::new()),
@@ -596,6 +692,7 @@ mod tests {
             can_control: true,
             pending_seek: false,
             open_uri_tx: None,
+            current_track_id: None,
         }
     }
 
@@ -679,5 +776,166 @@ mod tests {
         assert!(iface.pending_seek, "pending 应保留至位置变化");
         assert!(iface.apply_position(5_000_000));
         assert!(!iface.pending_seek);
+    }
+
+    /// MPRIS spec：SetPosition 传入 stale TrackId → 忽略（不 Seek、不置 pending）。
+    #[tokio::test]
+    async fn set_position_ignores_stale_track_id() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut iface = iface();
+        iface.cmd_tx = tx;
+        iface.can_seek = true;
+        iface.current_track_id = Some("qq:mid-a".into());
+        iface.metadata.insert(
+            "mpris:length".into(),
+            OwnedValue::try_from(Value::from(100_000_000i64)).unwrap(),
+        );
+        let stale = metadata::track_id_object_path("qq:mid-other");
+        iface.set_position(stale, 50_000_000).await.unwrap();
+        assert!(!iface.pending_seek, "stale TrackId 不得触发 Seek");
+        assert!(rx.try_recv().is_err(), "不得向驱动发 Seek");
+    }
+
+    /// MPRIS spec：SetPosition 位置 <0 或超过曲长 → 不处理。
+    #[tokio::test]
+    async fn set_position_rejects_negative_and_beyond_length() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut iface = iface();
+        iface.cmd_tx = tx;
+        iface.can_seek = true;
+        iface.current_track_id = Some("qq:mid-a".into());
+        iface.metadata.insert(
+            "mpris:length".into(),
+            OwnedValue::try_from(Value::from(100_000_000i64)).unwrap(),
+        );
+        let path = metadata::track_id_object_path("qq:mid-a");
+        iface.set_position(path.clone(), -1).await.unwrap();
+        assert!(!iface.pending_seek, "负位置不处理");
+        iface.set_position(path, 100_000_001).await.unwrap();
+        assert!(!iface.pending_seek, "超过曲长不处理");
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// SetPosition 合法路径：匹配 TrackId + 范围内 + CanSeek → 发 Seek。
+    #[tokio::test]
+    async fn set_position_seeks_when_valid() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut iface = iface();
+        iface.cmd_tx = tx;
+        iface.can_seek = true;
+        iface.current_track_id = Some("qq:mid-a".into());
+        iface.metadata.insert(
+            "mpris:length".into(),
+            OwnedValue::try_from(Value::from(100_000_000i64)).unwrap(),
+        );
+        let path = metadata::track_id_object_path("qq:mid-a");
+        iface.set_position(path, 30_000_000).await.unwrap();
+        assert!(iface.pending_seek);
+        assert_eq!(iface.position_us, 30_000_000);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            PlayerCommand::Seek(d) if d.as_micros() == 30_000_000
+        ));
+    }
+
+    /// SetPosition：CanSeek=false → NotSupported（spec：不可跳转时拒绝）。
+    #[tokio::test]
+    async fn set_position_rejects_when_cannot_seek() {
+        let mut iface = iface();
+        iface.current_track_id = Some("qq:mid-a".into());
+        let path = metadata::track_id_object_path("qq:mid-a");
+        assert!(iface.set_position(path, 1_000).await.is_err());
+    }
+
+    /// MPRIS spec：Seek 越过曲尾 → 等价于 Next（不再发 Seek）。
+    #[tokio::test]
+    async fn seek_beyond_length_sends_next() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut iface = iface();
+        iface.cmd_tx = tx;
+        iface.position_us = 90_000_000;
+        iface.metadata.insert(
+            "mpris:length".into(),
+            OwnedValue::try_from(Value::from(100_000_000i64)).unwrap(),
+        );
+        iface.seek(20_000_000).await.unwrap(); // 90s + 20s > 100s
+        assert!(matches!(rx.try_recv().unwrap(), PlayerCommand::Next));
+        assert!(!iface.pending_seek);
+    }
+
+    /// Rate setter：仅接受 1.0；其余取值 NotSupported。
+    #[tokio::test]
+    async fn set_rate_accepts_only_1x() {
+        let mut iface = iface();
+        iface.set_rate(1.0).unwrap();
+        assert_eq!(iface.rate, 1.0);
+        assert!(iface.set_rate(2.0).is_err());
+        assert!(iface.set_rate(0.5).is_err());
+        assert_eq!(iface.rate, 1.0, "拒绝时不得改 rate");
+    }
+
+    /// CanPlay：Stopped（Stop 保留当前曲）仍可 Play；仅 Empty 为 false。
+    #[test]
+    fn can_play_true_when_stopped_with_track() {
+        let mut iface = iface();
+        let mut changed: HashMap<&str, Value> = HashMap::new();
+        let st = PlaybackState {
+            status: PlaybackStatus::Stopped,
+            current: Some(hmp_core::Track::new(
+                hmp_core::TrackId::new("qq:mid-a"),
+                "a",
+            )),
+            ..Default::default()
+        };
+        iface.update_props(&st, &mut changed);
+        assert!(iface.can_play, "Stopped 有曲时应可 Play");
+        // Empty（无曲）→ false。
+        let mut changed: HashMap<&str, Value> = HashMap::new();
+        let st2 = PlaybackState {
+            status: PlaybackStatus::Empty,
+            current: None,
+            ..Default::default()
+        };
+        iface.update_props(&st2, &mut changed);
+        assert!(!iface.can_play, "Empty 不可 Play");
+    }
+
+    /// 根接口 Quit：有转发通道 → 送达；无 → NotSupported。
+    #[test]
+    fn root_quit_forwards_when_channel_present() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let root = MprisRoot {
+            identity: "t".into(),
+            quit_tx: Some(tx),
+        };
+        assert!(root.can_quit());
+        root.quit().unwrap();
+        assert!(rx.try_recv().is_ok());
+        let root = MprisRoot {
+            identity: "t".into(),
+            quit_tx: None,
+        };
+        assert!(!root.can_quit());
+        assert!(root.quit().is_err());
+    }
+
+    /// MIME 列表与本地扫描器支持对齐（is_audio_ext 同集合）。
+    #[test]
+    fn mime_types_cover_local_formats() {
+        let root = MprisRoot {
+            identity: "t".into(),
+            quit_tx: None,
+        };
+        let mimes = root.supported_mime_types();
+        for m in [
+            "audio/mpeg",
+            "audio/flac",
+            "audio/ogg",
+            "audio/wav",
+            "audio/x-ape",
+            "audio/x-aiff",
+        ] {
+            assert!(mimes.contains(&m), "缺少 {m}");
+        }
     }
 }

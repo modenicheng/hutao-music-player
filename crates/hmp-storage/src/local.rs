@@ -16,7 +16,7 @@ pub fn is_audio_ext(p: &Path) -> bool {
             .and_then(|e| e.to_str())
             .map(|e| e.to_ascii_lowercase())
             .as_deref(),
-        Some("mp3" | "flac" | "ogg" | "m4a" | "opus" | "wav" | "aac")
+        Some("mp3" | "flac" | "ogg" | "m4a" | "opus" | "wav" | "aac" | "ape" | "aiff")
     )
 }
 
@@ -63,6 +63,9 @@ mod tests {
         assert!(is_audio_ext(Path::new("/a/b.mp3")));
         assert!(is_audio_ext(Path::new("/a/b.FLAC")));
         assert!(is_audio_ext(Path::new("/a/b.ogg")));
+        assert!(is_audio_ext(Path::new("/a/b.ape")));
+        assert!(is_audio_ext(Path::new("/a/b.aiff")));
+        assert!(is_audio_ext(Path::new("/a/b.AIFF")));
         assert!(!is_audio_ext(Path::new("/a/b.txt")));
         assert!(!is_audio_ext(Path::new("/a/b")));
     }

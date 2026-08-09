@@ -254,24 +254,47 @@ impl LibraryDb {
     }
 
     /// 结束播放会话：闭合最近一条未结束的事件（按 track + 最新 started_at），
-    /// 累加播放次数与最近播放时间。
+    /// 累加播放次数与最近播放时间（两 SQL 同事务：历史闭合失败则计数不更新）。
     pub fn record_play_end(&mut self, e: &PlayEnd) -> rusqlite::Result<()> {
-        let updated = self.conn.execute(
-            r#"UPDATE play_events SET ended_at = ?2, listened_ms = ?3, end_reason = ?4
-               WHERE id = (
-                 SELECT id FROM play_events
-                 WHERE track_id = ?1 AND ended_at IS NULL
-                 ORDER BY started_at DESC, id DESC LIMIT 1
-               )"#,
-            params![e.track_id, e.ended_at, e.listened_ms, e.reason],
-        )?;
-        if updated > 0 {
-            self.conn.execute(
-                "UPDATE tracks SET play_count = play_count + 1, last_played_at = ?2 WHERE id = ?1",
-                params![e.track_id, e.ended_at],
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            let updated = self.conn.execute(
+                r#"UPDATE play_events SET ended_at = ?2, listened_ms = ?3, end_reason = ?4
+                   WHERE id = (
+                     SELECT id FROM play_events
+                     WHERE track_id = ?1 AND ended_at IS NULL
+                     ORDER BY started_at DESC, id DESC LIMIT 1
+                   )"#,
+                params![e.track_id, e.ended_at, e.listened_ms, e.reason],
             )?;
+            if updated > 0 {
+                self.conn.execute(
+                    "UPDATE tracks SET play_count = play_count + 1, last_played_at = ?2 WHERE id = ?1",
+                    params![e.track_id, e.ended_at],
+                )?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(err) => {
+                self.conn.execute_batch("ROLLBACK").ok();
+                return Err(err);
+            }
         }
         Ok(())
+    }
+
+    /// 启动恢复：闭合遗留的未结束会话（daemon 异常退出/被杀后
+    /// `ended_at IS NULL` 的行），`end_reason='interrupted'`、时长 0。
+    /// 返回闭合行数（幂等：再次调用返回 0）。
+    pub fn close_stale_sessions(&mut self) -> rusqlite::Result<u32> {
+        let n = self.conn.execute(
+            "UPDATE play_events SET ended_at = started_at, end_reason = 'interrupted' \
+             WHERE ended_at IS NULL",
+            [],
+        )?;
+        Ok(n as u32)
     }
 
     /// 最近播放（默认按开始时间倒序）。
@@ -561,12 +584,15 @@ impl LibraryDb {
         entity_key: &str,
         relation: &str,
     ) -> rusqlite::Result<Option<bool>> {
-        let v: Option<i64> = self.conn.query_row(
-            "SELECT desired_state FROM relations WHERE entity_type=?1 AND provider=?2 \
-             AND entity_key=?3 AND relation=?4",
-            params![entity_type, provider, entity_key, relation],
-            |r| r.get(0),
-        )?;
+        let v: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT desired_state FROM relations WHERE entity_type=?1 AND provider=?2 \
+                 AND entity_key=?3 AND relation=?4",
+                params![entity_type, provider, entity_key, relation],
+                |r| r.get(0),
+            )
+            .optional()?;
         Ok(v.map(|x| x != 0))
     }
 
@@ -1532,6 +1558,58 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    /// 无 relations 行时 is_favorite 返回 Ok(false) 而非 QueryReturnedNoRows
+    /// （relation_desired 无行 → None，修复前 query_row 直接报错）。
+    #[test]
+    fn is_favorite_without_relation_row_is_false() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let id = db.upsert_track(&row()).unwrap();
+        assert!(!db.is_favorite(id).unwrap(), "无 relations 行应视为未收藏");
+        // 对照：收藏后为 true，取消后回到 false。
+        db.add_favorite("qq", "mid123", "mid123").unwrap();
+        assert!(db.is_favorite(id).unwrap());
+        db.remove_favorite(id).unwrap();
+        assert!(!db.is_favorite(id).unwrap());
+    }
+
+    /// 启动恢复：遗留 open session 全部闭合（end_reason='interrupted'），幂等。
+    #[test]
+    fn close_stale_sessions_closes_open_events_idempotently() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let id = db.upsert_track(&row()).unwrap();
+        db.record_play_start(id, 1000).unwrap();
+        db.record_play_start(id, 2000).unwrap();
+        assert_eq!(
+            db.close_stale_sessions().unwrap(),
+            2,
+            "两条 open session 被闭合"
+        );
+        // 全部闭合且 reason 为 interrupted。
+        let open: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM play_events WHERE ended_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 0);
+        let reason: String = db
+            .conn
+            .query_row(
+                "SELECT end_reason FROM play_events WHERE track_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "interrupted");
+        assert_eq!(
+            db.close_stale_sessions().unwrap(),
+            0,
+            "重复调用幂等（无遗留 open session）"
+        );
     }
 
     #[test]

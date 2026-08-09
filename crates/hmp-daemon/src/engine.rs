@@ -535,8 +535,14 @@ impl PlaybackEngine {
                 });
                 self.driver.play();
                 // 等待驱动应用装载（真实驱动为异步管道）：完成前发布的复合状态
-                // 不得携带旧曲目（Bug 2：play-next 后显示旧曲）。
-                self.wait_current_applied(&expected).await;
+                // 不得携带旧曲目（Bug 2：play-next 后显示旧曲）。超时/通道断开 →
+                // 失败路径（调用方回滚队列、保留旧曲；不创建播放历史）。
+                if let Err(e) = self.wait_current_applied(&expected).await {
+                    self.last_error = Some(error_info(&e));
+                    self.phase = hmp_core::EnginePhase::Failed;
+                    self.publish();
+                    return Err(e);
+                }
                 // 装载完成：进入播放阶段，记录完成时刻（滞后事件窗口）。
                 self.phase = hmp_core::EnginePhase::Playing;
                 self.loaded_at = Some(std::time::Instant::now());
@@ -568,22 +574,23 @@ impl PlaybackEngine {
     }
 
     /// 等待驱动把 current 更新为 `expected`（同步应用的驱动立即返回；
-    /// 异步管道（真实 GStreamer）等待其装载臂发布）。5s 超时仅防御性告警。
-    async fn wait_current_applied(&mut self, expected: &TrackId) {
+    /// 异步管道（真实 GStreamer）等待其装载臂发布）。
+    /// 超时（5s）→ `Timeout`：调用方按装载失败处理（回滚队列、旧曲继续），
+    /// 不得把未确认的装载当成功提交（此前仅 warn 后继续置 Playing/建历史）。
+    async fn wait_current_applied(&mut self, expected: &TrackId) -> Result<(), EngineError> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             {
                 let cur = self.state_rx.borrow();
                 if cur.current.as_ref().map(|t| &t.id) == Some(expected) {
-                    return;
+                    return Ok(());
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                tracing::warn!("驱动未在 5s 内应用装载（current 未更新），继续播放流程");
-                return;
+                return Err(EngineError::Timeout);
             }
             if self.state_rx.changed().await.is_err() {
-                return;
+                return Err(EngineError::Internal("状态通道已关闭".into()));
             }
         }
     }
@@ -647,6 +654,7 @@ fn error_info(e: &EngineError) -> ErrorInfo {
         EngineError::TrackNotFound => IpcErrorCode::TrackNotFound,
         EngineError::PlaylistNotFound(_) => IpcErrorCode::PlaylistNotFound,
         EngineError::QualityUnavailable(_) => IpcErrorCode::QualityUnavailable,
+        EngineError::Timeout => IpcErrorCode::Internal,
         EngineError::Internal(_) => IpcErrorCode::Internal,
     };
     ErrorInfo {
@@ -811,6 +819,7 @@ mod tests {
             EngineError::TrackNotFound => EngineError::TrackNotFound,
             EngineError::PlaylistNotFound(m) => EngineError::PlaylistNotFound(m.clone()),
             EngineError::QualityUnavailable(m) => EngineError::QualityUnavailable(m.clone()),
+            EngineError::Timeout => EngineError::Timeout,
             EngineError::Internal(m) => EngineError::Internal(m.clone()),
         }
     }

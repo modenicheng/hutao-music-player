@@ -123,6 +123,8 @@ pub enum EngineError {
     PlaylistNotFound(String),
     #[error("所有音质均不可用: {0}")]
     QualityUnavailable(String),
+    #[error("驱动未在 5s 内应用装载")]
+    Timeout,
     #[error("内部错误: {0}")]
     Internal(String),
 }

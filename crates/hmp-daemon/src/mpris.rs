@@ -52,11 +52,23 @@ pub async fn start_mpris(
         });
         tx
     };
-    match hmp_mpris::MprisService::start_with_capabilities_and_uri(
+    // Quit 转发：MPRIS 根接口 Quit() → 引擎 `Request::Quit`（hmp quit 同路径）。
+    let quit_tx = {
+        let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+        let daemon_tx = command_tx.clone();
+        tokio::spawn(async move {
+            while rx.recv().await.is_some() {
+                let _ = daemon_tx.send(Request::Quit);
+            }
+        });
+        tx
+    };
+    match hmp_mpris::MprisService::start_with_capabilities_uri_and_quit(
         cmd_tx,
         playback_rx,
         Some(caps_rx),
         Some(open_uri_tx),
+        Some(quit_tx),
     )
     .await
     {

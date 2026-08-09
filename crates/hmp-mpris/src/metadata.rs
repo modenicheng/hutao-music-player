@@ -76,11 +76,11 @@ pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedValue)> {
         ));
     }
     if let Some(duration) = track.duration {
-        // mpris:length 单位微秒
-        let us = duration.as_micros().min(u64::MAX as u128) as u64;
+        // mpris:length 单位微秒；MPRIS spec 要求 signed 64-bit（D-Bus x/i64）。
+        let us = duration.as_micros() as i64;
         meta.push((
             "mpris:length",
-            OwnedValue::try_from(Value::from(us)).expect("u64"),
+            OwnedValue::try_from(Value::from(us)).expect("i64"),
         ));
     }
     if let Some(q) = track.available_qualities.first() {
@@ -93,7 +93,8 @@ pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedValue)> {
 }
 
 /// 曲目 id → MPRIS ObjectPath（稳定、唯一、可直用时保持可读）。
-fn track_id_object_path(id: &str) -> zvariant::ObjectPath<'static> {
+/// pub(crate)：SetPosition 的 stale TrackId 校验复用同一编码。
+pub(crate) fn track_id_object_path(id: &str) -> zvariant::ObjectPath<'static> {
     let direct = format!("/org/hmp/track/{id}");
     if let Ok(p) = zvariant::ObjectPath::try_from(direct.as_str()) {
         return p.to_owned();
@@ -189,7 +190,7 @@ mod tests {
         assert_eq!(album_artists.len(), 1);
         assert_eq!(album_artists.get::<&str>(0).unwrap().unwrap(), "孙燕姿");
         assert_eq!(
-            map["mpris:length"].downcast_ref::<u64>().unwrap(),
+            map["mpris:length"].downcast_ref::<i64>().unwrap(),
             257_000_000
         );
     }
