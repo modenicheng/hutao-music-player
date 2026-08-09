@@ -29,10 +29,9 @@ pub fn set(alias: &str, fallback: bool) -> Result<String, String> {
         QualityMode::Fixed(q)
     };
     let pref = QualityPref::from_mode(mode, fallback);
-    let config = Config {
-        quality: pref,
-        ..Default::default()
-    };
+    // 保留既有配置（如 [audio] sink）：只改 quality 字段，不整体重建（里程碑 G）。
+    let mut config = Config::load();
+    config.quality = pref;
     config.save().map_err(|e| format!("写入配置失败: {e}"))?;
     Ok(format!(
         "已设置: {}\n生效链: {}",
@@ -90,6 +89,20 @@ mod tests {
             assert!(set("auto", true).unwrap().contains("自动"));
             assert!(set("master", false).unwrap().contains("不回退"));
             assert!(set("bogus", true).is_err());
+        });
+    }
+
+    #[test]
+    fn set_preserves_audio_sink() {
+        isolated(|| {
+            // 预置 [audio] sink → quality set 不应抹掉（里程碑 G review）。
+            let mut c = Config::load();
+            c.audio.sink = Some("fakesink".into());
+            c.save().unwrap();
+            set("flac", true).unwrap();
+            let back = Config::load();
+            assert_eq!(back.audio.sink.as_deref(), Some("fakesink"));
+            assert_eq!(back.quality.mode, "flac");
         });
     }
 
