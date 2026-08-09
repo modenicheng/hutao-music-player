@@ -491,14 +491,16 @@ impl PlaybackEngine {
     }
 
     /// 脏检查 + 节流写盘（写失败仅告警，不阻断播放）。
-    /// 队列结构变更/音量/播放状态翻转立即写；position 按 `persist_throttle` 节流。
+    /// 持久化**用户音量**（未含 RG 补偿）——补偿是装载期叠加量，恢复时
+    /// 会随新曲重新计算；若持久化驱动侧补偿值，重启后 apply_gain 会二次
+    /// 相乘（Review G2 WF1：音量漂移）。
     fn persist_session(&mut self) {
         let Some(path) = self.session_path.clone() else {
             return;
         };
         let playback = self.state_rx.borrow().clone();
         let rev = self.queue.revision();
-        let volume = playback.volume;
+        let volume = self.user_volume;
         // 当前曲 id + 位置（无当前曲 → None）。
         let position = self
             .queue
@@ -520,7 +522,8 @@ impl PlaybackEngine {
         }
         let f = SessionFile {
             queue: self.queue.save_state(),
-            volume,
+            // 用户音量（未补偿；恢复路径 restored_volume → user_volume）。
+            volume: self.user_volume,
             position_ms: position.as_ref().map(|(_, ms)| *ms).unwrap_or(0),
         };
         match write_session_file(&path, &f) {
@@ -1162,14 +1165,15 @@ mod tests {
             self.commands.lock().unwrap().push(PlayerCommand::Stop);
         }
         fn set_volume(&self, v: f64) {
-            // 模拟真实驱动：音量变更反映到播放状态（engine 据此持久化）。
-            self.state_tx.send_modify(|s| s.volume = v);
+            // 模拟真实驱动（core.rs 命令循环 clamp [0,1]）：补偿后音量超上限
+            // 被截断（G2 Review WF2：Fake 与真实行为对齐）。
+            self.state_tx.send_modify(|s| s.volume = v.clamp(0.0, 1.0));
         }
         fn command(&self, cmd: PlayerCommand) {
             self.commands.lock().unwrap().push(cmd.clone());
-            // SetVolume 直通 driver：同步反映到状态（真实驱动亦然）。
+            // SetVolume 直通 driver：同步反映到状态（真实驱动亦然，含 clamp）。
             if let PlayerCommand::SetVolume(v) = cmd {
-                self.state_tx.send_modify(|s| s.volume = v);
+                self.state_tx.send_modify(|s| s.volume = v.clamp(0.0, 1.0));
             }
         }
         fn shutdown(&self) {}
@@ -1645,22 +1649,21 @@ mod tests {
             .unwrap();
         wait_idle().await;
         let expected = (10f64).powf(6.0 / 20.0);
+        // 初始用户音量 1.0：补偿后 1.0×1.995 超上限 → 真实驱动 clamp 到 1.0
+        //（FakeDriver 已对齐；增益本身由下方低音量断言验证）。
         let vol = handle.state_rx.borrow().playback.volume;
-        assert!(
-            (vol - expected).abs() < 1e-9,
-            "装载后应叠加 RG 增益: {vol} vs {expected}"
-        );
-        // 用户调音量：驱动 = 用户 × 当前曲增益（补偿不丢）。
+        assert!((vol - 1.0).abs() < 1e-9, "超上限应 clamp: {vol}");
+        // 用户调音量：驱动 = 用户 × 当前曲增益（补偿不丢，且此时不触发 clamp）。
         handle
-            .cmd(Request::Command(PlayerCommand::SetVolume(0.5)))
+            .cmd(Request::Command(PlayerCommand::SetVolume(0.4)))
             .await
             .unwrap();
         wait_idle().await;
         let vol2 = handle.state_rx.borrow().playback.volume;
         assert!(
-            (vol2 - 0.5 * expected).abs() < 1e-9,
+            (vol2 - 0.4 * expected).abs() < 1e-9,
             "SetVolume 应叠加补偿: {vol2} vs {}",
-            0.5 * expected
+            0.4 * expected
         );
         // Next → b（无 RG）→ 增益回 1.0。
         handle
@@ -1670,7 +1673,7 @@ mod tests {
         wait_idle().await;
         let vol3 = handle.state_rx.borrow().playback.volume;
         assert!(
-            (vol3 - 0.5).abs() < 1e-9,
+            (vol3 - 0.4).abs() < 1e-9,
             "无 RG 曲目应回到用户音量: {vol3}"
         );
         assert_eq!(
@@ -1704,8 +1707,15 @@ mod tests {
             .await
             .unwrap();
         wait_idle().await;
+        // 用户音量 0.2：0.2×4.0=0.8（<1.0 不 clamp）——证明因子确实封顶 4.0
+        //（未封顶则 0.2×31.6=6.3 → clamp 1.0，断言可区分）。
+        handle
+            .cmd(Request::Command(PlayerCommand::SetVolume(0.2)))
+            .await
+            .unwrap();
+        wait_idle().await;
         let vol = handle.state_rx.borrow().playback.volume;
-        assert!((vol - 4.0).abs() < 1e-9, "+30dB 应 clamp 到 4.0: {vol}");
+        assert!((vol - 0.8).abs() < 1e-9, "+30dB 因子应封顶 4.0: {vol}");
     }
 
     /// G2：配置 `[audio] replaygain=false` 时不做补偿（隔离 XDG_CONFIG_HOME）。
