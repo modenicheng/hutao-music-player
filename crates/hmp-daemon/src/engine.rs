@@ -906,6 +906,7 @@ fn track_row(t: &hmp_core::Track) -> hmp_storage::TrackRow {
         duration_ms: t.duration.map(|d| d.as_millis() as i64),
         cover_uri: t.cover.as_ref().map(|c| c.url.clone()),
         qq_song_id: None, // 播放路径无 numeric id；列表解析缓存（stub_row）时写入
+        ..Default::default()
     }
 }
 
@@ -925,6 +926,7 @@ fn stub_row(s: &hmp_core::TrackStub) -> hmp_storage::TrackRow {
         duration_ms: s.duration_ms,
         cover_uri: None,
         qq_song_id: None, // TrackStub 不含 numeric id；后续由列表解析补全
+        ..Default::default()
     }
 }
 

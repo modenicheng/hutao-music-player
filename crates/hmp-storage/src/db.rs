@@ -27,6 +27,32 @@ pub struct TrackRow {
     pub cover_uri: Option<String>,
     /// QQ numeric song id（comment biz_id 映射；仅 qq 源有）。
     pub qq_song_id: Option<i64>,
+    /// 完整元数据列（v3，本地媒体库域）：专辑艺术家/曲目号/碟号/年份/流派。
+    pub album_artist: Option<String>,
+    pub track_number: Option<i64>,
+    pub disc_number: Option<i64>,
+    pub year: Option<i64>,
+    pub genre: Option<String>,
+}
+
+impl Default for TrackRow {
+    fn default() -> Self {
+        Self {
+            source: "local",
+            source_key: String::new(),
+            title: String::new(),
+            album: None,
+            artist: None,
+            duration_ms: None,
+            cover_uri: None,
+            qq_song_id: None,
+            album_artist: None,
+            track_number: None,
+            disc_number: None,
+            year: None,
+            genre: None,
+        }
+    }
 }
 
 /// 批量元数据查询结果（投影层，`track_meta_batch`）。
@@ -219,14 +245,19 @@ impl LibraryDb {
     /// 幂等写入/更新曲目元数据；返回 track id。
     pub fn upsert_track(&mut self, t: &TrackRow) -> rusqlite::Result<i64> {
         self.conn.execute(
-            r#"INSERT INTO tracks (source, source_key, title, album, artist, duration_ms, cover_uri)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            r#"INSERT INTO tracks (source, source_key, title, album, artist, duration_ms, cover_uri, album_artist, track_number, disc_number, year, genre)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                ON CONFLICT(source, source_key) DO UPDATE SET
                  title = excluded.title,
                  album = COALESCE(excluded.album, tracks.album),
                  artist = COALESCE(excluded.artist, tracks.artist),
                  duration_ms = COALESCE(excluded.duration_ms, tracks.duration_ms),
-                 cover_uri = COALESCE(excluded.cover_uri, tracks.cover_uri)"#,
+                 cover_uri = COALESCE(excluded.cover_uri, tracks.cover_uri),
+                 album_artist = COALESCE(excluded.album_artist, tracks.album_artist),
+                 track_number = COALESCE(excluded.track_number, tracks.track_number),
+                 disc_number = COALESCE(excluded.disc_number, tracks.disc_number),
+                 year = COALESCE(excluded.year, tracks.year),
+                 genre = COALESCE(excluded.genre, tracks.genre)"#,
             params![
                 t.source,
                 t.source_key,
@@ -234,7 +265,12 @@ impl LibraryDb {
                 t.album,
                 t.artist,
                 t.duration_ms,
-                t.cover_uri
+                t.cover_uri,
+                t.album_artist,
+                t.track_number,
+                t.disc_number,
+                t.year,
+                t.genre
             ],
         )?;
         self.conn.query_row(
@@ -413,6 +449,7 @@ impl LibraryDb {
             duration_ms: meta.duration_ms,
             cover_uri: None,
             qq_song_id: None,
+            ..Default::default()
         })?;
         let md = std::fs::metadata(path).ok();
         self.conn.execute(
@@ -470,6 +507,7 @@ impl LibraryDb {
             duration_ms: None,
             cover_uri: None,
             qq_song_id: None,
+            ..Default::default()
         })?;
         self.set_relation("track", source, source_key, "liked", true)?;
         Ok(tid)
@@ -1197,6 +1235,7 @@ impl LibraryDb {
             duration_ms: None,
             cover_uri: None,
             qq_song_id: None,
+            ..Default::default()
         })?;
         let dup: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2)",
@@ -1257,6 +1296,34 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// v3：本地媒体库域（里程碑 E）——local_files 文件生命周期列
+/// （mtime_ns/指纹/扫描代际/missing/scan_root）+ tracks 完整元数据列 +
+/// 多艺术家表 + 扫描根表。
+const MIGRATION_V3: &str = r#"
+ALTER TABLE local_files ADD COLUMN mtime_ns INTEGER;
+ALTER TABLE local_files ADD COLUMN fingerprint TEXT;
+ALTER TABLE local_files ADD COLUMN last_seen_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE local_files ADD COLUMN missing INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE local_files ADD COLUMN scan_root_id INTEGER;
+ALTER TABLE tracks ADD COLUMN album_artist TEXT;
+ALTER TABLE tracks ADD COLUMN track_number INTEGER;
+ALTER TABLE tracks ADD COLUMN disc_number INTEGER;
+ALTER TABLE tracks ADD COLUMN year INTEGER;
+ALTER TABLE tracks ADD COLUMN genre TEXT;
+CREATE TABLE track_artists (
+  track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  artist TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (track_id, position)
+);
+CREATE INDEX idx_track_artists_artist ON track_artists(artist);
+CREATE TABLE scan_roots (
+  id INTEGER PRIMARY KEY,
+  path TEXT NOT NULL UNIQUE,
+  generation INTEGER NOT NULL DEFAULT 0
+);
+"#;
+
 /// 逐级迁移到最新 user_version。
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -1283,6 +1350,22 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         let result = (|| -> rusqlite::Result<()> {
             conn.execute_batch(MIGRATION_V2)?;
             conn.pragma_update(None, "user_version", 2)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+    }
+    if current < 3 {
+        // v3 迁移包事务：任一步失败整体回滚（user_version 不推进，库不砖化）。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute_batch(MIGRATION_V3)?;
+            conn.pragma_update(None, "user_version", 3)?;
             Ok(())
         })();
         match result {
@@ -1353,13 +1436,14 @@ mod tests {
             duration_ms: Some(180_000),
             cover_uri: None,
             qq_song_id: None,
+            ..Default::default()
         }
     }
 
     #[test]
     fn migration_creates_v1() {
         let db = LibraryDb::open_in_memory().unwrap();
-        assert_eq!(db.version().unwrap(), 2); // v2：relations/outbox 迁移
+        assert_eq!(db.version().unwrap(), 3); // v3：本地媒体库域迁移（里程碑 E）
         let mut db = db;
         assert_eq!(db.track_id("qq", "mid123").unwrap(), None);
     }
@@ -1509,7 +1593,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
         // favorites 表已删除；数据在 relations（track/liked，synced）。
         let count: i64 = conn
@@ -1789,6 +1873,7 @@ mod tests {
                 duration_ms: Some(180_000),
                 cover_uri: None,
                 qq_song_id: None,
+                ..Default::default()
             },
             TrackRow {
                 source: "qq",
@@ -1799,6 +1884,7 @@ mod tests {
                 duration_ms: None,
                 cover_uri: None,
                 qq_song_id: None,
+                ..Default::default()
             },
             TrackRow {
                 source: "local",
@@ -1809,6 +1895,7 @@ mod tests {
                 duration_ms: None,
                 cover_uri: None,
                 qq_song_id: None,
+                ..Default::default()
             },
         ];
         db.upsert_tracks_batch(&rows).unwrap();
@@ -1858,6 +1945,7 @@ mod tests {
                 duration_ms: None,
                 cover_uri: None,
                 qq_song_id: None,
+                ..Default::default()
             })
             .collect();
         db.upsert_tracks_batch(&rows).unwrap();
@@ -1880,6 +1968,7 @@ mod tests {
             duration_ms: None,
             cover_uri: None,
             qq_song_id: None,
+            ..Default::default()
         })
         .unwrap();
         // 破坏 outbox 表制造 enqueue 失败（独立内存库，不影响其他测试）。
@@ -1966,5 +2055,90 @@ mod tests {
             })
             .unwrap();
         assert_eq!(st, "synced", "pending 标记不得残留（整体回滚）");
+    }
+
+    /// 里程碑 E：v3 迁移——local_files 文件生命周期列 + tracks 完整元数据列 +
+    /// track_artists/scan_roots 表（新库直达 v3）。
+    #[test]
+    fn migration_v3_adds_columns_and_tables() {
+        let db = LibraryDb::open_in_memory().unwrap();
+        assert_eq!(db.version().unwrap(), 3);
+        let cols: Vec<String> = db
+            .conn
+            .prepare("PRAGMA table_info(local_files)")
+            .unwrap()
+            .query_map([], |r| r.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for want in [
+            "mtime_ns",
+            "fingerprint",
+            "last_seen_generation",
+            "missing",
+            "scan_root_id",
+        ] {
+            assert!(cols.iter().any(|c| c == want), "local_files 缺列 {want}");
+        }
+        let tcols: Vec<String> = db
+            .conn
+            .prepare("PRAGMA table_info(tracks)")
+            .unwrap()
+            .query_map([], |r| r.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for want in [
+            "album_artist",
+            "track_number",
+            "disc_number",
+            "year",
+            "genre",
+        ] {
+            assert!(tcols.iter().any(|c| c == want), "tracks 缺列 {want}");
+        }
+        let n: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('track_artists','scan_roots')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "track_artists/scan_roots 表应存在");
+    }
+
+    /// v2 库在打开时原地升级到 v3：旧数据保留、新列可写。
+    #[test]
+    fn migration_v2_to_v3_upgrades_in_place() {
+        let dir = std::env::temp_dir().join(format!("hmp-mig-v3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lib.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(MIGRATION_V2).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            conn.execute(
+                "INSERT INTO tracks (source, source_key, title, artist) VALUES ('local', 'local:/a.mp3', 'A', 'Art')",
+                [],
+            )
+            .unwrap();
+        }
+        let db = LibraryDb::open(&path).unwrap();
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "迁移后旧数据保留");
+        let v: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 3);
+        db.conn
+            .execute("UPDATE tracks SET genre='Rock' WHERE id=1", [])
+            .unwrap();
     }
 }

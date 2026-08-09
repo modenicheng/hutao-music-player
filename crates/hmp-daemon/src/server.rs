@@ -192,6 +192,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     duration_ms: None,
                     cover_uri: None,
                     qq_song_id: None,
+                    ..Default::default()
                 })
                 .and_then(|_| lib.set_relation("track", source_static, &key, "liked", desired))
                 .and_then(|_| {
