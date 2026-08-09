@@ -186,10 +186,11 @@ impl PlaybackEngine {
                                             self.publish(); // 回滚后重新发布（load_and_play 已发布中间态）
                                         }
                                     } else {
-                                        // 空队列：确定性停止。
+                                        // 空队列：确定性停止；阶段 → Idle。
                                         self.end_session("manual");
                                         self.last_error = None;
                                         self.driver.stop();
+                                        self.phase = hmp_core::EnginePhase::Idle;
                                         self.publish();
                                     }
                                 } else {
@@ -203,6 +204,7 @@ impl PlaybackEngine {
                                 self.queue.clear();
                                 self.end_session("stop");
                                 self.last_error = None;
+                                self.phase = hmp_core::EnginePhase::Idle;
                                 self.driver.stop();
                             } else {
                                 // 保留当前曲：清除待播曲目，播放/会话不受影响。
@@ -316,6 +318,7 @@ impl PlaybackEngine {
             PlayerCommand::Stop => {
                 self.end_session("stop");
                 self.driver.command(PlayerCommand::Stop);
+                self.phase = hmp_core::EnginePhase::Idle;
                 self.publish();
             }
             PlayerCommand::LoadAndPlay(_) => {

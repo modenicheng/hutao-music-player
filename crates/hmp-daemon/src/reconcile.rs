@@ -36,6 +36,7 @@ async fn reconcile_fav_songs(
     library: &Arc<Mutex<LibraryDb>>,
 ) {
     let mut page = 1i64;
+    let mut present = Vec::new();
     loop {
         let resp = match api.get_fav_song(euin, page, 100, Some(credential)).await {
             Ok(r) => r,
@@ -47,6 +48,7 @@ async fn reconcile_fav_songs(
         {
             let Ok(mut lib) = library.lock() else { return };
             for song in resp.songs.iter().filter(|s| !s.mid.is_empty()) {
+                present.push(song.mid.clone());
                 let _ = lib.reconcile_relation("track", "qq", &song.mid, "liked", true);
                 if song.id > 0 {
                     let _ = lib.set_track_qq_song_id("qq", &song.mid, song.id);
@@ -58,6 +60,10 @@ async fn reconcile_fav_songs(
         }
         page += 1;
     }
+    // 双向 reconcile：远端已取消收藏的本地行（synced）→ desired=0。
+    if let Ok(mut lib) = library.lock() {
+        let _ = lib.reconcile_remove_absent("track", "qq", "liked", &present);
+    }
 }
 
 /// 收藏歌单 → relations(playlist, subscribed) + playlists 行（remote_id=disstid）。
@@ -68,6 +74,7 @@ async fn reconcile_fav_songlists(
     library: &Arc<Mutex<LibraryDb>>,
 ) {
     let mut page = 1i64;
+    let mut present = Vec::new();
     loop {
         let resp = match api
             .get_fav_songlist(euin, page, 100, Some(credential))
@@ -83,6 +90,7 @@ async fn reconcile_fav_songlists(
             let Ok(mut lib) = library.lock() else { return };
             for pl in &resp.playlists {
                 if pl.id > 0 {
+                    present.push(pl.id.to_string());
                     let _ = lib.reconcile_relation(
                         "playlist",
                         "qq",
@@ -98,6 +106,12 @@ async fn reconcile_fav_songlists(
             break;
         }
         page += 1;
+    }
+    // 双向：远端已取消收藏的歌单（synced 行）→ desired=0。
+    if let Ok(mut lib) = library.lock() {
+        let _ = lib.reconcile_remove_absent("playlist", "qq", "subscribed", &present);
+        // 远端缺席的歌单同步删除本地行（不留幽灵 subscribed 条目）。
+        let _ = lib.delete_playlists_absent("subscribed", &present);
     }
 }
 
@@ -134,6 +148,7 @@ async fn reconcile_fav_albums(
     library: &Arc<Mutex<LibraryDb>>,
 ) {
     let mut page = 1i64;
+    let mut present = Vec::new();
     loop {
         let resp = match api.get_fav_album(euin, page, 100, Some(credential)).await {
             Ok(r) => r,
@@ -146,6 +161,7 @@ async fn reconcile_fav_albums(
             let Ok(mut lib) = library.lock() else { return };
             for album in &resp.albums {
                 if album.id > 0 {
+                    present.push(album.id.to_string());
                     let _ =
                         lib.reconcile_relation("album", "qq", &album.id.to_string(), "liked", true);
                 }
@@ -155,6 +171,10 @@ async fn reconcile_fav_albums(
             break;
         }
         page += 1;
+    }
+    // 双向：远端已取消收藏的专辑（synced 行）→ desired=0。
+    if let Ok(mut lib) = library.lock() {
+        let _ = lib.reconcile_remove_absent("album", "qq", "liked", &present);
     }
 }
 

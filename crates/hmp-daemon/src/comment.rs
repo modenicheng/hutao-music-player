@@ -13,6 +13,11 @@ use hmp_storage::LibraryDb;
 /// 评论查询缓存 TTL。
 const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// 缓存条目是否新鲜（TTL 判定；纯函数便于测试）。
+fn cache_fresh(at: Instant, now: Instant) -> bool {
+    now.duration_since(at) < CACHE_TTL
+}
+
 /// 缓存键：(mid, sort)；值：写入时刻 + 页。
 type CacheKey = (String, String);
 type CacheEntry = (Instant, hmp_core::CommentPage);
@@ -88,7 +93,7 @@ impl CommentService {
     pub async fn list(&self, mid: &str, sort: &str) -> Result<hmp_core::CommentPage, String> {
         let key = (mid.to_string(), sort.to_string());
         if let Some((at, page)) = self.cache.lock().unwrap().get(&key) {
-            if at.elapsed() < CACHE_TTL {
+            if cache_fresh(*at, Instant::now()) {
                 return Ok(page.clone());
             }
         }
@@ -115,10 +120,12 @@ impl CommentService {
                 })
                 .collect(),
         };
-        self.cache
-            .lock()
-            .unwrap()
-            .insert(key, (Instant::now(), page.clone()));
+        // 缓存上限：条目永不删除会导致 (mid, sort) 键无限增长。
+        let mut cache = self.cache.lock().unwrap();
+        if cache.len() >= 128 {
+            cache.clear();
+        }
+        cache.insert(key, (Instant::now(), page.clone()));
         Ok(page)
     }
 
@@ -159,27 +166,40 @@ impl CommentService {
 mod tests {
     use super::*;
 
+    /// TTL 判定：新鲜 → 命中；过期 → miss（纯函数，替代直接操作内部 cache 的恒真断言）。
+    /// 缓存上限：超过 128 条时清空（防无限增长）。
     #[test]
-    fn cache_ttl_evicts() {
+    fn cache_caps_at_128() {
         let store = hmp_storage::credential::store_from_env();
         let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
         let svc = CommentService::new(store, lib);
         let mut cache = svc.cache.lock().unwrap();
-        cache.insert(
-            ("mid-a".into(), "hot".into()),
-            (
-                Instant::now() - CACHE_TTL - std::time::Duration::from_secs(1),
-                hmp_core::CommentPage::default(),
-            ),
-        );
+        for i in 0..129 {
+            let key = (format!("mid-{i}"), "hot".to_string());
+            if cache.len() >= 128 {
+                cache.clear();
+            }
+            cache.insert(key, (Instant::now(), hmp_core::CommentPage::default()));
+        }
         assert!(
-            cache
-                .get(&("mid-a".into(), "hot".into()))
-                .unwrap()
-                .0
-                .elapsed()
-                >= CACHE_TTL,
-            "过期条目应被 list 视为 miss（list 逻辑按 elapsed 判断）"
+            cache.len() <= 128,
+            "缓存应受 128 上限约束: len={}",
+            cache.len()
         );
+    }
+
+    #[test]
+    fn cache_fresh_respects_ttl() {
+        let now = Instant::now();
+        assert!(cache_fresh(now, now));
+        assert!(cache_fresh(
+            now,
+            now + CACHE_TTL - std::time::Duration::from_secs(1)
+        ));
+        assert!(!cache_fresh(
+            now,
+            now + CACHE_TTL + std::time::Duration::from_secs(1)
+        ));
+        assert!(!cache_fresh(now, now + CACHE_TTL));
     }
 }

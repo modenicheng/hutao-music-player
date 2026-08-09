@@ -82,7 +82,12 @@ impl SyncWorker {
             };
             match msg {
                 Some(SyncMsg::Sync) => self.sync_once().await,
-                Some(SyncMsg::Reconcile) => self.reconcile().await,
+                Some(SyncMsg::Reconcile) => {
+                    // 先消费 outbox（推送完成再拉快照）：避免「已 synced 但快照旧 →
+                    // 缺席误翻」的最终一致闪烁窗口。
+                    self.sync_once().await;
+                    self.reconcile().await;
+                }
                 None => return, // 通道关闭（daemon 退出）
             }
         }
@@ -125,6 +130,12 @@ impl SyncWorker {
             };
             lib.playlists_pending().unwrap_or_default()
         };
+        // 指数退避：error 行在退避窗口内不重试（与 relations 一致）。
+        let mut playlists = playlists;
+        playlists.retain(|r| {
+            r.sync_state == "pending"
+                || now - r.updated_at.unwrap_or(0) >= retry_delay(r.retry_count).as_secs() as i64
+        });
         for row in playlists {
             self.sync_playlist(&row, &credential).await;
         }
@@ -134,6 +145,11 @@ impl SyncWorker {
             };
             lib.playlist_ops_pending().unwrap_or_default()
         };
+        let mut ops = ops;
+        ops.retain(|o| {
+            o.sync_state == "pending"
+                || now - o.updated_at.unwrap_or(0) >= retry_delay(o.retry_count).as_secs() as i64
+        });
         for op in ops {
             self.sync_playlist_op(&op, &credential).await;
         }
@@ -164,7 +180,7 @@ impl SyncWorker {
                         }
                         .map(|_| ())
                     }
-                    None => return, // 未知 numeric id：留 pending，等待播放/解析补全
+                    None => return self.fail_relation(row, "无法解析 QQ numeric song id"),
                 }
             }
             ("playlist", "subscribed") => {
@@ -274,7 +290,12 @@ impl SyncWorker {
                 };
                 let Some(d) = dirid else { return };
                 let Some(song_id) = song_id else {
-                    return; // numeric id 未知：等待补全后 30s 兜底重扫
+                    // numeric id 未知：标记错误（退避重试），不再无限 pending。
+                    let Ok(mut lib) = self.library.lock() else {
+                        return;
+                    };
+                    let _ = lib.mark_op_error(op.id, "无法解析 QQ numeric song id");
+                    return;
                 };
                 let api = SonglistApi::new(&self.client);
                 if op.op == "add" {

@@ -45,8 +45,9 @@ pub async fn sync() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             };
             let rels = db.relations_pending().unwrap_or_default();
+            let pls = db.playlists_pending().unwrap_or_default();
             let ops = db.playlist_ops_pending().unwrap_or_default();
-            rels.len() + ops.len()
+            rels.len() + pls.len() + ops.len()
         };
         if pending == 0 {
             println!("媒体库已同步");

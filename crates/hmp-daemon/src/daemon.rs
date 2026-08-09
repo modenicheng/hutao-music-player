@@ -54,12 +54,21 @@ impl Daemon {
         let sync_handle =
             crate::sync::SyncWorker::spawn(library.clone(), QqMusicClient::new(), store_from_env());
         let mut handle = handle;
-        handle.sync_handle = Some(sync_handle);
+        handle.sync_handle = Some(sync_handle.clone());
         handle.comment = Some(crate::comment::CommentService::new(
             store_from_env(),
             library.clone(),
         ));
         handle.library = Some(library);
+        // 已登录则启动即拉一次 QQ 用户库快照（spec §4：daemon 启动有凭证时 reconcile）。
+        if store_from_env()
+            .load()
+            .ok()
+            .flatten()
+            .is_some_and(|c| c.is_logged_in())
+        {
+            sync_handle.reconcile();
+        }
         Ok(Self { handle })
     }
 }

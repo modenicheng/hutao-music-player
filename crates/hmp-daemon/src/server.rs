@@ -235,7 +235,9 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     let r: rusqlite::Result<Option<i64>> = match op {
                         PlaylistWriteOp::Create { name } => lib.create_playlist(&name).map(Some),
                         PlaylistWriteOp::Rename { id, name } => match lib.playlist_relation(id) {
-                            Ok(Some(r)) if r == "owned" => Err(rusqlite::Error::InvalidQuery),
+                            Ok(Some(r)) if r == "owned" || r == "subscribed" => {
+                                Err(rusqlite::Error::InvalidQuery)
+                            }
                             Ok(_) => lib.rename_playlist(id, &name).map(|_| None),
                             Err(e) => Err(e),
                         },
@@ -247,6 +249,23 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                                 trigger_sync = true;
                                 Ok(None)
                             }
+                            Ok(Some(r)) if r == "subscribed" => {
+                                // 取消收藏：删本地行 + relations outbox（unfav 同步成功前
+                                // reconcile 不覆盖 pending，不会复活）。
+                                let remote = lib.playlist_remote_id(id)?;
+                                lib.delete_playlist(id)?;
+                                if let Some(remote_id) = remote {
+                                    lib.set_relation(
+                                        "playlist",
+                                        "qq",
+                                        &remote_id,
+                                        "subscribed",
+                                        false,
+                                    )?;
+                                    trigger_sync = true;
+                                }
+                                Ok(None)
+                            }
                             Ok(_) => lib.delete_playlist(id).map(|_| None),
                             Err(e) => Err(e),
                         },
@@ -256,12 +275,16 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                             key,
                             title,
                         } => {
+                            let rel = lib.playlist_relation(id)?.unwrap_or_default();
+                            if rel == "subscribed" {
+                                return Err(rusqlite::Error::InvalidQuery);
+                            }
                             let source_static: &'static str = match source.as_str() {
                                 "local" => "local",
                                 _ => "qq",
                             };
                             lib.add_playlist_track(id, source_static, &key, &title)?;
-                            if lib.playlist_relation(id)?.as_deref() == Some("owned") {
+                            if rel == "owned" {
                                 let song_id = lib.qq_song_id("qq", &key)?;
                                 lib.enqueue_playlist_op(id, "add", Some(&key), song_id)?;
                                 trigger_sync = true;
@@ -269,9 +292,13 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                             Ok(None)
                         }
                         PlaylistWriteOp::RemoveTrack { id, position } => {
+                            let rel = lib.playlist_relation(id)?.unwrap_or_default();
+                            if rel == "subscribed" {
+                                return Err(rusqlite::Error::InvalidQuery);
+                            }
                             let song_key = lib.track_key_at(id, position)?;
                             lib.remove_playlist_track(id, position)?;
-                            if lib.playlist_relation(id)?.as_deref() == Some("owned") {
+                            if rel == "owned" {
                                 if let Some(key) = song_key {
                                     let song_id = lib.qq_song_id("qq", &key)?;
                                     lib.enqueue_playlist_op(id, "del", Some(&key), song_id)?;

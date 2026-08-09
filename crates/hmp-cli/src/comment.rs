@@ -16,6 +16,9 @@ use super::commands;
 
 /// 评论列表。
 pub async fn list(mid: &str, sort: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !matches!(sort, "hot" | "new" | "recommend") {
+        return Err(format!("未知排序: {sort}（hot | new | recommend）").into());
+    }
     let mut c = DaemonClient::connect_or_spawn().await?;
     let resp = commands::send(
         &mut c,

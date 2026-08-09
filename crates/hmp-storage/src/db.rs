@@ -120,6 +120,8 @@ pub struct PlaylistRow {
     pub sync_state: String,
     pub retry_count: i64,
     pub last_sync_error: Option<String>,
+    /// 最近一次状态变更时间（退避节流用）。
+    pub updated_at: Option<i64>,
 }
 
 /// 本地歌单内曲目。
@@ -653,6 +655,75 @@ impl LibraryDb {
     }
 
     /// reconcile：按远端身份 upsert 歌单（owned=dirid / subscribed=disstid）。
+    /// reconcile：远端缺席的行（本地 desired=1 已 synced，但远端快照无此实体）
+    /// → 置 desired=0（QQ snapshot 胜；pending 行不受影响）。分片避开 999 变量上限。
+    /// `provider` 限定远端源（qq），本地（local）收藏不受 QQ 快照影响。
+    /// `present_keys` 为空（远端快照真 0 条）→ 全量清理该 provider 的 synced 行。
+    pub fn reconcile_remove_absent(
+        &mut self,
+        entity_type: &str,
+        provider: &str,
+        relation: &str,
+        present_keys: &[String],
+    ) -> rusqlite::Result<()> {
+        let now = now_unix();
+        if present_keys.is_empty() {
+            // 远端快照为 0 条：全量清理该 provider 的 synced 行。
+            self.conn.execute(
+                "UPDATE relations SET desired_state=0, last_remote_state=0, \
+                 sync_state='synced', retry_count=0, last_sync_error=NULL, updated_at=?1 \
+                 WHERE entity_type=?2 AND provider=?3 AND relation=?4 AND desired_state=1 \
+                 AND sync_state='synced'",
+                rusqlite::params![now, entity_type, provider, relation],
+            )?;
+            return Ok(());
+        }
+        for chunk in present_keys.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "UPDATE relations SET desired_state=0, last_remote_state=0, \
+                 sync_state='synced', retry_count=0, last_sync_error=NULL, updated_at=?1 \
+                 WHERE entity_type=?2 AND provider=?3 AND relation=?4 AND desired_state=1 \
+                 AND sync_state='synced' AND entity_key NOT IN ({placeholders})"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> =
+                vec![&now, &entity_type, &provider, &relation];
+            params.extend(chunk.iter().map(|k| k as &dyn rusqlite::ToSql));
+            self.conn
+                .execute(&sql, rusqlite::params_from_iter(params))?;
+        }
+        Ok(())
+    }
+
+    /// reconcile：远端缺席的歌单（relation=subscribed 已 synced 但远端快照无此 disstid）
+    /// → 删除本地行（与 server 取消收藏行为一致，不留幽灵条目）。
+    /// `present_keys` 为空 → 全量清理。
+    pub fn delete_playlists_absent(
+        &mut self,
+        relation: &str,
+        present_keys: &[String],
+    ) -> rusqlite::Result<()> {
+        if present_keys.is_empty() {
+            self.conn.execute(
+                "DELETE FROM playlists WHERE relation=?1 AND sync_state='synced'",
+                rusqlite::params![relation],
+            )?;
+            return Ok(());
+        }
+        for chunk in present_keys.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "DELETE FROM playlists WHERE relation=?1 AND sync_state='synced' \
+                 AND remote_id NOT IN ({placeholders})"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&relation];
+            params.extend(chunk.iter().map(|k| k as &dyn rusqlite::ToSql));
+            self.conn
+                .execute(&sql, rusqlite::params_from_iter(params))?;
+        }
+        Ok(())
+    }
+
     pub fn reconcile_playlist(
         &mut self,
         remote_id: &str,
@@ -795,7 +866,7 @@ impl LibraryDb {
     pub fn playlists_pending(&mut self) -> rusqlite::Result<Vec<PlaylistRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.id, p.name, p.created_at, p.provider, p.remote_id, p.relation, \
-             p.sync_state, p.retry_count, p.last_sync_error,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
+             p.sync_state, p.retry_count, p.last_sync_error, p.updated_at,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
              FROM playlists p WHERE p.relation != 'local' AND p.sync_state != 'synced' \
              ORDER BY p.updated_at",
         )?;
@@ -810,7 +881,8 @@ impl LibraryDb {
                 sync_state: r.get(6)?,
                 retry_count: r.get(7)?,
                 last_sync_error: r.get(8)?,
-                track_count: r.get(9)?,
+                updated_at: r.get(9)?,
+                track_count: r.get(10)?,
             })
         })?;
         rows.collect()
@@ -925,6 +997,11 @@ impl LibraryDb {
 
     /// 删除歌单（级联删曲目关联）。
     pub fn delete_playlist(&mut self, id: i64) -> rusqlite::Result<()> {
+        // 级联清理：outbox 操作行 + 曲目关联 + 歌单本体（孤儿 op 会永久卡死）。
+        self.conn.execute(
+            "DELETE FROM playlist_ops WHERE playlist_id = ?1",
+            params![id],
+        )?;
         self.conn.execute(
             "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
             params![id],
@@ -938,7 +1015,7 @@ impl LibraryDb {
     pub fn list_playlists(&mut self) -> rusqlite::Result<Vec<PlaylistRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.id, p.name, p.created_at, p.provider, p.remote_id, p.relation, \
-             p.sync_state, p.retry_count, p.last_sync_error,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
+             p.sync_state, p.retry_count, p.last_sync_error, p.updated_at,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
              FROM playlists p ORDER BY p.created_at",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -952,7 +1029,8 @@ impl LibraryDb {
                 sync_state: r.get(6)?,
                 retry_count: r.get(7)?,
                 last_sync_error: r.get(8)?,
-                track_count: r.get(9)?,
+                updated_at: r.get(9)?,
+                track_count: r.get(10)?,
             })
         })?;
         rows.collect()
@@ -1066,12 +1144,37 @@ fn now_unix() -> i64 {
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if current < 1 {
-        conn.execute_batch(SCHEMA_V1)?;
-        conn.pragma_update(None, "user_version", 1)?;
+        // v1 迁移同样包事务：中途失败整体回滚（user_version 不推进，库不砖化）。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute_batch(SCHEMA_V1)?;
+            conn.pragma_update(None, "user_version", 1)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
     }
     if current < 2 {
-        conn.execute_batch(MIGRATION_V2)?;
-        conn.pragma_update(None, "user_version", 2)?;
+        // v2 迁移包事务：任一步失败整体回滚（user_version 不推进，
+        // 库不砖化——否则中途失败重开库会在 CREATE TABLE 处报已存在）。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute_batch(MIGRATION_V2)?;
+            conn.pragma_update(None, "user_version", 2)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
     }
     Ok(())
 }
@@ -1142,6 +1245,196 @@ mod tests {
         assert_eq!(db.version().unwrap(), 2); // v2：relations/outbox 迁移
         let mut db = db;
         assert_eq!(db.track_id("qq", "mid123").unwrap(), None);
+    }
+
+    /// 双向 reconcile：远端缺席 → desired=0（synced 行）；pending 行不受影响。
+    #[test]
+    fn reconcile_remove_absent_respects_pending() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        // 两条 synced 收藏：一条仍在远端，一条缺席。
+        db.add_favorite("qq", "keep", "keep").unwrap();
+        db.mark_relation_synced("track", "qq", "keep", "liked")
+            .unwrap();
+        db.add_favorite("qq", "gone", "gone").unwrap();
+        db.mark_relation_synced("track", "qq", "gone", "liked")
+            .unwrap();
+        // 一条 pending（本地意图）——远端缺席也不得覆盖。
+        db.add_favorite("qq", "pending-one", "pending-one").unwrap();
+        db.reconcile_remove_absent("track", "qq", "liked", &["keep".to_string()])
+            .unwrap();
+        assert_eq!(
+            db.relation_desired("track", "qq", "keep", "liked").unwrap(),
+            Some(true),
+            "仍在远端：保留"
+        );
+        assert_eq!(
+            db.relation_desired("track", "qq", "gone", "liked").unwrap(),
+            Some(false),
+            "远端缺席：desired=0"
+        );
+        assert_eq!(
+            db.relation_desired("track", "qq", "pending-one", "liked")
+                .unwrap(),
+            Some(true),
+            "pending 本地意图：远端缺席不覆盖"
+        );
+        assert_eq!(
+            db.relations_pending().unwrap().len(),
+            1,
+            "仅 pending 行留在 outbox"
+        );
+    }
+
+    /// provider 过滤：local 收藏（synced）不受 QQ 快照缺席清理影响。
+    #[test]
+    fn reconcile_remove_absent_keeps_local_provider() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        db.add_favorite("local", "local:/m/a.flac", "a.flac")
+            .unwrap();
+        db.mark_relation_synced("track", "local", "local:/m/a.flac", "liked")
+            .unwrap();
+        db.add_favorite("qq", "gone", "gone").unwrap();
+        db.mark_relation_synced("track", "qq", "gone", "liked")
+            .unwrap();
+        // QQ 快照为空 → 只清 QQ 的 synced 行；local 收藏保留。
+        db.reconcile_remove_absent("track", "qq", "liked", &[])
+            .unwrap();
+        assert_eq!(
+            db.relation_desired("track", "local", "local:/m/a.flac", "liked")
+                .unwrap(),
+            Some(true),
+            "local 收藏不受 QQ 快照影响"
+        );
+        assert_eq!(
+            db.relation_desired("track", "qq", "gone", "liked").unwrap(),
+            Some(false),
+            "QQ synced 行被全清"
+        );
+    }
+
+    /// 空 present：远端快照为 0 条 → 全量清理该 provider 的 synced 行（pending 保留）。
+    #[test]
+    fn reconcile_remove_absent_empty_present_clears_all_synced() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        db.add_favorite("qq", "a", "a").unwrap();
+        db.mark_relation_synced("track", "qq", "a", "liked")
+            .unwrap();
+        db.add_favorite("qq", "b", "b").unwrap();
+        db.mark_relation_synced("track", "qq", "b", "liked")
+            .unwrap();
+        db.add_favorite("qq", "c-pending", "c-pending").unwrap(); // pending 保留
+        db.reconcile_remove_absent("track", "qq", "liked", &[])
+            .unwrap();
+        assert_eq!(
+            db.relation_desired("track", "qq", "a", "liked").unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            db.relation_desired("track", "qq", "b", "liked").unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            db.relation_desired("track", "qq", "c-pending", "liked")
+                .unwrap(),
+            Some(true),
+            "pending 保留"
+        );
+    }
+
+    /// 迁移回滚：v2 中途失败 → 整体回滚（user_version 不推进、favorites 表仍在）。
+    #[test]
+    fn migration_v2_rolls_back_on_failure() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        // 预建与 MIGRATION_V2 冲突的表：v2 的 CREATE TABLE relations 会失败。
+        conn.execute_batch("CREATE TABLE relations (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        let result = super::migrate(&mut conn);
+        assert!(result.is_err(), "v2 迁移应失败");
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1, "回滚后 user_version 不推进");
+        // favorites 表仍在（v2 的 DROP 未执行）——用 exists 检查。
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='favorites'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "favorites 表未被 DROP");
+    }
+
+    /// 手工构造 v1 库（含 favorites 数据）→ 跑 migrate → favorites 迁入 relations。
+    #[test]
+    fn migration_v2_migrates_favorites_into_relations() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute(
+            "INSERT INTO tracks (source, source_key, title) VALUES ('qq', 'mid-1', '夜曲')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tracks (source, source_key, title) VALUES ('local', 'local:/m/a.flac', 'a')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO favorites (track_id, created_at) VALUES (1, 100)",
+            [],
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        // favorites 表已删除；数据在 relations（track/liked，synced）。
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM relations WHERE entity_type='track' AND relation='liked'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "v1 收藏应迁入 relations");
+        let fav_err = conn.execute("SELECT * FROM favorites", []);
+        assert!(fav_err.is_err(), "favorites 表应被 DROP");
+        // qq 行 desired=1/last_remote=1/synced。
+        let (desired, remote, sync): (i64, i64, String) = conn
+            .query_row(
+                "SELECT desired_state, last_remote_state, sync_state FROM relations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((desired, remote, sync.as_str()), (1, 1, "synced"));
+    }
+
+    /// set_relation 的 settled 优化：已同步且意图与远端一致 → 不进 outbox。
+    #[test]
+    fn set_relation_settled_skips_outbox() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        db.add_favorite("qq", "mid-s", "mid-s").unwrap(); // pending
+        // 模拟 SyncWorker 同步成功（desired=1 已同步）。
+        db.mark_relation_synced("track", "qq", "mid-s", "liked")
+            .unwrap();
+        assert_eq!(db.relations_pending().unwrap().len(), 0);
+        // 再次收藏（意图与远端一致）→ settled 路径，不置 pending。
+        db.add_favorite("qq", "mid-s", "mid-s").unwrap();
+        assert_eq!(
+            db.relations_pending().unwrap().len(),
+            0,
+            "settled 一致时不得重新进 outbox"
+        );
+        // 取消收藏（意图变化）→ 进 outbox。
+        db.remove_favorite(1).unwrap();
+        assert_eq!(db.relations_pending().unwrap().len(), 1);
     }
 
     #[test]

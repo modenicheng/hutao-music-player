@@ -389,6 +389,33 @@ mod tests {
             Request::QueueRemove(2),
             Request::QueueClear { all: false },
             Request::QueueClear { all: true },
+            Request::QueueList {
+                offset: 1,
+                limit: 2,
+            },
+            Request::Favorite {
+                source: "qq".into(),
+                key: "k".into(),
+                title: "t".into(),
+                desired: true,
+            },
+            Request::PlaylistWrite {
+                op: PlaylistWriteOp::Create { name: "n".into() },
+            },
+            Request::PlaylistWrite {
+                op: PlaylistWriteOp::Delete { id: 3 },
+            },
+            Request::LibrarySync,
+            Request::CommentList {
+                mid: "m".into(),
+                sort: "hot".into(),
+            },
+            Request::CommentPost {
+                mid: "m".into(),
+                content: "c".into(),
+                reply_cmt_id: Some("r".into()),
+            },
+            Request::CommentDelete { cm_id: "c".into() },
             Request::Queue,
             Request::Command(PlayerCommand::Seek(std::time::Duration::from_secs(30))),
             Request::Status,
@@ -418,6 +445,36 @@ mod tests {
         let frame = encode_frame(&st).unwrap();
         let back: DaemonState = decode_frame(&frame).unwrap();
         assert_eq!(back, st);
+    }
+
+    /// 新响应变体（Created / CommentList）往返序列化。
+    #[test]
+    fn response_roundtrips_through_frame() {
+        let page = CommentPage {
+            total: 1,
+            comments: vec![CommentItem {
+                cm_id: "c".into(),
+                seq_no: "s".into(),
+                content: "x".into(),
+                nickname: "n".into(),
+                time: 1,
+                like_count: 2,
+            }],
+        };
+        let resps = vec![
+            Response::Ok,
+            Response::Created(42),
+            Response::CommentList(page.clone()),
+            Response::Err {
+                code: IpcErrorCode::Internal,
+                message: "boom".into(),
+            },
+        ];
+        for resp in resps {
+            let frame = encode_frame(&resp).unwrap();
+            let back: Response = decode_frame(&frame).unwrap();
+            assert_eq!(back, resp);
+        }
     }
 
     #[test]
