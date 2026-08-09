@@ -581,6 +581,11 @@ impl PlaybackEngine {
                     // 未确认装载：新解密代理此刻释放；旧 active_media 保持。
                     drop(res.media);
                     if let Some(p) = prev {
+                        // 复原代际：回滚后旧曲重新成为当前代（driver loaded_gen 已
+                        // 重载为 prev.load_gen），其 EOS/Error 不得再被误判为旧代
+                        // 忽略（否则播完不续播、会话不闭合）。失败装载 b 的迟到
+                        // 事件 gen=N+1 恰好被过滤，语义正确。
+                        self.current_gen = p.load_gen;
                         self.rollback_load(p, prev_position).await;
                     }
                     self.last_error = Some(error_info(&e));
@@ -658,7 +663,12 @@ impl PlaybackEngine {
     }
 
     /// 装载失败后的尽力回滚：重载上一首并恢复到其位置。
-    /// 沿用原代际（不干扰 current_gen 的事件过滤）；未确认仅 warn。
+    /// 沿用原代际（调用方已在失败路径把 current_gen 复原为 prev.load_gen，
+    /// 故回滚后旧曲 EOS/Error 仍属当前代，不会被过滤）；未确认仅 warn。
+    ///
+    /// 已知限制：真实 GstDriver 在 LoadCommand 处理时同步置 current（乐观
+    /// ACK），坏 URI 的真装载失败表现为**同代 Error**（仅发布、不回滚），
+    /// 事务回滚路径当前仅由超时模型（FakeDriver）覆盖。
     async fn rollback_load(&mut self, prev: AppliedLoad, position: std::time::Duration) {
         let id = prev.track.id.clone();
         self.driver.load(hmp_player_gst::LoadRequest {
@@ -754,14 +764,16 @@ mod tests {
     use std::sync::Mutex;
     use tokio::sync::{broadcast, watch};
 
-    /// 记录 load 的 uri 与收到的命令。
+    /// 记录 load 的 uri 与装载代际（uri, load_gen）与收到的命令。
     pub struct FakeDriver {
         pub state_tx: watch::Sender<PlaybackState>,
         pub events_tx: broadcast::Sender<PlayerEvent>,
-        pub loads: Mutex<Vec<String>>,
+        pub loads: Mutex<Vec<(String, u64)>>,
         pub commands: Mutex<Vec<PlayerCommand>>,
         /// 置位后下一次 load 不更新 current（模拟驱动装载失败 → wait 超时）。
         pub fail_next_load: std::sync::atomic::AtomicBool,
+        /// 剩余失败次数（连续多次装载失败，如回滚也失败；0=不失败）。
+        pub fail_remaining: std::sync::atomic::AtomicU32,
     }
 
     impl FakeDriver {
@@ -778,6 +790,7 @@ mod tests {
                 loads: Mutex::new(Vec::new()),
                 commands: Mutex::new(Vec::new()),
                 fail_next_load: std::sync::atomic::AtomicBool::new(false),
+                fail_remaining: std::sync::atomic::AtomicU32::new(0),
             });
             (d, state_rx, events_rx)
         }
@@ -789,17 +802,42 @@ mod tests {
             self.fail_next_load
                 .store(on, std::sync::atomic::Ordering::SeqCst);
         }
+        /// 连续 n 次装载失败（回滚重载也失败等场景）。
+        pub fn set_fail_loads(&self, n: u32) {
+            self.fail_remaining
+                .store(n, std::sync::atomic::Ordering::SeqCst);
+        }
         pub fn emit(&self, ev: PlayerEvent) {
             let _ = self.events_tx.send(ev);
+        }
+        /// 仅 URI 列表（断言便捷；loads 同时记录装载代际）。
+        pub fn load_uris(&self) -> Vec<String> {
+            self.loads
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(u, _)| u.clone())
+                .collect()
         }
     }
 
     impl PlaybackDriver for FakeDriver {
         fn load(&self, request: LoadRequest) {
-            self.loads.lock().unwrap().push(request.uri.clone());
+            self.loads
+                .lock()
+                .unwrap()
+                .push((request.uri.clone(), request.load_gen));
             if self
                 .fail_next_load
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
+                || self
+                    .fail_remaining
+                    .fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |n| n.checked_sub(1),
+                    )
+                    .is_ok()
             {
                 return; // 失败模拟：current 不更新 → wait_current_applied 超时
             }
@@ -1045,7 +1083,7 @@ mod tests {
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(0));
         assert_eq!(handle.state_rx.borrow().queue.tracks.len(), 3);
-        assert_eq!(driver.loads.lock().unwrap().clone(), vec!["fake://a"]);
+        assert_eq!(driver.load_uris(), vec!["fake://a"]);
     }
 
     /// Next 命令 → 队列前进并加载下一首。
@@ -1069,10 +1107,7 @@ mod tests {
             .unwrap();
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(1));
-        assert_eq!(
-            driver.loads.lock().unwrap().clone(),
-            vec!["fake://a", "fake://b"]
-        );
+        assert_eq!(driver.load_uris(), vec!["fake://a", "fake://b"]);
     }
 
     /// prev 恒跳上一首（不做 >3s 回开头）。
@@ -1108,7 +1143,7 @@ mod tests {
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(1));
         assert_eq!(
-            driver.loads.lock().unwrap().clone(),
+            driver.load_uris(),
             vec!["fake://a", "fake://b", "fake://c", "fake://b"]
         );
     }
@@ -1127,10 +1162,7 @@ mod tests {
         driver.emit(PlayerEvent::PlaybackEnded { load_gen: 1 }); // 当前代（首载 gen=1）
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(1));
-        assert_eq!(
-            driver.loads.lock().unwrap().clone(),
-            vec!["fake://a", "fake://b"]
-        );
+        assert_eq!(driver.load_uris(), vec!["fake://a", "fake://b"]);
     }
 
     /// Ended 且队列到头（None 循环）→ 保持空闲，不再加载。
@@ -1165,7 +1197,7 @@ mod tests {
         assert_eq!(state.queue.tracks.len(), 1);
         assert_eq!(state.queue.tracks[0].as_ref(), "local:/tmp/x.mp3");
         assert_eq!(
-            driver.loads.lock().unwrap().last(),
+            driver.load_uris().last(),
             Some(&"fake://local:/tmp/x.mp3".to_string())
         );
     }
@@ -1254,10 +1286,7 @@ mod tests {
         driver.emit(PlayerEvent::PlaybackEnded { load_gen: 2 }); // b → a（gen=2）
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(0));
-        assert_eq!(
-            driver.loads.lock().unwrap().clone(),
-            vec!["fake://a", "fake://b", "fake://a"]
-        );
+        assert_eq!(driver.load_uris(), vec!["fake://a", "fake://b", "fake://a"]);
     }
 
     /// PlayNext：插入到当前曲之后，current 定位到插入位置（队列中部也正确）。
@@ -1296,10 +1325,7 @@ mod tests {
                 TrackId::new("c")
             ]
         );
-        assert_eq!(
-            driver.loads.lock().unwrap().last(),
-            Some(&"fake://x".to_string())
-        );
+        assert_eq!(driver.load_uris().last(), Some(&"fake://x".to_string()));
     }
 
     /// `hmp playnext playlist:<id>`：整片歌单插入当前曲之后（旧代码只插 ids[0]）。
@@ -1342,10 +1368,7 @@ mod tests {
             ]
         );
         assert_eq!(state.queue.current, Some(1)); // 当前 = x
-        assert_eq!(
-            driver.loads.lock().unwrap().last(),
-            Some(&"fake://x".to_string())
-        );
+        assert_eq!(driver.load_uris().last(), Some(&"fake://x".to_string()));
     }
 
     /// 媒体库写库（B4）：Play 开启会话 → Next 关闭(reason=next)并开启新会话 → Quit 关闭(reason=quit)。
@@ -1447,7 +1470,11 @@ mod tests {
         fn load(&self, request: LoadRequest) {
             // 只记录 uri，不调用 inner.load（inner 已同步应用）：
             // 异步 150ms 后才把 current 更新为装载曲目。
-            self.inner.loads.lock().unwrap().push(request.uri.clone());
+            self.inner
+                .loads
+                .lock()
+                .unwrap()
+                .push((request.uri.clone(), request.load_gen));
             let st = self.inner.state_tx.clone();
             let track = request.track.clone();
             tokio::spawn(async move {
@@ -1567,24 +1594,85 @@ mod tests {
     #[tokio::test]
     async fn stale_gen_eos_is_ignored() {
         let (driver, _sr, _er) = FakeDriver::new();
-        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        // 两个列表：Play(a) 与 Play(b) 各消耗一个（此前单列表会在第二次
+        // resolve_source_ids 时 remove(0) panic 引擎线程，测试恒真）。
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("b")]]);
         let (handle, _st) = start_engine(driver.clone(), resolver).await;
         handle
             .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
             .await
             .unwrap();
         wait_idle().await;
-        // 手动换到 b（gen 递增）。
+        // 手动换到 b（gen=2）。
         handle
             .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
             .await
             .unwrap();
         wait_idle().await;
-        let cur_before = handle.state_rx.borrow().playback.current.clone();
-        // 旧代 EOS（gen=1）到达：任何时刻都应忽略（不换曲、不关会话）。
+        assert_eq!(
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .unwrap()
+                .id,
+            TrackId::new("b"),
+            "前置：当前应为 b"
+        );
+        let loads_before = driver.loads.lock().unwrap().len();
+        // 旧代 EOS（gen=1）到达：任何时刻都应忽略（不换曲、不置 Idle）。
         driver.emit(PlayerEvent::PlaybackEnded { load_gen: 1 });
         wait_idle().await;
-        assert_eq!(handle.state_rx.borrow().playback.current, cur_before);
+        let s = handle.state_rx.borrow();
+        assert_eq!(
+            s.phase,
+            hmp_core::EnginePhase::Playing,
+            "旧代 EOS 不得把阶段置 Idle（若过滤失效 on_ended 会置 Idle）"
+        );
+        assert_eq!(
+            s.playback.current.as_ref().unwrap().id,
+            TrackId::new("b"),
+            "旧代 EOS 不得换曲"
+        );
+        assert_eq!(
+            driver.loads.lock().unwrap().len(),
+            loads_before,
+            "旧代 EOS 不得触发任何新装载"
+        );
+    }
+
+    /// 旧代 Error（已换下曲目的迟到错误事件）不得进入状态（last_error/阶段不受污染）。
+    #[tokio::test]
+    async fn stale_gen_error_is_ignored() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("b")]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        // 旧代错误（gen=1）：不得写入 last_error、不得改变阶段。
+        driver.emit(PlayerEvent::Error {
+            load_gen: 1,
+            error: hmp_core::HmpError::Playback("stale".into()),
+        });
+        wait_idle().await;
+        let s = handle.state_rx.borrow();
+        assert!(s.last_error.is_none(), "旧代错误不得进入 last_error");
+        assert_eq!(s.phase, hmp_core::EnginePhase::Playing);
+        assert_eq!(
+            s.playback.current.as_ref().unwrap().id,
+            TrackId::new("b"),
+            "旧代错误不得改变当前曲"
+        );
     }
 
     /// 同代 EOS = 真实曲尾：装载完成后立即到达也须续播（旧 500ms 窗口会丢短曲）。
@@ -1598,7 +1686,7 @@ mod tests {
             .await
             .unwrap();
         wait_idle().await;
-        let load_gen = driver.loads.lock().unwrap().len() as u64; // 首载 gen=1
+        let load_gen = driver.loads.lock().unwrap()[0].1; // 首载 gen=1
         driver.emit(PlayerEvent::PlaybackEnded { load_gen });
         wait_idle().await;
         let s = handle.state_rx.borrow();
@@ -1639,7 +1727,7 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        let loads = driver.loads.lock().unwrap().clone();
+        let loads = driver.load_uris();
         // 失败装载本身记录一条（fake://b），随后回滚重载一条（fake://a）。
         assert_eq!(loads.len(), 3, "失败装载 + 回滚重载");
         assert_eq!(loads[2], "fake://a", "回滚应重载上一曲 a");
@@ -1884,7 +1972,7 @@ mod tests {
             .unwrap();
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(0)); // 播放 a
-        assert_eq!(driver.loads.lock().unwrap().clone(), vec!["fake://a"]);
+        assert_eq!(driver.load_uris(), vec!["fake://a"]);
 
         handle.cmd(Request::QueueRemove(0)).await.unwrap(); // 移除正在播的 a
         wait_idle().await;
@@ -1892,7 +1980,7 @@ mod tests {
         assert_eq!(st.queue.tracks, vec![TrackId::new("b"), TrackId::new("c")]);
         assert_eq!(st.queue.current, Some(0)); // 接替曲 b 占据 0
         assert_eq!(
-            driver.loads.lock().unwrap().clone(),
+            driver.load_uris(),
             vec!["fake://a", "fake://b"],
             "移除当前曲应立即加载接替曲"
         );
@@ -1940,7 +2028,7 @@ mod tests {
             .await
             .unwrap();
         wait_idle().await;
-        assert_eq!(driver.loads.lock().unwrap().clone(), vec!["fake://a"]);
+        assert_eq!(driver.load_uris(), vec!["fake://a"]);
 
         handle.cmd(Request::QueueRemove(0)).await.unwrap(); // 移除正在播的 a
         wait_idle().await;
@@ -1952,7 +2040,7 @@ mod tests {
         );
         assert_eq!(st.queue.current, Some(0));
         assert_eq!(
-            driver.loads.lock().unwrap().clone(),
+            driver.load_uris(),
             vec!["fake://a"],
             "接替曲装载失败不得加载"
         );
@@ -2251,6 +2339,122 @@ mod tests {
         );
         assert_eq!(recent[1].reason, "manual");
         assert!(recent[0].ended_at.is_none(), "新会话保持 open");
+    }
+
+    /// Repeat One（LoopMode::Track）：同代 EOS 重播同曲——旧会话以 ended 闭合，
+    /// 重播新建独立 open 会话（会话粒度，不按 track 延续合并）。
+    #[tokio::test]
+    async fn repeat_one_closes_and_reopens_session() {
+        use hmp_storage::LibraryDb;
+
+        let (driver, _sr, _er) = FakeDriver::new();
+        // 两个列表：Play(a) 与 EOS 重播各消耗一个。
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("a")]]);
+        let library = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let (handle, _st) =
+            start_engine_with_library(driver.clone(), resolver, library.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        handle
+            .cmd(Request::Command(PlayerCommand::SetLoopMode(
+                LoopMode::Track,
+            )))
+            .await
+            .unwrap();
+        wait_idle().await;
+        // 同代 EOS（首载 gen=1）：on_ended → end_session("ended") 闭合第一条 →
+        // advance_on_eos（Track 模式）重播同曲（gen=2）→ start_session 新建第二条。
+        driver.emit(PlayerEvent::PlaybackEnded { load_gen: 1 });
+        wait_idle().await;
+        let mut lib = library.lock().unwrap();
+        let recent = lib.recent_plays(10).unwrap();
+        assert_eq!(recent.len(), 2, "Repeat One 每圈独立会话");
+        assert_eq!(recent[1].reason, "ended", "旧会话以 ended 闭合");
+        assert!(recent[1].ended_at.is_some());
+        assert!(recent[0].ended_at.is_none(), "重播会话保持 open");
+        assert_eq!(recent[0].title, recent[1].title, "同曲重播");
+    }
+
+    /// 回滚重载也失败：仅 warn（不 panic）；旧曲保持 current、错误详情可见。
+    /// 注意：bool 无法表达"连续两次失败"，用 fail_remaining 计数（set_fail_loads）。
+    #[tokio::test]
+    async fn rollback_failure_only_warns() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("b")]]);
+        let handle = PlaybackEngine::start_with_options(
+            driver.clone(),
+            resolver,
+            Arc::new(|| true),
+            None,
+            std::time::Duration::from_millis(300),
+        );
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        // 连续两次失败：Play(b) 装载失败 + 回滚重载 a 也失败。
+        driver.set_fail_loads(2);
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+            .await
+            .unwrap();
+        // 装载 300ms 超时 + 回滚 300ms 超时：等待两者完成（+裕度）。
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        let s = handle.state_rx.borrow();
+        assert!(s.last_error.is_some(), "装载失败详情应可见");
+        // 回滚失败不 panic：旧曲 a 仍在 current → 恢复播放语义（Playing）。
+        assert_eq!(
+            s.playback.current.as_ref().unwrap().id,
+            TrackId::new("a"),
+            "回滚失败后旧曲保持 current"
+        );
+        assert_eq!(s.phase, hmp_core::EnginePhase::Playing);
+    }
+
+    /// Blocker 回归：回滚后旧曲恢复当前代——同代 EOS 仍触发续播。
+    /// （current_gen 未复原时旧曲 EOS 被误判旧代忽略：播完不续播、会话不闭合。）
+    #[tokio::test]
+    async fn rollback_restores_gen_then_eos_advances() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        // 第一个列表建队 [a, c]；第二个列表供 Play(b) 的 resolve_source_ids。
+        let resolver = FakeResolver::new(vec![
+            vec![TrackId::new("a"), TrackId::new("c")],
+            vec![TrackId::new("b")],
+        ]);
+        let handle = PlaybackEngine::start_with_options(
+            driver.clone(),
+            resolver,
+            Arc::new(|| true),
+            None,
+            std::time::Duration::from_millis(300),
+        );
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(driver.loads.lock().unwrap().len(), 1);
+        // 换 b 装载失败 → 回滚重载 a（current_gen 复原为 1）。
+        driver.set_fail_load(true);
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert!(driver.loads.lock().unwrap().len() >= 2, "应有回滚重载");
+        // 回滚后同代 EOS（gen=1）必须被处理：续播到 c。
+        driver.emit(PlayerEvent::PlaybackEnded { load_gen: 1 });
+        wait_idle().await;
+        let s = handle.state_rx.borrow();
+        assert_eq!(
+            s.playback.current.as_ref().unwrap().id,
+            TrackId::new("c"),
+            "回滚后同代 EOS 应触发续播（current_gen 复原语义）"
+        );
     }
 
     /// P1 #5：track_row 按 provider 写 source（本地曲目不得写成 qq）。
