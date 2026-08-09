@@ -532,6 +532,7 @@ impl PlaybackEngine {
                     track: res.track.clone(),
                     uri,
                     quality,
+                    load_gen: 0, // Task 3 起由 current_gen 分配
                 });
                 self.driver.play();
                 // 等待驱动应用装载（真实驱动为异步管道）：完成前发布的复合状态

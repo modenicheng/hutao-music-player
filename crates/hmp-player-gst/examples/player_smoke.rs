@@ -86,6 +86,7 @@ async fn main() {
         track,
         uri,
         quality: AudioQuality::Mp3_128,
+        load_gen: 0,
     });
     core.play();
 

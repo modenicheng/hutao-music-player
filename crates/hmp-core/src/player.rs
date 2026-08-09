@@ -67,6 +67,9 @@ pub struct PlaybackState {
     /// 实际播放音质（本次解析选定档位；媒体库重构 B3）。
     #[serde(default)]
     pub actual_quality: Option<AudioQuality>,
+    /// 装载代际：每次 driver 装载递增（engine 分配），事件/状态过滤用。
+    #[serde(default)]
+    pub load_gen: u64,
 }
 
 impl Default for PlaybackState {
@@ -82,6 +85,7 @@ impl Default for PlaybackState {
             can_seek: false,
             buffering: None,
             actual_quality: None,
+            load_gen: 0,
         }
     }
 }
@@ -156,6 +160,7 @@ mod tests {
         assert!(!s.shuffle);
         assert!(!s.can_seek);
         assert!(s.buffering.is_none());
+        assert_eq!(s.load_gen, 0);
     }
 
     #[test]

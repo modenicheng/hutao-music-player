@@ -20,6 +20,8 @@ pub struct LoadRequest {
     pub uri: String,
     /// 请求音质（记录用）。
     pub quality: hmp_core::AudioQuality,
+    /// 装载代际（engine 分配；事件与状态过滤用）。
+    pub load_gen: u64,
 }
 
 /// 加载请求（与命令分离：`Load` 携带 URI/元数据，命令经公共通道）。
@@ -191,6 +193,7 @@ async fn drive(
 ) {
     let mut state = PlaybackState::default();
     let mut pending_error: Option<String> = None;
+    let mut loaded_gen: u64 = 0;
 
     loop {
         tokio::select! {
@@ -256,12 +259,17 @@ async fn drive(
                     LoadCommand::Shutdown => break,
                     LoadCommand::Load(req) => {
                         // 加载即播放（docs/PROJECT.md §8.2：设置 URI → Loading → Playing）
+                        loaded_gen = req.load_gen;
                         state.status = PlaybackStatus::Loading;
                         state.current = Some(req.track);
                         state.actual_quality = Some(req.quality);
+                        state.load_gen = req.load_gen;
                         state.position = Duration::ZERO;
                         state.duration = None;
                         state.buffering = None;
+                        // 丢弃装载前已入队的旧曲总线事件（位置/时长/状态回调可能滞后，
+                        // 代际隔离的兜底：避免旧 Position/Duration 污染新曲状态）。
+                        while bus_rx.try_recv().is_ok() {}
                         player.set_uri(Some(req.uri.as_str()));
                         let _ = state_tx.send(state.clone());
                         let _ = events_tx.send(PlayerEvent::TrackChanged);
@@ -360,6 +368,7 @@ mod tests {
             track,
             uri: uri.to_owned(),
             quality: AudioQuality::Mp3_128,
+            load_gen: 0,
         }
     }
 
@@ -369,6 +378,18 @@ mod tests {
         let state = core.subscribe_state().borrow().clone();
         assert_eq!(state.status, PlaybackStatus::Empty);
         assert!(state.current.is_none());
+        core.shutdown();
+    }
+
+    #[tokio::test]
+    async fn load_sets_gen_on_state() {
+        let core = PlayerCore::new_with_sink(Some("fakeaudiosink")).expect("init");
+        let rx = core.subscribe_state();
+        let mut req = load_req(sample_track(), "file:///nonexistent.aiff");
+        req.load_gen = 42;
+        core.load(req);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(rx.borrow().load_gen, 42);
         core.shutdown();
     }
 
