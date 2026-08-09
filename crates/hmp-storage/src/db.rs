@@ -751,6 +751,16 @@ impl LibraryDb {
         Ok(())
     }
 
+    /// 单文件删除标记（watcher Remove 事件；不删行，missing 语义与扫描一致）。
+    /// 返回改动行数（0 = 路径不在库中）。
+    pub fn mark_missing_by_path(&mut self, path: &Path) -> rusqlite::Result<u32> {
+        let n = self.conn.execute(
+            "UPDATE local_files SET missing = 1 WHERE path = ?1 AND missing = 0",
+            params![path.display().to_string()],
+        )?;
+        Ok(n as u32)
+    }
+
     /// 按指纹查找候选行（移动/改名复用）；返回 (track_id, 原 path)。
     pub fn find_by_fingerprint(&mut self, fp: &str) -> rusqlite::Result<Option<(i64, String)>> {
         self.conn
@@ -2758,6 +2768,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(p, new.to_str().unwrap(), "path 已更新");
+    }
+
+    /// 里程碑 E2：单文件删除标记（watcher Remove 事件；不删行，missing 语义与扫描一致）。
+    #[test]
+    fn mark_missing_by_path_flags_row() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("hmp-mm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.mp3");
+        std::fs::write(&f, b"x").unwrap();
+        let (root_id, generation) = db.begin_scan(&dir).unwrap();
+        db.record_scan_file(root_id, generation, &f, None, "fp")
+            .unwrap();
+        let n = db.mark_missing_by_path(&f).unwrap();
+        assert_eq!(n, 1);
+        let miss: i64 = db
+            .conn
+            .query_row(
+                "SELECT missing FROM local_files WHERE path=?1",
+                [f.to_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(miss, 1);
+        // 已删除文件的路径 → 0 行。
+        assert_eq!(db.mark_missing_by_path(&dir.join("gone.mp3")).unwrap(), 0);
     }
 
     /// 里程碑 E：浏览聚合——tracks 过滤（search/artist/album/liked）、

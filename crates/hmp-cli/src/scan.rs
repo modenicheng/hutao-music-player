@@ -5,11 +5,10 @@
 //! missing 标记、移动/改名指纹复用、封面提取。
 
 use std::collections::HashSet;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
 use std::io::Write;
 use std::path::Path;
 
+use hmp_storage::scan::{file_fingerprint, persist_cover};
 use hmp_storage::{LibraryDb, ScanOutcome, read_meta};
 
 /// 扫描报告。
@@ -49,44 +48,6 @@ fn collect_audio(
     Ok(())
 }
 
-/// 文件指纹：内容 hash（前 1MB）+ size。
-/// 不含路径与 mtime：移动/改名后内容不变 → 指纹不变（供行复用候选）；
-/// 内容相同但 mtime 不同的文件由 record_scan_file 内的 mtime 校验排除。
-fn file_fingerprint(path: &Path, size: u64) -> std::io::Result<String> {
-    use std::io::Read;
-    let mut hasher = DefaultHasher::new();
-    let mut f = std::fs::File::open(path)?;
-    let mut buf = [0u8; 65536];
-    let mut total = 0u64;
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.write(&buf[..n]);
-        total += n as u64;
-        if total >= 1_048_576 {
-            break; // 1MB 前缀足以区分
-        }
-    }
-    hasher.write_u64(size);
-    Ok(format!("{:016x}", hasher.finish()))
-}
-
-/// 提取封面到 `<data_dir>/covers/<hash>.jpg`；返回 cover_uri（`file://…`）。
-fn persist_cover(cover: &[u8]) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let covers = hmp_storage::data_dir().join("covers");
-    std::fs::create_dir_all(&covers)?;
-    let mut hasher = DefaultHasher::new();
-    hasher.write(cover);
-    let name = format!("{:016x}.jpg", hasher.finish());
-    let cpath = covers.join(&name);
-    if !cpath.exists() {
-        std::fs::write(&cpath, cover)?;
-    }
-    Ok(Some(format!("file://{}", cpath.display())))
-}
-
 /// 扫描目录入库，返回报告。
 /// 目录入口先 canonicalize：`hmp scan ./Music` 不再因 daemon 后续 cwd 不同而失配。
 pub fn scan_dir(root: &Path, db: &mut LibraryDb) -> Result<ScanReport, Box<dyn std::error::Error>> {
@@ -105,7 +66,12 @@ pub fn scan_dir(root: &Path, db: &mut LibraryDb) -> Result<ScanReport, Box<dyn s
         let local_meta = read_meta(&path);
         // 封面先落盘（新增/更新时；record_scan_file 前完成，cover_uri 经 set_track_cover）。
         let cover_uri = match &local_meta {
-            Some(m) => m.cover.as_deref().map(persist_cover).transpose()?.flatten(),
+            Some(m) => m
+                .cover
+                .as_deref()
+                .map(|c| persist_cover(c).map(Some))
+                .transpose()?
+                .flatten(),
             None => None,
         };
         let outcome = db.record_scan_file(root_id, generation, &path, local_meta.as_ref(), &fp)?;

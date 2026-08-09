@@ -14,6 +14,7 @@ pub mod config;
 pub mod credential;
 pub mod db;
 pub mod local;
+pub mod scan;
 pub mod xdg;
 
 pub use config::{Config, QualityMode, QualityPref};
