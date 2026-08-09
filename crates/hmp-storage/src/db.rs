@@ -165,6 +165,19 @@ pub struct LibraryDb {
     conn: Connection,
 }
 
+/// 扫描结果分类（里程碑 E）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanOutcome {
+    /// 新曲目入库。
+    Added,
+    /// 已有曲目元数据/路径更新（含指纹命中复用）。
+    Updated,
+    /// mtime+size 未变，跳过（增量）。
+    Skipped,
+    /// missing 标记复位（文件重新出现）。
+    MissingReset,
+}
+
 const SCHEMA_V1: &str = r#"
 CREATE TABLE tracks (
   id INTEGER PRIMARY KEY,
@@ -486,6 +499,264 @@ impl LibraryDb {
                 |r| r.get(0),
             )
             .optional()
+    }
+
+    /// 注册扫描根并推进 generation，返回 (root_id, generation)。
+    /// 首次扫描 generation=1，之后每次 +1（增量/缺失判定的代际基准）。
+    pub fn begin_scan(&mut self, root: &Path) -> rusqlite::Result<(i64, i64)> {
+        let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let path_str = canonical.display().to_string();
+        self.conn.execute(
+            "INSERT INTO scan_roots (path, generation) VALUES (?1, 1)
+             ON CONFLICT(path) DO UPDATE SET generation = generation + 1",
+            params![path_str],
+        )?;
+        self.conn.query_row(
+            "SELECT id, generation FROM scan_roots WHERE path = ?1",
+            params![path_str],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+    }
+
+    /// 记录一个扫描文件：新增/更新/跳过/复位。
+    /// 增量判定：同 path 且 mtime_ns+size 一致 → Skipped（仍刷新代际、清 missing）；
+    /// path 不存在但指纹命中 → 复用行更新路径（移动/改名）。
+    pub fn record_scan_file(
+        &mut self,
+        root_id: i64,
+        generation: i64,
+        path: &Path,
+        meta: Option<&crate::local::LocalMeta>,
+        fingerprint: &str,
+    ) -> rusqlite::Result<ScanOutcome> {
+        let path_str = path.display().to_string();
+        let md = std::fs::metadata(path).ok();
+        let mtime_ns = md
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i64);
+        let size = md.as_ref().map(|m| m.len() as i64);
+
+        let existing: Option<(i64, Option<i64>, Option<i64>, i64)> = self
+            .conn
+            .query_row(
+                "SELECT track_id, mtime_ns, file_size, missing FROM local_files WHERE path = ?1",
+                params![path_str],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+
+        if let Some((track_id, old_ns, old_size, missing)) = existing {
+            if old_ns == mtime_ns && old_size == size {
+                // 增量跳过：刷新代际 + 清 missing（若曾缺失）。
+                self.conn.execute(
+                    "UPDATE local_files SET last_seen_generation = ?1, missing = 0 WHERE track_id = ?2",
+                    params![generation, track_id],
+                )?;
+                return Ok(if missing == 1 {
+                    ScanOutcome::MissingReset
+                } else {
+                    ScanOutcome::Skipped
+                });
+            }
+            // 变化：更新元数据 + 文件行。
+            if let Some(m) = meta {
+                self.apply_local_meta(track_id, m)?;
+            }
+            self.conn.execute(
+                "UPDATE local_files SET file_size = ?1, mtime = ?2, mtime_ns = ?3,
+                        format = COALESCE(?4, format), bitrate = COALESCE(?5, bitrate),
+                        sample_rate = COALESCE(?6, sample_rate), fingerprint = ?7,
+                        last_seen_generation = ?8, missing = 0, scan_root_id = ?9
+                 WHERE track_id = ?10",
+                params![
+                    size,
+                    mtime_ns.map(|n| n / 1_000_000_000),
+                    mtime_ns,
+                    meta.and_then(|m| m.format.clone()),
+                    meta.and_then(|m| m.bitrate),
+                    meta.and_then(|m| m.sample_rate),
+                    fingerprint,
+                    generation,
+                    root_id,
+                    track_id
+                ],
+            )?;
+            return Ok(ScanOutcome::Updated);
+        }
+
+        // path 不存在：指纹命中 → 复用行（移动/改名；指纹含内容+size，命中后
+        // 再校验 mtime 一致——内容相同但写入时刻不同的文件不复用）。
+        if let Some((tid, _orig)) = self.find_by_fingerprint(fingerprint)? {
+            let row_mtime: Option<Option<i64>> = self
+                .conn
+                .query_row(
+                    "SELECT mtime_ns FROM local_files WHERE track_id = ?1",
+                    params![tid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if row_mtime.flatten() == mtime_ns {
+                self.conn.execute(
+                    "UPDATE local_files SET path = ?1, file_size = ?2, mtime = ?3, mtime_ns = ?4,
+                            fingerprint = ?5, last_seen_generation = ?6, missing = 0, scan_root_id = ?7
+                     WHERE track_id = ?8",
+                    params![
+                        path_str,
+                        size,
+                        mtime_ns.map(|n| n / 1_000_000_000),
+                        mtime_ns,
+                        fingerprint,
+                        generation,
+                        root_id,
+                        tid
+                    ],
+                )?;
+                // 同步 tracks 身份：`local:<旧路径>` → `local:<新路径>`（播放/查询用）。
+                self.conn.execute(
+                    "UPDATE tracks SET source_key = ?1 WHERE id = ?2",
+                    params![format!("local:{path_str}"), tid],
+                )?;
+                if let Some(m) = meta {
+                    self.apply_local_meta(tid, m)?;
+                }
+                return Ok(ScanOutcome::Updated);
+            }
+        }
+
+        // 全新：upsert track + local_files + track_artists。
+        let meta_owned = meta.cloned();
+        let title = meta_owned
+            .as_ref()
+            .map(|m| m.title.clone())
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("未知")
+                    .to_string()
+            });
+        let tid = self.upsert_track(&TrackRow {
+            source: "local",
+            source_key: format!("local:{path_str}"),
+            title,
+            album: meta_owned.as_ref().and_then(|m| m.album.clone()),
+            artist: meta_owned.as_ref().and_then(|m| m.artist.clone()),
+            duration_ms: meta_owned.as_ref().and_then(|m| m.duration_ms),
+            cover_uri: None,
+            qq_song_id: None,
+            album_artist: meta_owned.as_ref().and_then(|m| m.album_artist.clone()),
+            track_number: meta_owned
+                .as_ref()
+                .and_then(|m| m.track_number.map(|n| n as i64)),
+            disc_number: meta_owned
+                .as_ref()
+                .and_then(|m| m.disc_number.map(|n| n as i64)),
+            year: meta_owned.as_ref().and_then(|m| m.year),
+            genre: meta_owned.as_ref().and_then(|m| m.genre.clone()),
+        })?;
+        self.conn.execute(
+            r#"INSERT INTO local_files (track_id, path, file_size, mtime, mtime_ns, format, bitrate, sample_rate, fingerprint, last_seen_generation, missing, scan_root_id)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0,?11)"#,
+            params![
+                tid,
+                path_str,
+                size,
+                mtime_ns.map(|n| n / 1_000_000_000),
+                mtime_ns,
+                meta_owned.as_ref().and_then(|m| m.format.clone()),
+                meta_owned.as_ref().and_then(|m| m.bitrate),
+                meta_owned.as_ref().and_then(|m| m.sample_rate),
+                fingerprint,
+                generation,
+                root_id
+            ],
+        )?;
+        if let Some(m) = &meta_owned {
+            self.write_track_artists(tid, &m.artists)?;
+        }
+        Ok(ScanOutcome::Added)
+    }
+
+    /// 扫描收尾：本代际未见到的文件标 missing（不删行；返回新标记数）。
+    pub fn finish_scan(&mut self, root_id: i64, generation: i64) -> rusqlite::Result<u32> {
+        let n = self.conn.execute(
+            "UPDATE local_files SET missing = 1
+             WHERE scan_root_id = ?1 AND last_seen_generation < ?2 AND missing = 0",
+            params![root_id, generation],
+        )?;
+        Ok(n as u32)
+    }
+
+    /// 清除缺失标记（文件重新出现/手动确认）。
+    pub fn clear_missing(&mut self, track_id: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE local_files SET missing = 0 WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        Ok(())
+    }
+
+    /// 按指纹查找候选行（移动/改名复用）；返回 (track_id, 原 path)。
+    pub fn find_by_fingerprint(&mut self, fp: &str) -> rusqlite::Result<Option<(i64, String)>> {
+        self.conn
+            .query_row(
+                "SELECT track_id, path FROM local_files WHERE fingerprint = ?1 LIMIT 1",
+                params![fp],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+    }
+
+    /// 更新本地曲目封面 URI（仅不同才写；scan 封面提取后调用）。
+    pub fn set_track_cover(&mut self, source_key: &str, cover_uri: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE tracks SET cover_uri = ?2
+             WHERE source = 'local' AND source_key = ?1 AND COALESCE(cover_uri, '') <> ?2",
+            params![source_key, cover_uri],
+        )?;
+        Ok(())
+    }
+
+    /// 写入完整元数据（tracks 行 + track_artists 重写）。
+    fn apply_local_meta(
+        &mut self,
+        track_id: i64,
+        m: &crate::local::LocalMeta,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE tracks SET title = ?1, album = ?2, artist = ?3, duration_ms = ?4,
+                    album_artist = ?5, track_number = ?6, disc_number = ?7, year = ?8, genre = ?9
+             WHERE id = ?10",
+            params![
+                m.title,
+                m.album,
+                m.artist,
+                m.duration_ms,
+                m.album_artist,
+                m.track_number.map(|n| n as i64),
+                m.disc_number.map(|n| n as i64),
+                m.year,
+                m.genre,
+                track_id
+            ],
+        )?;
+        self.write_track_artists(track_id, &m.artists)
+    }
+
+    /// 重写多艺术家行（先删后插，position 保序）。
+    fn write_track_artists(&mut self, track_id: i64, artists: &[String]) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM track_artists WHERE track_id = ?1",
+            params![track_id],
+        )?;
+        for (i, a) in artists.iter().enumerate() {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO track_artists (track_id, artist, position) VALUES (?1,?2,?3)",
+                params![track_id, a, i as i64],
+            )?;
+        }
+        Ok(())
     }
 
     /// 收藏曲目（upsert 曲目行 + 收藏；幂等）。
@@ -2140,5 +2411,115 @@ mod tests {
         db.conn
             .execute("UPDATE tracks SET genre='Rock' WHERE id=1", [])
             .unwrap();
+    }
+
+    /// 里程碑 E：扫描生命周期——首轮新增、删除标 missing、重扫复位。
+    #[test]
+    fn scan_lifecycle_marks_missing_and_resets() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("hmp-scan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.mp3");
+        let b = dir.join("b.mp3");
+        std::fs::write(&a, b"").unwrap();
+        std::fs::write(&b, b"").unwrap();
+        let b_mtime = std::fs::metadata(&b).unwrap().modified().unwrap();
+        // 第一轮：全部新增。
+        let (root_id, generation) = db.begin_scan(&dir).unwrap();
+        assert!(matches!(
+            db.record_scan_file(root_id, generation, &a, None, "fp-a")
+                .unwrap(),
+            ScanOutcome::Added
+        ));
+        assert!(matches!(
+            db.record_scan_file(root_id, generation, &b, None, "fp-b")
+                .unwrap(),
+            ScanOutcome::Added
+        ));
+        assert_eq!(
+            db.finish_scan(root_id, generation).unwrap(),
+            0,
+            "首轮无 missing"
+        );
+        // 同路径同指纹再扫：跳过（增量）。
+        assert!(matches!(
+            db.record_scan_file(root_id, generation, &a, None, "fp-a")
+                .unwrap(),
+            ScanOutcome::Skipped
+        ));
+        // 删除 b → 第二轮：b 标 missing。
+        std::fs::remove_file(&b).unwrap();
+        let (root_id2, generation2) = db.begin_scan(&dir).unwrap();
+        assert_ne!(generation2, generation, "generation 应递增");
+        db.record_scan_file(root_id2, generation2, &a, None, "fp-a")
+            .unwrap();
+        assert_eq!(
+            db.finish_scan(root_id2, generation2).unwrap(),
+            1,
+            "b 应标 missing"
+        );
+        let miss: i64 = db
+            .conn
+            .query_row(
+                "SELECT missing FROM local_files WHERE path LIKE '%b.mp3'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(miss, 1);
+        // 重扫 b 出现 → missing 复位（外接盘场景：内容未变、mtime 不变）。
+        std::fs::write(&b, b"").unwrap();
+        let f = std::fs::File::options().write(true).open(&b).unwrap();
+        f.set_modified(b_mtime).unwrap();
+        let (root_id3, generation3) = db.begin_scan(&dir).unwrap();
+        let out = db
+            .record_scan_file(root_id3, generation3, &b, None, "fp-b")
+            .unwrap();
+        assert!(matches!(out, ScanOutcome::MissingReset));
+        db.finish_scan(root_id3, generation3).unwrap();
+        let miss: i64 = db
+            .conn
+            .query_row(
+                "SELECT missing FROM local_files WHERE path LIKE '%b.mp3'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(miss, 0, "b 已复位");
+    }
+
+    /// 里程碑 E：移动/改名 → 指纹命中复用行（不产生孤儿曲目）。
+    #[test]
+    fn fingerprint_reuses_row_on_path_change() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("hmp-fp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.mp3");
+        let new = dir.join("new.mp3");
+        std::fs::write(&old, b"x").unwrap();
+        let (root_id, generation) = db.begin_scan(&dir).unwrap();
+        db.record_scan_file(root_id, generation, &old, None, "fp-same")
+            .unwrap();
+        // "移动"：旧路径没了，新路径指纹相同。
+        std::fs::rename(&old, &new).unwrap();
+        let (tid, _orig) = db.find_by_fingerprint("fp-same").unwrap().unwrap();
+        let out = db
+            .record_scan_file(root_id, generation, &new, None, "fp-same")
+            .unwrap();
+        assert!(matches!(out, ScanOutcome::Updated), "指纹命中复用行");
+        let n: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "不产生孤儿曲目");
+        let p: String = db
+            .conn
+            .query_row(
+                "SELECT path FROM local_files WHERE track_id=?1",
+                [tid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(p, new.to_str().unwrap(), "path 已更新");
     }
 }

@@ -20,7 +20,7 @@ pub use config::{Config, QualityMode, QualityPref};
 pub use credential::{BackendKind, CredentialStore, FileStore, SecretServiceStore};
 pub use db::{
     FavoriteRow, LibraryDb, PlayEnd, PlaylistOpRow, PlaylistRow, PlaylistTrackRow, RecentPlay,
-    RelationRow, TrackMeta, TrackRow,
+    RelationRow, ScanOutcome, TrackMeta, TrackRow,
 };
 pub use local::{LocalMeta, is_audio_ext, read_meta};
 pub use xdg::{cache_dir, config_dir, data_dir};
