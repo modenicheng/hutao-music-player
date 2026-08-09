@@ -22,6 +22,7 @@ pub fn format_status(st: &DaemonState) -> String {
         })
         .unwrap_or_default();
     s.push_str(&format!("状态: {:?}\n", st.playback.status));
+    s.push_str(&format!("引擎: {:?}\n", st.phase));
     s.push_str(&format!("曲目: {title} - {artist}\n"));
     match st.playback.duration {
         Some(d) => s.push_str(&format!(
@@ -420,6 +421,7 @@ mod tests {
             caps: Default::default(),
             seq: 0,
             last_error: None,
+            phase: hmp_core::EnginePhase::Playing,
         };
         let s = format_status(&st);
         assert!(s.contains("稻香"));
@@ -485,6 +487,7 @@ mod tests {
             caps: Default::default(),
             seq,
             last_error: None,
+            phase: hmp_core::EnginePhase::Idle,
         }
     }
 

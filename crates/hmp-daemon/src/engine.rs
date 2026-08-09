@@ -57,6 +57,10 @@ pub struct PlaybackEngine {
     seq: u64,
     /// 最近一次命令错误（解析失败等；成功换曲时清空，Finding 2）。
     last_error: Option<ErrorInfo>,
+    /// 播放引擎阶段（spec §7 状态机）。
+    phase: hmp_core::EnginePhase,
+    /// 最近一次装载完成时刻（滞后 EOS/Error 窗口判定，spec §7）。
+    loaded_at: Option<std::time::Instant>,
     /// 播放能力发布（MPRIS 订阅，Finding 9）。
     caps_tx: watch::Sender<PlaybackCapabilities>,
     /// 终止信号发布（sticky，Finding 7）。
@@ -100,6 +104,8 @@ impl PlaybackEngine {
             active_media: None,
             seq: 0,
             last_error: None,
+            phase: hmp_core::EnginePhase::Idle,
+            loaded_at: None,
             caps_tx,
             term_tx,
             library,
@@ -176,6 +182,7 @@ impl PlaybackEngine {
                                             // 装载失败：回滚队列（被删曲目回到原位，
                                             // 旧曲继续播放）；last_error 已由 load_and_play 发布。
                                             self.queue.restore_state(saved);
+                                            self.restore_phase_after_failure();
                                             self.publish(); // 回滚后重新发布（load_and_play 已发布中间态）
                                         }
                                     } else {
@@ -235,8 +242,28 @@ impl PlaybackEngine {
                 }
                 ev = events_rx.recv() => {
                     match ev {
-                        Ok(PlayerEvent::PlaybackEnded) => self.on_ended().await,
-                        Ok(PlayerEvent::Error(_)) => self.publish(), // 不自动跳歌（spec §7）
+                        Ok(PlayerEvent::PlaybackEnded) => {
+                            // 滞后事件防护（spec §7）：新曲装载中（Loading）或装载完成
+                            // 500ms 内到达的 EOS 属旧曲目 → 忽略，不触发换曲。
+                            if self.phase == hmp_core::EnginePhase::Loading
+                                || self
+                                    .loaded_at
+                                    .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500))
+                            {
+                                tracing::debug!("忽略滞后 EOS（装载窗口内）");
+                            } else {
+                                self.on_ended().await;
+                            }
+                        }
+                        Ok(PlayerEvent::Error(_)) => {
+                            // 不自动跳歌（spec §7）；装载窗口内的错误事件属旧曲 → 忽略
+                            // （装载结果由 load_and_play 决定）。
+                            if self.phase == hmp_core::EnginePhase::Loading {
+                                tracing::debug!("忽略滞后错误事件（装载窗口内）");
+                            } else {
+                                self.publish();
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -258,6 +285,7 @@ impl PlaybackEngine {
             caps,
             seq: self.seq,
             last_error: self.last_error.clone(),
+            phase: self.phase,
         };
         let _ = self.state_tx.send(state);
         let _ = self.caps_tx.send(caps);
@@ -314,6 +342,7 @@ impl PlaybackEngine {
         } else {
             // 装载失败：回滚队列位置（原曲继续播放，状态一致）。
             self.queue.restore_state(saved);
+            self.restore_phase_after_failure();
         }
     }
 
@@ -331,6 +360,7 @@ impl PlaybackEngine {
             }
         } else {
             self.queue.restore_state(saved);
+            self.restore_phase_after_failure();
         }
     }
 
@@ -344,11 +374,14 @@ impl PlaybackEngine {
     /// 队列变更与会话切换；装载失败则保持旧队列/旧会话/旧曲继续播放，
     /// 仅发布错误——CLI 不再把旧曲目当成新请求成功。
     async fn play_source(&mut self, src: PlayRequest, playnext: bool) {
+        self.phase = hmp_core::EnginePhase::Resolving;
         let stubs = match self.resolver.resolve_source_ids(&src).await {
             Ok(stubs) => stubs,
             Err(e) => {
-                // 解析失败 → 发布错误详情（Finding 2）+ 推进命令代际。
+                // 解析失败 → 发布错误详情（Finding 2）+ 推进命令代际；
+                // 阶段恢复：旧曲仍在播 → Playing，否则 Idle。
                 self.last_error = Some(error_info(&e));
+                self.restore_phase_after_failure();
                 self.seq += 1;
                 self.publish();
                 return;
@@ -360,6 +393,7 @@ impl PlaybackEngine {
                 code: IpcErrorCode::Internal,
                 message: "源解析结果为空，无曲目可播放".into(),
             });
+            self.restore_phase_after_failure();
             self.seq += 1;
             self.publish();
             return;
@@ -388,8 +422,10 @@ impl PlaybackEngine {
                 self.publish();
             }
             Err(e) => {
-                // 装载失败：队列/会话/播放均保持原状，仅发布错误（P1）。
+                // 装载失败：队列/会话/播放均保持原状，仅发布错误（P1）；
+                // 阶段恢复：旧曲仍在播 → Playing。
                 self.last_error = Some(error_info(&e));
+                self.restore_phase_after_failure();
                 self.seq += 1;
                 self.publish();
             }
@@ -404,9 +440,12 @@ impl PlaybackEngine {
             if self.load_and_play(id).await.is_err() {
                 // 续播失败：回滚队列位置（已播完的曲目停在当前位置）。
                 self.queue.restore_state(saved);
+                self.restore_phase_after_failure();
             }
             self.publish();
         } else {
+            // 无续播：阶段 → Idle。
+            self.phase = hmp_core::EnginePhase::Idle;
             self.publish();
         }
     }
@@ -475,8 +514,11 @@ impl PlaybackEngine {
 
     /// 解析 + 解密 + 加载 + 播放。装载失败返回错误（调用方决定回滚/保持）。
     async fn load_and_play(&mut self, id: TrackId) -> Result<(), EngineError> {
-        // 成功路径：清除旧错误（Finding 2）。
+        // 成功路径：清除旧错误（Finding 2）；进入装载阶段（spec §7）并发布
+        // （订阅者可见 Loading 中间态；seq 未动，CLI 确认逻辑不受影响）。
         self.last_error = None;
+        self.phase = hmp_core::EnginePhase::Loading;
+        self.publish();
         match self.resolver.resolve_track(&id).await {
             Ok(res) => {
                 self.active_media = res.media; // 旧 guard 自动 Drop → 旧代理停止
@@ -492,6 +534,9 @@ impl PlaybackEngine {
                 // 等待驱动应用装载（真实驱动为异步管道）：完成前发布的复合状态
                 // 不得携带旧曲目（Bug 2：play-next 后显示旧曲）。
                 self.wait_current_applied(&expected).await;
+                // 装载完成：进入播放阶段，记录完成时刻（滞后事件窗口）。
+                self.phase = hmp_core::EnginePhase::Playing;
+                self.loaded_at = Some(std::time::Instant::now());
                 // 媒体库：upsert 曲目 + 开启播放会话（B4）。
                 self.start_session(&res.track);
                 self.publish();
@@ -499,12 +544,24 @@ impl PlaybackEngine {
             }
             Err(e) => {
                 tracing::error!(%e, "解析失败: {id}");
-                // 队列位置保持；错误详情进入复合状态（Finding 2）。
+                // 队列位置保持；错误详情进入复合状态（Finding 2）；阶段 → Failed。
                 self.last_error = Some(error_info(&e));
+                self.phase = hmp_core::EnginePhase::Failed;
                 self.publish();
                 Err(e)
             }
         }
+    }
+
+    /// 装载/解析失败后的阶段恢复：旧曲仍在播 → Playing，否则 Idle。
+    /// 回滚调用方（navigate/QueueRemove/on_ended）在 restore 后调用。
+    fn restore_phase_after_failure(&mut self) {
+        let playing = self.state_rx.borrow().current.is_some();
+        self.phase = if playing {
+            hmp_core::EnginePhase::Playing
+        } else {
+            hmp_core::EnginePhase::Idle
+        };
     }
 
     /// 等待驱动把 current 更新为 `expected`（同步应用的驱动立即返回；
@@ -960,6 +1017,8 @@ mod tests {
             .await
             .unwrap();
         wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await; // 滞后窗口外
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await; // 滞后窗口外
         driver.emit(PlayerEvent::PlaybackEnded);
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(1));
@@ -980,6 +1039,7 @@ mod tests {
             .await
             .unwrap();
         wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await; // 滞后窗口外
         driver.emit(PlayerEvent::PlaybackEnded);
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(0));
@@ -1085,8 +1145,10 @@ mod tests {
             .await
             .unwrap();
         wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await; // 滞后窗口外
         driver.emit(PlayerEvent::PlaybackEnded); // a → b
         wait_idle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await; // 滞后窗口外
         driver.emit(PlayerEvent::PlaybackEnded); // b → a（回绕）
         wait_idle().await;
         assert_eq!(handle.state_rx.borrow().queue.current, Some(0));
@@ -1399,8 +1461,107 @@ mod tests {
         assert_eq!(driver.inner.loads.lock().unwrap().len(), 1);
     }
 
+    /// 装载窗口内到达的 EOS 属旧曲（滞后事件）→ 忽略，不触发换曲（spec §7）。
+    #[tokio::test]
+    async fn loading_window_ignores_stale_eos() {
+        let (driver, _sr, _er) = SlowDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        let handle = PlaybackEngine::start(driver.clone(), resolver, Arc::new(|| true));
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        // 装载进行中（SlowDriver 150ms 异步应用）时发出 EOS（属旧队列/旧曲的迟到事件）。
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            handle.state_rx.borrow().phase,
+            hmp_core::EnginePhase::Loading,
+            "装载窗口内 phase 应为 Loading"
+        );
+        driver.inner.emit(PlayerEvent::PlaybackEnded);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let st = handle.state_rx.borrow();
+        assert_eq!(st.queue.current, Some(0), "滞后 EOS 不得触发换曲");
+        assert_eq!(
+            driver.inner.loads.lock().unwrap().clone(),
+            vec!["fake://a"],
+            "不得加载下一首"
+        );
+        assert_eq!(
+            st.phase,
+            hmp_core::EnginePhase::Playing,
+            "装载完成进入 Playing"
+        );
+    }
+
+    /// 装载完成 500ms 窗口内的迟到 EOS 同样忽略；窗口外正常续播。
+    #[tokio::test]
+    async fn stale_eos_after_load_window_is_ignored() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        // 装载完成后的迟到 EOS（<500ms）：忽略。
+        driver.emit(PlayerEvent::PlaybackEnded);
+        wait_idle().await;
+        assert_eq!(
+            handle.state_rx.borrow().queue.current,
+            Some(0),
+            "迟到 EOS 忽略"
+        );
+        // 窗口外（>500ms）的 EOS：正常续播。
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        driver.emit(PlayerEvent::PlaybackEnded);
+        wait_idle().await;
+        assert_eq!(
+            handle.state_rx.borrow().queue.current,
+            Some(1),
+            "窗口外 EOS 正常换曲"
+        );
+    }
+
+    /// 解析失败时阶段 → Failed，随后恢复为 Playing（旧曲继续播放）。
+    #[tokio::test]
+    async fn phase_transitions_on_load_failure() {
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = PartialFailResolver::new(
+            vec![vec![TrackId::new("a")], vec![TrackId::new("b")]],
+            vec![TrackId::new("b")],
+        );
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        assert_eq!(
+            handle.state_rx.borrow().phase,
+            hmp_core::EnginePhase::Playing
+        );
+        // 换曲装载失败：发布 Failed，随后回滚恢复 Playing（旧曲仍在播）。
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let st = handle.state_rx.borrow();
+        assert!(st.last_error.is_some());
+        assert_eq!(
+            st.phase,
+            hmp_core::EnginePhase::Playing,
+            "回滚后恢复 Playing"
+        );
+        assert_eq!(
+            st.playback.current.as_ref().map(|t| t.id.as_ref()),
+            Some("a")
+        );
+    }
+
     /// Bug 2（状态滞后）：seq 推进时复合状态必须已反映新曲（而非旧曲）。
-    /// 修复：load 后等待驱动应用装载再发布完成态。
     #[tokio::test]
     async fn seq_advance_implies_new_track_applied() {
         let (driver, _sr, _er) = SlowDriver::new();

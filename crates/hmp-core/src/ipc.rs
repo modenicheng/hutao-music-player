@@ -203,6 +203,8 @@ pub struct DaemonState {
     pub seq: u64,
     /// 最近一次命令的错误（解析失败等；成功操作时清空，Finding 2）。
     pub last_error: Option<ErrorInfo>,
+    /// 播放引擎阶段。
+    pub phase: EnginePhase,
 }
 
 /// 歌单写操作（本地先提交 + outbox；spec §3.3/§5）。
@@ -286,6 +288,22 @@ pub struct QueuePage {
     pub offset: usize,
     /// 本页条目。
     pub items: Vec<QueueEntry>,
+}
+
+/// 播放引擎阶段（spec §7 显式状态机：Resolving → Loading → Playing/Failed）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EnginePhase {
+    /// 无活动。
+    #[default]
+    Idle,
+    /// 源解析中（歌单/专辑分页拉取）。
+    Resolving,
+    /// 曲目装载中（解析 + 取流 + 驱动应用）。
+    Loading,
+    /// 正在播放。
+    Playing,
+    /// 最近一次装载失败（旧曲/队列保持原状）。
+    Failed,
 }
 
 /// 最近一次命令的失败详情（final review Finding 2）。
@@ -395,6 +413,7 @@ mod tests {
                 code: IpcErrorCode::TrackNotFound,
                 message: "曲目不存在".into(),
             }),
+            phase: EnginePhase::Playing,
         };
         let frame = encode_frame(&st).unwrap();
         let back: DaemonState = decode_frame(&frame).unwrap();
