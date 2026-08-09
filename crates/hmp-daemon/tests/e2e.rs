@@ -438,6 +438,7 @@ impl SourceResolver for LocalWavResolver {
                 uri: format!("file://{wav}"),
                 media: None,
                 quality: AudioQuality::Mp3_128,
+                replaygain_db: None,
             })
         })
     }

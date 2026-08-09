@@ -41,6 +41,29 @@ pub struct LocalMeta {
     pub genre: Option<String>,
     /// 内嵌封面原图（前 2MB；无封面 None）。
     pub cover: Option<Vec<u8>>,
+    /// ReplayGain 曲目增益（dB；无标签 None）。
+    pub replaygain_track_db: Option<f64>,
+}
+
+/// 解析 ReplayGain 标签文本（`-6.50 dB` / `+3.0 dB` / `12.34dB`；大小写不敏感）。
+/// 失败/乱串 → None（不阻断元数据读取）。
+pub fn parse_rg_db(s: &str) -> Option<f64> {
+    let t = s.trim();
+    let t = t
+        .strip_suffix("dB")
+        .or_else(|| t.strip_suffix("db"))
+        .or_else(|| t.strip_suffix("Db"))
+        .or_else(|| t.strip_suffix("DB"))
+        .unwrap_or(t)
+        .trim();
+    if t.is_empty() {
+        return None;
+    }
+    let v: f64 = t.parse().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    Some(v)
 }
 
 /// 读取标签元数据；无标签/不可解析 → None。
@@ -85,6 +108,9 @@ pub fn read_meta(path: &Path) -> Option<LocalMeta> {
         year: tag.and_then(|t| t.year()).map(|y| y as i64),
         genre: tag.and_then(|t| t.genre()).map(|s| s.to_string()),
         cover,
+        replaygain_track_db: tag
+            .and_then(|t| t.get_string(&ItemKey::ReplayGainTrackGain))
+            .and_then(parse_rg_db),
     })
 }
 
@@ -107,6 +133,29 @@ mod tests {
     #[test]
     fn read_meta_missing_file_returns_none() {
         assert!(read_meta(Path::new("/nonexistent/x.mp3")).is_none());
+    }
+
+    /// G2：ReplayGain 标签项映射与读取（read_meta 的一行读取路径去风险）。
+    #[test]
+    fn replaygain_tag_item_reads_back() {
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
+        tag.insert_text(lofty::tag::ItemKey::ReplayGainTrackGain, "-6.50 dB".into());
+        let got = tag.get_string(&lofty::tag::ItemKey::ReplayGainTrackGain);
+        assert_eq!(got, Some("-6.50 dB"));
+        assert_eq!(got.and_then(parse_rg_db), Some(-6.5));
+    }
+
+    /// G2：ReplayGain 标签文本（如 `-6.50 dB`）解析为 dB 值。
+    #[test]
+    fn parses_replaygain_db() {
+        assert_eq!(parse_rg_db("-6.50 dB"), Some(-6.5));
+        assert_eq!(parse_rg_db("+3.0 dB"), Some(3.0));
+        assert_eq!(parse_rg_db("0 dB"), Some(0.0));
+        assert_eq!(parse_rg_db("12.34dB"), Some(12.34));
+        assert_eq!(parse_rg_db("-23.83 db"), Some(-23.83));
+        assert_eq!(parse_rg_db(""), None);
+        assert_eq!(parse_rg_db("abc"), None);
+        assert_eq!(parse_rg_db("NaN dB"), None);
     }
 
     #[test]

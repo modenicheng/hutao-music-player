@@ -164,6 +164,10 @@ pub struct PlaybackEngine {
     last_load: Option<AppliedLoad>,
     /// 下一首预解析缓存（G2；后台任务写、load_and_play 消费）。
     preload_slot: Arc<Mutex<Option<PreloadSlot>>>,
+    /// 用户音量（RG 补偿前；SetVolume 更新，换曲时叠加当前曲增益）。
+    user_volume: f64,
+    /// 当前曲 ReplayGain 增益因子（无标签/关闭 = 1.0）。
+    rg_factor: f64,
     /// 等待驱动应用装载的超时（测试注入短超时）。
     load_timeout: std::time::Duration,
     /// 完整队列快照（仅结构变化时发送；position tick 不触发——O(1) publish）。
@@ -280,6 +284,8 @@ impl PlaybackEngine {
             session: None,
             last_load: None,
             preload_slot: Arc::new(Mutex::new(None)),
+            user_volume: restored_volume.unwrap_or(1.0),
+            rg_factor: 1.0,
             load_timeout,
             queue_tx,
             last_queue_rev: 0,
@@ -560,7 +566,14 @@ impl PlaybackEngine {
             PlayerCommand::LoadAndPlay(_) => {
                 // 队列场景不使用（CLI/桌面按 id 走 Play 请求）；忽略。
             }
-            other => self.driver.command(other), // Play/Pause/Stop/Seek/Volume/TogglePlay 直通驱动
+            PlayerCommand::SetVolume(v) => {
+                // G2：用户音量与 RG 补偿分离——记录用户音量，驱动收到叠加补偿后的值
+                // （换曲时 apply_gain 按新曲增益重算）。
+                self.user_volume = v;
+                self.driver
+                    .command(PlayerCommand::SetVolume(v * self.rg_factor));
+            }
+            other => self.driver.command(other), // Play/Pause/Stop/Seek/TogglePlay 直通驱动
         }
     }
 
@@ -837,6 +850,8 @@ impl PlaybackEngine {
         }
         // ACK 成功才提交：替换 active_media（旧代理此刻才释放）、
         // 记录装载（回滚用）、进入播放阶段、开启播放会话。
+        // G2：ReplayGain 补偿（用户音量 × 当前曲增益；仅成功路径更新 rg_factor）。
+        self.apply_gain(res.replaygain_db);
         self.active_media = res.media;
         self.last_load = Some(AppliedLoad {
             track: res.track.clone(),
@@ -851,6 +866,22 @@ impl PlaybackEngine {
         self.schedule_preload(&res.track.id);
         self.publish();
         Ok(())
+    }
+
+    /// G2：应用当前曲的 ReplayGain 补偿。`factor = 10^(dB/20)`，clamp 到
+    /// [0.25, 4.0]（±12dB，防异常标签）；配置 `[audio] replaygain=false`
+    /// 时恒为 1.0。驱动音量 = 用户音量 × 因子（用户调音量不丢补偿）。
+    fn apply_gain(&mut self, replaygain_db: Option<f64>) {
+        let enabled = hmp_storage::Config::load().audio.replaygain;
+        self.rg_factor = if enabled {
+            match replaygain_db {
+                Some(db) => (10f64).powf(db / 20.0).clamp(0.25, 4.0),
+                None => 1.0,
+            }
+        } else {
+            1.0
+        };
+        self.driver.set_volume(self.user_volume * self.rg_factor);
     }
 
     /// G2：后台预解析队列下一首（gapless 加速曲间切换）。
@@ -1033,6 +1064,10 @@ mod tests {
     use std::sync::Mutex;
     use tokio::sync::{broadcast, watch};
 
+    /// 串行化改环境变量的测试（ReplayGain 配置隔离；其余测试不持有锁——
+    /// 它们的曲目无 RG，配置误读不影响断言）。
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// 记录 load 的 uri 与装载代际（uri, load_gen）与收到的命令。
     pub struct FakeDriver {
         pub state_tx: watch::Sender<PlaybackState>,
@@ -1154,6 +1189,8 @@ mod tests {
         pub resolve_calls: Mutex<usize>,
         /// resolve_track 对这些 id 返回 TrackNotFound（预解析失败静默回退测试）。
         pub fail_ids: Mutex<Vec<TrackId>>,
+        /// 指定 id 的 replaygain_db（G2 ReplayGain 测试；缺省 = 无 RG）。
+        pub replaygain: Mutex<Vec<(TrackId, f64)>>,
     }
 
     impl FakeResolver {
@@ -1163,6 +1200,7 @@ mod tests {
                 stubs: Mutex::new(ids.into_iter().map(stub_list).collect()),
                 resolve_calls: Mutex::new(0),
                 fail_ids: Mutex::new(Vec::new()),
+                replaygain: Mutex::new(Vec::new()),
             })
         }
 
@@ -1177,6 +1215,7 @@ mod tests {
                 stubs: Mutex::new(stubs),
                 resolve_calls: Mutex::new(0),
                 fail_ids: Mutex::new(Vec::new()),
+                replaygain: Mutex::new(Vec::new()),
             })
         }
     }
@@ -1209,6 +1248,13 @@ mod tests {
             // 克隆 id：让 future 持有数据，不借用参数（返回类型生命周期为 `&self`）。
             let id = id.clone();
             let fail = self.fail_ids.lock().unwrap().contains(&id);
+            let rg = self
+                .replaygain
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, db)| *db);
             Box::pin(async move {
                 *self.resolve_calls.lock().unwrap() += 1;
                 if fail {
@@ -1228,6 +1274,7 @@ mod tests {
                     uri: format!("fake://{id}"),
                     media: None,
                     quality: hmp_core::AudioQuality::Mp3_128,
+                    replaygain_db: rg,
                 })
             })
         }
@@ -1326,6 +1373,7 @@ mod tests {
                     uri: format!("fake://{id}"),
                     media: None,
                     quality: hmp_core::AudioQuality::Mp3_128,
+                    replaygain_db: None,
                 })
             })
         }
@@ -1541,6 +1589,125 @@ mod tests {
             Some("a"),
             "装载失败回滚：a 继续播放"
         );
+    }
+
+    /// G2：RG 增益在装载时叠加到用户音量；SetVolume 后仍叠加；换曲自动切换。
+    #[tokio::test]
+    // 锁仅用于串行化改 env 的测试；引擎任务从不获取该锁，无死锁风险。
+    #[allow(clippy::await_holding_lock)]
+    async fn replaygain_applied_on_load() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+        resolver
+            .replaygain
+            .lock()
+            .unwrap()
+            .push((TrackId::new("a"), 6.0)); // +6dB → factor ≈ 1.995
+        let (handle, _st) = start_engine(driver.clone(), resolver.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let expected = (10f64).powf(6.0 / 20.0);
+        let vol = handle.state_rx.borrow().playback.volume;
+        assert!(
+            (vol - expected).abs() < 1e-9,
+            "装载后应叠加 RG 增益: {vol} vs {expected}"
+        );
+        // 用户调音量：驱动 = 用户 × 当前曲增益（补偿不丢）。
+        handle
+            .cmd(Request::Command(PlayerCommand::SetVolume(0.5)))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let vol2 = handle.state_rx.borrow().playback.volume;
+        assert!(
+            (vol2 - 0.5 * expected).abs() < 1e-9,
+            "SetVolume 应叠加补偿: {vol2} vs {}",
+            0.5 * expected
+        );
+        // Next → b（无 RG）→ 增益回 1.0。
+        handle
+            .cmd(Request::Command(PlayerCommand::Next))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let vol3 = handle.state_rx.borrow().playback.volume;
+        assert!(
+            (vol3 - 0.5).abs() < 1e-9,
+            "无 RG 曲目应回到用户音量: {vol3}"
+        );
+        assert_eq!(
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref()),
+            Some("b")
+        );
+    }
+
+    /// G2：异常标签（+30dB）因子封顶 4.0（clamp ±12dB）。
+    #[tokio::test]
+    // 锁仅用于串行化改 env 的测试；引擎任务从不获取该锁，无死锁风险。
+    #[allow(clippy::await_holding_lock)]
+    async fn replaygain_clamps_extreme_values() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")]]);
+        resolver
+            .replaygain
+            .lock()
+            .unwrap()
+            .push((TrackId::new("a"), 30.0));
+        let (handle, _st) = start_engine(driver.clone(), resolver.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let vol = handle.state_rx.borrow().playback.volume;
+        assert!((vol - 4.0).abs() < 1e-9, "+30dB 应 clamp 到 4.0: {vol}");
+    }
+
+    /// G2：配置 `[audio] replaygain=false` 时不做补偿（隔离 XDG_CONFIG_HOME）。
+    #[tokio::test]
+    // 锁仅用于串行化改 env 的测试；引擎任务从不获取该锁，无死锁风险。
+    #[allow(clippy::await_holding_lock)]
+    async fn replaygain_disabled_by_config() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_dir = dir.path().join("hmp");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.toml"), "[audio]\nreplaygain = false\n").unwrap();
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        }
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")]]);
+        resolver
+            .replaygain
+            .lock()
+            .unwrap()
+            .push((TrackId::new("a"), 6.0)); // 有标签，但配置关闭 → 不补偿
+        let (handle, _st) = start_engine(driver.clone(), resolver.clone()).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let vol = handle.state_rx.borrow().playback.volume;
+        assert!(
+            (vol - 1.0).abs() < 1e-9,
+            "replaygain=false 时不应补偿: {vol}"
+        );
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
     }
 
     /// prev 恒跳上一首（不做 >3s 回开头）。

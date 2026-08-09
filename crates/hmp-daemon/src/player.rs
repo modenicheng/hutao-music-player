@@ -99,6 +99,8 @@ pub struct ResolvedTrack {
     pub media: Option<hmp_media::PreparedMedia>,
     /// 本次实际选定的音质（媒体库重构 B3：actual vs available 分离）。
     pub quality: AudioQuality,
+    /// ReplayGain 曲目增益（dB；无标签 None → 不补偿）。
+    pub replaygain_db: Option<f64>,
 }
 
 impl std::fmt::Debug for ResolvedTrack {
@@ -382,6 +384,7 @@ pub async fn resolve_track_impl(
                 uri,
                 media,
                 quality: q,
+                replaygain_db: None, // QQ 曲目无 RG 标签源
             });
         }
     }

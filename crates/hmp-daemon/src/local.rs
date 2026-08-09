@@ -146,6 +146,7 @@ impl LocalSourceResolver {
             uri,
             media: None,
             quality,
+            replaygain_db: meta.as_ref().and_then(|m| m.replaygain_track_db),
         })
     }
 }

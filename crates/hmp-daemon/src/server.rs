@@ -595,6 +595,7 @@ mod tests {
                     uri: format!("fake://{id}"),
                     media: None,
                     quality: hmp_core::AudioQuality::Mp3_128,
+                    replaygain_db: None,
                 })
             })
         }

@@ -124,10 +124,22 @@ pub struct Config {
 }
 
 /// 音频输出偏好（`[audio]` 段；`sink` = GStreamer sink 元素名，None = 系统默认）。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioPref {
     #[serde(default)]
     pub sink: Option<String>,
+    /// ReplayGain 音量补偿（默认开启；本地曲目按标签增益叠加到用户音量）。
+    #[serde(default = "default_true")]
+    pub replaygain: bool,
+}
+
+impl Default for AudioPref {
+    fn default() -> Self {
+        Self {
+            sink: None,
+            replaygain: true,
+        }
+    }
 }
 
 impl Config {
@@ -229,12 +241,16 @@ mod tests {
             let c3 = Config {
                 audio: AudioPref {
                     sink: Some("pulsesink".into()),
+                    replaygain: false,
                 },
                 ..Default::default()
             };
             let text = toml::to_string(&c3).unwrap();
             let back: Config = toml::from_str(&text).unwrap();
             assert_eq!(back.audio.sink.as_deref(), Some("pulsesink"));
+            assert!(!back.audio.replaygain);
+            // 默认：replaygain 开启（缺省字段）。
+            assert!(Config::default().audio.replaygain);
         });
     }
 
