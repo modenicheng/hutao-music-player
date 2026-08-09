@@ -302,7 +302,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 }
                 Some(Err(rusqlite::Error::InvalidQuery)) => Response::Err {
                     code: IpcErrorCode::Internal,
-                    message: "QQ 自建歌单暂不支持重命名".into(),
+                    message: "QQ 远端歌单只读（subscribed 仅可取消收藏；owned 不可重命名）".into(),
                 },
                 Some(Err(e)) => Response::Err {
                     code: IpcErrorCode::Internal,

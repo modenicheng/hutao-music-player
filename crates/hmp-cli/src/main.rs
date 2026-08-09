@@ -160,8 +160,12 @@ enum QueueCmd {
 /// `hmp playlist` 子命令。
 #[derive(Subcommand)]
 enum PlaylistCmd {
-    /// 列出歌单。
-    List,
+    /// 列出歌单（--scope all|local|owned|favorite，默认 all）。
+    List {
+        /// 范围：all | local | owned | favorite。
+        #[arg(long)]
+        scope: Option<String>,
+    },
     /// 查看歌单内曲目。
     Show { id: i64 },
     /// 新建歌单。
@@ -319,7 +323,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Command::Playlist(cmd) => match cmd {
-            PlaylistCmd::List => playlist::list().await,
+            PlaylistCmd::List { scope } => playlist::list(scope.as_deref()).await,
             PlaylistCmd::Show { id } => playlist::show(id).await,
             PlaylistCmd::Create { name } => playlist::create(&name).await,
             PlaylistCmd::Rename { id, name } => playlist::rename(id, &name).await,

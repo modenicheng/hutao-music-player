@@ -111,12 +111,29 @@ pub async fn remove_track(id: i64, position: i64) -> Result<(), Box<dyn std::err
 }
 
 /// 歌单列表（统一视图：local / qq-owned / qq-favorite）。
-pub async fn list() -> Result<(), Box<dyn std::error::Error>> {
+/// `scope`：all | local | owned | favorite（默认 all）。
+pub async fn list(scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;
     let rows = db.list_playlists()?;
+    let want = match scope {
+        Some("local") => Some("local"),
+        Some("owned") => Some("owned"),
+        Some("favorite") => Some("subscribed"),
+        Some("all") | None => None,
+        Some(other) => {
+            return Err(format!("未知 scope: {other}（all|local|owned|favorite）").into());
+        }
+    };
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|p| want.is_none_or(|w| p.relation == w))
+        .collect();
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
-        writeln!(stdout, "暂无本地歌单（hmp playlist create <名称>）")?;
+        writeln!(
+            stdout,
+            "暂无歌单（hmp playlist create <名称> / hmp library sync）"
+        )?;
     } else {
         writeln!(stdout, "{:<5} {:<12} {:<12} NAME", "ID", "TYPE", "SYNC")?;
         for p in &rows {
