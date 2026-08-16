@@ -1,0 +1,19 @@
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+}
+
+main {
+  display: flex;
+  min-height: 100vh;
+}
+
+aside {
+  width: 220px;
+  padding: 24px;
+}
+
+section {
+  flex: 1;
+  padding: 24px;
+}
