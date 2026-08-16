@@ -11,8 +11,6 @@
   padding: var(--space-4);
   overflow: auto;
   color: var(--foreground);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
 }
 </style>

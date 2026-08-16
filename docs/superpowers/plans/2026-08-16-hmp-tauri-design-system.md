@@ -45,12 +45,12 @@ Expected: `vue-tsc --noEmit` 和 `vite build` 均成功；若失败，记录为�
 在 `:root` 中保留现有胡桃木色阶、语义状态色和 Vuetify RGB 变量，将背景区域改成不透明纯色，并添加以下令牌：
 
 ```css
-  --background: #FAF8F7;
+  --background: var(--walnut-100);
   --foreground: var(--neutral-900);
 
-  --surface-1: #F2EFEC;
-  --surface-2: #FFFFFF;
-  --surface-3: #FDFCFB;
+  --surface-1: #ECEAE9;
+  --surface-2: #FAF9F8;
+  --surface-3: #FFFFFF;
   --card: var(--surface-2);
   --card-foreground: var(--foreground);
   --popover: var(--surface-3);
@@ -115,16 +115,16 @@ The existing `--secondary`, `--accent`, status colors and their foreground varia
 In `.dark`, keep the current dark walnut and neutral scale values, then define matching opaque semantic variables:
 
 ```css
-  --background: #12100D;
-  --foreground: var(--neutral-900);
+  --background: var(--walnut-50);
+  --foreground: var(--walnut-950);
 
   --surface-1: #1F1B17;
-  --surface-2: #2A241F;
-  --surface-3: #36302A;
+  --surface-2: #302321;
+  --surface-3: #44302D;
   --card: var(--surface-2);
-  --card-foreground: var(--foreground);
+  --card-foreground: var(--walnut-950);
   --popover: var(--surface-3);
-  --popover-foreground: var(--foreground);
+  --popover-foreground: var(--walnut-950);
 
   --primary-hover: var(--walnut-400);
   --primary-active: var(--walnut-600);
@@ -214,7 +214,6 @@ Keep the existing template, imports, `playerOverlay` state, and click handler. U
   overflow: auto;
   background: var(--surface-1);
   color: var(--foreground);
-  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
 }
 
@@ -247,7 +246,6 @@ Keep the empty template and add a scoped style block:
   overflow: auto;
   color: var(--foreground);
   background: var(--surface-2);
-  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
 }
 </style>
@@ -318,7 +316,6 @@ Keep the empty template and add a scoped style block without enabling the compon
   padding: 0 var(--space-4);
   color: var(--foreground);
   background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
 }
 </style>
 ```

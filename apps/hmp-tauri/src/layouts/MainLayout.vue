@@ -22,7 +22,7 @@ const playerOverlay = ref(false);
       class="player-bar"
       @click="
         () => {
-          playerOverlay = !playerOverlay;
+          // playerOverlay = !playerOverlay;
         }
       "
     />
@@ -42,7 +42,7 @@ const playerOverlay = ref(false);
   padding: var(--layout-gap);
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) var(--player-bar-height);
-  background: var(--background);
+  background: var(--surface-1);
 }
 
 /*
@@ -65,9 +65,8 @@ const playerOverlay = ref(false);
 
   overflow: auto;
 
-  background: var(--surface-1);
+  background: var(--surface-2);
   color: var(--foreground);
-  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
 }
 

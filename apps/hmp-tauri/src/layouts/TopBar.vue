@@ -10,6 +10,5 @@
   padding: 0 var(--space-4);
   color: var(--foreground);
   background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
 }
 </style>
