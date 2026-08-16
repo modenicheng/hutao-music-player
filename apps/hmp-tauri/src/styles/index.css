@@ -70,118 +70,248 @@ h6 {
   font-weight: inherit;
 }
 
+/* ============================================
+   浅色主题 (Light Theme) — 通透胡桃木
+   ============================================ */
 :root {
-  /* ============================================
-     1. 胡桃木主色色阶 (Walnut Scale)
-     ============================================ */
-  --walnut-50: #F5EDE8;
-  --walnut-100: #EAD9D0;
-  --walnut-200: #D4B3A2;
-  --walnut-300: #BF8D75;
-  --walnut-400: #A9674D;
-  --walnut-500: #7A3E2A;
-  /* 主色基准 */
-  --walnut-600: #6A3523;
-  --walnut-700: #5A2C1C;
-  --walnut-800: #4A2315;
-  --walnut-900: #3A1A0E;
-  --walnut-950: #2A1108;
+  /* ---------- 胡桃木色阶 (更通透版) ---------- */
+  --walnut-50: #F8F2EF;
+  --walnut-100: #EDE1DA;
+  --walnut-200: #DBC4B8;
+  --walnut-300: #C9A697;
+  --walnut-400: #B88975;
+  --walnut-500: #A4725C;
+  /* 新主色，更明亮通透 */
+  --walnut-600: #8A5F4C;
+  --walnut-700: #704C3C;
+  --walnut-800: #56392C;
+  --walnut-900: #3C261D;
+  --walnut-950: #22130E;
 
-  /* ============================================
-     2. 语义色 (Semantic Colors)
-     参考 shadcn/ui 的 background/foreground 命名规范
-     ============================================ */
-
-  /* Primary — 主色 */
+  /* ---------- 语义色 ---------- */
   --primary: var(--walnut-500);
   --primary-foreground: #FFFFFF;
-
   --primary-light: var(--walnut-300);
-  --primary-light-foreground: #2A1108;
-
+  --primary-light-foreground: #22130E;
   --primary-dark: var(--walnut-700);
   --primary-dark-foreground: #FFFFFF;
 
-  /* Secondary — 辅色（偏暖的浅胡桃色） */
-  --secondary: #B58B72;
-  --secondary-foreground: #2A1108;
+  --secondary: #C4A08A;
+  --secondary-foreground: #22130E;
 
-  /* Accent — 强调色（更偏红的点缀色） */
-  --accent: #C06040;
+  --accent: #C9704E;
   --accent-foreground: #FFFFFF;
 
-  /* ============================================
-     3. 状态色 (Status Colors)
-     ============================================ */
-  --success: #2D7D46;
+  /* ---------- 状态色 ---------- */
+  --success: #3A8A5A;
   --success-foreground: #FFFFFF;
-
-  --warning: #B8860B;
-  --warning-foreground: #2A1108;
-
-  --error: #B22222;
+  --warning: #C99A2E;
+  --warning-foreground: #22130E;
+  --error: #C94A4A;
   --error-foreground: #FFFFFF;
-
-  --info: #2E6B8A;
+  --info: #4A85A8;
   --info-foreground: #FFFFFF;
-
-  /* ============================================
-     4. 中性色 (Neutral Colors)
-     用于背景、文字、边框等
-     ============================================ */
-  --neutral-50: #F9F8F6;
-  --neutral-100: #F0EDE9;
-  --neutral-200: #E0DBD4;
-  --neutral-300: #C8C1B7;
-  --neutral-400: #A89F92;
-  --neutral-500: #887D6E;
-  --neutral-600: #6B6255;
-  --neutral-700: #4F483E;
-  --neutral-800: #36322B;
-  --neutral-900: #1E1B17;
-  --neutral-950: #0F0D0B;
-
-  /* ============================================
-     5. 背景 & 文字 (Background & Foreground)
-     参考 shadcn/ui 的语义变量
-     ============================================ */
-  --background: var(--neutral-50);
-  --foreground: var(--neutral-900);
-  --bg: var(--neutral-50);
-  --fg: var(--neutral-900);
-
-  --card: #FFFFFF;
-  --card-foreground: var(--neutral-900);
-
-  --popover: #FFFFFF;
-  --popover-foreground: var(--neutral-900);
-
-  --border: var(--neutral-200);
-  --input: var(--neutral-200);
-  --ring: var(--walnut-400);
-
-  --muted: var(--neutral-100);
-  --muted-foreground: var(--neutral-500);
-
   --destructive: var(--error);
   --destructive-foreground: #FFFFFF;
 
-  /* ============================================
-     6. Vuetify 风格颜色变量 (RGB 格式)
-     Vuetify 3 的 CSS 变量以 r,g,b 列表形式存储
-     ============================================ */
-  --v-theme-primary: 122, 62, 42;
-  --v-theme-secondary: 181, 139, 114;
-  --v-theme-accent: 192, 96, 64;
-  --v-theme-success: 45, 125, 70;
-  --v-theme-warning: 184, 134, 11;
-  --v-theme-error: 178, 34, 34;
-  --v-theme-info: 46, 107, 138;
-  --v-theme-background: 249, 248, 246;
+  /* ---------- 中性色 (柔和版) ---------- */
+  --neutral-50: #FAF8F7;
+  --neutral-100: #F2EFEC;
+  --neutral-200: #E3DED8;
+  --neutral-300: #CDC5BC;
+  --neutral-400: #B0A69B;
+  --neutral-500: #92877A;
+  --neutral-600: #756A5E;
+  --neutral-700: #574E44;
+  --neutral-800: #3D3630;
+  --neutral-900: #241F1B;
+  --neutral-950: #12100D;
+
+  /* ---------- 页面与表面 ---------- */
+  --background: #FAF8F7;
+  --foreground: var(--neutral-900);
+
+  --surface-1: #F2EFEC;
+  --surface-2: #FFFFFF;
+  --surface-3: #FDFCFB;
+  --card: var(--surface-2);
+  --card-foreground: var(--neutral-900);
+
+  --popover: var(--surface-3);
+  --popover-foreground: var(--neutral-900);
+
+  --border: #CDC5BC;
+  --border-strong: #B0A69B;
+  --input: #E3DED8;
+  --ring: var(--walnut-400);
+
+  --muted: #F2EFEC;
+  --muted-foreground: var(--neutral-500);
+  --track: var(--neutral-200);
+
+  --primary-hover: var(--walnut-400);
+  --primary-active: var(--walnut-600);
+
+  /* ---------- 间距 ---------- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+
+  /* ---------- 圆角 ---------- */
+  --radius-none: 0;
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-full: 9999px;
+
+  /* ---------- 阴影 ---------- */
+  --shadow-sm: 0 1px 2px rgba(36, 31, 27, 0.08);
+  --shadow-md: 0 4px 12px rgba(36, 31, 27, 0.12);
+  --shadow-lg: 0 12px 32px rgba(36, 31, 27, 0.18);
+
+  /* ---------- 尺寸 ---------- */
+  --control-height-xs: 0.25rem;
+  --control-height-sm: 2rem;
+  --control-height-md: 2.5rem;
+  --control-height-lg: 3rem;
+  --sidebar-width: clamp(14rem, 17vw, 18rem);
+  --top-bar-height: 5rem;
+  --player-bar-height: 5rem;
+  --layout-gap: var(--space-2);
+
+  /* ---------- 动效与层级 ---------- */
+  --duration-fast: 120ms;
+  --duration-normal: 240ms;
+  --duration-slow: 320ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-enter: cubic-bezier(0, 0, 0.18, 0.99);
+  --ease-exit: cubic-bezier(0.42, 0, 1, 1);
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-dropdown: 20;
+  --z-overlay: 30;
+  --z-modal: 40;
+
+  /* ---------- Vuetify 风格 RGB ---------- */
+  --v-theme-primary: 164, 114, 92;
+  --v-theme-secondary: 196, 160, 138;
+  --v-theme-accent: 201, 112, 78;
+  --v-theme-success: 58, 138, 90;
+  --v-theme-warning: 201, 154, 46;
+  --v-theme-error: 201, 74, 74;
+  --v-theme-info: 74, 133, 168;
+  --v-theme-background: 250, 248, 247;
   --v-theme-surface: 255, 255, 255;
   --v-theme-on-primary: 255, 255, 255;
-  --v-theme-on-secondary: 42, 17, 8;
+  --v-theme-on-secondary: 34, 19, 14;
   --v-theme-on-accent: 255, 255, 255;
-  --v-theme-on-background: 30, 27, 23;
-  --v-theme-on-surface: 30, 27, 23;
+  --v-theme-on-background: 36, 31, 27;
+  --v-theme-on-surface: 36, 31, 27;
+
+}
+
+/* ============================================
+   深色主题 (Dark Theme) — 深邃依旧通透
+   ============================================ */
+.dark {
+  /* 胡桃木色阶在深色模式下整体提亮，以保持可见度 */
+  --walnut-50: #2A1B16;
+  --walnut-100: #3D2820;
+  --walnut-200: #563A2E;
+  --walnut-300: #704C3C;
+  --walnut-400: #A4725C;
+  /* 在深色背景上作为主色 */
+  --walnut-500: #C9A697;
+  /* 更深背景上的主色变亮 */
+  --walnut-600: #DBC4B8;
+  --walnut-700: #EDE1DA;
+  --walnut-800: #F2ECEA;
+  --walnut-900: #F8F5F3;
+  --walnut-950: #FCFBFB;
+
+  /* 语义色覆盖 (深色下用更亮的胡桃木色) */
+  --primary: var(--walnut-500);
+  --primary-foreground: #12100D;
+  --primary-light: var(--walnut-400);
+  --primary-light-foreground: #FFFFFF;
+  --primary-dark: var(--walnut-600);
+  --primary-dark-foreground: #12100D;
+
+  --secondary: #B58B72;
+  --secondary-foreground: #FFFFFF;
+
+  --accent: #D6805A;
+  --accent-foreground: #12100D;
+
+  /* 状态色 (深色下保持可读性) */
+  --success: #4CAF6E;
+  --success-foreground: #12100D;
+  --warning: #D4A830;
+  --warning-foreground: #12100D;
+  --error: #E06060;
+  --error-foreground: #FFFFFF;
+  --info: #5A9ABF;
+  --info-foreground: #12100D;
+  --destructive: var(--error);
+  --destructive-foreground: #FFFFFF;
+
+  /* 中性色 (深色反转) */
+  --neutral-50: #12100D;
+  --neutral-100: #1F1B17;
+  --neutral-200: #36302A;
+  --neutral-300: #4F483E;
+  --neutral-400: #756A5E;
+  --neutral-500: #92877A;
+  --neutral-600: #B0A69B;
+  --neutral-700: #CDC5BC;
+  --neutral-800: #E3DED8;
+  --neutral-900: #F2EFEC;
+  --neutral-950: #FAF8F7;
+
+  /* 页面与表面 */
+  --background: #12100D;
+  --foreground: var(--neutral-900);
+
+  --surface-1: #1F1B17;
+  --surface-2: #2A241F;
+  --surface-3: #36302A;
+  --card: var(--surface-2);
+  --card-foreground: var(--neutral-900);
+
+  --popover: var(--surface-3);
+  --popover-foreground: var(--neutral-900);
+
+  --border: #4F483E;
+  --border-strong: #756A5E;
+  --input: #36302A;
+  --ring: var(--walnut-400);
+
+  --muted: #1F1B17;
+  --muted-foreground: var(--neutral-500);
+  --track: var(--neutral-300);
+
+  --primary-hover: var(--walnut-400);
+  --primary-active: var(--walnut-600);
+
+  /* Vuetify RGB (深色) */
+  --v-theme-primary: 201, 166, 151;
+  --v-theme-secondary: 181, 139, 114;
+  --v-theme-accent: 214, 128, 90;
+  --v-theme-success: 76, 175, 110;
+  --v-theme-warning: 212, 168, 48;
+  --v-theme-error: 224, 96, 96;
+  --v-theme-info: 90, 154, 191;
+  --v-theme-background: 18, 16, 13;
+  --v-theme-surface: 31, 27, 23;
+  --v-theme-on-primary: 18, 16, 13;
+  --v-theme-on-secondary: 255, 255, 255;
+  --v-theme-on-accent: 18, 16, 13;
+  --v-theme-on-background: 242, 239, 236;
+  --v-theme-on-surface: 242, 239, 236;
 }
