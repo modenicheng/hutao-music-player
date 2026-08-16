@@ -1,30 +1,136 @@
-# Rust
-/target
+# =========================
+# Rust / Cargo
+# =========================
+/target/
 **/target/
 
-# 本地工具产物
-*.swp
-*.swo
-.idea/
-.vscode/
-*.iml
+# Rust tooling
+*.profraw
+perf.data
+perf.data.old
 
-# 环境变量 / 凭据（严禁提交）
+# =========================
+# Node.js / Vue / Vite
+# =========================
+node_modules/
+**/node_modules/
+
+dist/
+**/dist/
+
+.vite/
+**/.vite/
+
+coverage/
+**/coverage/
+
+*.tsbuildinfo
+
+# Package manager caches / logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =========================
+# Tauri
+# =========================
+# Tauri Rust build output is already covered by **/target/
+# Keep src-tauri/Cargo.lock committed for applications.
+
+# Generated Tauri bundles / temporary output
+**/src-tauri/gen/
+
+# =========================
+# Environment variables
+# =========================
 .env
 .env.*
+!.env.example
 
-# 测试与诊断产物
+# =========================
+# Editors / IDE
+# =========================
+.vscode/
+.idea/
+
+*.swp
+*.swo
+*.swn
+*~
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+.AppleDouble
+.LSOverride
+
+Thumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+
+# =========================
+# Logs
+# =========================
 *.log
-/perf.data*
-*.profraw
+logs/
+**/logs/
 
-# 本地 Python 参考源（差分测试按需拉取，不提交）
+# =========================
+# Temporary files / caches
+# =========================
+tmp/
+.tmp/
+**/.tmp/
+
+.cache/
+**/.cache/
+
+.temp/
+**/.temp/
+
+# =========================
+# Test / diagnostic artifacts
+# =========================
+*.profraw
+*.profdata
+perf.data*
+lcov.info
+
+# =========================
+# Local dependencies / references
+# =========================
 third_party/
 .deps/
 
-# 临时文件
-/tmp/
+# =========================
+# Local project tooling
+# =========================
 .superpowers/sdd/
 
-# git worktree（本地隔离工作区，绝不提交）
+# Git worktrees
 .worktrees/
+
+# =========================
+# Local databases / runtime data
+# =========================
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Do not ignore checked-in test fixtures if you add SQLite fixtures later:
+# !fixtures/**/*.db
+
+# =========================
+# Credentials / secrets
+# =========================
+*.pem
+*.key
+*.p12
+*.pfx
+
+credentials.json
+secrets.json
