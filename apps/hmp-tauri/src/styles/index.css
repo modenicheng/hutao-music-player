@@ -1,0 +1,185 @@
+/* 样式重置 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+html {
+  font-size: 16px;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+  user-select: none;
+}
+
+img,
+svg,
+video,
+canvas {
+  display: block;
+  max-width: 100%;
+}
+
+input,
+button,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  outline: none;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+ul,
+ol {
+  list-style: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+:root {
+  /* ============================================
+     1. 胡桃木主色色阶 (Walnut Scale)
+     ============================================ */
+  --walnut-50: #F5EDE8;
+  --walnut-100: #EAD9D0;
+  --walnut-200: #D4B3A2;
+  --walnut-300: #BF8D75;
+  --walnut-400: #A9674D;
+  --walnut-500: #7A3E2A;
+  /* 主色基准 */
+  --walnut-600: #6A3523;
+  --walnut-700: #5A2C1C;
+  --walnut-800: #4A2315;
+  --walnut-900: #3A1A0E;
+  --walnut-950: #2A1108;
+
+  /* ============================================
+     2. 语义色 (Semantic Colors)
+     参考 shadcn/ui 的 background/foreground 命名规范
+     ============================================ */
+
+  /* Primary — 主色 */
+  --primary: var(--walnut-500);
+  --primary-foreground: #FFFFFF;
+
+  --primary-light: var(--walnut-300);
+  --primary-light-foreground: #2A1108;
+
+  --primary-dark: var(--walnut-700);
+  --primary-dark-foreground: #FFFFFF;
+
+  /* Secondary — 辅色（偏暖的浅胡桃色） */
+  --secondary: #B58B72;
+  --secondary-foreground: #2A1108;
+
+  /* Accent — 强调色（更偏红的点缀色） */
+  --accent: #C06040;
+  --accent-foreground: #FFFFFF;
+
+  /* ============================================
+     3. 状态色 (Status Colors)
+     ============================================ */
+  --success: #2D7D46;
+  --success-foreground: #FFFFFF;
+
+  --warning: #B8860B;
+  --warning-foreground: #2A1108;
+
+  --error: #B22222;
+  --error-foreground: #FFFFFF;
+
+  --info: #2E6B8A;
+  --info-foreground: #FFFFFF;
+
+  /* ============================================
+     4. 中性色 (Neutral Colors)
+     用于背景、文字、边框等
+     ============================================ */
+  --neutral-50: #F9F8F6;
+  --neutral-100: #F0EDE9;
+  --neutral-200: #E0DBD4;
+  --neutral-300: #C8C1B7;
+  --neutral-400: #A89F92;
+  --neutral-500: #887D6E;
+  --neutral-600: #6B6255;
+  --neutral-700: #4F483E;
+  --neutral-800: #36322B;
+  --neutral-900: #1E1B17;
+  --neutral-950: #0F0D0B;
+
+  /* ============================================
+     5. 背景 & 文字 (Background & Foreground)
+     参考 shadcn/ui 的语义变量
+     ============================================ */
+  --background: var(--neutral-50);
+  --foreground: var(--neutral-900);
+
+  --card: #FFFFFF;
+  --card-foreground: var(--neutral-900);
+
+  --popover: #FFFFFF;
+  --popover-foreground: var(--neutral-900);
+
+  --border: var(--neutral-200);
+  --input: var(--neutral-200);
+  --ring: var(--walnut-400);
+
+  --muted: var(--neutral-100);
+  --muted-foreground: var(--neutral-500);
+
+  --destructive: var(--error);
+  --destructive-foreground: #FFFFFF;
+
+  /* ============================================
+     6. Vuetify 风格颜色变量 (RGB 格式)
+     Vuetify 3 的 CSS 变量以 r,g,b 列表形式存储
+     ============================================ */
+  --v-theme-primary: 122, 62, 42;
+  --v-theme-secondary: 181, 139, 114;
+  --v-theme-accent: 192, 96, 64;
+  --v-theme-success: 45, 125, 70;
+  --v-theme-warning: 184, 134, 11;
+  --v-theme-error: 178, 34, 34;
+  --v-theme-info: 46, 107, 138;
+  --v-theme-background: 249, 248, 246;
+  --v-theme-surface: 255, 255, 255;
+  --v-theme-on-primary: 255, 255, 255;
+  --v-theme-on-secondary: 42, 17, 8;
+  --v-theme-on-accent: 255, 255, 255;
+  --v-theme-on-background: 30, 27, 23;
+  --v-theme-on-surface: 30, 27, 23;
+}
