@@ -147,6 +147,8 @@ h6 {
      ============================================ */
   --background: var(--neutral-50);
   --foreground: var(--neutral-900);
+  --bg: var(--neutral-50);
+  --fg: var(--neutral-900);
 
   --card: #FFFFFF;
   --card-foreground: var(--neutral-900);
