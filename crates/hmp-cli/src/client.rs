@@ -61,7 +61,7 @@ impl DaemonClient {
 /// spawn `hmp serve --background`：经 `hmp_daemon::serve::spawn_detached` 以
 /// `setsid` 脱离会话 + 丢弃 stdio（final review Finding 8，单一 detach 点）。
 fn spawn_daemon() -> Result<(), CliError> {
-    hmp_daemon::serve::spawn_detached(&["serve", "--background"])
+    hmp_daemon::serve::spawn_detached(&["--autonomous"])
         .map_err(|e| CliError::Connect(format!("拉起后端失败: {e}")))?;
     Ok(())
 }

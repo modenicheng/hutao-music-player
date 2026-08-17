@@ -2582,6 +2582,8 @@ dependencies = [
 name = "hmp-daemon"
 version = "0.1.0"
 dependencies = [
+ "clap 4.6.6",
+ "hmp-control",
  "hmp-core",
  "hmp-media",
  "hmp-mpris",
@@ -2598,6 +2600,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "wiremock",
 ]

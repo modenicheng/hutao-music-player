@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! `serve.rs` 编排集成测试（真实 GStreamer 环境；无音频设备的 CI 上跳过）。
 //!
 //! 协议层（帧编解码 / socket 服务器 / 引擎仲裁）已由 hmp-daemon 内 lib 级单测

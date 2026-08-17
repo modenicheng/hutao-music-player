@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! CLI 进程级集成测试（真机验收：需要真实 GStreamer/音频环境，默认 `#[ignore]`）。
 //!
 //! 协议层已由 hmp-daemon lib 级测试覆盖（`server.rs` / `engine.rs`）；

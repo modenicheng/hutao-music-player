@@ -1,46 +1,43 @@
-//! Unix socket 控制服务器（spec §4.2 `server.rs` / §5）。
+//! Cross-platform local control server (Unix socket / Windows named pipe).
 //!
 //! 长度前缀 JSON 帧；每连接独立任务；查询（Status/Queue）直接读
 //! `EngineHandle.state_rx` 同步应答；Subscribe 后推送 `Event` 帧。
 
-use std::path::PathBuf;
-
-use hmp_core::ipc::{
-    Event, IpcErrorCode, MAX_FRAME, Request, Response, decode_frame, encode_frame,
+use hmp_control::{
+    Event as ControlEvent, FrontendLeaseGuard, FrontendLeaseTracker, PROTOCOL_VERSION,
+    Request as ControlRequest, Response as ControlResponse,
 };
+use hmp_core::{Event, IpcErrorCode, Request, Response};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 use crate::engine::EngineHandle;
 
 /// socket 路径：`$XDG_RUNTIME_DIR/hmp.sock`，回退 `/tmp/hmp-{uid}/hmp.sock`
 /// （owner-only 目录，final review Finding 5；与 serve.rs 一致，勿重复实现）。
+#[cfg(unix)]
 pub fn socket_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir).join("hmp.sock");
-        }
-    }
-    #[cfg(unix)]
-    {
-        let uid = unsafe { libc::getuid() };
-        PathBuf::from(format!("/tmp/hmp-{uid}/hmp.sock"))
-    }
-    #[cfg(not(unix))]
-    {
-        PathBuf::from("/tmp/hmp.sock")
-    }
+    hmp_control::transport::endpoint()
 }
 
 /// 启动服务器（accept 循环；由 daemon 编排退出时机）。
-pub async fn serve(listener: UnixListener, handle: EngineHandle) {
+pub async fn serve(listener: hmp_control::transport::Listener, handle: EngineHandle) {
+    let lifecycle = FrontendLeaseTracker::autonomous(handle.command_tx.clone());
+    serve_with_lifecycle(listener, handle, lifecycle).await;
+}
+
+pub async fn serve_with_lifecycle(
+    mut listener: hmp_control::transport::Listener,
+    handle: EngineHandle,
+    lifecycle: FrontendLeaseTracker,
+) {
     loop {
         match listener.accept().await {
-            Ok((stream, _addr)) => {
+            Ok(stream) => {
                 let handle = handle.clone();
+                let lifecycle = lifecycle.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, handle).await {
+                    if let Err(e) = handle_connection(stream, handle, lifecycle).await {
                         tracing::debug!(%e, "连接处理结束");
                     }
                 });
@@ -78,8 +75,12 @@ fn requires_credential(req: &Request) -> bool {
 /// 仍能收到推送事件（不再有 100ms 轮询窗口停滞），请求也能即时应答
 /// （无需等待轮询窗口兜底）。直接对 `read_frame` 做 `select!` 会取消进行中的
 /// 读取并破坏帧边界，故采用 channel 中转。
-async fn handle_connection(stream: UnixStream, mut handle: EngineHandle) -> std::io::Result<()> {
-    let (mut rd, mut wr) = stream.into_split();
+async fn handle_connection(
+    stream: hmp_control::transport::BoxStream,
+    mut handle: EngineHandle,
+    lifecycle: FrontendLeaseTracker,
+) -> std::io::Result<()> {
+    let (mut rd, mut wr) = tokio::io::split(stream);
     let (frame_tx, mut frame_rx) = mpsc::channel::<std::io::Result<Option<Vec<u8>>>>(8);
     // reader 任务：阻塞读帧，逐帧投递；EOF/错误后退出（channel 关闭触发主循环收尾）。
     let reader = tokio::spawn(async move {
@@ -101,7 +102,9 @@ async fn handle_connection(stream: UnixStream, mut handle: EngineHandle) -> std:
             }
         }
     });
+    let mut handshaken = false;
     let mut subscribed = false;
+    let mut lease: Option<FrontendLeaseGuard> = None;
     let result: std::io::Result<()> = async {
         loop {
             tokio::select! {
@@ -109,7 +112,15 @@ async fn handle_connection(stream: UnixStream, mut handle: EngineHandle) -> std:
                     let Some(frame) = frame else { break }; // 通道关闭（reader 已退出）
                     match frame {
                         Ok(Some(raw)) => {
-                            handle_frame(&mut wr, &mut handle, raw, &mut subscribed).await?;
+                            handle_control_frame(
+                                &mut wr,
+                                &mut handle,
+                                &lifecycle,
+                                raw,
+                                &mut handshaken,
+                                &mut subscribed,
+                                &mut lease,
+                            ).await?;
                         }
                         Ok(None) => break, // EOF
                         Err(e) => return Err(e),
@@ -117,7 +128,7 @@ async fn handle_connection(stream: UnixStream, mut handle: EngineHandle) -> std:
                 }
                 // 订阅期间：状态变更与下一请求并发处理（推送不被请求读取阻塞）。
                 _ = handle.state_rx.changed(), if subscribed => {
-                    let ev = Event::StateChanged(handle.state_rx.borrow().clone());
+                    let ev = ControlEvent::Engine(Event::StateChanged(handle.state_rx.borrow().clone()));
                     write_frame(&mut wr, &ev).await?;
                 }
             }
@@ -129,25 +140,90 @@ async fn handle_connection(stream: UnixStream, mut handle: EngineHandle) -> std:
     result
 }
 
-/// 处理一帧请求：查询直接应答；Subscribe 置位并推初始快照；Play 类做凭证前置
-/// 校验后投递命令通道；解码失败回 BadRequest。订阅推送由主循环负责。
-async fn handle_frame<W: AsyncWrite + Unpin>(
+async fn handle_control_frame<W: AsyncWrite + Unpin>(
     wr: &mut W,
     handle: &mut EngineHandle,
+    lifecycle: &FrontendLeaseTracker,
     raw: Vec<u8>,
+    handshaken: &mut bool,
     subscribed: &mut bool,
+    lease: &mut Option<FrontendLeaseGuard>,
 ) -> std::io::Result<()> {
-    match decode_frame::<Request>(&raw) {
-        Ok(Request::Status) => {
+    let request = match hmp_control::decode_frame::<ControlRequest>(&raw) {
+        Ok(request) => request,
+        Err(error) => {
+            return write_frame(
+                wr,
+                &ControlResponse::ProtocolError {
+                    message: error.to_string(),
+                },
+            )
+            .await;
+        }
+    };
+    match request {
+        ControlRequest::Hello { protocol } if protocol == PROTOCOL_VERSION => {
+            *handshaken = true;
+            write_frame(
+                wr,
+                &ControlResponse::Hello {
+                    protocol: PROTOCOL_VERSION,
+                },
+            )
+            .await
+        }
+        ControlRequest::Hello { protocol } => {
+            write_frame(
+                wr,
+                &ControlResponse::ProtocolError {
+                    message: format!(
+                        "unsupported protocol {protocol}; expected {PROTOCOL_VERSION}"
+                    ),
+                },
+            )
+            .await
+        }
+        _ if !*handshaken => {
+            write_frame(
+                wr,
+                &ControlResponse::ProtocolError {
+                    message: "protocol handshake required".into(),
+                },
+            )
+            .await
+        }
+        ControlRequest::Subscribe { frontend_lease } => {
+            *subscribed = true;
+            if frontend_lease && lease.is_none() {
+                *lease = Some(lifecycle.acquire());
+            }
+            let event = ControlEvent::Engine(Event::StateChanged(
+                handle.state_rx.borrow_and_update().clone(),
+            ));
+            write_frame(wr, &event).await
+        }
+        ControlRequest::Engine(request) => handle_engine_request(wr, handle, request).await,
+    }
+}
+
+/// 处理一帧请求：查询直接应答；Subscribe 置位并推初始快照；Play 类做凭证前置
+/// 校验后投递命令通道；解码失败回 BadRequest。订阅推送由主循环负责。
+async fn handle_engine_request<W: AsyncWrite + Unpin>(
+    wr: &mut W,
+    handle: &mut EngineHandle,
+    request: Request,
+) -> std::io::Result<()> {
+    match request {
+        Request::Status => {
             // 先克隆出响应再 await，避免 watch::Ref 守卫跨 await（Send 约束）。
             let resp = Response::Status(handle.state_rx.borrow().clone());
-            write_frame(wr, &resp).await?;
+            write_engine_response(wr, &resp).await?;
         }
-        Ok(Request::Queue) => {
+        Request::Queue => {
             let resp = Response::Queue(handle.queue_rx.borrow().clone());
-            write_frame(wr, &resp).await?;
+            write_engine_response(wr, &resp).await?;
         }
-        Ok(Request::QueueList { offset, limit }) => {
+        Request::QueueList { offset, limit } => {
             // 纯 ID 分页（server 无媒体库引用；标题投影在 CLI 侧）。
             let snap = handle.queue_rx.borrow().clone();
             let total = snap.tracks.len();
@@ -167,23 +243,16 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 offset,
                 items,
             });
-            write_frame(wr, &resp).await?;
-        }
-        Ok(Request::Subscribe) => {
-            *subscribed = true;
-            // 先推初始快照，并标记为已见：防止引擎启动发布的 pending 版本让
-            // `changed()` 立即再推一帧重复快照（两帧连读导致客户端解码失败）。
-            let ev = Event::StateChanged(handle.state_rx.borrow_and_update().clone());
-            write_frame(wr, &ev).await?;
+            write_engine_response(wr, &resp).await?;
         }
         // —— 媒体库写命令：本地先提交，QQ 由 SyncWorker 异步同步（spec §3.3）。
         // 与播放状态正交，server 直接操作媒体库（不经过引擎命令循环）。
-        Ok(Request::Favorite {
+        Request::Favorite {
             source,
             key,
             title,
             desired,
-        }) => {
+        } => {
             let is_local = source == "local";
             let source_static: &'static str = if is_local { "local" } else { "qq" };
             let result = handle.library.as_ref().map(|lib| {
@@ -228,9 +297,9 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     message: "媒体库不可用".into(),
                 },
             };
-            write_frame(wr, &resp).await?;
+            write_engine_response(wr, &resp).await?;
         }
-        Ok(Request::PlaylistWrite { op }) => {
+        Request::PlaylistWrite { op } => {
             use hmp_core::PlaylistWriteOp;
             let mut trigger_sync = false;
             let result = handle
@@ -362,12 +431,12 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     message: "媒体库不可用".into(),
                 },
             };
-            write_frame(wr, &resp).await?;
+            write_engine_response(wr, &resp).await?;
         }
-        Ok(Request::LibrarySync) => {
+        Request::LibrarySync => {
             // 前置校验：reconcile 需要登录态（requires_credential 只作用于通用分支）。
             if !(handle.credential_ok)() {
-                write_frame(
+                write_engine_response(
                     wr,
                     &Response::Err {
                         code: IpcErrorCode::NotLoggedIn,
@@ -387,10 +456,10 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     message: "同步 worker 不可用".into(),
                 },
             };
-            write_frame(wr, &resp).await?;
+            write_engine_response(wr, &resp).await?;
         }
         // —— 评论（spec §6）：读走 TTL cache；写直发 QQ。
-        Ok(Request::CommentList { mid, sort }) => {
+        Request::CommentList { mid, sort } => {
             let resp = match &handle.comment {
                 Some(svc) => match svc.list(&mid, &sort).await {
                     Ok(page) => Response::CommentList(page),
@@ -404,13 +473,13 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     message: "评论服务不可用".into(),
                 },
             };
-            write_frame(wr, &resp).await?;
+            write_engine_response(wr, &resp).await?;
         }
-        Ok(Request::CommentPost {
+        Request::CommentPost {
             mid,
             content,
             reply_cmt_id,
-        }) => {
+        } => {
             let resp = match &handle.comment {
                 Some(svc) => match svc.post(&mid, &content, reply_cmt_id.as_deref()).await {
                     Ok(_) => Response::Ok,
@@ -424,9 +493,9 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     message: "评论服务不可用".into(),
                 },
             };
-            write_frame(wr, &resp).await?;
+            write_engine_response(wr, &resp).await?;
         }
-        Ok(Request::CommentDelete { cm_id }) => {
+        Request::CommentDelete { cm_id } => {
             let resp = match &handle.comment {
                 Some(svc) => match svc.delete(&cm_id).await {
                     Ok(()) => Response::Ok,
@@ -440,11 +509,11 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     message: "评论服务不可用".into(),
                 },
             };
-            write_frame(wr, &resp).await?;
+            write_engine_response(wr, &resp).await?;
         }
-        Ok(req) => {
+        req => {
             if requires_credential(&req) && !(handle.credential_ok)() {
-                write_frame(
+                write_engine_response(
                     wr,
                     &Response::Err {
                         code: IpcErrorCode::NotLoggedIn,
@@ -461,17 +530,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     message: "引擎已退出".into(),
                 },
             };
-            write_frame(wr, &resp).await?;
-        }
-        Err(e) => {
-            write_frame(
-                wr,
-                &Response::Err {
-                    code: IpcErrorCode::BadRequest,
-                    message: e.to_string(),
-                },
-            )
-            .await?;
+            write_engine_response(wr, &resp).await?;
         }
     }
     Ok(())
@@ -486,7 +545,7 @@ async fn read_frame<R: AsyncRead + Unpin>(stream: &mut R) -> std::io::Result<Opt
         Err(e) => return Err(e),
     }
     let len = u32::from_le_bytes(len_buf) as usize;
-    if len == 0 || len > MAX_FRAME - 4 {
+    if len == 0 || len > hmp_control::MAX_FRAME - 4 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "非法帧长度",
@@ -505,23 +564,32 @@ async fn write_frame<W: AsyncWrite + Unpin>(
     stream: &mut W,
     msg: &impl serde::Serialize,
 ) -> std::io::Result<()> {
-    let frame = encode_frame(msg).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let frame = hmp_control::encode_frame(msg).map_err(|e| std::io::Error::other(e.to_string()))?;
     stream.write_all(&frame).await
 }
 
-#[cfg(test)]
+async fn write_engine_response<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    response: &Response,
+) -> std::io::Result<()> {
+    write_frame(stream, &ControlResponse::Engine(response.clone())).await
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::engine::PlaybackEngine;
     use crate::player::{EngineError, PlaybackDriver, ResolvedTrack, SourceResolver};
-    use hmp_core::ipc::{Event, Request, Response};
+    use hmp_core::{Event, Request, Response};
     use hmp_core::{
         IpcErrorCode, PlayRequest, PlaybackState, PlaybackStatus, PlayerCommand, Track, TrackId,
     };
     use hmp_player_gst::{LoadRequest, PlayerEvent};
     use std::future::Future;
+    use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
+    use tokio::net::UnixStream;
     use tokio::sync::{broadcast, watch};
 
     /// 最小 fake 播放驱动（本模块测试专用）。
@@ -611,10 +679,12 @@ mod tests {
         PlaybackEngine::start(driver, Arc::new(SResolver), Arc::new(move || cred_ok))
     }
 
-    async fn temp_socket() -> (PathBuf, UnixListener) {
+    async fn temp_socket() -> (PathBuf, hmp_control::transport::Listener) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hmp-test.sock");
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = hmp_control::transport::Listener::bind_path(path.clone())
+            .await
+            .unwrap();
         // TempDir 必须保持存活到测试结束：drop 会删除 socket 文件，
         // 使后续 `UnixStream::connect` 失败（ENOENT）。
         std::mem::forget(dir);
@@ -624,10 +694,54 @@ mod tests {
     /// 连接 → 发送一帧 → 读一帧响应（每次新建连接）。
     async fn request(sock: &PathBuf, req: &Request) -> Response {
         let mut stream = UnixStream::connect(sock).await.unwrap();
-        stream.write_all(&encode_frame(req).unwrap()).await.unwrap();
-        let mut buf = vec![0u8; 65536];
-        let n = stream.read(&mut buf).await.unwrap();
-        decode_frame::<Response>(&buf[..n]).unwrap()
+        handshake(&mut stream).await;
+        write_frame(&mut stream, &ControlRequest::Engine(req.clone()))
+            .await
+            .unwrap();
+        match read_control::<ControlResponse>(&mut stream).await {
+            ControlResponse::Engine(response) => response,
+            other => panic!("expected engine response, got {other:?}"),
+        }
+    }
+
+    async fn handshake(stream: &mut UnixStream) {
+        write_frame(
+            stream,
+            &ControlRequest::Hello {
+                protocol: PROTOCOL_VERSION,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_control::<ControlResponse>(stream).await,
+            ControlResponse::Hello {
+                protocol: PROTOCOL_VERSION,
+            }
+        );
+    }
+
+    async fn subscribe(stream: &mut UnixStream) -> Event {
+        handshake(stream).await;
+        write_frame(
+            stream,
+            &ControlRequest::Subscribe {
+                frontend_lease: false,
+            },
+        )
+        .await
+        .unwrap();
+        match read_control::<ControlEvent>(stream).await {
+            ControlEvent::Engine(event) => event,
+        }
+    }
+
+    async fn read_control<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> T {
+        let frame = read_frame(stream)
+            .await
+            .unwrap()
+            .expect("control frame EOF");
+        hmp_control::decode_frame(&frame).unwrap()
     }
 
     #[tokio::test]
@@ -722,19 +836,14 @@ mod tests {
         let handle = PlaybackEngine::start(driver.clone(), Arc::new(SResolver), Arc::new(|| true));
         tokio::spawn(async move { serve(listener, handle).await });
         let mut stream = UnixStream::connect(&sock).await.unwrap();
-        stream
-            .write_all(&encode_frame(&Request::Subscribe).unwrap())
-            .await
-            .unwrap();
-        let mut buf = vec![0u8; 65536];
-        let n = stream.read(&mut buf).await.unwrap();
-        let ev: Event = decode_frame(&buf[..n]).unwrap();
+        let ev = subscribe(&mut stream).await;
         assert!(matches!(ev, Event::StateChanged(_)));
         // 触发状态变更 → 订阅帧（select 轮询间隔 100ms，等 300ms）
         state_tx.send_modify(|s| s.status = PlaybackStatus::Paused);
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        let n = stream.read(&mut buf).await.unwrap();
-        let ev2: Event = decode_frame(&buf[..n]).unwrap();
+        let ev2 = match read_control::<ControlEvent>(&mut stream).await {
+            ControlEvent::Engine(event) => event,
+        };
         assert!(matches!(ev2, Event::StateChanged(_)));
     }
 
@@ -753,24 +862,19 @@ mod tests {
         let handle = PlaybackEngine::start(driver.clone(), Arc::new(SResolver), Arc::new(|| true));
         tokio::spawn(async move { serve(listener, handle).await });
         let mut stream = UnixStream::connect(&sock).await.unwrap();
-        stream
-            .write_all(&encode_frame(&Request::Subscribe).unwrap())
-            .await
-            .unwrap();
-        let mut buf = vec![0u8; 65536];
-        let n = stream.read(&mut buf).await.unwrap();
-        let ev: Event = decode_frame(&buf[..n]).unwrap();
+        let ev = subscribe(&mut stream).await;
         assert!(matches!(ev, Event::StateChanged(_)));
         // 等待超过旧实现的 100ms 轮询窗口，确保读端已无待处理请求。
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         // 触发状态变更；期间不发送任何请求，仍须收到推送帧。
         state_tx.send_modify(|s| s.status = PlaybackStatus::Paused);
-        let read =
-            tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf)).await;
-        let n = read
-            .expect("订阅后状态变更未推送（停滞）")
-            .expect("读推送帧失败");
-        let ev2: Event = decode_frame(&buf[..n]).unwrap();
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_control::<ControlEvent>(&mut stream),
+        )
+        .await
+        .expect("订阅后状态变更未推送（停滞）");
+        let ControlEvent::Engine(ev2) = event;
         assert!(matches!(ev2, Event::StateChanged(_)));
     }
 
@@ -788,23 +892,20 @@ mod tests {
         let handle = PlaybackEngine::start(driver.clone(), Arc::new(SResolver), Arc::new(|| true));
         tokio::spawn(async move { serve(listener, handle).await });
         let mut stream = UnixStream::connect(&sock).await.unwrap();
-        stream
-            .write_all(&encode_frame(&Request::Subscribe).unwrap())
-            .await
-            .unwrap();
-        let mut buf = vec![0u8; 65536];
-        let n = stream.read(&mut buf).await.unwrap();
-        let _ev: Event = decode_frame(&buf[..n]).unwrap();
+        let _event = subscribe(&mut stream).await;
         // 订阅后发送 Status，应答须在 100ms 内（无状态变更、无轮询等待）。
-        stream
-            .write_all(&encode_frame(&Request::Status).unwrap())
+        write_frame(&mut stream, &ControlRequest::Engine(Request::Status))
             .await
             .unwrap();
-        let read =
-            tokio::time::timeout(std::time::Duration::from_millis(100), stream.read(&mut buf))
-                .await;
-        let n = read.expect("订阅后请求应答超过 100ms").expect("读响应失败");
-        let resp: Response = decode_frame(&buf[..n]).unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            read_control::<ControlResponse>(&mut stream),
+        )
+        .await
+        .expect("订阅后请求应答超过 100ms");
+        let ControlResponse::Engine(resp) = response else {
+            panic!("expected engine response")
+        };
         assert!(matches!(resp, Response::Status(_)));
     }
 
@@ -819,16 +920,8 @@ mod tests {
             .write_all(&[4, 0, 0, 0, b'j', b'u', b'n', b'k'])
             .await
             .unwrap();
-        let mut buf = vec![0u8; 65536];
-        let n = stream.read(&mut buf).await.unwrap();
-        let resp: Response = decode_frame(&buf[..n]).unwrap();
-        assert!(matches!(
-            resp,
-            Response::Err {
-                code: IpcErrorCode::BadRequest,
-                ..
-            }
-        ));
+        let response = read_control::<ControlResponse>(&mut stream).await;
+        assert!(matches!(response, ControlResponse::ProtocolError { .. }));
     }
 
     #[tokio::test]
@@ -964,3 +1057,5 @@ mod tests {
         );
     }
 }
+#[cfg(unix)]
+use std::path::PathBuf;
