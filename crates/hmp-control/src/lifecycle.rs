@@ -39,13 +39,17 @@ impl FrontendLeaseTracker {
     }
 
     pub fn new(mode: LifecycleMode, quit_tx: mpsc::UnboundedSender<hmp_core::Request>) -> Self {
-        Self {
+        let tracker = Self {
             inner: Arc::new(Inner {
                 mode,
                 state: Mutex::new(LeaseState::default()),
                 quit_tx,
             }),
+        };
+        if let LifecycleMode::FrontendOwned { orphan_grace } = mode {
+            schedule_orphan_shutdown(Arc::clone(&tracker.inner), 0, orphan_grace);
         }
+        tracker
     }
 
     pub fn acquire(&self) -> FrontendLeaseGuard {
@@ -99,18 +103,21 @@ impl Drop for FrontendLeaseGuard {
         if !became_orphaned {
             return;
         }
-        let inner = Arc::clone(&self.inner);
-        tokio::spawn(async move {
-            tokio::time::sleep(orphan_grace).await;
-            let should_quit = {
-                let state = inner.state.lock().expect("frontend lease lock poisoned");
-                state.active == 0 && state.generation == generation
-            };
-            if should_quit {
-                let _ = inner.quit_tx.send(hmp_core::Request::Quit);
-            }
-        });
+        schedule_orphan_shutdown(Arc::clone(&self.inner), generation, orphan_grace);
     }
+}
+
+fn schedule_orphan_shutdown(inner: Arc<Inner>, generation: u64, orphan_grace: Duration) {
+    tokio::spawn(async move {
+        tokio::time::sleep(orphan_grace).await;
+        let should_quit = {
+            let state = inner.state.lock().expect("frontend lease lock poisoned");
+            state.active == 0 && state.generation == generation
+        };
+        if should_quit {
+            let _ = inner.quit_tx.send(hmp_core::Request::Quit);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -127,10 +134,25 @@ mod tests {
         let lifecycle = FrontendLeaseTracker::frontend_owned(Duration::from_secs(30), quit_tx);
         let lease = lifecycle.acquire();
         drop(lease);
+        tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(29)).await;
         assert!(quit_rx.try_recv().is_err());
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(quit_rx.recv().await, Some(hmp_core::Request::Quit));
+        tokio::task::yield_now().await;
+        assert_eq!(quit_rx.try_recv().unwrap(), hmp_core::Request::Quit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn frontend_owned_daemon_without_first_lease_quits_after_grace() {
+        let (quit_tx, mut quit_rx) = mpsc::unbounded_channel();
+        let _lifecycle =
+            FrontendLeaseTracker::frontend_owned(Duration::from_secs(30), quit_tx);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert!(quit_rx.try_recv().is_err());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(quit_rx.try_recv().unwrap(), hmp_core::Request::Quit);
     }
 
     #[tokio::test(start_paused = true)]

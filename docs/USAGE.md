@@ -1,6 +1,6 @@
 # HMP 使用文档
 
-HMP 是面向 Linux 的 Rust QQ 音乐播放器：**后台常驻播放后端（daemon）+ 多前端遥控**（CLI、系统托盘、MPRIS 媒体键），支持无损/高解析度加密音质（QMC2）流式解密播放。
+HMP 是跨 Windows/Linux 的 Rust QQ 音乐播放器：**后台播放内核（`hmpd`）+ 多控制器**（CLI、Tauri/未来 Slint、桌面 tray；Linux 另有 MPRIS），支持无损/高解析度加密音质（QMC2）流式解密播放。播放内核不创建窗口或 tray，也不依赖任何交互前端。
 
 ## 目录
 
@@ -23,7 +23,26 @@ cargo build --release
 # 二进制位于 target/release/hmp
 ```
 
-依赖：Rust 1.85+、GStreamer（`gstreamer` 及其插件：`gst-plugins-base/good`，播放用 `playbin`）、Linux 桌面会话（tray/MPRIS 需要 D-Bus session bus；无桌面环境时后端照常运行，仅 tray/MPRIS 跳过）。
+依赖：Rust 1.85+、GStreamer（`gstreamer` 及其插件：`gst-plugins-base/good`，播放用 `playbin`）。Linux 的 MPRIS 需要 D-Bus session bus；CLI/headless 模式始终不创建窗口或 tray。
+
+### 1.1 Windows 原生依赖与桌面打包
+
+安装官方 MSVC x86_64 GStreamer 的同版本 **Runtime** 与 **Development** 安装包，然后在同一个 PowerShell 会话执行：
+
+```powershell
+./scripts/setup-gstreamer-windows.ps1
+cargo build -p hmp-daemon --bin hmpd --release --no-default-features
+./apps/hmp-tauri/scripts/stage-sidecar.ps1
+Push-Location apps/hmp-tauri
+pnpm install --frozen-lockfile
+pnpm test
+pnpm tauri build
+Pop-Location
+```
+
+设置脚本只探测 SDK 并配置当前进程的 `PATH`、`PKG_CONFIG_PATH` 和 `GSTREAMER_1_0_ROOT_MSVC_X86_64`，不会下载软件或修改系统环境。暂存脚本依据 `rustc -vV` 的 host triple 生成 Tauri 所需的 `hmpd-<target>.exe`；源二进制不存在时会明确失败。
+
+当前 Tauri bundle 捆绑 `hmpd`，但不自动收集 GStreamer DLL/插件树；运行安装包的 Windows 机器仍需安装官方 GStreamer Runtime。发布前的 clean-runtime 依赖收集与安装包验证是显式剩余验收项。
 
 ## 2. 登录
 
@@ -52,19 +71,21 @@ hmp auth
 ## 3. 播放：后台播放架构
 
 ```text
-hmp play <track-id> ──┐
-hmp status            ├─►  Unix socket JSON-RPC ──►  hmp daemon（常驻）
-playerctl -p hmp ...  │        (127.0.0.1 本机)          │
-系统托盘菜单 ──────────┘                                 │
+hmp / Tauri / tray ──►  hmp-control ──► hmpd（单一状态与播放进程）
+                         │
+                         ├─ Linux：owner-only Unix socket
+                         └─ Windows：session-scoped named pipe
+                                                         │
                                                          ▼
                                       队列核心 → 音质回退 → QMC2 解密 → GStreamer 播放
 ```
 
-- **单例常驻**：`hmp play/status/...` 等遥控命令发现 daemon 未运行时会**自动拉起**（detached + setsid，终端关闭播放不中断）；已运行则复用。
-- **控制面**：Unix socket（`$XDG_RUNTIME_DIR/hmp.sock`，无 XDG_RUNTIME_DIR 时 ` /tmp/hmp-<uid>/hmp.sock`，权限 0600），长度前缀 JSON 帧；多个客户端（多终端 + tray + MPRIS）可并发。
-- **单实例保证**：`flock` 锁文件（`<socket>.lock`）原子抢占；后启动的实例检测到已在运行即退出。
-- **状态单一来源**：daemon 发布 `DaemonState`（播放状态 + 队列 + 能力），CLI/tray/MPRIS 均只读它。
-- **退出**：`hmp quit` 或托盘「退出」→ 停止播放、清理 socket、释放 MPRIS、关闭 tray，进程退出；SIGINT/SIGTERM 同样处理。
+- **单例**：endpoint 在初始化 GStreamer 前抢占。Linux 用 `flock` 与 Unix socket；Windows 用 named pipe 的 first-instance 语义。后启动实例不会创建第二个播放器。
+- **控制面**：Linux socket 位于 `$XDG_RUNTIME_DIR/hmp.sock`（回退 `/tmp/hmp-<uid>/hmp.sock`），目录 0700、socket 0600；Windows pipe 名包含用户与登录 session，拒绝远程客户端，并以当前用户 DACL 限制访问。
+- **状态单一来源**：`hmpd` 发布 `DaemonState`，CLI、GUI 和 tray 都只发送接口命令并消费同一快照。WebView 不播放音频。
+- **自主模式**：CLI 发现 daemon 缺失时以 `hmpd --autonomous` 分离拉起；关闭终端不影响播放。
+- **前端托管模式**：GUI 发现 daemon 缺失时以 `hmpd --frontend-owned` 拉起并持有 lease。最后一个 GUI lease 断开后等待 30 秒；未重连则优雅退出。GUI 崩溃不再产生无期限孤儿进程。
+- **退出**：`hmp quit` 或桌面 tray「完整退出」发送统一 `Request::Quit`。GUI 最多等待 3 秒后清理自己的唯一 tray 并退出。
 
 ## 4. 命令参考（完整）
 
@@ -105,7 +126,7 @@ playerctl -p hmp ...  │        (127.0.0.1 本机)          │
 | 命令 | 说明 |
 |---|---|
 | `hmp serve` | 前台运行 daemon（调试用，Ctrl+C 退出） |
-| `hmp serve --background` | 后台运行（detached + setsid，命令立即返回）；遥控命令自动拉起时也走此路径 |
+| `hmp serve --background` | 兼容入口：后台拉起 autonomous `hmpd`；Windows 使用无控制台新进程组，Linux 使用 `setsid` |
 
 ## 5. 队列与播放语义
 
@@ -155,7 +176,7 @@ MPRIS `OpenUri`（`playerctl open file:///...`）经同一路径播放。
   playerctl -p hmp metadata      # 曲目元数据
   ```
   `CanGoNext`/`CanGoPrevious` 按队列位置与循环模式实时上报；`xesam:url` 为本地解密代理 URI。
-- **托盘**：KDE 等桌面显示图标，菜单 = 播放/暂停、上一首、下一首、停止、退出（GNOME 需 AppIndicator 扩展；无桌面会话时自动跳过，不影响播放）。
+- **桌面 tray**：由唯一桌面控制器维护，不属于 daemon。菜单 = 显示/隐藏、播放/暂停、上一首、下一首、停止、完整退出，并随 daemon 快照更新可用性。Windows 左键恢复窗口；Linux 仍可使用 tray 菜单，但 Tauri 底层不保证发送 tray 左键事件。CLI/headless 模式没有 tray。
 
 ## 8. 故障排查
 
@@ -163,7 +184,10 @@ MPRIS `OpenUri`（`playerctl open file:///...`）经同一路径播放。
 |---|---|
 | `hmp play` 报 `NotLoggedIn` | 先运行 `hmp login`；凭证过期同理 |
 | `后端启动超时` | daemon 拉起失败（见下）；可先手动 `hmp serve` 看前台错误 |
-| 端口/socket 冲突或残留 | 删除 `$XDG_RUNTIME_DIR/hmp.sock*` 与 `/tmp/hmp-<uid>/` 后重试（flock 锁保证不会双实例） |
+| socket 冲突或残留（Linux） | 确认没有 `hmpd` 后再删除 `$XDG_RUNTIME_DIR/hmp.sock*` 与 `/tmp/hmp-<uid>/`；锁保证不会双实例 |
+| named pipe 连接失败（Windows） | 确认 GUI/CLI 与 daemon 属于同一用户和登录 session；正常情况下无需也无法手动删除 pipe |
+| Windows 编译找不到 `gstreamer-1.0.pc` | 同时安装官方 Runtime/Development，并在当前 PowerShell 先运行 `./scripts/setup-gstreamer-windows.ps1` |
+| Tauri 报 sidecar 不存在 | 先 release 构建 `hmpd`，再运行 `./apps/hmp-tauri/scripts/stage-sidecar.ps1` |
 | 无声音 | 检查 GStreamer 音频插件（`gst-inspect-1.0 autoaudiosink`）；确认音频输出设备 |
 | 托盘不显示 | 桌面需支持 StatusNotifierItem（GNOME 装 AppIndicator 扩展）；无碍播放 |
 | `playerctl` 无响应 | `playerctl -p hmp` 前缀必须带 `-p hmp`；确认 daemon 在运行（`hmp status`） |
@@ -181,7 +205,7 @@ cargo fmt --all -- --check
 覆盖面：
 - **hmp-core**：`QueueCore` 纯逻辑（循环回绕/prev/播放顺序洗牌/历史回退/插队整片/移除）、IPC 帧编解码（round-trip、长度上限、截断）；
 - **hmp-daemon 引擎**：FakeDriver/FakeResolver 注入——Play 替换队列、Next/Prev 导航、EOS 自动续播、List/Track 循环、移除当前曲立即接替、quit 终止、seq/last_error 发布；
-- **服务器**：真实 Unix socket + 协议客户端——Status/Queue/订阅推送（含空闲订阅者事件流）、畸形帧、未登录前置校验、多客户端；
+- **服务器/传输**：共享握手与帧协议；Linux 验证 Unix socket 权限，Windows 验证多 named-pipe 客户端、远程拒绝与 second-listener 排他；
 - **CLI**：状态格式化、播放源解析、二维码渲染（已知像素图断言）、登录刷新判定、`hmp quit` 进程级优雅退出、`hmp quality`/`hmp history` 格式化；
 - **存储**：SQLite 媒体库（迁移 v1、upsert 幂等、播放会话 start→end 闭环、WAL 并发）、配置 round-trip、回退链生成；
 - **e2e（wiremock）**：QQ 详情/取流契约、音质回退链顺序（Auto 含 Atmos；固定 FLAC 只试 F0M0）。
@@ -218,3 +242,15 @@ cargo test -p hmp-daemon --test e2e -- --ignored
 cargo test -p hmp-daemon --test daemon_cli -- --ignored
 cargo test -p hmp-cli --test daemon_cli -- --ignored
 ```
+
+### 9.3 Windows 桌面生命周期验收
+
+完成 §1.1 的 release 打包后逐项验证：
+
+1. 启动桌面应用并播放本地 FLAC，确认实际音频由 `hmpd`/GStreamer 输出。
+2. 关闭主窗口，确认窗口隐藏、播放继续；单击 tray 恢复窗口。
+3. 分别从 GUI、tray 与 CLI 执行播放/暂停、上一首、下一首、停止，确认三者状态同步且只有一个 `hmpd.exe`。
+4. 在 GUI 启动 daemon 的场景强制结束 GUI，确认 30 秒内重启 GUI 可重新接管；不重启时 daemon 在宽限期后自行退出。
+5. 从 CLI 先启动 autonomous daemon，再打开 GUI，确认 GUI 复用已有实例；tray「完整退出」后确认 `hmpd.exe` 与 named pipe 均消失。
+
+自动化检查覆盖协议、named pipe 多客户端/单例、lease 计时器、Tauri 生命周期 reducer 和 Vue bridge；真实音频、Explorer tray 行为及安装包 clean-runtime 启动仍属于必须在装有官方 GStreamer SDK/运行时的 Windows 主机上完成的人工验收，不能以 `DOCS_RS=1` 类型检查代替。

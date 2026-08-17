@@ -64,6 +64,34 @@ jobs:
       - run: cargo test --workspace
       - run: cargo doc --no-deps --workspace
 
+  windows-control:
+    name: Windows control plane
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test Windows named-pipe transport
+        run: cargo test -p hmp-control --all-targets
+      - name: Type-check daemon and CLI Windows hosts
+        env:
+          DOCS_RS: "1"
+        run: |
+          cargo check -p hmp-daemon --no-default-features --all-targets
+          cargo check -p hmp-cli --all-targets
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/hmp-tauri/pnpm-lock.yaml
+      - run: corepack enable
+      - name: Test and build the WebView controller
+        working-directory: apps/hmp-tauri
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm test
+          pnpm build
+
   deny:
     name: deny
     runs-on: ubuntu-latest

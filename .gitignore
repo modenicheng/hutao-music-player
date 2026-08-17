@@ -37,6 +37,7 @@ pnpm-debug.log*
 # =========================
 # Tauri Rust build output is already covered by **/target/
 # Keep src-tauri/Cargo.lock committed for applications.
+**/src-tauri/binaries/hmpd-*
 
 # Generated Tauri bundles / temporary output
 **/src-tauri/gen/

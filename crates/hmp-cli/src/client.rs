@@ -26,7 +26,7 @@ pub struct DaemonClient {
 }
 
 impl DaemonClient {
-    /// 连接或拉起后端（ENOENT → spawn `hmp serve --background`；ECONNREFUSED → 清理重试）。
+    /// 连接或拉起 autonomous `hmpd`，随后轮询平台控制端点。
     pub async fn connect_or_spawn() -> Result<Self, CliError> {
         match Self::try_connect().await {
             Ok(c) => return Ok(c),
@@ -58,8 +58,8 @@ impl DaemonClient {
     }
 }
 
-/// spawn `hmp serve --background`：经 `hmp_daemon::serve::spawn_detached` 以
-/// `setsid` 脱离会话 + 丢弃 stdio（final review Finding 8，单一 detach 点）。
+/// 经 `hmp_daemon::serve::spawn_detached` 拉起同目录的 `hmpd --autonomous`。
+/// Linux 使用 `setsid`；Windows 使用无窗口的新进程组；两端都丢弃 stdio。
 fn spawn_daemon() -> Result<(), CliError> {
     hmp_daemon::serve::spawn_detached(&["--autonomous"])
         .map_err(|e| CliError::Connect(format!("拉起后端失败: {e}")))?;

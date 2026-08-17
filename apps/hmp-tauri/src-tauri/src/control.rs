@@ -204,7 +204,17 @@ pub async fn stop(state: State<'_, ControlState>) -> Result<(), String> {
 
 pub async fn quit_daemon(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<ControlState>();
-    expect_ok(state.request(hmp_core::Request::Quit).await?)
+    expect_ok(state.request(hmp_core::Request::Quit).await?)?;
+
+    loop {
+        match hmp_control::ControlClient::connect().await {
+            Ok(client) => {
+                drop(client);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(_) => return Ok(()),
+        }
+    }
 }
 
 pub async fn send_player_command(
