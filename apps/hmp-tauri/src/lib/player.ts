@@ -2,12 +2,31 @@ import { reactive } from "vue";
 
 const VOLUME_STORAGE_KEY = "hmp.player.volume";
 
-interface PlayerAudio {
-  currentTime: number;
-  duration: number;
+export interface PlayerStateSnapshot {
+  status: string;
+  positionMs: number;
+  durationMs: number | null;
   volume: number;
-  pause(): void;
-  play(): Promise<void> | void;
+  canSeek: boolean;
+  canGoNext: boolean;
+  canGoPrevious: boolean;
+  title: string | null;
+  artists: string[];
+  error: string | null;
+}
+
+export interface PlayerBridge {
+  getState(): Promise<PlayerStateSnapshot>;
+  onStateChanged(
+    listener: (state: PlayerStateSnapshot) => void,
+  ): Promise<() => void>;
+  onError(listener: (message: string) => void): Promise<() => void>;
+  togglePlay(): Promise<void>;
+  seek(positionMs: number): Promise<void>;
+  setVolume(volume: number): Promise<void>;
+  previous(): Promise<void>;
+  next(): Promise<void>;
+  stop(): Promise<void>;
 }
 
 interface PlayerStorage {
@@ -16,93 +35,115 @@ interface PlayerStorage {
 }
 
 interface PlayerControllerOptions {
-  audio?: PlayerAudio;
   storage?: PlayerStorage;
-  sendVolume?: (volume: number) => Promise<void> | void;
 }
 
 export enum PlayerControlStatus {
   idle,
-  mousedown,
   dragging,
-  mouseup,
 }
 
 export class PlayerController {
   readonly state = reactive({
     playing: false,
     progress: 0,
+    positionMs: 0,
+    durationMs: null as number | null,
     volume: 1,
+    status: "empty",
+    canSeek: false,
+    canGoNext: false,
+    canGoPrevious: false,
+    title: null as string | null,
+    artists: [] as string[],
+    error: null as string | null,
     controlStatus: PlayerControlStatus.idle,
     overlayVisible: false,
   });
 
-  private readonly audio: PlayerAudio;
+  private readonly bridge: PlayerBridge;
   private readonly storage?: PlayerStorage;
-  private readonly sendVolume?: PlayerControllerOptions["sendVolume"];
   private progressbar?: HTMLElement;
   private dragPercent = 0;
-  private animationFrame?: number;
+  private unsubscribes: Array<() => void> = [];
 
-  constructor(uri: string, options: PlayerControllerOptions = {}) {
-    this.audio = options.audio ?? new Audio(uri);
+  constructor(bridge: PlayerBridge, options: PlayerControllerOptions = {}) {
+    this.bridge = bridge;
     this.storage =
       options.storage ??
       (typeof localStorage === "undefined" ? undefined : localStorage);
-    this.sendVolume = options.sendVolume;
-
-    const volume = this.readVolume();
-    this.state.volume = volume;
-    this.audio.volume = volume;
+    this.state.volume = this.readVolume();
   }
 
-  mount = () => {
-    window.addEventListener("mouseup", this.handleMouseUp);
-    window.addEventListener("mousemove", this.handleMouseMove);
-    this.animationFrame = requestAnimationFrame(this.renderProgress);
+  mount = async () => {
+    if (typeof window !== "undefined") {
+      window.addEventListener("mouseup", this.handleMouseUp);
+      window.addEventListener("mousemove", this.handleMouseMove);
+    }
+    try {
+      this.unsubscribes = await Promise.all([
+        this.bridge.onStateChanged(this.applySnapshot),
+        this.bridge.onError((message) => {
+          this.state.error = message;
+        }),
+      ]);
+      this.applySnapshot(await this.bridge.getState());
+    } catch (error) {
+      this.setError(error);
+    }
   };
 
   unmount = () => {
-    window.removeEventListener("mouseup", this.handleMouseUp);
-    window.removeEventListener("mousemove", this.handleMouseMove);
-    if (this.animationFrame !== undefined) {
-      cancelAnimationFrame(this.animationFrame);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("mouseup", this.handleMouseUp);
+      window.removeEventListener("mousemove", this.handleMouseMove);
     }
+    this.unsubscribes.forEach((unsubscribe) => unsubscribe());
+    this.unsubscribes = [];
   };
 
   captureProgressBar = (element: unknown) => {
     this.progressbar = element instanceof HTMLElement ? element : undefined;
   };
 
-  togglePlay = () => {
-    if (this.state.playing) {
-      this.audio.pause();
-      this.state.playing = false;
-      return;
-    }
-    this.audio.play();
-    this.state.playing = true;
-  };
+  togglePlay = () => this.run(() => this.bridge.togglePlay());
+  previous = () => this.run(() => this.bridge.previous());
+  next = () => this.run(() => this.bridge.next());
+  stop = () => this.run(() => this.bridge.stop());
 
-  // UI -> local state/storage -> backend command.
   setVolume = (volume: number) => {
     const nextVolume = this.applyVolume(volume);
-    void this.sendVolume?.(nextVolume);
+    this.run(() => this.bridge.setVolume(nextVolume));
   };
 
-  // Backend snapshot -> local state/storage, without echoing a command.
+  // Daemon snapshots are authoritative and must never echo another command.
   syncVolume = (volume: number) => {
     this.applyVolume(volume);
   };
 
   startDragging = () => {
-    this.state.controlStatus = PlayerControlStatus.dragging;
+    if (this.state.canSeek) {
+      this.state.controlStatus = PlayerControlStatus.dragging;
+    }
+  };
+
+  updateDragPercent = (percent: number) => {
+    if (!Number.isFinite(percent)) return;
+    this.dragPercent = Math.min(1, Math.max(0, percent));
+    if (this.state.controlStatus === PlayerControlStatus.dragging) {
+      this.state.progress = this.dragPercent;
+    }
   };
 
   setProgress = () => {
+    if (this.state.controlStatus !== PlayerControlStatus.dragging) return;
     this.state.controlStatus = PlayerControlStatus.idle;
-    const progress = Math.min(1, Math.max(0, this.dragPercent));
-    this.audio.currentTime = progress * this.audio.duration;
+    const duration = this.state.durationMs;
+    if (duration === null || duration <= 0) return;
+    const positionMs = Math.round(duration * this.dragPercent);
+    this.state.positionMs = positionMs;
+    this.state.progress = this.dragPercent;
+    this.run(() => this.bridge.seek(positionMs));
   };
 
   showOverlay = () => {
@@ -117,11 +158,32 @@ export class PlayerController {
     this.state.overlayVisible = !this.state.overlayVisible;
   };
 
+  private applySnapshot = (snapshot: PlayerStateSnapshot) => {
+    this.state.status = snapshot.status;
+    this.state.playing = snapshot.status === "playing";
+    this.state.positionMs = snapshot.positionMs;
+    this.state.durationMs = snapshot.durationMs;
+    this.state.canSeek = snapshot.canSeek;
+    this.state.canGoNext = snapshot.canGoNext;
+    this.state.canGoPrevious = snapshot.canGoPrevious;
+    this.state.title = snapshot.title;
+    this.state.artists = [...snapshot.artists];
+    this.state.error = snapshot.error;
+    this.syncVolume(snapshot.volume);
+
+    if (this.state.controlStatus === PlayerControlStatus.idle) {
+      const duration = snapshot.durationMs;
+      this.state.progress =
+        duration !== null && duration > 0
+          ? Math.min(1, Math.max(0, snapshot.positionMs / duration))
+          : 0;
+    }
+  };
+
   private applyVolume(volume: number) {
     if (!Number.isFinite(volume)) return this.state.volume;
     const nextVolume = Math.min(1, Math.max(0, volume));
     this.state.volume = nextVolume;
-    this.audio.volume = nextVolume;
     this.storage?.setItem(VOLUME_STORAGE_KEY, String(nextVolume));
     return nextVolume;
   }
@@ -134,26 +196,22 @@ export class PlayerController {
   }
 
   private handleMouseUp = () => {
-    if (this.state.controlStatus === PlayerControlStatus.dragging) {
-      this.setProgress();
-    }
+    this.setProgress();
   };
 
   private handleMouseMove = (event: MouseEvent) => {
-    this.dragPercent =
-      (event.clientX -
-        (this.progressbar?.offsetLeft ? this.progressbar.offsetLeft : 0)) /
-      (this.progressbar?.clientWidth ? this.progressbar.clientWidth : 0);
-
-    this.dragPercent = Math.min(1, Math.max(0, this.dragPercent));
+    const width = this.progressbar?.clientWidth ?? 0;
+    if (width <= 0) return;
+    const left = this.progressbar?.getBoundingClientRect().left ?? 0;
+    this.updateDragPercent((event.clientX - left) / width);
   };
 
-  private renderProgress = () => {
-    if (this.state.controlStatus === PlayerControlStatus.idle) {
-      this.state.progress = this.audio.currentTime / this.audio.duration;
-    } else {
-      this.state.progress = this.dragPercent;
-    }
-    this.animationFrame = requestAnimationFrame(this.renderProgress);
-  };
+  private run(command: () => Promise<void>) {
+    this.state.error = null;
+    void command().catch((error) => this.setError(error));
+  }
+
+  private setError(error: unknown) {
+    this.state.error = error instanceof Error ? error.message : String(error);
+  }
 }
