@@ -23,7 +23,7 @@ url = "2"
 notify = { workspace = true }
 
 [features]
-default = ["tray", "mpris"]
+default = []
 tray = ["dep:ksni"]
 mpris = ["dep:hmp-mpris"]
 

@@ -17,7 +17,8 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 hmp-core = { path = "../hmp-core" }
-hmp-daemon = { path = "../hmp-daemon" }
+hmp-control = { path = "../hmp-control" }
+hmp-daemon = { path = "../hmp-daemon", default-features = false }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
 hmp-storage = { path = "../hmp-storage" }
 rusqlite = { workspace = true }
@@ -31,3 +32,6 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+hmp-daemon = { path = "../hmp-daemon", default-features = false, features = ["tray", "mpris"] }
