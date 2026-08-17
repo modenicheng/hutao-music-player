@@ -2,10 +2,11 @@
 import Sidebar from "./Sidebar.vue";
 import PlayerBar from "./PlayerBar.vue";
 import PlayerOverlay from "./PlayerOverlay.vue";
+import type { PlayerController } from "../lib/player.ts";
 
-import { ref } from "vue";
-
-const playerOverlay = ref(false);
+defineProps<{
+  player: PlayerController;
+}>();
 </script>
 
 <template>
@@ -19,17 +20,21 @@ const playerOverlay = ref(false);
     </main>
 
     <PlayerBar
+      :player="player"
       class="player-bar"
       @click="
         () => {
-          // playerOverlay = !playerOverlay;
+          // player.toggleOverlay();
         }
       "
     />
   </div>
 
   <Transition name="slide-bottom">
-    <PlayerOverlay v-if="playerOverlay" @close="playerOverlay = false" />
+    <PlayerOverlay
+      v-if="player.state.overlayVisible"
+      :player="player"
+    />
   </Transition>
 </template>
 

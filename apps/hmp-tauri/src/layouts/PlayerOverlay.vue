@@ -1,12 +1,13 @@
 <script setup lang="ts">
-const emits = defineEmits<{
-  close: [];
+import type { PlayerController } from "../lib/player";
+
+defineProps<{
+  player: PlayerController;
 }>();
 </script>
 
 <template>
-  <div class="player-container" @click="emits('close')">
-  </div>
+  <div class="player-container" @click="player.hideOverlay"></div>
 </template>
 
 <style scoped>
