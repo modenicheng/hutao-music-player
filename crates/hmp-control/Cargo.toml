@@ -1,0 +1,15 @@
+[package]
+name = "hmp-control"
+description = "HMP versioned controller protocol and cross-platform transport"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hmp-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+

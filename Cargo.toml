@@ -8,6 +8,7 @@
 [workspace]
 members = [
     "crates/hmp-cli",
+    "crates/hmp-control",
     "crates/hmp-core",
     "crates/hmp-daemon",
     "crates/hmp-desktop",
@@ -75,6 +76,7 @@ tracing-subscriber = "0.3"
 url = "2"
 notify = "6"
 hmp-core = { path = "crates/hmp-core" }
+hmp-control = { path = "crates/hmp-control" }
 hmp-storage = { path = "crates/hmp-storage" }
 
 # 仅测试用
