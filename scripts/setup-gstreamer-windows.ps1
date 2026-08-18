@@ -9,7 +9,8 @@ $candidates = @(
     $Root,
     $env:GSTREAMER_1_0_ROOT_MSVC_X86_64,
     "C:\gstreamer\1.0\msvc_x86_64",
-    (Join-Path ${env:ProgramFiles} "gstreamer\1.0\msvc_x86_64")
+    (Join-Path ${env:ProgramFiles} "gstreamer\1.0\msvc_x86_64"),
+    (Join-Path ${env:LOCALAPPDATA} "Programs\gstreamer\1.0\msvc_x86_64")
 ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
 $gstreamerRoot = $candidates |
@@ -21,9 +22,9 @@ $gstreamerRoot = $candidates |
 
 if (-not $gstreamerRoot) {
     throw @"
-未找到完整的 GStreamer MSVC x86_64 SDK。
-请从 https://gstreamer.freedesktop.org/download/ 安装同版本的 Runtime 和 Development 安装包，
-或使用 -Root 指定包含 bin\gst-inspect-1.0.exe 与 lib\pkgconfig\gstreamer-1.0.pc 的目录。
+GStreamer MSVC x86_64 SDK was not found.
+Install matching Runtime and Development packages from https://gstreamer.freedesktop.org/download/,
+or pass -Root with a directory containing bin\gst-inspect-1.0.exe and lib\pkgconfig\gstreamer-1.0.pc.
 "@
 }
 
@@ -44,5 +45,5 @@ $env:PKG_CONFIG_PATH = if ([string]::IsNullOrWhiteSpace($existingPkgConfig)) {
     "$pkgConfigPath;$existingPkgConfig"
 }
 
-Write-Host "GStreamer SDK：$gstreamerRoot"
-Write-Host "已为当前 PowerShell 进程配置 PATH、PKG_CONFIG_PATH 和 GSTREAMER_1_0_ROOT_MSVC_X86_64。"
+Write-Host "GStreamer SDK: $gstreamerRoot"
+Write-Host "Configured PATH, PKG_CONFIG_PATH, and GSTREAMER_1_0_ROOT_MSVC_X86_64 for this process."

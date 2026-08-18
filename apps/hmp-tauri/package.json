@@ -7,10 +7,12 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "test": "vitest run",
+    "sidecar:prepare:debug": "node ./scripts/prepare-sidecar.mjs debug",
+    "sidecar:prepare:release": "node ./scripts/prepare-sidecar.mjs release",
     "sidecar:stage": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/stage-sidecar.ps1",
-    "tauri:build:windows": "pnpm sidecar:stage && tauri build",
+    "tauri:build:windows": "pnpm tauri build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "node ./scripts/tauri.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

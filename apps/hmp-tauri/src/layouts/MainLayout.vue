@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import Sidebar from "./Sidebar.vue";
 import PlayerBar from "./PlayerBar.vue";
 import PlayerOverlay from "./PlayerOverlay.vue";
@@ -7,13 +8,15 @@ import type { PlayerController } from "../lib/player.ts";
 defineProps<{
   player: PlayerController;
 }>();
+
+const sidebarCollapsed = ref(false);
 </script>
 
 <template>
-  <div class="app-layout">
+  <div class="app-layout" :class="{ 'is-sidebar-collapsed': sidebarCollapsed }">
     <!-- <TopBar class="top-bar" /> -->
 
-    <Sidebar class="sidebar" />
+    <Sidebar v-model:collapsed="sidebarCollapsed" class="sidebar" />
 
     <main class="content">
       <RouterView />
@@ -31,10 +34,7 @@ defineProps<{
   </div>
 
   <Transition name="slide-bottom">
-    <PlayerOverlay
-      v-if="player.state.overlayVisible"
-      :player="player"
-    />
+    <PlayerOverlay v-if="player.state.overlayVisible" :player="player" />
   </Transition>
 </template>
 
@@ -45,9 +45,15 @@ defineProps<{
   display: grid;
   gap: var(--layout-gap);
   padding: var(--layout-gap);
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-current-width) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) var(--player-bar-height);
   background: var(--surface-1);
+  --sidebar-current-width: var(--sidebar-width);
+  transition: grid-template-columns var(--duration-slow) var(--ease-standard);
+}
+
+.app-layout.is-sidebar-collapsed {
+  --sidebar-current-width: 4rem;
 }
 
 /*

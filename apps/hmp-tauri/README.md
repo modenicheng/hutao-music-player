@@ -33,6 +33,16 @@ GStreamer 脚本只为当前 PowerShell 进程配置环境，不下载软件，�
 
 当前安装包只捆绑 `hmpd`，尚未把 GStreamer DLL 与插件树一起收集进安装包；目标 Windows 机器仍需安装对应架构的官方 GStreamer Runtime。发布前必须在未安装开发工具的干净 Windows 环境验证依赖收集，不能把构建机上可运行视为已完成 clean-runtime 打包。
 
+## 本地开发
+
+安装 GStreamer Runtime 与 Development 后，在 `apps/hmp-tauri` 目录运行：
+
+```powershell
+pnpm tauri dev
+```
+
+该命令会先探测 GStreamer SDK、构建 debug 版 daemon，并按当前 Rust host triple 暂存 sidecar，再启动 Tauri 和 Vite；同一环境也会传递给启动后的 `hmpd`。不要设置 `DOCS_RS=1`；该变量只适用于不链接原生库的类型检查。
+
 ## 开发检查
 
 ```powershell
