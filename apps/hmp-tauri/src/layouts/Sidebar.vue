@@ -16,7 +16,9 @@ import queueIcon from "../assets/icons/queue-music-rounded.svg?raw";
 import settingsIcon from "../assets/icons/settings-rounded.svg?raw";
 
 defineProps<{ collapsed?: boolean }>();
-defineEmits<{ "update:collapsed": [value: boolean] }>();
+const emit = defineEmits<{ "update:collapsed": [value: boolean] }>();
+
+// emit.call(true, "update:collapsed", true);
 </script>
 
 <template>
@@ -40,7 +42,7 @@ defineEmits<{ "update:collapsed": [value: boolean] }>();
         </Button>
       </div>
     </section>
-    <Scroll :height="'30rem'">
+    <Scroll direction="vertical">
       <nav class="primary-nav" aria-label="主导航">
         <Button variant="ghost" class="sidebar-button nav-item">
           <AppIcon :src="homeIcon" />
@@ -156,7 +158,6 @@ defineEmits<{ "update:collapsed": [value: boolean] }>();
   height: 100%;
   min-width: 0;
   overflow: hidden;
-  /* color: var(--foreground); */
 }
 
 .sidebar-scroll {

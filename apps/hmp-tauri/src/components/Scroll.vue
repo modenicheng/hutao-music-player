@@ -1,10 +1,16 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from "vue";
 
-const props = defineProps<{
-  width?: number | string;
-  height?: number | string;
-}>();
+type ScrollDirection = "all" | "vertical" | "horizontal";
+
+const props = withDefaults(
+  defineProps<{
+    width?: number | string;
+    height?: number | string;
+    direction?: ScrollDirection;
+  }>(),
+  { width: "100%", height: "100%", direction: "all" },
+);
 
 type Axis = "x" | "y";
 type Size = { width: number; height: number };
@@ -36,7 +42,8 @@ class ScrollBar {
   constructor(
     content: HTMLElement,
     inner: HTMLElement,
-    thumb: { y: HTMLElement; x: HTMLElement },
+    thumb: Thumbs,
+    private readonly direction: ScrollDirection,
   ) {
     this.content = content;
     this.inner = inner;
@@ -151,16 +158,19 @@ class ScrollBar {
   }
 
   private updateThumbVisibility() {
-    const hasVerticalScroll = this.contentSize.height > this.viewport.height;
-    const hasHorizontalScroll = this.contentSize.width > this.viewport.width;
+    const hasVerticalScroll =
+      this.direction !== "horizontal" &&
+      this.contentSize.height > this.viewport.height;
+    const hasHorizontalScroll =
+      this.direction !== "vertical" &&
+      this.contentSize.width > this.viewport.width;
 
     this.setThumbVisibility(this.thumb.y, hasVerticalScroll);
     this.setThumbVisibility(this.thumb.x, hasHorizontalScroll);
   }
 
   private setThumbVisibility(element: HTMLElement, visible: boolean) {
-    element.style.opacity = visible ? "" : "0";
-    element.style.pointerEvents = visible ? "" : "none";
+    element.style.display = visible ? "" : "none";
   }
 
   private handleResize = (entries: ResizeObserverEntry[]) => {
@@ -263,10 +273,15 @@ onMounted(() => {
     thumbYRef.value &&
     innerRef.value
   ) {
-    scrollBar.value = new ScrollBar(contentRef.value, innerRef.value, {
-      x: thumbXRef.value,
-      y: thumbYRef.value,
-    });
+    scrollBar.value = new ScrollBar(
+      contentRef.value,
+      innerRef.value,
+      {
+        x: thumbXRef.value,
+        y: thumbYRef.value,
+      },
+      props.direction,
+    );
   }
 });
 
@@ -285,7 +300,14 @@ onUnmounted(() => {
   >
     <div class="thumb thumb-y" ref="thumbYRef"></div>
     <div class="thumb thumb-x" ref="thumbXRef"></div>
-    <div class="content" ref="contentRef">
+    <div
+      class="content"
+      :style="{
+        overflowX: props.direction === 'vertical' ? 'hidden' : undefined,
+        overflowY: props.direction === 'horizontal' ? 'hidden' : undefined,
+      }"
+      ref="contentRef"
+    >
       <div ref="innerRef" class="inner">
         <slot />
       </div>
@@ -336,7 +358,6 @@ onUnmounted(() => {
   height: 100%;
   overflow: auto;
 }
-
 .content::-webkit-scrollbar {
   display: none;
 }
