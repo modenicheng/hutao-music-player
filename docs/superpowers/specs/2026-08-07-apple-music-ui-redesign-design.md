@@ -263,7 +263,7 @@ cargo fmt --all -- --check
 本次 UI 重构不包含：
 
 - QQ 音乐 API 协议重写。
-- 播放后端替换或 GStreamer 架构变更。
+- 播放后端替换或 Rodio 架构变更。
 - MV、社区、评论、直播、播客、K 歌等业务。
 - 真实推荐、收藏云同步和完整用户歌单接口实现。
 - Windows、macOS 或移动端适配。

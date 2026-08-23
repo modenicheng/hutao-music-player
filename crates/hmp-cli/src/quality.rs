@@ -93,15 +93,15 @@ mod tests {
     }
 
     #[test]
-    fn set_preserves_audio_sink() {
+    fn set_preserves_audio_preferences() {
         isolated(|| {
-            // 预置 [audio] sink → quality set 不应抹掉（里程碑 G review）。
+            // 预置 ReplayGain 偏好，quality set 不应抹掉。
             let mut c = Config::load();
-            c.audio.sink = Some("fakesink".into());
+            c.audio.replaygain = false;
             c.save().unwrap();
             set("flac", true).unwrap();
             let back = Config::load();
-            assert_eq!(back.audio.sink.as_deref(), Some("fakesink"));
+            assert!(!back.audio.replaygain);
             assert_eq!(back.quality.mode, "flac");
         });
     }

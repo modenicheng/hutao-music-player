@@ -12,7 +12,7 @@ hutao-music-player/
 ├── crates/
 │   ├── hmp-core/           # 领域模型：Track/PlayerCommand/PlaybackState/QueueCore/IPC 协议
 │   ├── hmp-qqmusic-api/    # QQ 音乐 API 移植 crate（独立发布 crates.io）
-│   ├── hmp-player-gst/     # GStreamer 播放核心（PlayerCore）
+│   ├── hmp-player/     # Rodio 播放核心（PlayerCore）
 │   ├── hmp-media/          # 下载/QMC2 解密/缓存/本地回环解密代理
 │   ├── hmp-storage/        # 凭证存储
 │   ├── hmp-mpris/          # MPRIS D-Bus 服务

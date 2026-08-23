@@ -1,6 +1,6 @@
 //! `hmp serve` 入口（spec §4.2 `serve.rs`）。
 //!
-//! 组装 daemon（引擎 + GStreamer 驱动 + QQ 解析器）并接入 Task 3 的
+//! 组装 daemon（引擎 + Rust 音频驱动 + QQ 解析器）并接入 Task 3 的
 //! Unix socket 控制服务器；SIGINT/SIGTERM → 引擎 Quit → 引擎退出
 //! （sticky watch）→ 停服务器 → 清理 socket 后退出。
 //! 单实例由 flock 锁文件保证（final review Finding 6）。
@@ -11,19 +11,14 @@ use crate::daemon::{Daemon, DaemonConfig};
 use crate::server;
 
 /// 前台运行（调试；Ctrl+C 优雅退出）。也是后台 detached 子进程的 daemon 循环。
-/// `sink`：GStreamer 输出元素名（`--sink` 命令行覆盖 config.toml；None = 配置/默认）。
-pub async fn run_foreground(sink: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    run_inner(DaemonConfig {
-        audio_sink: sink.map(|s| s.to_string()),
-    })
-    .await
+pub async fn run_foreground() -> Result<(), Box<dyn std::error::Error>> {
+    run_inner(DaemonConfig).await
 }
 
 /// 后台运行：`setsid` 完全脱离当前会话启动子进程（无控制终端、丢弃 stdio），
 /// 子进程运行前台 daemon 循环；本函数随即返回（final review Finding 8）。
-/// `sink` 经命令行 `--sink NAME` 透传给子进程（打磨）。
-pub async fn run_background(sink: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    spawn_detached(&background_args(sink))?;
+pub async fn run_background() -> Result<(), Box<dyn std::error::Error>> {
+    spawn_detached(&background_args())?;
     Ok(())
 }
 
@@ -43,28 +38,12 @@ pub fn spawn_detached(args: &[&str]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 合并输出设备：显式注入优先，否则用 config.toml `[audio] sink`（无 → None）。
-/// 里程碑 G：输出设备选择（`config.toml [audio] sink` → GstDriver）。
-fn merge_audio_sink(injected: Option<&str>, configured: Option<String>) -> Option<String> {
-    injected.map(|s| s.to_string()).or(configured)
-}
-
-/// 打磨：`serve --background` 的子进程参数（含 `--sink NAME` 时透传）。
-fn background_args(sink: Option<&str>) -> Vec<&str> {
-    let mut args = vec!["serve"];
-    if let Some(s) = sink {
-        args.push("--sink");
-        args.push(s);
-    }
-    args
+/// `serve --background` 的子进程参数。
+fn background_args() -> Vec<&'static str> {
+    vec!["serve"]
 }
 
 async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
-    // 里程碑 G：输出设备来自 config.toml `[audio] sink`（显式注入优先；无段 → 系统默认）。
-    let audio = hmp_storage::Config::load().audio;
-    let cfg = DaemonConfig {
-        audio_sink: merge_audio_sink(cfg.audio_sink.as_deref(), audio.sink),
-    };
     let path = server::socket_path();
     // 父目录（XDG_RUNTIME_DIR 已存在；/tmp/hmp-{uid} 回退目录须创建且仅属本用户，
     // final review Finding 5）。
@@ -141,6 +120,12 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
         handle.caps_rx.clone(),
     )
     .await;
+    #[cfg(windows)]
+    let smtc = crate::smtc::start_smtc(
+        handle.command_tx.clone(),
+        handle.state_rx.clone(),
+        handle.caps_rx.clone(),
+    );
     // 等待引擎实际终止（sticky watch；`hmp quit` / tray 退出 / SIGINT/SIGTERM 均
     // 收敛到引擎处理 Request::Quit 后置位，final review Finding 7）。信号任务只发
     // Quit，不再旁路通知，故此处仅需等引擎退出，清理必然在 driver.shutdown 之后。
@@ -161,6 +146,8 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
     }
     #[cfg(feature = "mpris")]
     drop(mpris);
+    #[cfg(windows)]
+    drop(smtc);
     tracing::info!("后端已退出");
     Ok(())
 }
@@ -169,31 +156,8 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
 mod tests {
     use super::*;
 
-    /// 里程碑 G：输出设备合并——显式注入优先于配置；配置缺失 → None。
     #[test]
-    fn audio_sink_config_merges_with_injection() {
-        assert_eq!(
-            merge_audio_sink(Some("injected"), Some("configed".into())),
-            Some("injected".to_string())
-        );
-        assert_eq!(
-            merge_audio_sink(None, Some("configed".into())),
-            Some("configed".to_string())
-        );
-        assert_eq!(merge_audio_sink(None, None), None);
-        assert_eq!(
-            merge_audio_sink(Some("injected"), None),
-            Some("injected".to_string())
-        );
-    }
-
-    /// 打磨：`--sink` 命令行参数 → detached 子进程参数透传。
-    #[test]
-    fn background_args_include_sink_when_given() {
-        assert_eq!(background_args(None), vec!["serve"]);
-        assert_eq!(
-            background_args(Some("fakesink")),
-            vec!["serve", "--sink", "fakesink"]
-        );
+    fn background_args_are_backend_neutral() {
+        assert_eq!(background_args(), vec!["serve"]);
     }
 }

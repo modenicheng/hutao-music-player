@@ -1,6 +1,6 @@
 # HMP 使用文档
 
-HMP 是面向 Linux 的 Rust QQ 音乐播放器：**后台常驻播放后端（daemon）+ 多前端遥控**（CLI、系统托盘、MPRIS 媒体键），支持无损/高解析度加密音质（QMC2）流式解密播放。
+HMP 是面向 Windows 与 Linux 的 Rust QQ 音乐播放器：**后台常驻播放后端（daemon）+ 多前端遥控**（CLI、桌面应用、SMTC/MPRIS 媒体键），支持无损/高解析度加密音质（QMC2）流式解密播放。
 
 ## 目录
 
@@ -10,7 +10,7 @@ HMP 是面向 Linux 的 Rust QQ 音乐播放器：**后台常驻播放后端（d
 4. [命令参考（完整）](#4-命令参考完整)
 5. [队列与播放语义](#5-队列与播放语义)
 6. [音质与 QMC2 解密](#6-音质与-qmc2-解密)
-7. [系统集成：MPRIS / 托盘](#7-系统集成mpris--托盘)
+7. [系统集成：SMTC / MPRIS / 托盘](#7-系统集成mpris--托盘)
 8. [故障排查](#8-故障排查)
 9. [测试指南](#9-测试指南)
 
@@ -23,7 +23,7 @@ cargo build --release
 # 二进制位于 target/release/hmp
 ```
 
-依赖：Rust 1.85+、GStreamer（`gstreamer` 及其插件：`gst-plugins-base/good`，播放用 `playbin`）、Linux 桌面会话（tray/MPRIS 需要 D-Bus session bus；无桌面环境时后端照常运行，仅 tray/MPRIS 跳过）。
+依赖：Rust 1.85+。音频由 Rodio/CPAL 提供；Windows 无需安装额外媒体 SDK，Linux 需要发行版的 ALSA 开发库。tray/MPRIS 需要 D-Bus session bus；无桌面会话时后端仍可运行。
 
 ## 2. 登录
 
@@ -57,7 +57,7 @@ hmp status            ├─►  Unix socket JSON-RPC ──►  hmp daemon（�
 playerctl -p hmp ...  │        (127.0.0.1 本机)          │
 系统托盘菜单 ──────────┘                                 │
                                                          ▼
-                                      队列核心 → 音质回退 → QMC2 解密 → GStreamer 播放
+                                      队列核心 → 音质回退 → QMC2 解密 → Rodio 播放
 ```
 
 - **单例常驻**：`hmp play/status/...` 等遥控命令发现 daemon 未运行时会**自动拉起**（detached + setsid，终端关闭播放不中断）；已运行则复用。
@@ -164,7 +164,7 @@ MPRIS `OpenUri`（`playerctl open file:///...`）经同一路径播放。
 | `hmp play` 报 `NotLoggedIn` | 先运行 `hmp login`；凭证过期同理 |
 | `后端启动超时` | daemon 拉起失败（见下）；可先手动 `hmp serve` 看前台错误 |
 | 端口/socket 冲突或残留 | 删除 `$XDG_RUNTIME_DIR/hmp.sock*` 与 `/tmp/hmp-<uid>/` 后重试（flock 锁保证不会双实例） |
-| 无声音 | 检查 GStreamer 音频插件（`gst-inspect-1.0 autoaudiosink`）；确认音频输出设备 |
+| 无声音 | 确认系统存在默认音频输出设备；Linux 同时检查 ALSA/PipeWire 兼容层 |
 | 托盘不显示 | 桌面需支持 StatusNotifierItem（GNOME 装 AppIndicator 扩展）；无碍播放 |
 | `playerctl` 无响应 | `playerctl -p hmp` 前缀必须带 `-p hmp`；确认 daemon 在运行（`hmp status`） |
 
@@ -186,7 +186,7 @@ cargo fmt --all -- --check
 - **存储**：SQLite 媒体库（迁移 v1、upsert 幂等、播放会话 start→end 闭环、WAL 并发）、配置 round-trip、回退链生成；
 - **e2e（wiremock）**：QQ 详情/取流契约、音质回退链顺序（Auto 含 Atmos；固定 FLAC 只试 F0M0）。
 
-### 9.2 真机验收（需 QQ 账号 + 桌面环境 + GStreamer）
+### 9.2 真机验收（需 QQ 账号 + 桌面环境 + Rodio）
 
 ```bash
 # 1) 登录（终端二维码）
@@ -213,7 +213,7 @@ playerctl -p hmp play-pause && playerctl -p hmp status
 # 9) 退出干净
 hmp quit && ls $XDG_RUNTIME_DIR/hmp.sock   # 应不存在
 
-# 端到端冒烟（本机需 GStreamer；已按默认忽略，显式运行）：
+# 端到端冒烟（本机需 Rodio；已按默认忽略，显式运行）：
 cargo test -p hmp-daemon --test e2e -- --ignored
 cargo test -p hmp-daemon --test daemon_cli -- --ignored
 cargo test -p hmp-cli --test daemon_cli -- --ignored

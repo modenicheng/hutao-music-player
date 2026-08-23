@@ -3,17 +3,16 @@
 //! 单一命令通道：所有输入适配器（socket 服务器 / tray / MPRIS）把
 //! [`Request`] 发进 [`EngineHandle::command_tx`]，由引擎串行处理；
 //! 单一状态出口：`watch<DaemonState>`。Next/Previous 由引擎拦截做队列
-//! 导航（PlayerCore 忽略这两个命令，见 hmp-player-gst core.rs）。
+//! 导航（PlayerCore 忽略这两个命令，见 hmp-player core.rs）。
 
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use hmp_core::{
-    DaemonState, ErrorInfo, IpcErrorCode, PlayRequest, PlaybackCapabilities, PlaybackState,
-    PlaybackStatus, PlayerCommand, QueueSnapshot, Request, TrackId,
+    DaemonState, ErrorInfo, IpcErrorCode, LoadRequest, PlayRequest, PlaybackCapabilities,
+    PlaybackState, PlaybackStatus, PlayerCommand, PlayerEvent, QueueSnapshot, Request, TrackId,
 };
-use hmp_player_gst::PlayerEvent;
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::player::{EngineError, PlaybackDriver, ResolvedTrack, SourceResolver};
@@ -832,7 +831,7 @@ impl PlaybackEngine {
         let expected = res.track.id.clone();
         self.current_gen += 1;
         let load_gen = self.current_gen;
-        self.driver.load(hmp_player_gst::LoadRequest {
+        self.driver.load(LoadRequest {
             track: res.track.clone(),
             uri,
             quality: quality.clone(),
@@ -947,7 +946,7 @@ impl PlaybackEngine {
     }
 
     /// 等待驱动把 current 更新为 `expected`（同步应用的驱动立即返回；
-    /// 异步管道（真实 GStreamer）等待其装载臂发布）。
+    /// 异步音频驱动等待其装载任务发布）。
     /// 超时（`load_timeout`，默认 5s）→ `Timeout`：调用方按装载失败处理
     /// （回滚队列、旧曲继续），不得把未确认的装载当成功提交
     /// （此前仅 warn 后继续置 Playing/建历史）。
@@ -982,12 +981,10 @@ impl PlaybackEngine {
     /// 沿用原代际（调用方已在失败路径把 current_gen 复原为 prev.load_gen，
     /// 故回滚后旧曲 EOS/Error 仍属当前代，不会被过滤）；未确认仅 warn。
     ///
-    /// 已知限制：真实 GstDriver 在 LoadCommand 处理时同步置 current（乐观
-    /// ACK），坏 URI 的真装载失败表现为**同代 Error**（仅发布、不回滚），
-    /// 事务回滚路径当前仅由超时模型（FakeDriver）覆盖。
+    /// 回滚上一条已应用装载，并恢复此前的播放位置。
     async fn rollback_load(&mut self, prev: AppliedLoad, position: std::time::Duration) {
         let id = prev.track.id.clone();
-        self.driver.load(hmp_player_gst::LoadRequest {
+        self.driver.load(LoadRequest {
             track: prev.track.clone(),
             uri: prev.uri,
             quality: prev.quality,
@@ -1076,7 +1073,6 @@ mod tests {
     use super::*;
     use crate::player::{EngineError, ResolvedTrack};
     use hmp_core::{LoopMode, PlaybackState, PlaybackStatus, PlayerCommand, Track, TrackId};
-    use hmp_player_gst::LoadRequest;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -2282,7 +2278,7 @@ mod tests {
         assert!(driver.commands.lock().unwrap().is_empty()); // shutdown 不产生命令
     }
 
-    /// 装载应用有延迟的驱动（模拟真实 GStreamer 异步管道：load() 返回后
+    /// 装载应用有延迟的驱动（模拟真实 Rodio 异步管道：load() 返回后
     /// 驱动任务才更新 current）。
     struct SlowDriver {
         inner: Arc<FakeDriver>,

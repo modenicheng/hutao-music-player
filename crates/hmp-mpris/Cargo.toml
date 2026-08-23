@@ -16,5 +16,6 @@ zbus = { workspace = true }
 zvariant = "5"
 
 [dev-dependencies]
-hmp-player-gst = { path = "../hmp-player-gst" }
+hmp-player = { path = "../hmp-player" }
 tracing-subscriber = { workspace = true }
+url = { workspace = true }

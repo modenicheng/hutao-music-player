@@ -2,16 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 里程碑 G（审计第 6 步收尾）第 1 批：Previous 曲首语义（position > 3s → 回曲首不换曲）+ 输出设备选择（config.toml `[audio] sink` → daemon 启动透传 GstDriver）。**G2（下轮）**：gapless/preload + ReplayGain。
+**Goal:** 里程碑 G（审计第 6 步收尾）第 1 批：Previous 曲首语义（position > 3s → 回曲首不换曲）+ 输出设备选择（config.toml `[audio] sink` → daemon 启动透传 RodioDriver）。**G2（下轮）**：gapless/preload + ReplayGain。
 
 **决策定案：**
 1. Previous 阈值 3s（与主流播放器一致；`position > 3s` 时 `Seek(0)` 不换曲、不闭合会话）。
 2. 输出设备：`Config` 加 `[audio] sink: Option<String>`（serde default None）；daemon 启动读配置传 `DaemonConfig.audio_sink`（与音质策略同模式——resolver 层读 `Config::load()`，见 player.rs:295）。**不加 CLI 设置命令**（config.toml 人工编辑；与 quality 的命令式管理不同步做，避免范围膨胀）。
-3. 非法 sink 名：`GstDriver::new` 已返回 Err（元素创建失败）→ daemon 启动失败并报清晰错误（现状行为，不改）。
+3. 非法 sink 名：`RodioDriver::new` 已返回 Err（元素创建失败）→ daemon 启动失败并报清晰错误（现状行为，不改）。
 
 **Architecture:** engine `navigate_prev` 开头加曲首判断（driver `Seek(0)`；无队列/会话变更）；`hmp-storage::config::Config` 加 `AudioPref { sink: Option<String> }` 字段（`[audio]` toml 段）；`serve.rs` 读 Config 传给 `DaemonConfig`。
 
-**Tech Stack:** Rust workspace（hmp-storage / hmp-daemon / hmp-player-gst）；tokio。
+**Tech Stack:** Rust workspace（hmp-storage / hmp-daemon / hmp-player）；tokio。
 
 ## Global Constraints
 
@@ -156,7 +156,7 @@ git commit -m "feat(engine): Previous restarts current track when >3s (seek 0, n
 - Produces:
   ```rust
   // config.rs
-  /// 音频输出偏好（`[audio]` 段；`sink` = GStreamer sink 元素名，None = 系统默认）。
+  /// 音频输出偏好（`[audio]` 段；`sink` = Rodio sink 元素名，None = 系统默认）。
   #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
   pub struct AudioPref {
       #[serde(default)]
@@ -210,7 +210,7 @@ git commit -m "feat(engine): Previous restarts current track when >3s (seek 0, n
 
 （`TEST_ENV_LOCK` 与 `TempGuard` 是 hmp-storage 测试基建——以现有 config.rs 测试的隔离模式为准。）
 
-`crates/hmp-daemon/tests/e2e.rs`（现有 daemon 启动相关测试——若无 serve 启动测试，放 daemon_cli？**决策：e2e 加一个协议级测试**（不需真实音频）：`serve` 的 `Daemon::start` 用注入 cfg（`audio_sink: Some("fakesink")`）验证 GstDriver 创建成功 + 非法 sink 报错。若 e2e 无 Daemon::start 直接调用先例，改在 serve.rs 单元测试验证 `run_inner` 的配置合并逻辑（提取为纯函数）：
+`crates/hmp-daemon/tests/e2e.rs`（现有 daemon 启动相关测试——若无 serve 启动测试，放 daemon_cli？**决策：e2e 加一个协议级测试**（不需真实音频）：`serve` 的 `Daemon::start` 用注入 cfg（`audio_sink: Some("fakesink")`）验证 RodioDriver 创建成功 + 非法 sink 报错。若 e2e 无 Daemon::start 直接调用先例，改在 serve.rs 单元测试验证 `run_inner` 的配置合并逻辑（提取为纯函数）：
 
 ```rust
     #[test]
@@ -246,7 +246,7 @@ Expected: 全绿。
 
 ```bash
 git add crates/hmp-storage/src/config.rs crates/hmp-daemon/src/serve.rs
-git commit -m "feat(storage,daemon): output device selection - config.toml [audio] sink wired to GstDriver"
+git commit -m "feat(storage,daemon): output device selection - config.toml [audio] sink wired to RodioDriver"
 ```
 
 ---
@@ -267,7 +267,7 @@ Expected: 全绿。
 
 - [ ] **Step 3: 核对覆盖**
 
-对照里程碑 G 第 1 批：Previous 曲首语义（✓ >3s Seek(0) 不换曲、≤3s 换曲、会话不闭合）；输出设备选择（✓ config.toml `[audio] sink` → GstDriver；注入优先；旧配置兼容）。G2 待办：gapless/preload（SourceResolver preload + 引擎下一首预解析）、ReplayGain（lofty RG 标签 → volume 补偿）。
+对照里程碑 G 第 1 批：Previous 曲首语义（✓ >3s Seek(0) 不换曲、≤3s 换曲、会话不闭合）；输出设备选择（✓ config.toml `[audio] sink` → RodioDriver；注入优先；旧配置兼容）。G2 待办：gapless/preload（SourceResolver preload + 引擎下一首预解析）、ReplayGain（lofty RG 标签 → volume 补偿）。
 
 - [ ] **Step 4: 报告**
 

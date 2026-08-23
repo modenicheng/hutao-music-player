@@ -1,6 +1,6 @@
 //! HMP 核心领域模型（docs/PROJECT.md §5.2 `hmp-core`）。
 //!
-//! 只存放稳定领域模型与应用层协议，**不得依赖** Slint、GStreamer、SQLite
+//! 只存放稳定领域模型与应用层协议，**不得依赖** Slint、具体音频驱动、SQLite
 //! 或具体 QQ 接口字段：
 //!
 //! - [`media`]：`Track` / `ArtistRef` / `AlbumRef` / `Playlist` / [`AudioQuality`]
@@ -27,5 +27,8 @@ pub use ipc::{
     TrackRef,
 };
 pub use media::{Album, AlbumRef, ArtistRef, AudioQuality, CoverRef, Playlist, Track, TrackStub};
-pub use player::{LoopMode, PlaybackCapabilities, PlaybackState, PlaybackStatus, PlayerCommand};
+pub use player::{
+    LoadRequest, LoopMode, PlaybackCapabilities, PlaybackState, PlaybackStatus, PlayerCommand,
+    PlayerEvent,
+};
 pub use queue::{QueueCore, QueueSnapshot};

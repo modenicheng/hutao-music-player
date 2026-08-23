@@ -1,4 +1,4 @@
-//! CLI 进程级集成测试（真机验收：需要真实 GStreamer/音频环境，默认 `#[ignore]`）。
+//! CLI 进程级集成测试（真机验收：需要真实音频设备，默认 `#[ignore]`）。
 //!
 //! 协议层已由 hmp-daemon lib 级测试覆盖（`server.rs` / `engine.rs`）；
 //! 此处端到端验证 CLI → daemon 完整链路（spec §6）：
@@ -42,7 +42,7 @@ fn wait_until(mut cond: impl FnMut() -> bool, timeout: Duration, what: &str) {
 }
 
 #[test]
-#[ignore = "需要真实 GStreamer/音频环境（真机验收项）"]
+#[ignore = "需要真实音频设备（真机验收项）"]
 fn daemon_lifecycle_end_to_end() {
     // 独立 socket 目录（不污染真实 XDG_RUNTIME_DIR）。
     let base = std::env::temp_dir().join(format!("hmp-cli-it-{}", std::process::id()));
@@ -104,7 +104,7 @@ fn daemon_lifecycle_end_to_end() {
 /// 建歌单 → 加本地 wav → `hmp play playlist:local:<id>` → status 显示播放中。
 /// 数据目录隔离：XDG_DATA_HOME 指向临时目录（避免污染真实库）。
 #[test]
-#[ignore = "需要真实 GStreamer/音频环境（真机验收项）"]
+#[ignore = "需要真实音频设备（真机验收项）"]
 fn library_playlist_plays_locally() {
     let base = std::env::temp_dir().join(format!("hmp-cli-pl-{}", std::process::id()));
     std::fs::create_dir_all(&base).unwrap();
@@ -130,7 +130,7 @@ fn library_playlist_plays_locally() {
         "daemon socket 未就绪"
     );
 
-    // 本地 wav（GStreamer 可播，无需凭证）。
+    // 本地 wav（无需凭证）。
     let wav = base.join("tone.wav");
     write_wav(&wav);
 
@@ -185,45 +185,7 @@ fn library_playlist_plays_locally() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// 打磨：`hmp serve --background --sink fakesink` 应正常启动（fakesink 是
-/// 有效 GStreamer sink，无默认音频输出的环境也能跑）并优雅退出。
-#[test]
-#[ignore = "需要真实 GStreamer 环境（真机验收项）"]
-fn serve_with_explicit_sink_starts() {
-    let base = std::env::temp_dir().join(format!("hmp-cli-sink-{}", std::process::id()));
-    std::fs::create_dir_all(&base).unwrap();
-    let socket = base.join("hmp.sock");
-
-    let mut daemon = Command::new(hmp_bin())
-        .args(["serve", "--background", "--sink", "fakesink"])
-        .env("XDG_RUNTIME_DIR", &base)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn hmp serve --sink fakesink 失败");
-    // fakesink 是有效元素：GstDriver 应成功创建并启动 daemon。
-    assert!(
-        wait_for_socket(&socket, Duration::from_secs(15)),
-        "daemon socket 未就绪（--sink fakesink 启动失败?）"
-    );
-    let out = Command::new(hmp_bin())
-        .args(["quit"])
-        .env("XDG_RUNTIME_DIR", &base)
-        .output()
-        .expect("hmp quit 失败");
-    assert!(out.status.success(), "hmp quit 失败: {out:?}");
-    wait_until(
-        || !socket.exists(),
-        Duration::from_secs(5),
-        "quit 后 socket 清理",
-    );
-    let status = daemon.wait().expect("等待 daemon 退出失败");
-    assert!(status.success(), "daemon 退出码异常: {status:?}");
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-/// 最小 wav 文件（8kHz 单声道 1 秒，GStreamer 可直接播放）。
+/// 最小 wav 文件（8kHz 单声道 1 秒）。
 fn write_wav(path: &std::path::Path) {
     let sample_rate = 8000u32;
     let n = sample_rate as usize;

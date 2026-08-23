@@ -9,13 +9,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use hmp_core::LoadRequest;
 use hmp_core::{
     AudioQuality, LoopMode, PlaybackCapabilities, PlaybackState, PlaybackStatus, PlayerCommand,
     Track, TrackId,
 };
 use hmp_media;
 use hmp_mpris::MprisService;
-use hmp_player_gst::{LoadRequest, PlayerCore};
+use hmp_player::PlayerCore;
 use hmp_qqmusic_api::{
     Credential, LoginApi, LyricApi, QRLoginType, QqMusicClient, SongFileType,
     song::{SongApi, SongFileInfo},

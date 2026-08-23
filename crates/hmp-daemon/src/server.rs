@@ -518,7 +518,7 @@ mod tests {
     use hmp_core::{
         IpcErrorCode, PlayRequest, PlaybackState, PlaybackStatus, PlayerCommand, Track, TrackId,
     };
-    use hmp_player_gst::{LoadRequest, PlayerEvent};
+    use hmp_core::{LoadRequest, PlayerEvent};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};

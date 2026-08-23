@@ -4,7 +4,7 @@
 > 缩写：HMP
 > 主程序命令：`hmp`
 > 当前阶段：CLI 原型（login/search/play 闭环）/ 主项目 crate 骨架
-> 目标平台：Linux 桌面，优先 Wayland；首要适配 Arch Linux + Niri
+> 目标平台：Windows 与 Linux 桌面；Windows 使用 SMTC，Linux 使用 MPRIS
 > 文档用途：作为仓库内的项目总纲、架构说明、开发路线和验收标准
 
 ---
@@ -13,7 +13,7 @@
 
 HMP 是一个以 QQ 音乐为首要音源、使用 Rust 构建的轻量桌面音乐播放器。
 
-项目的核心目标不是复刻 QQ 音乐官方客户端的全部功能，而是建立一个稳定、可维护、资源占用可控，并且完整适配 Linux 桌面协议的播放器。重点解决官方 Linux 客户端存在的系统媒体控制不完整、专辑封面未正确导出、播放进度无法由外部组件调整等问题。
+项目的核心目标不是复刻 QQ 音乐官方客户端的全部功能，而是建立一个稳定、可维护、资源占用可控，并且适配 Windows 与 Linux 桌面媒体协议的播放器。重点保证系统媒体控制、专辑封面、播放进度与后端权威状态保持一致。
 
 HMP 第一阶段采用以下技术路线：
 
@@ -22,7 +22,7 @@ Rust 2024
 + Tokio
 + Reqwest
 + Serde
-+ GStreamer
++ Rodio + CPAL
 + mpris-server
 + Slint
 + SQLite
@@ -79,7 +79,7 @@ HMP 的正式目标包括：
 - MV 播放；
 - 评论、动态、私信和社区功能；
 - 直播、播客、K 歌、听歌识曲；
-- Windows 和 macOS 的首发支持；
+- macOS 的首发支持；
 - 多音源聚合；
 - 浏览器端或移动端；
 - 云端账户服务；
@@ -128,22 +128,23 @@ HMP 的正式目标包括：
 - 若 Slint 在输入法、可访问性或特定 Wayland 环境中出现无法接受的问题，第二选择为 Relm4 + GTK4。
 - Tauri 仅保留为快速原型或未来跨平台 UI 的备选，不作为首版默认架构。
 
-### 3.3 音频后端：GStreamer
+### 3.3 音频后端：Rodio
 
-首版使用 GStreamer 高层播放接口。
+播放驱动使用纯 Rust 的 Rodio 解码/播放接口，并通过 CPAL 连接系统默认音频设备。
 
 原因：
 
-- 能处理网络流、缓冲、格式探测和 Seek；
+- 常见格式解码不需要额外媒体 SDK 或插件树；
+- `stream-download` 将 HTTP(S) 媒体转换为可缓存、可 Seek 的输入；
 - 支持常见音频格式；
-- Linux 桌面部署成熟；
-- 避免首版自行实现 HTTP Range、解码线程、设备切换和错误恢复。
+- CPAL 同时支持 Windows 与 Linux 音频设备；
+- 保持 `PlaybackDriver` 边界，队列、解析和桌面协议不依赖具体音频实现。
 
-首版不采用纯 Rust 解码链。未来只有在性能、依赖体积或部署方面出现明确问题时，再评估 Symphonia + CPAL/Rodio。
+首版使用系统默认输出设备；输出设备枚举与切换作为独立能力后续实现。
 
-### 3.4 桌面媒体协议：MPRIS
+### 3.4 桌面媒体协议：MPRIS 与 SMTC
 
-使用 `mpris-server` 让 HMP 自身成为 MPRIS 播放器。
+Linux 使用 `mpris-server`，Windows 使用 System Media Transport Controls（SMTC）。两者都只消费同一组 `PlayerCommand`、`PlaybackState` 和能力快照。
 
 必须完整支持：
 
@@ -213,7 +214,7 @@ xesam:url
                │               │
                ▼               ▼
 ┌─────────────────────┐  ┌─────────────────┐
-│ QQ Music Rust Client│  │ GStreamer Player │
+│ QQ Music Rust Client│  │ Rodio Player │
 │ 登录/搜索/歌单/取流 │  │ 播放/缓冲/Seek   │
 └──────────┬──────────┘  └────────┬────────┘
            │                       │
@@ -244,7 +245,7 @@ MPRIS ────┘                         │
 
 - UI 自己维护一份播放进度；
 - MPRIS 自己推算另一份进度；
-- GStreamer 状态只在后端内部可见；
+- Rodio 状态只在后端内部可见；
 - 当前歌曲由多个模块分别修改。
 
 ### 4.3 并发模型
@@ -325,7 +326,7 @@ hutao-music-player/
 ├── crates/
 │   ├── hmp-core/
 │   ├── hmp-qqmusic/
-│   ├── hmp-player-gst/
+│   ├── hmp-player/
 │   ├── hmp-mpris/
 │   ├── hmp-storage/
 │   └── hmp-desktop/
@@ -357,7 +358,7 @@ hutao-music-player/
 - `Quality`
 - 核心错误分类
 
-不得依赖 Slint、GStreamer、SQLite 或具体 QQ 接口字段。
+不得依赖 Slint、Rodio、SQLite 或具体 QQ 接口字段。
 
 #### `hmp-qqmusic`
 
@@ -377,9 +378,9 @@ QQ 音乐 Rust 客户端：
 
 该 crate 不依赖 UI、MPRIS 或播放器。
 
-#### `hmp-player-gst`
+#### `hmp-player`
 
-- GStreamer 初始化；
+- Rodio 初始化；
 - 播放、暂停、停止；
 - URI 加载；
 - 缓冲；
@@ -439,7 +440,7 @@ hmp-qqmusic-client
 members = [
     "crates/hmp-core",
     "crates/hmp-qqmusic",
-    "crates/hmp-player-gst",
+    "crates/hmp-player",
     "crates/hmp-mpris",
     "crates/hmp-storage",
     "crates/hmp-desktop",
@@ -830,7 +831,7 @@ Error
 选择歌曲
 → 查询播放 URL
 → 校验 URL 和有效期
-→ 设置 GStreamer URI（加密音质经本地解密代理 http://127.0.0.1:port 按 Range 取明文，Seek 即 Range 重定位）
+→ 设置 Rodio URI（加密音质经本地解密代理 http://127.0.0.1:port 按 Range 取明文，Seek 即 Range 重定位）
 → 进入 Loading
 → preroll
 → Playing
@@ -1013,7 +1014,7 @@ UI 不直接执行：
 - HTTP 请求；
 - SQLite；
 - keyring；
-- GStreamer；
+- Rodio；
 - D-Bus；
 - Cookie 拼接；
 - QQ 响应解析。
@@ -1276,11 +1277,7 @@ playerctl -p hmp metadata
 
 ```text
 rustup 或 rust
-gstreamer
-gst-plugins-base
-gst-plugins-good
-gst-plugins-bad
-gst-libav
+alsa-lib
 sqlite
 libsecret
 pkgconf
@@ -1320,7 +1317,7 @@ cargo xtask diagnose
 4. 通用 tar.zst；
 5. 其他发行版打包。
 
-AppImage 可后置。GStreamer 插件和 Secret Service 依赖使完全自包含打包需要额外评估。
+AppImage 可后置。Linux 音频系统库和 Secret Service 依赖使完全自包含打包需要额外评估；Windows 不需要额外媒体运行时。
 
 ### 16.5 桌面文件
 
@@ -1406,7 +1403,7 @@ test(qqmusic): add vkey response fixture
 - [ ] tracing；
 - [ ] 基础文档；
 - [ ] Slint 空窗口；
-- [ ] GStreamer 初始化测试；
+- [ ] Rodio 初始化测试；
 - [ ] MPRIS 注册测试。
 
 ### v0.1.0：最小可播放版本
@@ -1415,7 +1412,7 @@ test(qqmusic): add vkey response fixture
 - [x] 凭据保存（keyring Secret Service / 显式文件回退）；
 - [x] 搜索歌曲（`hmp search` + UI 搜索页）；
 - [x] 获取播放 URL（音质回退链，加密取流 GetEVkey）；
-- [x] GStreamer 播放（hmp-player-gst）；
+- [x] Rodio 播放（hmp-player）；
 - [x] 播放 / 暂停（PlayerCommand::TogglePlay）；
 - [x] Seek（UI 进度条 / MPRIS position）；
 - [~] 封面（占位渐变；远程封面下载待接入）；
@@ -1482,7 +1479,7 @@ test(qqmusic): add vkey response fixture
 6. ✅ 移植 QQ 扫码登录
 7. ✅ 移植播放 URL（含加密取流）
 8. ✅ 实现 QMC2 加密音质解密播放（CLI + 桌面）
-9. ✅ 建立 GStreamer 播放原型
+9. ✅ 建立 Rodio 播放原型
 10. ✅ 建立完整 MPRIS 原型
 11. ✅ 最后接 Slint 最小 UI（Apple Music 风格）
 ```
@@ -1530,13 +1527,13 @@ playerctl -p hmp position 60
 - 不自动反复登录；
 - 出现账号风险提示时停止请求并通知用户。
 
-### 21.3 GStreamer 插件缺失
+### 21.3 音频设备或解码失败
 
 应对：
 
-- 启动时检查必要插件；
-- 给出明确 Arch 安装提示；
-- 错误信息包含缺失 decoder / demuxer 名称。
+- 启动时报告默认音频设备初始化错误；
+- Linux 给出系统音频库安装提示；
+- 解码错误包含媒体 URI 与底层格式错误。
 
 ### 21.4 UI 框架限制
 

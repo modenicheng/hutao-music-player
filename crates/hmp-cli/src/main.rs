@@ -66,9 +66,6 @@ enum Command {
         /// 后台模式（脱离终端）。
         #[arg(long)]
         background: bool,
-        /// 音频输出 sink（GStreamer 元素名；覆盖 config.toml [audio] sink）。
-        #[arg(long)]
-        sink: Option<String>,
     },
     /// 搜索歌曲。
     Search { keyword: String },
@@ -320,11 +317,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Command::Quit => run_remote(commands::quit_req()).await,
-        Command::Serve { background, sink } => {
+        Command::Serve { background } => {
             if background {
-                hmp_daemon::serve::run_background(sink.as_deref()).await
+                hmp_daemon::serve::run_background().await
             } else {
-                hmp_daemon::serve::run_foreground(sink.as_deref()).await
+                hmp_daemon::serve::run_foreground().await
             }
         }
         Command::Search { keyword } => search::run(&keyword).await,

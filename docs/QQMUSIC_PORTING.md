@@ -110,7 +110,7 @@
 - 上游普通组高音质常量（`MASTER`/`FLAC`/`OGG_*` 等）与加密组同名，Rust 合并为单一
   `SongFileType`（高音质统一为加密版本）；
 - **待播放器阶段**：`.mflac`/`.mgg` 解密播放（上游仓库无解密算法，需社区方案如 unlock-music）。
-- **实测记录（2026-08-08）**：`CgiGetEVkey` 返回 `ekey` 后解密播放链路已接线（Task 3/4），QMC2 解密播放完整闭环已验证。加密流播放链路：CLI/桌面 → 本地回环解密代理（http://127.0.0.1:随机端口）→ Range 按需解密 → GStreamer 流式播放。
+- **实测记录（2026-08-08）**：`CgiGetEVkey` 返回 `ekey` 后解密播放链路已接线（Task 3/4），QMC2 解密播放完整闭环已验证。加密流播放链路：CLI/桌面 → 本地回环解密代理（http://127.0.0.1:随机端口）→ Range 按需解密 → Rodio 流式播放。
 
 ### 歌单/专辑/歌手/排行榜/推荐（阶段 D，docs/PROJECT.md §6.6）
 
@@ -140,7 +140,7 @@
 - 微信扫码登录 / 手机客户端扫码（MQTT）—— 微信需 open.weixin.qq.com 页面解析，手机端依赖 MQTT
 - 短信验证码登录（`PhoneLoginSession`）—— 待移植
 - MV 播放地址（`modules/mv.py`）—— 用户明确暂不需要
-- 加密音频解密播放（mflac/mgg → 明文）—— 播放器阶段（hmp-player-gst）
+- 加密音频解密播放（mflac/mgg → 明文）—— 播放器阶段（hmp-player）
 - 写操作（收藏、歌单管理）—— 阶段 E
 - Android 平台会话（`ensure_session`/QIMEI/设备指纹）—— HMP 目标为 Linux 桌面，暂不移植
 

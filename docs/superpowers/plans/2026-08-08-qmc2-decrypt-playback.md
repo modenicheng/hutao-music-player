@@ -4,7 +4,7 @@
 
 **Goal:** 让 `hmp play`（CLI）与 hmp-desktop 能够直接播放 QQ 音乐加密音质（`.mflac`/`.mgg`/`.mmp4`/`.mnac`），通过 GetEVkey 返回的 `ekey` 做 QMC2 解密，恢复无损音质回退链（docs/PROJECT.md §7.3），并把无损（FLAC）作为默认可取流音质。
 
-**Architecture:** 解密算法（TEA-CBC、ekey 派生、map/RC4 流密码、STag/QTag 尾部检测）放进 `hmp-qqmusic-api::algorithms::qmc2`（与现有 `algorithms/qrc.rs`、`algorithms/tripledes.rs` 并列）。新增独立 crate `hmp-media`：下载加密流 → 检测/剥离尾部 → 流式解密 → 写入 XDG 缓存 → 返回 `file://` URI；CLI 与桌面共用。播放器（hmp-player-gst）不变——它本就支持 `file://` URI。
+**Architecture:** 解密算法（TEA-CBC、ekey 派生、map/RC4 流密码、STag/QTag 尾部检测）放进 `hmp-qqmusic-api::algorithms::qmc2`（与现有 `algorithms/qrc.rs`、`algorithms/tripledes.rs` 并列）。新增独立 crate `hmp-media`：下载加密流 → 检测/剥离尾部 → 流式解密 → 写入 XDG 缓存 → 返回 `file://` URI；CLI 与桌面共用。播放器（hmp-player）不变——它本就支持 `file://` URI。
 
 **Tech Stack:** Rust 2024, reqwest 0.12（新增 `stream` feature）, tokio, base64, sha1, hmp-core, hmp-storage（XDG 路径）, wiremock（测试）。
 
@@ -14,7 +14,7 @@
 - 加密音质取流仍走 `CgiGetEVkey`（`song::SongApi::get_song_urls` 已实现）；本计划**不修改** QQ 协议请求层。
 - 不新增 `AudioQuality` 枚举变体（OGG 系列 `O8M1`/`O8M0` 等仍不进入回退链，维持现状，文档中记为后续项）；回退链维持 `Master → HiRes → Atmos → Flac → Mp3_320 → Mp3_128`，其中 Master/Atmos/Flac 现在可解密播放。
 - 解密密钥只来自接口 `ekey`；文件内嵌 ekey 仅在接口 ekey 缺失时作为回退（STag 尾部）。
-- `hmp-core` 领域模型、`hmp-player-gst`、`hmp-mpris` 三个 crate 除 CLI/desktop 接线外**不得修改**。
+- `hmp-core` 领域模型、`hmp-player`、`hmp-mpris` 三个 crate 除 CLI/desktop 接线外**不得修改**。
 - 所有编辑保持 ASCII 注释，除非已有中文产品文案或源文件字符集明确需要中文（本仓库文档/注释惯例为中文，代码注释沿用中文）。
 - 每个 Task 一个原子 commit；`cargo fmt --all`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace` 必须通过。
 - 缓存目录：`hmp_storage::cache_dir()/decrypted/`；缓存键 = `sha1(url|ekey)` 十六进制前 16 位；eviction：新建文件时若总大小超阈值（默认 2048 MiB，环境变量 `HMP_DECRYPT_CACHE_MIB` 可覆盖）则删除 mtime 最旧的文件直至达标。
@@ -851,4 +851,4 @@ pub fn detect_footer(total_len: usize, tail: &[u8]) -> Option<Footer> {
 
 - 覆盖范围：Task 1 覆盖全部算法需求（TEA/ekey/双密码/尾部检测）；Task 2 覆盖下载/解密/缓存/魔数校验/进度/兜底重试；Task 3/4 覆盖 CLI 与桌面播放接线；Task 5 覆盖 PROJECT.md/QQMUSIC_PORTING.md/README 鸣谢。
 - 类型一致性：`parse_ekey(&str) -> Result<Vec<u8>, Qmc2Error>`、`decrypt_factory(&str) -> Result<Box<dyn Qmc2Cipher>, Qmc2Error>`、`detect_footer(usize, &[u8]) -> Option<Footer>`、`prepare_playable(&str, Option<&str>, Option<watch::Sender<Option<f64>>>) -> Result<String, MediaError>` 在 Task 1→4 中签名一致。
-- 已知限制（非缺陷，文档已记）：OGG 加密音质不入回退链；桌面解密期间 UI 无独立进度提示（CLI 有）；`.mnac`（AICodec）解密后容器由 GStreamer typefind 探测。
+- 已知限制（非缺陷，文档已记）：OGG 加密音质不入回退链；桌面解密期间 UI 无独立进度提示（CLI 有）；`.mnac`（AICodec）解密后容器由 Rodio typefind 探测。

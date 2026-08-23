@@ -57,7 +57,7 @@ impl MprisRoot {
 
     #[zbus(property)]
     fn supported_mime_types(&self) -> Vec<&str> {
-        // 与本地扫描器 is_audio_ext 对齐（GStreamer/lofty 实际支持的容器）。
+        // 与本地扫描器 is_audio_ext 对齐（播放器/lofty 实际支持的容器）。
         vec![
             "audio/mpeg",
             "audio/flac",

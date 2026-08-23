@@ -870,7 +870,7 @@ mod tests {
     }
 
     /// P1：shuffle 播放若干首后关闭 shuffle，当前曲目必须保持不变
-    /// （旧实现保留 cursor 数值 → QueueCore 静默换曲，GStreamer 仍播原曲）。
+    /// （旧实现保留 cursor 数值 → QueueCore 静默换曲，Rodio 仍播原曲）。
     /// 多种子扫描：任意种子下关 shuffle 后 canonical 当前曲不变（旧实现部分种子失败）。
     #[test]
     fn shuffle_off_keeps_canonical_current() {

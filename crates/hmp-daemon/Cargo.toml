@@ -8,7 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 hmp-core = { path = "../hmp-core" }
-hmp-player-gst = { path = "../hmp-player-gst" }
+hmp-player = { path = "../hmp-player" }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
 hmp-storage = { path = "../hmp-storage" }
 rusqlite = { workspace = true }
@@ -22,8 +22,11 @@ libc = "0.2"
 url = "2"
 notify = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+hmp-smtc = { path = "../hmp-smtc" }
+
 [features]
-default = ["tray", "mpris"]
+default = []
 tray = ["dep:ksni"]
 mpris = ["dep:hmp-mpris"]
 
