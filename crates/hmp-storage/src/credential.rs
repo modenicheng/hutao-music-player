@@ -1,4 +1,4 @@
-//! 凭据存储（keyring 优先，文件显式回退）。
+//! 凭据存储（平台系统 keyring 优先，文件显式回退）。
 
 use hmp_core::HmpError;
 pub use hmp_qqmusic_api::Credential;
@@ -6,7 +6,9 @@ pub use hmp_qqmusic_api::Credential;
 /// 后端类型。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendKind {
-    /// Linux Secret Service（gnome-keyring / kwallet）。
+    /// 系统 keyring（Windows Credential Manager / Linux Secret Service）。
+    ///
+    /// 变体名为兼容既有 API 保留。
     SecretService,
     /// 明文 JSON 文件（0600；仅测试/无密钥环环境，显式启用）。
     File,
@@ -14,7 +16,7 @@ pub enum BackendKind {
 
 impl BackendKind {
     /// 根据环境变量选择后端：`HMP_CREDENTIAL_BACKEND=file` 强制文件回退；
-    /// 否则使用 Secret Service。
+    /// 否则使用平台系统 keyring。
     pub fn from_env() -> Self {
         match std::env::var("HMP_CREDENTIAL_BACKEND").as_deref() {
             Ok("file") => BackendKind::File,
@@ -38,9 +40,10 @@ pub trait CredentialStore: Send + Sync {
 /// 供 daemon/API 层按值持有（`Box<dyn CredentialStore>`），避免暴露具体后端。
 pub type Store = Box<dyn CredentialStore>;
 
-/// Secret Service 后端（keyring v1，Linux 默认）。
+/// 平台系统 keyring 后端。
 ///
-/// 依赖 `gnome-keyring` / `kwallet` 提供 `org.freedesktop.secrets` 服务；
+/// Windows 使用 Credential Manager，Linux 使用 Secret Service。类型名为兼容
+/// 既有 API 保留；
 /// 不可用时返回 [`HmpError::Storage`] 并附带安装提示（不静默降级明文）。
 #[derive(Clone, Debug)]
 pub struct SecretServiceStore {
@@ -58,7 +61,7 @@ impl Default for SecretServiceStore {
 }
 
 impl SecretServiceStore {
-    /// 构造 Secret Service 凭据存储。
+    /// 构造系统 keyring 凭据存储。
     pub fn new() -> Self {
         Self::default()
     }
@@ -67,25 +70,21 @@ impl SecretServiceStore {
     pub fn status() -> Result<(), HmpError> {
         keyring::Entry::store_status()
             .as_ref()
-            .map_err(secret_service_error)?;
+            .map_err(keyring_error)?;
         Ok(())
     }
 }
 
 impl CredentialStore for SecretServiceStore {
     fn save(&self, credential: &Credential) -> Result<(), HmpError> {
-        let entry =
-            keyring::Entry::new(self.service, self.user).map_err(|e| secret_service_error(&e))?;
+        let entry = keyring::Entry::new(self.service, self.user).map_err(|e| keyring_error(&e))?;
         let json = serde_json::to_vec(credential)
             .map_err(|e| HmpError::Storage(format!("serialize credential: {e}")))?;
-        entry
-            .set_secret(&json)
-            .map_err(|e| secret_service_error(&e))
+        entry.set_secret(&json).map_err(|e| keyring_error(&e))
     }
 
     fn load(&self) -> Result<Option<Credential>, HmpError> {
-        let entry =
-            keyring::Entry::new(self.service, self.user).map_err(|e| secret_service_error(&e))?;
+        let entry = keyring::Entry::new(self.service, self.user).map_err(|e| keyring_error(&e))?;
         match entry.get_secret() {
             Ok(bytes) => {
                 let cred: Credential = serde_json::from_slice(&bytes)
@@ -93,17 +92,16 @@ impl CredentialStore for SecretServiceStore {
                 Ok(Some(cred))
             }
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(secret_service_error(&e)),
+            Err(e) => Err(keyring_error(&e)),
         }
     }
 
     fn delete(&self) -> Result<(), HmpError> {
-        let entry =
-            keyring::Entry::new(self.service, self.user).map_err(|e| secret_service_error(&e))?;
+        let entry = keyring::Entry::new(self.service, self.user).map_err(|e| keyring_error(&e))?;
         match entry.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(secret_service_error(&e)),
+            Err(e) => Err(keyring_error(&e)),
         }
     }
 }
@@ -117,7 +115,7 @@ pub struct FileStore {
 }
 
 impl FileStore {
-    /// 构造文件后端（默认 XDG 配置目录）。
+    /// 构造文件后端（默认平台应用配置目录）。
     pub fn new() -> Self {
         Self::at(crate::xdg::config_dir().join("credential.json"))
     }
@@ -188,11 +186,14 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
-/// Secret Service 错误 → 可操作的 `HmpError::Storage` 提示。
-fn secret_service_error(e: &keyring::Error) -> HmpError {
+/// 系统 keyring 错误 → 可操作的 `HmpError::Storage` 提示。
+fn keyring_error(e: &keyring::Error) -> HmpError {
+    #[cfg(windows)]
+    let hint = "请确认 Windows Credential Manager 可用";
+    #[cfg(not(windows))]
+    let hint = "请安装并启动 gnome-keyring 或 kwallet";
     HmpError::Storage(format!(
-        "系统密钥环不可用（{e}）。请安装并启动 gnome-keyring 或 kwallet，\
-         或使用 HMP_CREDENTIAL_BACKEND=file 回退到明文文件（不安全）"
+        "系统密钥环不可用（{e}）。{hint}，或使用 HMP_CREDENTIAL_BACKEND=file 回退到明文文件（不安全）"
     ))
 }
 

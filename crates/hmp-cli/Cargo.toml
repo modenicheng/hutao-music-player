@@ -34,4 +34,4 @@ serde_json = { workspace = true }
 tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
-hmp-daemon = { path = "../hmp-daemon", default-features = false, features = ["tray", "mpris"] }
+hmp-daemon = { path = "../hmp-daemon", default-features = false, features = ["mpris"] }

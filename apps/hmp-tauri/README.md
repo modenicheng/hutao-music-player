@@ -14,10 +14,9 @@ Linux 的 Tauri tray 仍提供完整右键菜单；受底层平台限制，tray 
 
 ## Windows 构建
 
-先安装官方 MSVC x86_64 GStreamer 的同版本 Runtime 与 Development 安装包。然后在仓库根目录的同一个 PowerShell 会话执行：
+Windows 音频与 SMTC 使用系统接口，无需安装额外媒体 SDK。在仓库根目录执行：
 
 ```powershell
-./scripts/setup-gstreamer-windows.ps1
 cargo build -p hmp-daemon --bin hmpd --release --no-default-features
 ./apps/hmp-tauri/scripts/stage-sidecar.ps1
 Push-Location apps/hmp-tauri
@@ -29,19 +28,17 @@ Pop-Location
 
 `stage-sidecar.ps1` 会读取 `rustc -vV` 的 host triple，并生成 Tauri 要求的 `src-tauri/binaries/hmpd-<target>.exe`。如果 daemon 尚未构建，脚本会退出非零并打印准确的构建命令，不会放置伪 sidecar。
 
-GStreamer 脚本只为当前 PowerShell 进程配置环境，不下载软件，也不修改系统级环境变量。
-
-当前安装包只捆绑 `hmpd`，尚未把 GStreamer DLL 与插件树一起收集进安装包；目标 Windows 机器仍需安装对应架构的官方 GStreamer Runtime。发布前必须在未安装开发工具的干净 Windows 环境验证依赖收集，不能把构建机上可运行视为已完成 clean-runtime 打包。
+当前安装包只需捆绑 `hmpd` sidecar。发布前仍应在未安装开发工具的干净 Windows 环境验证安装包。
 
 ## 本地开发
 
-安装 GStreamer Runtime 与 Development 后，在 `apps/hmp-tauri` 目录运行：
+在 `apps/hmp-tauri` 目录运行：
 
 ```powershell
 pnpm tauri dev
 ```
 
-该命令会先探测 GStreamer SDK、构建 debug 版 daemon，并按当前 Rust host triple 暂存 sidecar，再启动 Tauri 和 Vite；同一环境也会传递给启动后的 `hmpd`。不要设置 `DOCS_RS=1`；该变量只适用于不链接原生库的类型检查。
+该命令会构建 debug 版 daemon，并按当前 Rust host triple 暂存 sidecar，再启动 Tauri 和 Vite。
 
 ## 开发检查
 

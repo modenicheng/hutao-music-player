@@ -29,16 +29,16 @@ impl DaemonClient {
     /// 连接或拉起 autonomous `hmpd`，随后轮询平台控制端点。
     pub async fn connect_or_spawn() -> Result<Self, CliError> {
         match Self::try_connect().await {
-            Ok(c) => return Ok(c),
+            Ok(c) => Ok(c),
             Err(CliError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 spawn_daemon()?;
-                return wait_for_daemon(Duration::from_secs(3)).await;
+                wait_for_daemon(Duration::from_secs(3)).await
             }
             Err(CliError::Io(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
                 spawn_daemon()?;
-                return wait_for_daemon(Duration::from_secs(3)).await;
+                wait_for_daemon(Duration::from_secs(3)).await
             }
-            Err(e) => return Err(e),
+            Err(e) => Err(e),
         }
     }
 

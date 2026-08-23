@@ -39,7 +39,7 @@
 │                          ▼                                      │
 │  控制核心：命令通道（单一 mpsc）                                    │
 │    → 队列核心（hmp-core，纯逻辑可单测）                            │
-│    → PlayerCore（hmp-player-gst）                                │
+│    → PlayerCore（hmp-player）                                │
 │                          │                                      │
 │                          ▼                                      │
 │  状态出口：PlaybackState（watch 单一来源）                         │
@@ -123,7 +123,7 @@ pub enum IpcErrorCode {
 | `mpris.rs` | 现有 hmp-mpris 服务原样搬入（已具备 watch + 命令通道两个接口，天然适配） |
 | `serve.rs` | `hmp serve` 前台调试 / `hmp serve --background` 供 CLI 拉起（detached 新会话、stdio 丢弃） |
 
-**`PlaybackDriver` trait**（`player.rs`）：`load(track, uri, quality)` / `play()` / `pause()` / `seek()` / `stop()` / `state_watch()`。生产实现包 `PlayerCore`；测试注入 fake。队列裁决、Ended 自动续播、循环/洗牌逻辑在 driver 之上，无 gst/无网络可测。
+**`PlaybackDriver` trait**（`player.rs`）：`load(track, uri, quality)` / `play()` / `pause()` / `seek()` / `stop()` / `state_watch()`。生产实现包 `PlayerCore`；测试注入 fake。队列裁决、Ended 自动续播、循环/洗牌逻辑在 driver 之上，无 audio backend/无网络可测。
 
 ### 4.3 CLI 变更
 
@@ -169,9 +169,9 @@ pub enum IpcErrorCode {
 
 - **hmp-core**：`QueueCore` 纯逻辑单测（replace/append/insert/remove/clear、List 回绕、Track 循环、shuffle、prev 恒跳上一首）；ipc 消息 serde round-trip。
 - **hmp-daemon**：
-  - 播放层 `PlaybackDriver` 注入 fake——队列裁决、Ended 自动续播、循环/洗牌逻辑全部无 gst/无网络可测；
+  - 播放层 `PlaybackDriver` 注入 fake——队列裁决、Ended 自动续播、循环/洗牌逻辑全部无 audio backend/无网络可测；
   - 协议集成：真实 socket + 真协议客户端，多客户端并发、订阅 fan-out、畸形帧；
-  - wiremock 端到端（真实 gst + 本地生成 wav + 假 QQ API）验证 Play→详情→回退→解密→播放→Ended→下一首 闭环；
+  - wiremock 端到端（真实 audio backend + 本地生成 wav + 假 QQ API）验证 Play→详情→回退→解密→播放→Ended→下一首 闭环；
   - tray/MPRIS 默认 features 开关——无桌面环境（CI）下跑 backend-only。
 - **CLI**：client 单测（ENOENT 拉起、ECONNREFUSED 恢复、超时）；`qr_ascii` 渲染单测（已知像素图 → 断言输出字符序列、宽度钳位 32..=120、纵横比 2:1、解码失败走 PNG 兜底）；`login` 刷新循环单测（伪造超时错误 → 断言重新取码/重渲染调用、墙钟上限生效）；集成：起 daemon → `hmp status`/`hmp pause` 断言。
 

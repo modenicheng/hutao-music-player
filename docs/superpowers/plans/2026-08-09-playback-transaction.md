@@ -4,9 +4,9 @@
 
 **Goal:** 让"换曲事务"覆盖真正播放器装载：引入装载代际（load generation）彻底替代 500ms 滞后事件猜测窗口；driver 明确 ACK 新曲后才提交（队列/会话/旧媒体释放）；播放历史改用显式 event id，listened_ms 记录旧曲真实位置。
 
-**Architecture:** 三层改动——(1) hmp-core `PlaybackState` 加 `gen` 字段 + hmp-player-gst `LoadRequest` 加 `gen`、离散事件携带 gen；(2) engine 用 `current_gen` 过滤旧代事件（删除 `loaded_at` 窗口），装载失败尽力回滚到上一曲；(3) 播放会话从 `Option<i64>` 升级为 `PlaybackSession { track_id, event_id }`，`record_play_start` 返回 event id，`record_play_end(event_id, …)` 精确闭合，换曲路径在装载**前**捕获旧 position 作为 listened_ms。
+**Architecture:** 三层改动——(1) hmp-core `PlaybackState` 加 `gen` 字段 + hmp-player `LoadRequest` 加 `gen`、离散事件携带 gen；(2) engine 用 `current_gen` 过滤旧代事件（删除 `loaded_at` 窗口），装载失败尽力回滚到上一曲；(3) 播放会话从 `Option<i64>` 升级为 `PlaybackSession { track_id, event_id }`，`record_play_start` 返回 event id，`record_play_end(event_id, …)` 精确闭合，换曲路径在装载**前**捕获旧 position 作为 listened_ms。
 
-**Tech Stack:** Rust workspace（hmp-core / hmp-player-gst / hmp-storage / hmp-daemon）；tokio watch/broadcast；rusqlite；TDD（每任务先写失败测试）。
+**Tech Stack:** Rust workspace（hmp-core / hmp-player / hmp-storage / hmp-daemon）；tokio watch/broadcast；rusqlite；TDD（每任务先写失败测试）。
 
 ## Global Constraints
 
@@ -24,11 +24,11 @@
 
 **Files:**
 - Modify: `crates/hmp-core/src/player.rs`（PlaybackState 结构）
-- Modify: `crates/hmp-player-gst/src/core.rs`（LoadRequest、drive()）
-- Test: `crates/hmp-player-gst/src/core.rs` tests 模块
+- Modify: `crates/hmp-player/src/core.rs`（LoadRequest、drive()）
+- Test: `crates/hmp-player/src/core.rs` tests 模块
 
 **Interfaces:**
-- Produces: `PlaybackState { …, pub gen: u64 }`（`#[serde(default)]`）；`hmp_player_gst::LoadRequest { track, uri, quality, gen: u64 }`；`PlayerCore::load`/`GstDriver::load` 透传 gen；drive() 在装载处理时置 `state.gen = req.gen` 并 **drain** `bus_rx` 队列（丢弃装载前已入队的旧曲事件）。
+- Produces: `PlaybackState { …, pub gen: u64 }`（`#[serde(default)]`）；`hmp_player_gst::LoadRequest { track, uri, quality, gen: u64 }`；`PlayerCore::load`/`RodioDriver::load` 透传 gen；drive() 在装载处理时置 `state.gen = req.gen` 并 **drain** `bus_rx` 队列（丢弃装载前已入队的旧曲事件）。
 
 - [ ] **Step 1: hmp-core 加字段**
 
@@ -50,9 +50,9 @@
 Run: `cargo test -p hmp-core`
 Expected: 全绿（新断言通过；序列化测试不受影响，serde default 兜底）。
 
-- [ ] **Step 3: hmp-player-gst LoadRequest 加 gen**
+- [ ] **Step 3: hmp-player LoadRequest 加 gen**
 
-`crates/hmp-player-gst/src/core.rs`：
+`crates/hmp-player/src/core.rs`：
 
 ```rust
 /// 加载请求：曲目元数据 + 播放 URI。
@@ -121,7 +121,7 @@ pub struct LoadRequest {
 
 - [ ] **Step 6: 写 gen 传播测试（失败先行）**
 
-`crates/hmp-player-gst/src/core.rs` tests 模块追加：
+`crates/hmp-player/src/core.rs` tests 模块追加：
 
 ```rust
     #[tokio::test]
@@ -139,19 +139,19 @@ pub struct LoadRequest {
 
 - [ ] **Step 7: 跑测试确认先失败**
 
-Run: `cargo test -p hmp-player-gst load_sets_gen_on_state`
+Run: `cargo test -p hmp-player load_sets_gen_on_state`
 Expected: FAIL（`assert_eq!` 失败：state.gen 为 0 而非 42）——证明测试有效。
 
-- [ ] **Step 8: 跑 hmp-player-gst 全测试确认通过**
+- [ ] **Step 8: 跑 hmp-player 全测试确认通过**
 
-Run: `cargo test -p hmp-player-gst`
+Run: `cargo test -p hmp-player`
 Expected: 全绿（含已有 4 个状态测试；`load_publishes_track_and_loading` 等不受影响）。
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add crates/hmp-core/src/player.rs crates/hmp-player-gst/src/core.rs
-git commit -m "feat(core,gst): load generation - PlaybackState.gen + LoadRequest.gen, drain stale bus events on load"
+git add crates/hmp-core/src/player.rs crates/hmp-player/src/core.rs
+git commit -m "feat(core,audio backend): load generation - PlaybackState.gen + LoadRequest.gen, drain stale bus events on load"
 ```
 
 ---
@@ -159,9 +159,9 @@ git commit -m "feat(core,gst): load generation - PlaybackState.gen + LoadRequest
 ### Task 2: PlayerEvent 携带装载代际
 
 **Files:**
-- Modify: `crates/hmp-player-gst/src/events.rs`
-- Modify: `crates/hmp-player-gst/src/core.rs`（Eos/Error 发布点）
-- Test: `crates/hmp-player-gst/src/core.rs` tests 模块
+- Modify: `crates/hmp-player/src/events.rs`
+- Modify: `crates/hmp-player/src/core.rs`（Eos/Error 发布点）
+- Test: `crates/hmp-player/src/core.rs` tests 模块
 
 **Interfaces:**
 - Consumes: Task 1 的 `loaded_gen: u64`（drive 内局部变量）。
@@ -169,7 +169,7 @@ git commit -m "feat(core,gst): load generation - PlaybackState.gen + LoadRequest
 
 - [ ] **Step 1: events.rs 改枚举**
 
-`crates/hmp-player-gst/src/events.rs`：
+`crates/hmp-player/src/events.rs`：
 
 ```rust
 /// 播放器离散事件。
@@ -234,7 +234,7 @@ Expected: 全绿（此任务只改形状不改行为）。
 
 - [ ] **Step 5: 写错误事件 gen 测试（失败先行）**
 
-`crates/hmp-player-gst/src/core.rs` tests 模块追加（bad uri 可靠触发 Error）：
+`crates/hmp-player/src/core.rs` tests 模块追加（bad uri 可靠触发 Error）：
 
 ```rust
     #[tokio::test]
@@ -264,14 +264,14 @@ Expected: 全绿（此任务只改形状不改行为）。
 
 - [ ] **Step 6: 跑测试确认先失败再通过**
 
-Run: `cargo test -p hmp-player-gst error_event_carries_loaded_gen`
+Run: `cargo test -p hmp-player error_event_carries_loaded_gen`
 Expected: 先 FAIL（Step 2 未做时 gen 不存在——实际编译失败即"失败"）；Step 2 后 PASS。若 Step 2 已先行，此测试直接 PASS——顺序以实际为准，测试必须真实断言 `gen == 7`。
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/hmp-player-gst/src/events.rs crates/hmp-player-gst/src/core.rs crates/hmp-daemon/src/engine.rs crates/hmp-daemon/tests/e2e.rs
-git commit -m "feat(gst): PlayerEvent carries load generation (PlaybackEnded/Error); update consumers"
+git add crates/hmp-player/src/events.rs crates/hmp-player/src/core.rs crates/hmp-daemon/src/engine.rs crates/hmp-daemon/tests/e2e.rs
+git commit -m "feat(audio backend): PlayerEvent carries load generation (PlaybackEnded/Error); update consumers"
 ```
 
 ---

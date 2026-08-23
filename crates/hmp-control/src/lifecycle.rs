@@ -145,8 +145,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn frontend_owned_daemon_without_first_lease_quits_after_grace() {
         let (quit_tx, mut quit_rx) = mpsc::unbounded_channel();
-        let _lifecycle =
-            FrontendLeaseTracker::frontend_owned(Duration::from_secs(30), quit_tx);
+        let _lifecycle = FrontendLeaseTracker::frontend_owned(Duration::from_secs(30), quit_tx);
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(29)).await;
         assert!(quit_rx.try_recv().is_err());

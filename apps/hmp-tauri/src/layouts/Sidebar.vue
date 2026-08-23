@@ -16,7 +16,7 @@ import queueIcon from "../assets/icons/queue-music-rounded.svg?raw";
 import settingsIcon from "../assets/icons/settings-rounded.svg?raw";
 
 defineProps<{ collapsed?: boolean }>();
-const emit = defineEmits<{ "update:collapsed": [value: boolean] }>();
+defineEmits<{ "update:collapsed": [value: boolean] }>();
 
 // emit.call(true, "update:collapsed", true);
 </script>

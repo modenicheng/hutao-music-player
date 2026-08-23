@@ -7,9 +7,9 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hmp_core::{AudioQuality, Track, TrackId};
+use hmp_core::{AudioQuality, LoadRequest, Track, TrackId};
 use hmp_mpris::MprisService;
-use hmp_player_gst::{LoadRequest, PlayerCore};
+use hmp_player::PlayerCore;
 
 fn write_test_aiff(path: &std::path::Path) -> std::io::Result<()> {
     const RATE: u32 = 44100;
@@ -79,8 +79,7 @@ async fn main() {
         .with_max_level(tracing::Level::WARN)
         .init();
 
-    // 播放器（fakeaudiosink：无音频设备环境）
-    let core = Arc::new(PlayerCore::new_with_sink(Some("fakeaudiosink")).expect("player"));
+    let core = Arc::new(PlayerCore::new().expect("player"));
     let state_rx = core.subscribe_state();
 
     // MPRIS 服务
@@ -110,7 +109,9 @@ async fn main() {
         available_qualities: vec![AudioQuality::Mp3_128],
     };
     core.load(LoadRequest {
-        uri: format!("file://{}", aiff.display()),
+        uri: url::Url::from_file_path(&aiff)
+            .expect("file URI")
+            .to_string(),
         track,
         quality: AudioQuality::Mp3_128,
         load_gen: 0,

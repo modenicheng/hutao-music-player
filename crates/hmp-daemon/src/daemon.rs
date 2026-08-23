@@ -6,15 +6,12 @@ use hmp_storage::credential::store_from_env;
 
 use crate::engine::{EngineHandle, PlaybackEngine};
 use crate::local::{CompositeSourceResolver, LocalSourceResolver};
-use crate::player::{GstDriver, PlaybackDriver, QqSourceResolver, SourceResolver};
+use crate::player::{PlaybackDriver, QqSourceResolver, RodioDriver, SourceResolver};
 
 /// 后端运行配置。
-pub struct DaemonConfig {
-    /// 测试可传 "fakesink"；None = 系统默认音频输出。
-    pub audio_sink: Option<String>,
-}
+pub struct DaemonConfig;
 
-/// 组装后端并返回引擎句柄（服务器/tray/MPRIS 由 Task 3/5/6 接入）。
+/// 组装后端并返回引擎句柄；控制与系统媒体适配器由 `serve` 接入。
 pub struct Daemon {
     pub handle: EngineHandle,
     /// 本地目录监听（保活：drop 即停止；serve.rs 持 Daemon 到进程结束）。
@@ -22,8 +19,8 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn start(cfg: DaemonConfig) -> Result<Self, hmp_core::HmpError> {
-        let driver: Arc<dyn PlaybackDriver> = Arc::new(GstDriver::new(cfg.audio_sink.as_deref())?);
+    pub fn start(_cfg: DaemonConfig) -> Result<Self, hmp_core::HmpError> {
+        let driver: Arc<dyn PlaybackDriver> = Arc::new(RodioDriver::new()?);
         let store = store_from_env();
         let resolver = Arc::new(QqSourceResolver::new(QqMusicClient::new(), store));
         let credential_ok = {

@@ -43,7 +43,15 @@ pub fn persist_cover(cover: &[u8]) -> std::io::Result<String> {
     if !cpath.exists() {
         std::fs::write(&cpath, cover)?;
     }
-    Ok(format!("file://{}", cpath.display()))
+    let absolute = cpath.canonicalize()?;
+    url::Url::from_file_path(&absolute)
+        .map(|uri| uri.to_string())
+        .map_err(|()| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("无法生成封面文件 URI: {}", absolute.display()),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -69,12 +77,13 @@ mod tests {
 
     #[test]
     fn persist_cover_writes_deduplicated_file() {
+        let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
         let cover = vec![1u8, 2, 3, 4];
         let uri1 = persist_cover(&cover).unwrap();
         let uri2 = persist_cover(&cover).unwrap();
         assert_eq!(uri1, uri2, "同封面去重（同 hash 文件名）");
         assert!(uri1.starts_with("file://"), "{uri1}");
-        let p = uri1.strip_prefix("file://").unwrap();
-        assert!(std::path::Path::new(p).exists());
+        let p = url::Url::parse(&uri1).unwrap().to_file_path().unwrap();
+        assert!(p.exists());
     }
 }

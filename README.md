@@ -1,8 +1,8 @@
 # HMP (hutao-music-player)
 
-HMP is a lightweight, Rust-native QQ Music player for Linux with complete MPRIS integration.
+HMP is a lightweight, Rust-native QQ Music player for Windows and Linux.
 
-HMP 是一个面向 Linux 的轻量 Rust QQ 音乐播放器，重点提供完整的 MPRIS 系统媒体控制体验。
+HMP 是一个面向 Windows 与 Linux 的轻量 Rust QQ 音乐播放器，分别接入 Windows SMTC 与 Linux MPRIS 系统媒体控制。
 
 ## 仓库结构
 
@@ -12,11 +12,12 @@ hutao-music-player/
 ├── crates/
 │   ├── hmp-core/           # 领域模型：Track/PlayerCommand/PlaybackState/QueueCore/IPC 协议
 │   ├── hmp-qqmusic-api/    # QQ 音乐 API 移植 crate（独立发布 crates.io）
-│   ├── hmp-player-gst/     # GStreamer 播放核心（PlayerCore）
+│   ├── hmp-player/         # Rodio/CPAL 播放核心（PlayerCore）
 │   ├── hmp-media/          # 下载/QMC2 解密/缓存/本地回环解密代理
 │   ├── hmp-storage/        # 凭证存储
 │   ├── hmp-mpris/          # MPRIS D-Bus 服务
-│   ├── hmp-daemon/         # 后台播放后端（socket 服务器 + 播放引擎 + tray/MPRIS 适配）
+│   ├── hmp-smtc/           # Windows System Media Transport Controls 适配器
+│   ├── hmp-daemon/         # 后台播放后端（控制服务器 + 播放引擎 + SMTC/MPRIS）
 │   ├── hmp-desktop/        # Slint 桌面端（接入中）
 │   └── hmp-cli/            # CLI（登录/搜索/遥控子命令，二进制名 `hmp`）
 ├── docs/
@@ -43,7 +44,7 @@ hmp pause / next / seek 60   # 遥控
 hmp quit                     # 退出后端
 ```
 
-完整使用文档（命令参考、队列语义、音质与解密、MPRIS/托盘、故障排查、测试指南）见 **[docs/USAGE.md](docs/USAGE.md)**。
+完整使用文档（命令参考、队列语义、音质与解密、SMTC/MPRIS/托盘、故障排查、测试指南）见 **[docs/USAGE.md](docs/USAGE.md)**。
 
 ## Crate 说明
 

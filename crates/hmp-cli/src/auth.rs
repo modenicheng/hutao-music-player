@@ -15,7 +15,7 @@ pub fn format_auth(cred: Option<&Credential>, backend: BackendKind) -> String {
         "未过期"
     };
     let backend_name = match backend {
-        BackendKind::SecretService => "系统密钥环 (SecretService)".to_string(),
+        BackendKind::SecretService => system_keyring_name().to_string(),
         BackendKind::File => {
             let path = hmp_storage::xdg::config_dir().join("credential.json");
             format!("明文文件 {}（不安全）", path.display())
@@ -25,6 +25,14 @@ pub fn format_auth(cred: Option<&Credential>, backend: BackendKind) -> String {
         "登录: 已登录\n用户: {} (musicid: {})\n过期: {}\n后端: {}",
         cred.uin, cred.music_id, expired, backend_name
     )
+}
+
+fn system_keyring_name() -> &'static str {
+    if cfg!(windows) {
+        "系统密钥环 (Windows Credential Manager)"
+    } else {
+        "系统密钥环 (Secret Service)"
+    }
 }
 
 /// 显示登录状况。

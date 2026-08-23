@@ -5,11 +5,11 @@
 //! 1. [`resolve_track_falls_back_to_plain_via_mock_api`]：真实
 //!    [`QqSourceResolver`] + wiremock QQ API（曲目详情 + 取流）+ 文件凭证
 //!    后端，验证「详情解析 → 加密音质全部失败 → 明文音质成功」的完整回退链
-//!    与 CDN URI 契约（无 GStreamer，完全离线）。
-//! 2. [`play_then_end_advances_queue_with_gst`]：真实 [`GstDriver`]
-//!    （fakeaudiosink，headless）+ 本地生成的 1s wav，验证「Play → Playing →
-//!    真实 EOS → 自动续播下一首 → 队列播完」；队列裁决逻辑由引擎单测
-//!    （engine.rs）覆盖，本测试是真实 GStreamer 冒烟。
+//!    与 CDN URI 契约（无音频设备，完全离线）。
+//! 2. [`play_then_end_advances_queue_with_rodio`]：真实 [`RodioDriver`]
+//!    + 本地生成的 1s wav，验证「Play → Playing →
+//!      真实 EOS → 自动续播下一首 → 队列播完」；队列裁决逻辑由引擎单测
+//!      （engine.rs）覆盖，本测试是真实音频输出冒烟。
 //!
 //! 凭证隔离通过环境变量：`HMP_CREDENTIAL_BACKEND=file` + `XDG_CONFIG_HOME`
 //! 指向临时目录（`FileStore` 落在 `$XDG_CONFIG_HOME/hmp/credential.json`，
@@ -29,7 +29,7 @@ use std::time::Duration;
 use hmp_core::{AudioQuality, DaemonState, PlayRequest, PlaybackStatus, Request, Track, TrackId};
 use hmp_daemon::engine::PlaybackEngine;
 use hmp_daemon::player::{
-    EngineError, GstDriver, PlaybackDriver, QqSourceResolver, ResolvedTrack, SourceResolver,
+    EngineError, PlaybackDriver, QqSourceResolver, ResolvedTrack, RodioDriver, SourceResolver,
 };
 use hmp_qqmusic_api::{ClientConfig, Credential, QqMusicClient};
 use hmp_storage::credential::{Store, store_from_env};
@@ -42,7 +42,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const TRACK_MID: &str = "003xYzAbTestMid";
 /// 媒体文件 mid（详情 file.media_mid，取流文件名以它拼 `M500<media_mid>.mp3`）。
 const TRACK_MEDIA_MID: &str = "004wavMediaMid";
-/// 队列中的两首本地 wav（GStreamer 冒烟用）。
+/// 队列中的两首本地 wav（真实音频冒烟用）。
 const WAV_ID_1: &str = "localwav-1";
 const WAV_ID_2: &str = "localwav-2";
 
@@ -253,7 +253,7 @@ async fn mount_qq_mocks(server: &MockServer) {
 
 /// 真实 `QqSourceResolver` × wiremock：详情 + 回退 + 取流 → 可播放 URI。
 ///
-/// 不触网、不依赖 GStreamer；验证 daemon 对 QQ API 响应的解析契约。
+/// 不触网、不依赖 Rodio；验证 daemon 对 QQ API 响应的解析契约。
 #[tokio::test]
 async fn resolve_track_falls_back_to_plain_via_mock_api() {
     let _lock = CONFIG_ENV_LOCK.lock().await;
@@ -313,7 +313,7 @@ async fn resolve_track_falls_back_to_plain_via_mock_api() {
             "https://isure.stream.qqmusic.qq.com/M500{TRACK_MEDIA_MID}.mp3?guid=abc&vkey=testvkey"
         )
     );
-    // 明文音质无需解密 guard（media = None → GStreamer 直连 CDN）
+    // 明文音质无需解密 guard（media = None → Rodio 直连 CDN）
     assert!(resolved.media.is_none(), "明文路径不应有解密代理 guard");
 
     // 元数据（歌手/专辑/封面/时长）来自详情
@@ -364,7 +364,7 @@ async fn resolve_track_falls_back_to_plain_via_mock_api() {
     );
 }
 
-// ── 测试 2：真实 GStreamer × fakesink × 本地 wav ──────────────────────
+// ── 测试 2：真实 Rodio × 本地 wav ─────────────────────────────────────
 
 /// 把本地 wav 当播放源的解析器：模拟歌单 `PlayRequest::Playlist` →
 /// [t1, t2]，每首解析为 `file://` URI（真实播放本地音频，产生真实 EOS）。
@@ -435,7 +435,9 @@ impl SourceResolver for LocalWavResolver {
                     url: Some(format!("file://{wav}")),
                     available_qualities: vec![AudioQuality::Mp3_128],
                 },
-                uri: format!("file://{wav}"),
+                uri: url::Url::from_file_path(&wav)
+                    .map_err(|()| EngineError::Internal("无效本地路径".into()))?
+                    .to_string(),
                 media: None,
                 quality: AudioQuality::Mp3_128,
                 replaygain_db: None,
@@ -469,13 +471,13 @@ async fn wait_state(
 /// 等待下一个 `PlaybackEnded` 事件（真实 EOS 的直接证据；
 /// 每次调用从当前广播游标起等待一次）。
 async fn wait_next_ended(
-    events: &mut tokio::sync::broadcast::Receiver<hmp_player_gst::PlayerEvent>,
+    events: &mut tokio::sync::broadcast::Receiver<hmp_core::PlayerEvent>,
     timeout: Duration,
 ) {
     tokio::time::timeout(timeout, async {
         loop {
             match events.recv().await {
-                Ok(hmp_player_gst::PlayerEvent::PlaybackEnded { .. }) => return,
+                Ok(hmp_core::PlayerEvent::PlaybackEnded { .. }) => return,
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -490,13 +492,7 @@ async fn wait_next_ended(
 
 /// 引擎 Play → Playing → 真实 EOS → 自动续播下一首 → 队列播完。
 ///
-/// 非 `#[ignore]`：与 hmp-player-gst 既有测试一致，使用 `fakeaudiosink`
-/// headless 运行（GStreamer 为本仓库 workspace 测试的硬依赖）。
-///
-/// 不用 `fakesink`：gstreamer-player 在 fakesink 下 EOS/续播时序不稳定
-/// （首曲可能不触发 EOS、紧接 EOS 的换曲可能停在 Stopped）；
-/// `fakeaudiosink` 是仓库 headless 约定（hmp-player-gst 既有测试），
-/// 顺序加载与 EOS 行为确定。
+/// 需要真实默认音频设备；无设备 CI 由 hmp-player 的无设备单测覆盖。
 /// 固定音质策略（`hmp quality flac`）：回退链从 FLAC 起，不再尝试 Master/HiRes/Atmos。
 /// 断言：GetEVkey 序列只含 F0M0（Q0M0/AIM0 不出现）→ 加密失败后明文 M500 兜底。
 #[tokio::test]
@@ -588,7 +584,8 @@ async fn resolve_track_respects_fixed_quality_config() {
 }
 
 #[tokio::test]
-async fn play_then_end_advances_queue_with_gst() {
+#[ignore = "需要真实默认音频设备（真机验收项）"]
+async fn play_then_end_advances_queue_with_rodio() {
     // 1) 本地 1s wav（两首，验证续播）
     let dir = tempfile::tempdir().unwrap();
     let wav1 = dir.path().join("t1.wav");
@@ -596,10 +593,9 @@ async fn play_then_end_advances_queue_with_gst() {
     write_wav(&wav1);
     write_wav(&wav2);
 
-    // 2) 真实 GStreamer 驱动（fakeaudiosink，headless）
-    let driver: Arc<dyn PlaybackDriver> = Arc::new(
-        GstDriver::new(Some("fakeaudiosink")).expect("GStreamer 初始化失败（fakeaudiosink）"),
-    );
+    // 2) 真实 Rodio/CPAL 默认输出驱动
+    let driver: Arc<dyn PlaybackDriver> =
+        Arc::new(RodioDriver::new().expect("默认音频输出初始化失败"));
 
     // 3) 本地 wav 解析器（模拟歌单队列 [t1, t2]）
     let resolver: Arc<dyn SourceResolver> = Arc::new(LocalWavResolver::new(vec![
@@ -656,8 +652,7 @@ async fn play_then_end_advances_queue_with_gst() {
     );
 
     // 7) 队列播完：第二次 EOS 后停在最后一首（current 保持 1）。
-    //    gstreamer-player 在 EOS 后自行停管线（state-changed STOPPED），
-    //    会覆盖核心发布的 Ended —— 故收尾状态接受 Ended | Stopped。
+    //    音频驱动停止后收尾状态接受 Ended | Stopped。
     wait_next_ended(&mut events, Duration::from_secs(15)).await;
     let st = wait_state(handle.state_rx.clone(), Duration::from_secs(10), |st| {
         (st.playback.status == PlaybackStatus::Ended

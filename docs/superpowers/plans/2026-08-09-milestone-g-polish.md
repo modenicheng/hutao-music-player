@@ -189,9 +189,9 @@ daemon_cli.rs（真机项，`#[ignore]`，仿现有 library_playlist 测试）�
 
 ```rust
     /// 打磨：`hmp serve --background --sink fakesink` 应正常启动（fakesink 是
-    /// 有效 GStreamer sink；真实音频环境无默认音频输出也能跑）。
+    /// 有效 Rodio sink；真实音频环境无默认音频输出也能跑）。
     #[test]
-    #[ignore = "需要真实 GStreamer 环境（真机验收项）"]
+    #[ignore = "需要真实 Rodio 环境（真机验收项）"]
     fn serve_with_explicit_sink_starts() { … 与 library_playlist 同构，但 serve 参数带 --sink fakesink；
         启动成功 + quit 正常。 }
 ```
@@ -211,7 +211,7 @@ Expected: FAIL（--sink 参数不存在 → clap 报错）。
         /// 后台模式（脱离终端）。
         #[arg(long)]
         background: bool,
-        /// 音频输出 sink（GStreamer 元素名；覆盖 config.toml [audio] sink）。
+        /// 音频输出 sink（Rodio 元素名；覆盖 config.toml [audio] sink）。
         #[arg(long)]
         sink: Option<String>,
     },

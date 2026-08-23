@@ -6,7 +6,7 @@
 
 **Architecture:** 保留 Slint 1.17 和现有 Rust 应用核心。将当前单文件 UI 拆成主题、原语、导航、页面、播放栏和登录弹层组件；`AppWindow` 只持有 UI 状态和转发回调。`AppCore` 继续作为真实播放状态唯一来源，通过新增的队列快照、歌词状态事件和现有播放状态订阅向 UI 提供数据，推荐内容仅由本地演示数据模块提供。
 
-**Tech Stack:** Rust 2024, Slint 1.17, `slint-build`, Tokio 1, GStreamer 播放器核心, QQ Music Rust API, `i-slint-backend-testing`, image crate.
+**Tech Stack:** Rust 2024, Slint 1.17, `slint-build`, Tokio 1, Rodio 播放器核心, QQ Music Rust API, `i-slint-backend-testing`, image crate.
 
 ## Global Constraints
 
@@ -25,7 +25,7 @@
 
 ## File Structure
 
-将按以下边界创建和修改文件；不修改 QQ Music 协议、GStreamer 播放器或 MPRIS 实现。
+将按以下边界创建和修改文件；不修改 QQ Music 协议、Rodio 播放器或 MPRIS 实现。
 
 - Create: `crates/hmp-desktop/ui/theme.slint` - 深色/浅色语义颜色、间距、尺寸和字号令牌。
 - Create: `crates/hmp-desktop/ui/primitives.slint` - 图标按钮、封面、开发中状态条、空状态和可复用列表行原语。
@@ -856,7 +856,7 @@ Run the desktop binary from the repository environment and inspect `1100x720` pl
 
 - [ ] **Step 5: Record verification results**
 
-Append a dated verification note to `docs/PROJECT.md` only after the commands and manual checks have been run. Record the exact commands, whether the desktop binary launched, and any environment-specific limitation such as unavailable GStreamer audio devices or missing Secret Service. Keep the feature status table unchanged unless implementation genuinely changed a capability.
+Append a dated verification note to `docs/PROJECT.md` only after the commands and manual checks have been run. Record the exact commands, whether the desktop binary launched, and any environment-specific limitation such as unavailable Rodio audio devices or missing Secret Service. Keep the feature status table unchanged unless implementation genuinely changed a capability.
 
 - [ ] **Step 6: Commit verification documentation**
 

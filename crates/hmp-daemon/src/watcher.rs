@@ -240,7 +240,8 @@ mod tests {
         // 写入音频文件 → 事件 → 自动入库（轮询等待，超时 5s）。
         let f = music.path().join("new-song.mp3");
         std::fs::write(&f, b"abc").unwrap();
-        let key = format!("local:{}", f.canonicalize().unwrap().display());
+        let canonical = f.canonicalize().unwrap();
+        let key = format!("local:{}", canonical.display());
         let mut found = false;
         for _ in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -260,7 +261,7 @@ mod tests {
             let miss: i64 = check
                 .query_row(
                     "SELECT missing FROM local_files WHERE path=?1",
-                    [f.display().to_string()],
+                    [canonical.display().to_string()],
                     |r| r.get(0),
                 )
                 .unwrap_or(-1);

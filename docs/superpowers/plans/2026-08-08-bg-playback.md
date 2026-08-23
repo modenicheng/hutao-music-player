@@ -6,7 +6,7 @@
 
 **Architecture:** 单例 daemon 进程（setsid 常驻，CLI 按需拉起）持有凭证/QQ API/解密/播放/队列/MPRIS；所有前端（CLI socket 客户端、tray、MPRIS）是适配器，经单一 `Request` 命令通道与单一 `watch<DaemonState>` 状态出口与后端交互；控制协议 = Unix socket 长度前缀 JSON 帧（消息类型在 hmp-core，与 `PlayerCommand` 同居）。
 
-**Tech Stack:** Rust 2024 / tokio / clap / serde+serde_json / hmp-core（队列+协议）/ hmp-player-gst（PlayerCore）/ hmp-qqmusic-api / hmp-media（解密）/ hmp-storage（凭证）/ ksni（tray，feature）/ zbus（MPRIS，复用 hmp-mpris）/ image（CLI 二维码渲染，workspace 已有）
+**Tech Stack:** Rust 2024 / tokio / clap / serde+serde_json / hmp-core（队列+协议）/ hmp-player（PlayerCore）/ hmp-qqmusic-api / hmp-media（解密）/ hmp-storage（凭证）/ ksni（tray，feature）/ zbus（MPRIS，复用 hmp-mpris）/ image（CLI 二维码渲染，workspace 已有）
 
 ## Global Constraints
 
@@ -34,7 +34,7 @@
 | `crates/hmp-daemon/src/lib.rs` | 模块声明、`Daemon` 组装（feature 门控） |
 | `crates/hmp-daemon/src/daemon.rs` | `Daemon`：持有引擎 + 服务器 + tray/MPRIS 适配器 + 优雅退出编排 |
 | `crates/hmp-daemon/src/engine.rs` | `PlaybackEngine`：命令循环、队列裁决、Ended 自动续播、`watch<DaemonState>` 发布 |
-| `crates/hmp-daemon/src/player.rs` | `PlaybackDriver` trait + `GstDriver`（包 PlayerCore）+ `resolve_track`（详情/回退/解密） |
+| `crates/hmp-daemon/src/player.rs` | `PlaybackDriver` trait + `RodioDriver`（包 PlayerCore）+ `resolve_track`（详情/回退/解密） |
 | `crates/hmp-daemon/src/server.rs` | Unix socket 服务器：accept/每连接帧循环/查询/订阅 fan-out |
 | `crates/hmp-daemon/src/serve.rs` | `run_foreground` / `run_background`（CLI `hmp serve` 入口） |
 | `crates/hmp-daemon/src/tray.rs` |（feature `tray`）ksni 最小菜单适配器 |
@@ -640,7 +640,7 @@ git commit -m "feat(core): queue core and cross-process IPC protocol"
 **Interfaces:**
 - Consumes: Task 1 的 `QueueCore/QueueSnapshot/Request/DaemonState/PlayRequest/IpcErrorCode`；现有 `hmp_core::{Track, TrackId, AudioQuality, PlayerCommand, PlaybackState, PlaybackStatus, LoopMode}`、`hmp_player_gst::{PlayerCore, LoadRequest, PlayerEvent}`、`hmp_qqmusic_api::{QqMusicClient, SongApi, SongFileType, SongFileInfo, songlist::SonglistApi, album::AlbumApi}`、`hmp_storage::credential::Store`
 - Produces（后续任务依赖，签名锁定）:
-  - `player::PlaybackDriver`（trait，含 `command(&self, PlayerCommand)`）+ `player::GstDriver`
+  - `player::PlaybackDriver`（trait，含 `command(&self, PlayerCommand)`）+ `player::RodioDriver`
   - `player::ResolvedTrack { track: Track, uri: String, media: Option<hmp_media::PreparedMedia> }`
   - `player::SourceResolver`（trait：`resolve_source_ids(&PlayRequest) -> Result<Vec<TrackId>, EngineError>` + `resolve_track(&TrackId) -> Result<ResolvedTrack, EngineError>`）+ `player::QqSourceResolver { client: QqMusicClient, store: Store }`
   - `player::EngineError { NotLoggedIn, TrackNotFound, PlaylistNotFound, QualityUnavailable, Internal }`
@@ -661,7 +661,7 @@ rust-version.workspace = true
 
 [dependencies]
 hmp-core = { path = "../hmp-core" }
-hmp-player-gst = { path = "../hmp-player-gst" }
+hmp-player = { path = "../hmp-player" }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
 hmp-storage = { path = "../hmp-storage" }
 hmp-media = { path = "../hmp-media" }
@@ -808,13 +808,13 @@ mod tests {
 
 Run: `cargo build -p hmp-daemon --no-default-features`  Expected: 通过（空模块）
 
-- [ ] **Step 3: 实现 PlaybackDriver + GstDriver + ResolvedTrack + EngineError + SourceResolver**
+- [ ] **Step 3: 实现 PlaybackDriver + RodioDriver + ResolvedTrack + EngineError + SourceResolver**
 
 ```rust
 //! 播放驱动抽象、曲目解析与解析错误（spec §4.2 `player.rs`）。
 //!
 //! [`PlaybackDriver`] 是后端与播放器的唯一接缝：测试注入 fake，生产用
-//! [`GstDriver`]（包 `PlayerCore`）。[`SourceResolver`] 是后端与 QQ API
+//! [`RodioDriver`]（包 `PlayerCore`）。[`SourceResolver`] 是后端与 QQ API
 //! 的唯一接缝：测试注入 fake，生产用 [`QqSourceResolver`]。队列裁决/
 //! 自动续播在引擎（`engine.rs`），播放器核心不感知队列。
 
@@ -845,13 +845,13 @@ pub trait PlaybackDriver: Send + Sync {
     fn subscribe_events(&self) -> broadcast::Receiver<PlayerEvent>;
 }
 
-/// GStreamer 播放驱动（生产）。
+/// Rodio 播放驱动（生产）。
 #[derive(Debug)]
-pub struct GstDriver {
+pub struct RodioDriver {
     core: PlayerCore,
 }
 
-impl GstDriver {
+impl RodioDriver {
     /// 新建（`audio_sink` 为 None 时用系统默认；测试可传 "fakesink"）。
     pub fn new(audio_sink: Option<&str>) -> Result<Self, hmp_core::HmpError> {
         Ok(Self {
@@ -860,7 +860,7 @@ impl GstDriver {
     }
 }
 
-impl PlaybackDriver for GstDriver {
+impl PlaybackDriver for RodioDriver {
     fn load(&self, request: LoadRequest) {
         self.core.load(request);
     }
@@ -1090,7 +1090,7 @@ Run: `cargo test -p hmp-daemon --no-default-features engine`  Expected: 编译�
 //! 单一命令通道：所有输入适配器（socket 服务器 / tray / MPRIS）把
 //! [`Request`] 发进 [`EngineHandle::command_tx`]，由引擎串行处理；
 //! 单一状态出口：`watch<DaemonState>`。Next/Previous 由引擎拦截做队列
-//! 导航（PlayerCore 忽略这两个命令，见 hmp-player-gst core.rs）。
+//! 导航（PlayerCore 忽略这两个命令，见 hmp-player core.rs）。
 
 use std::sync::Arc;
 
@@ -1355,7 +1355,7 @@ use hmp_qqmusic_api::QqMusicClient;
 use hmp_storage::credential::store_from_env;
 
 use crate::engine::{EngineHandle, PlaybackEngine};
-use crate::player::{GstDriver, PlaybackDriver, QqSourceResolver};
+use crate::player::{RodioDriver, PlaybackDriver, QqSourceResolver};
 
 /// 后端运行配置。
 pub struct DaemonConfig {
@@ -1370,7 +1370,7 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn start(cfg: DaemonConfig) -> Result<Self, hmp_core::HmpError> {
-        let driver: Arc<dyn PlaybackDriver> = Arc::new(GstDriver::new(cfg.audio_sink.as_deref())?);
+        let driver: Arc<dyn PlaybackDriver> = Arc::new(RodioDriver::new(cfg.audio_sink.as_deref())?);
         let store = store_from_env();
         let resolver = Arc::new(QqSourceResolver::new(QqMusicClient::new(), store));
         let credential_ok = {
@@ -2719,7 +2719,7 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
 // 注：进程级测试用 std::process::Command 调 cargo 构建的 hmp 二进制
 // （CARGO_BIN_EXE_hmp 环境变量由 cargo 提供）
 ```
-> 进程级测试在 CI 无音频设备时 `serve --background` 的 GstDriver 可能失败（无音频 sink）——测试改用**只测 socket 层**：直接构造 `hmp-daemon` 的 server + FakeDriver 引擎（lib 级集成，hmp-daemon 内已有）；CLI 进程级测试标记 `#[ignore]`（需真实环境），并在计划验收清单标注"真机验收项"。
+> 进程级测试在 CI 无音频设备时 `serve --background` 的 RodioDriver 可能失败（无音频 sink）——测试改用**只测 socket 层**：直接构造 `hmp-daemon` 的 server + FakeDriver 引擎（lib 级集成，hmp-daemon 内已有）；CLI 进程级测试标记 `#[ignore]`（需真实环境），并在计划验收清单标注"真机验收项"。
 
 - [ ] **Step 6: 验证 + 提交**
 
@@ -2949,7 +2949,7 @@ git commit -m "feat(daemon): ksni tray and MPRIS adapters with graceful exit"
 
 use hmp_core::{PlaybackStatus, PlayerCommand, Request, TrackId};
 use hmp_daemon::engine::PlaybackEngine;
-use hmp_daemon::player::GstDriver;
+use hmp_daemon::player::RodioDriver;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use wiremock::matchers::{method, path};
 
@@ -2988,12 +2988,12 @@ async fn play_then_end_advances_queue() {
     //    wiremock 用例形态参考 hmp-qqmusic-api 与 hmp-media 既有测试
     //    （crates/hmp-qqmusic-api/src/**/tests.rs 与 crates/hmp-media/src/**/tests.rs 的 Mock/MockServer 用法，
     //    响应 JSON 字段对齐 song.rs/models.rs 的 serde 结构）。
-    // 3) GstDriver::new(Some("fakesink"))
+    // 3) RodioDriver::new(Some("fakesink"))
     // 4) 引擎 Play([t1, t2]) → 状态 Playing → 等 Ended 事件 → 断言队列 current==1 且第二首已加载
     // 5) 清理 env 变量（防污染其他测试）
 }
 ```
-> 端到端细节较多、依赖 GStreamer 环境——按 hmp-player-gst 既有测试的媒体生成方式（若已有 test media helper 则复用）。若 CI 无 GStreamer，本测试标 `#[ignore]` 并记录为真机验收项。**必须至少包含**：引擎驱动（FakeDriver）的队列裁决+自动续播已由 Task 2 单测覆盖；本 e2e 是真实 gst 冒烟，允许 `#[ignore]`。
+> 端到端细节较多、依赖 Rodio 环境——按 hmp-player 既有测试的媒体生成方式（若已有 test media helper 则复用）。若 CI 无 Rodio，本测试标 `#[ignore]` 并记录为真机验收项。**必须至少包含**：引擎驱动（FakeDriver）的队列裁决+自动续播已由 Task 2 单测覆盖；本 e2e 是真实 audio backend 冒烟，允许 `#[ignore]`。
 
 - [ ] **Step 2: 文档更新**
 

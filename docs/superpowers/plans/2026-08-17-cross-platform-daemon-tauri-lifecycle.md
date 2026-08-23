@@ -6,7 +6,7 @@
 
 **Architecture:** `hmp-core` remains transport-agnostic; a new `hmp-control` crate owns the wire protocol, client, framing, and platform endpoints. `hmpd` is the only playback-runtime process, while Tauri owns the desktop lifecycle and tray and talks to `hmpd` exactly like CLI or a future Slint frontend.
 
-**Tech Stack:** Rust 2024, Tokio, Tauri 2, Windows named pipes, Unix domain sockets, GStreamer, Vue 3, TypeScript, Vitest.
+**Tech Stack:** Rust 2024, Tokio, Tauri 2, Windows named pipes and SMTC, Unix domain sockets, Rodio/CPAL, Vue 3, TypeScript, Vitest.
 
 ## Global Constraints
 
@@ -15,7 +15,7 @@
 - Closing a tray-capable window hides it; complete exit remains available in tray and GUI and converges on `Request::Quit`.
 - Frontend-owned daemon leases use a 30-second orphan grace period; autonomous CLI daemons do not depend on a GUI lease.
 - Linux uses owner-only Unix sockets; Windows uses session-scoped named pipes and rejects remote clients.
-- Tauri and Vue never create an `HTMLAudioElement`; Rust/GStreamer is the only audio engine.
+- Tauri and Vue never create an `HTMLAudioElement`; Rust/Rodio is the only audio engine.
 - New behavior follows red-green-refactor. Configuration-only changes are verified by the nearest build or integration test.
 
 ---
@@ -261,7 +261,7 @@ Change connection handling to split any boxed async stream rather than naming `U
 
 Run: `cargo test -p hmp-daemon --lib --no-default-features`
 
-Expected: PASS when the platform GStreamer development libraries are available.
+Expected: PASS without a separate multimedia SDK.
 
 - [ ] **Step 6: Commit**
 
@@ -318,7 +318,7 @@ Make daemon default features platform-neutral. Compile `ksni`, MPRIS, Unix signa
 
 Run: `cargo check -p hmp-daemon --no-default-features --all-targets` and `cargo check -p hmp-cli --all-targets`.
 
-Expected: both checks exit 0 when GStreamer is installed.
+Expected: both checks exit 0 on the native platform.
 
 - [ ] **Step 6: Commit**
 
@@ -401,7 +401,7 @@ Add `hmpd` to `bundle.externalBin`, enable Tauri's `tray-icon` feature, add the 
 
 Run from `apps/hmp-tauri/src-tauri`: `cargo test --lib && cargo check --all-targets`.
 
-Expected: PASS with GStreamer development libraries installed and the sidecar placeholder/build artifact present.
+Expected: PASS with the sidecar placeholder/build artifact present.
 
 - [ ] **Step 7: Commit**
 
@@ -474,10 +474,9 @@ git add apps/hmp-tauri/src/lib/player.ts apps/hmp-tauri/src/lib/player.test.ts a
 git commit -m "feat(player): route webview controls through rust core"
 ```
 
-### Task 7: Windows packaging, native verification, and documentation
+### Task 7: Windows packaging, SMTC verification, and documentation
 
 **Files:**
-- Create: `scripts/setup-gstreamer-windows.ps1`
 - Create: `apps/hmp-tauri/scripts/stage-sidecar.ps1`
 - Modify: `apps/hmp-tauri/package.json`
 - Modify: `apps/hmp-tauri/README.md`
@@ -485,23 +484,23 @@ git commit -m "feat(player): route webview controls through rust core"
 - Modify: CI workflow files under `.github/workflows` that build desktop targets
 
 **Interfaces:**
-- Consumes: official MSVC x64 GStreamer Runtime/Development installation and built `hmpd`.
+- Consumes: a native Rust/MSVC toolchain and built `hmpd`.
 - Produces: reproducible Windows developer setup, staged sidecar, Tauri build, and acceptance checklist.
 
 - [ ] **Step 1: Add a failing staging preflight**
 
 The staging script resolves the current Rust host triple, checks for `target/release/hmpd.exe`, copies it to `apps/hmp-tauri/src-tauri/binaries/hmpd-<target>.exe`, and exits non-zero with a concrete build command when absent. Run it before building `hmpd` and confirm the expected non-zero result.
 
-- [ ] **Step 2: Add GStreamer discovery setup**
+- [ ] **Step 2: Verify SDK-free Windows media dependencies**
 
-The setup script locates the official MSVC x64 installation, sets `GSTREAMER_1_0_ROOT_MSVC_X86_64`, prepends its `bin` directory to the current process `PATH`, and sets `PKG_CONFIG_PATH` to its pkg-config directory. It never downloads or installs software silently.
+Confirm the daemon builds on a clean MSVC environment without an additional media SDK;
+SMTC and audio output use Windows system APIs through Rust crates.
 
 - [ ] **Step 3: Build and stage the daemon**
 
 Run:
 
 ```powershell
-./scripts/setup-gstreamer-windows.ps1
 cargo build -p hmp-daemon --bin hmpd --release --no-default-features
 ./apps/hmp-tauri/scripts/stage-sidecar.ps1
 ```
@@ -528,7 +527,7 @@ Expected: every command exits 0 with zero test failures.
 
 - [ ] **Step 5: Perform Windows lifecycle smoke test**
 
-Launch the packaged application, play the bundled/local FLAC through GStreamer, close the window and confirm playback continues, restore by tray click, exercise tray playback commands, launch the CLI and confirm the same state/daemon PID, choose complete exit, then verify no `hmpd` process or named pipe remains. Kill a frontend-owned GUI once and verify `hmpd` exits after the 30-second grace.
+Launch the packaged application, play a local FLAC through Rodio, verify SMTC metadata/media keys/timeline, close the window and confirm playback continues, restore by tray click, exercise tray playback commands, launch the CLI and confirm the same state/daemon PID, choose complete exit, then verify no `hmpd` process or named pipe remains. Kill a frontend-owned GUI once and verify `hmpd` exits after the 30-second grace.
 
 - [ ] **Step 6: Document evidence and limitations**
 
@@ -537,7 +536,7 @@ Update usage docs with Windows prerequisites, endpoint selection, daemon ownersh
 - [ ] **Step 7: Commit**
 
 ```powershell
-git add scripts apps/hmp-tauri/scripts apps/hmp-tauri/README.md apps/hmp-tauri/package.json docs/USAGE.md .github/workflows
+git add apps/hmp-tauri/scripts apps/hmp-tauri/README.md apps/hmp-tauri/package.json docs/USAGE.md .github/workflows
 git commit -m "build(windows): package and verify daemon sidecar"
 ```
 
@@ -548,7 +547,7 @@ git commit -m "build(windows): package and verify daemon sidecar"
 - [ ] `git diff --check` reports no whitespace errors.
 - [ ] `git status --short` contains only known user-owned changes or intentional task changes.
 - [ ] `cargo test -p hmp-control --all-targets` passes on Windows.
-- [ ] `cargo test -p hmp-daemon --no-default-features --all-targets` passes with GStreamer installed.
+- [ ] `cargo test -p hmp-daemon --no-default-features --all-targets` passes without an external media SDK.
 - [ ] `cargo test -p hmp-cli --all-targets` passes.
 - [ ] `pnpm test` and `pnpm build` pass in `apps/hmp-tauri`.
 - [ ] `pnpm tauri build` succeeds with the target-suffixed `hmpd` sidecar.

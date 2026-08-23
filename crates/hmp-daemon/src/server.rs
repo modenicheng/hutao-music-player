@@ -572,7 +572,7 @@ async fn write_engine_response<W: AsyncWrite + Unpin>(
     stream: &mut W,
     response: &Response,
 ) -> std::io::Result<()> {
-    write_frame(stream, &ControlResponse::Engine(response.clone())).await
+    write_frame(stream, &ControlResponse::Engine(Box::new(response.clone()))).await
 }
 
 #[cfg(all(test, unix))]
@@ -584,7 +584,7 @@ mod tests {
     use hmp_core::{
         IpcErrorCode, PlayRequest, PlaybackState, PlaybackStatus, PlayerCommand, Track, TrackId,
     };
-    use hmp_player_gst::{LoadRequest, PlayerEvent};
+    use hmp_core::{LoadRequest, PlayerEvent};
     use std::future::Future;
     use std::path::PathBuf;
     use std::pin::Pin;
@@ -699,7 +699,7 @@ mod tests {
             .await
             .unwrap();
         match read_control::<ControlResponse>(&mut stream).await {
-            ControlResponse::Engine(response) => response,
+            ControlResponse::Engine(response) => *response,
             other => panic!("expected engine response, got {other:?}"),
         }
     }
@@ -750,7 +750,7 @@ mod tests {
         let handle = test_engine(true).await;
         tokio::spawn(async move { serve(listener, handle).await });
         let resp = request(&sock, &Request::Status).await;
-        assert!(matches!(resp, Response::Status(_)));
+        assert!(matches!(*resp, Response::Status(_)));
     }
 
     #[tokio::test]

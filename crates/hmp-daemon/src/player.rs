@@ -1,7 +1,7 @@
 //! 播放驱动抽象、曲目解析与解析错误（spec §4.2 `player.rs`）。
 //!
 //! [`PlaybackDriver`] 是后端与播放器的唯一接缝：测试注入 fake，生产用
-//! [`GstDriver`]（包 `PlayerCore`）。[`SourceResolver`] 是后端与 QQ API
+//! [`RodioDriver`]（包 `PlayerCore`）。[`SourceResolver`] 是后端与 QQ API
 //! 的唯一接缝：测试注入 fake，生产用 [`QqSourceResolver`]。队列裁决/
 //! 自动续播在引擎（`engine.rs`），播放器核心不感知队列。
 
@@ -9,10 +9,10 @@ use std::future::Future;
 use std::pin::Pin;
 
 use hmp_core::{
-    AlbumId, AlbumRef, ArtistId, ArtistRef, AudioQuality, CoverRef, PlaybackState, PlayerCommand,
-    Track, TrackId,
+    AlbumId, AlbumRef, ArtistId, ArtistRef, AudioQuality, CoverRef, LoadRequest, PlaybackState,
+    PlayerCommand, PlayerEvent, Track, TrackId,
 };
-use hmp_player_gst::{LoadRequest, PlayerCore, PlayerEvent};
+use hmp_player::PlayerCore;
 use hmp_qqmusic_api::{AlbumApi, QqMusicClient, SongApi, SongFileInfo, SongFileType, SonglistApi};
 use hmp_storage::credential::Store;
 use tokio::sync::{broadcast, watch};
@@ -36,27 +36,27 @@ pub trait PlaybackDriver: Send + Sync {
     fn subscribe_events(&self) -> broadcast::Receiver<PlayerEvent>;
 }
 
-/// GStreamer 播放驱动（生产）。
-pub struct GstDriver {
+/// Rodio/CPAL 播放驱动（生产）。
+pub struct RodioDriver {
     core: PlayerCore,
 }
 
-impl std::fmt::Debug for GstDriver {
+impl std::fmt::Debug for RodioDriver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `PlayerCore` 不实现 Debug；只呈现类型名。
-        f.debug_struct("GstDriver").finish_non_exhaustive()
+        f.debug_struct("RodioDriver").finish_non_exhaustive()
     }
 }
-impl GstDriver {
-    /// 新建（`audio_sink` 为 None 时用系统默认；测试可传 "fakesink"）。
-    pub fn new(audio_sink: Option<&str>) -> Result<Self, hmp_core::HmpError> {
+impl RodioDriver {
+    /// 使用平台默认音频输出新建驱动。
+    pub fn new() -> Result<Self, hmp_core::HmpError> {
         Ok(Self {
-            core: PlayerCore::new_with_sink(audio_sink)?,
+            core: PlayerCore::new()?,
         })
     }
 }
 
-impl PlaybackDriver for GstDriver {
+impl PlaybackDriver for RodioDriver {
     fn load(&self, request: LoadRequest) {
         self.core.load(request);
     }

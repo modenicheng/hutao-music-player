@@ -11,7 +11,7 @@ daemon per user session, and correct Windows and Linux lifecycle behavior.
 
 - `hmp-core` contains playback, queue, media, and other domain types. It does not
   know about IPC transports, windows, trays, Tauri, Slint, or controller leases.
-- `hmp-player-gst` implements the audio driver used by the playback runtime.
+- `hmp-player` implements the Rodio/CPAL audio driver used by the playback runtime.
 - `hmp-daemon` owns the single playback runtime, persistence, cross-platform IPC
   server, and process lifecycle. It does not create a window or tray.
 - A shared `hmp-control` crate owns the versioned control protocol, client,
@@ -78,7 +78,7 @@ Starting -> Running -> Draining -> Exited
 - `Running` accepts controller connections and serializes commands through the
   existing engine command channel.
 - `Draining` stops accepting new commands, closes the current play session,
-  persists queue/position/volume, shuts down GStreamer, closes IPC, and releases
+  persists queue/position/volume, shuts down the audio driver, closes IPC, and releases
   the instance guard.
 - `Exited` terminates the process.
 
@@ -179,12 +179,12 @@ echoing commands back to the daemon.
 - Operating-system shutdown gets a bounded graceful attempt; correctness does not
   depend on receiving unlimited shutdown time.
 
-## Windows GStreamer requirements
+## Windows media integration
 
-Development and verification require the official MSVC x64 GStreamer Runtime and
-Development components. The shipped Windows application must include the runtime
-DLLs and required plugins, or install them as an application prerequisite. A clean
-runtime verification must not depend on a developer-only `PATH` configuration.
+Windows audio uses Rodio/CPAL and system audio APIs without an additional multimedia
+SDK. `hmpd` publishes the authoritative playback snapshot through SMTC so media keys,
+the system overlay, lock screen, metadata, timeline, seek, repeat, and shuffle all
+route through the same command/state channels as other controllers.
 
 ## Testing and acceptance
 
@@ -203,7 +203,7 @@ Automated tests cover:
 
 Windows acceptance requires a native Tauri build and manual smoke test proving:
 
-1. Audio is produced by the Rust/GStreamer kernel rather than the WebView.
+1. Audio is produced by the Rust/Rodio kernel rather than the WebView, and SMTC shows the same state.
 2. Closing the window hides it while playback continues.
 3. Tray actions control the same daemon state seen by the GUI and CLI.
 4. A GUI attaches to a daemon previously started by CLI without starting another.
@@ -214,5 +214,5 @@ Windows acceptance requires a native Tauri build and manual smoke test proving:
 
 - Running the daemon as a Windows Service or Linux system service.
 - Shipping two trays concurrently for multiple desktop frontends.
-- Replacing GStreamer or changing the playback engine state machine.
+- Changing the playback engine state machine.
 - Implementing the future Slint frontend.

@@ -4,7 +4,7 @@
 
 **Goal:** 让加密音质（`.mflac`/`.mgg`/`.mmp4`/`.mnac`）的播放链路做到与 QQ 音乐官方客户端一致的**流式体验**：边下边播（缓冲几秒即出声）、任意位置即时 Seek，而不是当前的"整文件下载 → 整文件解密 → 本地 file:// 播放"。
 
-**Architecture:** 在 `hmp-media` 新增 `proxy` 模块：启动一个只监听 `127.0.0.1:0`（内核分配随机回环端口）的极简 HTTP/1.1 服务，按 GStreamer 发来的 `Range` 请求，从 CDN 按区间拉取对应密文、用 QMC2 流密码**按绝对 offset 就地解密该区间**后返回。QMC2 的 map/RC4 两种密码均按绝对偏移寻址（`plain[i] = cipher[i] ^ keystream(i)`，偏移一一对应），因此任意字节区间可独立解密——这是本方案可行的根本。`PlayerCore`（playbin）无需改动：播放 `http://127.0.0.1:port/` 与现在的 https 流走同一条 souphttpsrc 通道，Seek 自动变成 Range 请求。
+**Architecture:** 在 `hmp-media` 新增 `proxy` 模块：启动一个只监听 `127.0.0.1:0`（内核分配随机回环端口）的极简 HTTP/1.1 服务，按 Rodio 发来的 `Range` 请求，从 CDN 按区间拉取对应密文、用 QMC2 流密码**按绝对 offset 就地解密该区间**后返回。QMC2 的 map/RC4 两种密码均按绝对偏移寻址（`plain[i] = cipher[i] ^ keystream(i)`，偏移一一对应），因此任意字节区间可独立解密——这是本方案可行的根本。`PlayerCore`（playbin）无需改动：播放 `http://127.0.0.1:port/` 与现在的 https 流走同一条 souphttpsrc 通道，Seek 自动变成 Range 请求。
 
 **Tech Stack:** Rust 2024, tokio（TcpListener/oneshot/semaphore）, reqwest 0.12（Range 头 + 206 解析）, hmp-qqmusic-api::algorithms::qmc2（已有）, wiremock（CDN 模拟测试）。
 
@@ -16,7 +16,7 @@
 - CDN 不支持 Range 或缺失 Content-Length 时，**回退**到现有整文件下载+解密路径（`decrypt::prepare_playable_at` / `prepare_playable_embedded_at`，返回 file://）——旧行为完整保留。
 - 解密密钥来源与上一轮一致：优先接口 `ekey`；缺失时从尾部（QTag/STag）提取内嵌 ekey；两者皆无 → 该音质视为不可用（回退链继续）。
 - 不新增第三方依赖：HTTP 服务手写极简解析（仅支持 GET/HEAD、单 Range、keep-alive、定长响应）；`bytes`、`url` 等已是 workspace 依赖，可直接用。
-- `PlayerCore`（hmp-player-gst）、`hmp-mpris`、`hmp-core` **不得修改**；`hmp-qqmusic-api` 本计划不改（上一轮已完成）。
+- `PlayerCore`（hmp-player）、`hmp-mpris`、`hmp-core` **不得修改**；`hmp-qqmusic-api` 本计划不改（上一轮已完成）。
 - 生命周期：`prepare_stream` 返回 `PreparedMedia { uri, _guard }`，guard 被 Drop 时关闭代理服务；CLI 在 `run()` 作用域持有，桌面在 `AppCore` 持有并在换曲/播放结束/退出时释放。
 - `cargo fmt --all`、相关 crate `cargo clippy --all-targets -- -D warnings`、`cargo test --workspace`（多次复跑稳定）必须通过。hmp-mpris 的预存 clippy 错误在基线即存在，与本计划无关，不修。
 - 每个 Task 一个原子 commit；中文 doc 注释、ASCII 代码（仓库惯例）。
@@ -176,5 +176,5 @@
 
 - 覆盖：Task 1（Range 解析/HTTP 服务/生命周期）→ Task 2（CDN 探测/尾部/区间解密/回退/内嵌 ekey）→ Task 3/4（CLI/桌面接线，guard 生命周期正确）→ Task 5（文档）。
 - 类型一致性：`parse_range(&str, u64) -> Result<ByteRange, RangeError>`、`clamp_end(u64, u64, u64) -> ByteRange`、`http::serve(TcpListener, Arc<dyn Source>, oneshot::Receiver<()>)`、`Source::{audio_len, read_range}`、`prepare_stream(&str, Option<&str>, Option<&watch::Sender<Option<f64>>>) -> Result<PreparedMedia, MediaError>`、`PreparedMedia { uri, _guard }` 在 Task 1→4 中签名一致。
-- 已知限制（文档记录）：CDN URL 约 2 小时过期，长会话超时后 seek 会失败（重新播放即重新取流，属后续优化）；无解密区间内存缓存（来回 seek 重复解密，属后续优化）；代理为手写 HTTP 子集，仅服务 GStreamer 的 GET/HEAD+单 Range 行为。
+- 已知限制（文档记录）：CDN URL 约 2 小时过期，长会话超时后 seek 会失败（重新播放即重新取流，属后续优化）；无解密区间内存缓存（来回 seek 重复解密，属后续优化）；代理为手写 HTTP 子集，仅服务 Rodio 的 GET/HEAD+单 Range 行为。
 - 验收：明文路径行为不变；加密路径启动即播 + 任意 Seek；CDN 无 Range 时回退旧路径；`cargo test --workspace` 稳定。

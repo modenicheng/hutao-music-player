@@ -5,12 +5,13 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::HmpError;
 use crate::id::TrackId;
 use crate::media::{AudioQuality, Track};
 
 /// 播放状态机（docs/PROJECT.md §8.1）。
 ///
-/// 状态转换只能发生在播放器核心（`hmp-player-gst`）中。
+/// 状态转换只能发生在播放器核心（`hmp-player`）中。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlaybackStatus {
     /// 无加载内容。
@@ -97,6 +98,45 @@ pub struct PlaybackCapabilities {
     pub can_go_next: bool,
     /// 是否存在上一首。
     pub can_go_previous: bool,
+}
+
+/// 后端无关的音频装载请求。
+///
+/// URI 的解析与解码属于具体播放驱动；应用引擎只负责提供已解析的媒体地址、
+/// 领域元数据和用于过滤陈旧事件的装载代际。
+#[derive(Clone, Debug)]
+pub struct LoadRequest {
+    /// 当前曲目元数据。
+    pub track: Track,
+    /// `file://`、`http://` 或 `https://` 媒体地址。
+    pub uri: String,
+    /// 本次实际选定的音质。
+    pub quality: AudioQuality,
+    /// 引擎分配的装载代际。
+    pub load_gen: u64,
+}
+
+/// 播放驱动向应用引擎发布的离散事件。
+#[derive(Clone, Debug)]
+pub enum PlayerEvent {
+    /// 已应用新曲目。
+    TrackChanged,
+    /// 当前装载代际播放结束。
+    PlaybackEnded { load_gen: u64 },
+    /// 当前装载代际播放失败。
+    Error { load_gen: u64, error: HmpError },
+    /// 缓冲进度变化（0.0..=1.0，None 表示结束缓冲）。
+    BufferingChanged(Option<f64>),
+}
+
+impl PlayerEvent {
+    /// 返回需要做陈旧事件过滤的装载代际。
+    pub const fn load_gen(&self) -> Option<u64> {
+        match self {
+            Self::PlaybackEnded { load_gen } | Self::Error { load_gen, .. } => Some(*load_gen),
+            Self::TrackChanged | Self::BufferingChanged(_) => None,
+        }
+    }
 }
 
 /// `Duration` 以秒（u64）序列化，便于跨进程传递。
@@ -234,5 +274,14 @@ mod tests {
                 assert_eq!(s == t, i == j);
             }
         }
+    }
+
+    #[test]
+    fn player_event_preserves_load_generation() {
+        let ended = PlayerEvent::PlaybackEnded { load_gen: 42 };
+        assert_eq!(ended.load_gen(), Some(42));
+
+        let changed = PlayerEvent::TrackChanged;
+        assert_eq!(changed.load_gen(), None);
     }
 }

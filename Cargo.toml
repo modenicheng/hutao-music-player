@@ -14,8 +14,9 @@ members = [
     "crates/hmp-desktop",
     "crates/hmp-media",
     "crates/hmp-mpris",
-    "crates/hmp-player-gst",
+    "crates/hmp-player",
     "crates/hmp-qqmusic-api",
+    "crates/hmp-smtc",
     "crates/hmp-storage",
 ]
 # workspace 根 `cargo run` 默认运行 hmp（遥控命令），`cargo run --bin hmp-desktop` 跑桌面端。

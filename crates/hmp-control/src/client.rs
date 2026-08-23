@@ -63,7 +63,7 @@ impl ControlClient {
     ) -> Result<hmp_core::Response, ControlError> {
         write_frame(&mut *self.stream, &Request::Engine(request)).await?;
         match read_frame::<Response, _>(&mut *self.stream).await? {
-            Response::Engine(response) => Ok(response),
+            Response::Engine(response) => Ok(*response),
             Response::ProtocolError { message } => Err(ControlError::Protocol(message)),
             Response::Hello { .. } => Err(ControlError::Protocol(
                 "unexpected duplicate protocol handshake".into(),
@@ -146,7 +146,7 @@ mod tests {
             );
             write_frame(
                 &mut server_io,
-                &Response::Engine(hmp_core::Response::Status(Default::default())),
+                &Response::Engine(Box::new(hmp_core::Response::Status(Default::default()))),
             )
             .await
             .unwrap();

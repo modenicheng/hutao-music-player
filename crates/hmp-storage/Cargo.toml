@@ -1,6 +1,6 @@
 [package]
 name = "hmp-storage"
-description = "HMP 存储层：keyring 凭据访问（Secret Service）、XDG 路径、显式文件回退"
+description = "HMP 存储层：系统 keyring、跨平台应用目录、显式文件回退"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -16,6 +16,7 @@ toml = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -2,7 +2,7 @@
 //!
 //! 第一版只承载音质策略（媒体库重构计划 B2）。音质属于 **source
 //! resolution policy** 而非播放器状态机命令：resolver 依据 `QualityPref`
-//! 生成回退链，不改变 GStreamer 参数。
+//! 生成回退链，不改变具体音频驱动参数。
 
 use std::path::PathBuf;
 
@@ -123,11 +123,9 @@ pub struct Config {
     pub audio: AudioPref,
 }
 
-/// 音频输出偏好（`[audio]` 段；`sink` = GStreamer sink 元素名，None = 系统默认）。
+/// 音频输出偏好（`[audio]` 段）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioPref {
-    #[serde(default)]
-    pub sink: Option<String>,
     /// ReplayGain 音量补偿（默认开启；本地曲目按标签增益叠加到用户音量）。
     #[serde(default = "default_true")]
     pub replaygain: bool,
@@ -135,10 +133,7 @@ pub struct AudioPref {
 
 impl Default for AudioPref {
     fn default() -> Self {
-        Self {
-            sink: None,
-            replaygain: true,
-        }
+        Self { replaygain: true }
     }
 }
 
@@ -225,31 +220,22 @@ mod tests {
     }
 
     #[test]
-    fn audio_sink_roundtrips_and_defaults() {
+    fn legacy_sink_is_ignored_but_replaygain_is_loaded() {
         with_isolated_config(|| {
-            // [audio] 段 → sink 读取。
             let path = Config::path();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, "[audio]\nsink = \"fakesink\"\n").unwrap();
+            std::fs::write(
+                &path,
+                "[audio]\nsink = \"legacy-element\"\nreplaygain = false\n",
+            )
+            .unwrap();
             let c = Config::load();
-            assert_eq!(c.audio.sink.as_deref(), Some("fakesink"));
-            // 无 [audio] 段 → None（旧配置兼容）。
-            std::fs::write(&path, "[quality]\nmode = \"auto\"\n").unwrap();
-            let c2 = Config::load();
-            assert_eq!(c2.audio.sink, None);
-            // 序列化往返。
-            let c3 = Config {
-                audio: AudioPref {
-                    sink: Some("pulsesink".into()),
-                    replaygain: false,
-                },
-                ..Default::default()
-            };
-            let text = toml::to_string(&c3).unwrap();
-            let back: Config = toml::from_str(&text).unwrap();
-            assert_eq!(back.audio.sink.as_deref(), Some("pulsesink"));
-            assert!(!back.audio.replaygain);
-            // 默认：replaygain 开启（缺省字段）。
+            assert!(!c.audio.replaygain);
+            let normalized = toml::to_string(&c).unwrap();
+            assert!(
+                !normalized.contains("sink"),
+                "legacy backend field must not survive normalization: {normalized}"
+            );
             assert!(Config::default().audio.replaygain);
         });
     }

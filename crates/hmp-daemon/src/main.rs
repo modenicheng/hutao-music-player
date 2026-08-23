@@ -17,9 +17,6 @@ struct Args {
     /// Continue running without a desktop frontend (CLI/headless mode).
     #[arg(long)]
     autonomous: bool,
-    /// Override the configured GStreamer audio sink.
-    #[arg(long)]
-    sink: Option<String>,
 }
 
 impl Args {
@@ -40,7 +37,7 @@ async fn main() {
         .with_max_level(tracing::Level::WARN)
         .init();
     let args = Args::parse();
-    if let Err(error) = hmp_daemon::serve::run(args.sink.as_deref(), args.mode()).await {
+    if let Err(error) = hmp_daemon::serve::run(args.mode()).await {
         eprintln!("hmpd: {error}");
         std::process::exit(1);
     }

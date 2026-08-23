@@ -1,19 +1,18 @@
 //! 播放引擎：命令循环 + 队列裁决 + 自动续播 + 复合状态发布（spec §4.2 `daemon.rs`）。
 //!
-//! 单一命令通道：所有输入适配器（socket 服务器 / tray / MPRIS）把
+//! 单一命令通道：所有输入适配器（控制服务器 / MPRIS / SMTC）把
 //! [`Request`] 发进 [`EngineHandle::command_tx`]，由引擎串行处理；
 //! 单一状态出口：`watch<DaemonState>`。Next/Previous 由引擎拦截做队列
-//! 导航（PlayerCore 忽略这两个命令，见 hmp-player-gst core.rs）。
+//! 导航（PlayerCore 忽略这两个命令，见 hmp-player core.rs）。
 
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use hmp_core::{
-    DaemonState, ErrorInfo, IpcErrorCode, PlayRequest, PlaybackCapabilities, PlaybackState,
-    PlaybackStatus, PlayerCommand, QueueSnapshot, Request, TrackId,
+    DaemonState, ErrorInfo, IpcErrorCode, LoadRequest, PlayRequest, PlaybackCapabilities,
+    PlaybackState, PlaybackStatus, PlayerCommand, PlayerEvent, QueueSnapshot, Request, TrackId,
 };
-use hmp_player_gst::PlayerEvent;
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::player::{EngineError, PlaybackDriver, ResolvedTrack, SourceResolver};
@@ -105,7 +104,7 @@ struct PlaybackSession {
     event_id: i64,
 }
 
-/// 引擎句柄（服务器 / tray / MPRIS 持有；可 Clone）。
+/// 引擎句柄（控制服务器与系统媒体适配器持有；可 Clone）。
 #[derive(Clone)]
 pub struct EngineHandle {
     /// 命令通道（唯一输入）。
@@ -832,7 +831,7 @@ impl PlaybackEngine {
         let expected = res.track.id.clone();
         self.current_gen += 1;
         let load_gen = self.current_gen;
-        self.driver.load(hmp_player_gst::LoadRequest {
+        self.driver.load(LoadRequest {
             track: res.track.clone(),
             uri,
             quality: quality.clone(),
@@ -947,7 +946,7 @@ impl PlaybackEngine {
     }
 
     /// 等待驱动把 current 更新为 `expected`（同步应用的驱动立即返回；
-    /// 异步管道（真实 GStreamer）等待其装载臂发布）。
+    /// 异步音频驱动等待其装载任务发布）。
     /// 超时（`load_timeout`，默认 5s）→ `Timeout`：调用方按装载失败处理
     /// （回滚队列、旧曲继续），不得把未确认的装载当成功提交
     /// （此前仅 warn 后继续置 Playing/建历史）。
@@ -982,12 +981,10 @@ impl PlaybackEngine {
     /// 沿用原代际（调用方已在失败路径把 current_gen 复原为 prev.load_gen，
     /// 故回滚后旧曲 EOS/Error 仍属当前代，不会被过滤）；未确认仅 warn。
     ///
-    /// 已知限制：真实 GstDriver 在 LoadCommand 处理时同步置 current（乐观
-    /// ACK），坏 URI 的真装载失败表现为**同代 Error**（仅发布、不回滚），
-    /// 事务回滚路径当前仅由超时模型（FakeDriver）覆盖。
+    /// 回滚上一条已应用装载，并恢复此前的播放位置。
     async fn rollback_load(&mut self, prev: AppliedLoad, position: std::time::Duration) {
         let id = prev.track.id.clone();
-        self.driver.load(hmp_player_gst::LoadRequest {
+        self.driver.load(LoadRequest {
             track: prev.track.clone(),
             uri: prev.uri,
             quality: prev.quality,
@@ -1076,7 +1073,6 @@ mod tests {
     use super::*;
     use crate::player::{EngineError, ResolvedTrack};
     use hmp_core::{LoopMode, PlaybackState, PlaybackStatus, PlayerCommand, Track, TrackId};
-    use hmp_player_gst::LoadRequest;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -2017,21 +2013,19 @@ mod tests {
     #[tokio::test]
     async fn open_uri_file_plays_via_play_source() {
         let (driver, _sr, _er) = FakeDriver::new();
-        let resolver = FakeResolver::new(vec![vec![TrackId::new("local:/tmp/x.mp3")]]);
+        let path = tempfile::tempdir().unwrap().path().join("x.mp3");
+        let uri = url::Url::from_file_path(&path).unwrap();
+        let decoded_path = uri.to_file_path().unwrap();
+        let local_id = TrackId::new(format!("local:{}", decoded_path.display()));
+        let resolver = FakeResolver::new(vec![vec![local_id.clone()]]);
         let (handle, _st) = start_engine(driver.clone(), resolver).await;
-        handle
-            .cmd(Request::OpenUri("file:///tmp/x.mp3".into()))
-            .await
-            .unwrap();
+        handle.cmd(Request::OpenUri(uri.to_string())).await.unwrap();
         wait_idle().await;
         assert_eq!(handle.queue_rx.borrow().tracks.len(), 1);
-        assert_eq!(
-            handle.queue_rx.borrow().tracks[0].as_ref(),
-            "local:/tmp/x.mp3"
-        );
+        assert_eq!(handle.queue_rx.borrow().tracks[0], local_id);
         assert_eq!(
             driver.load_uris().last(),
-            Some(&"fake://local:/tmp/x.mp3".to_string())
+            Some(&format!("fake://{}", handle.queue_rx.borrow().tracks[0]))
         );
     }
 
@@ -2282,7 +2276,7 @@ mod tests {
         assert!(driver.commands.lock().unwrap().is_empty()); // shutdown 不产生命令
     }
 
-    /// 装载应用有延迟的驱动（模拟真实 GStreamer 异步管道：load() 返回后
+    /// 装载应用有延迟的驱动（模拟真实 Rodio 异步管道：load() 返回后
     /// 驱动任务才更新 current）。
     struct SlowDriver {
         inner: Arc<FakeDriver>,

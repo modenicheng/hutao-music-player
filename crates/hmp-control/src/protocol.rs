@@ -28,7 +28,7 @@ pub enum Response {
     /// Accepted protocol version.
     Hello { protocol: u16 },
     /// Response produced by the playback runtime or daemon query adapter.
-    Engine(hmp_core::Response),
+    Engine(Box<hmp_core::Response>),
     /// Host-level protocol error.
     ProtocolError { message: String },
 }
@@ -114,5 +114,9 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
             },
         );
+
+        let engine = Response::Engine(Box::new(hmp_core::Response::Status(Default::default())));
+        let frame = encode_frame(&engine).unwrap();
+        assert_eq!(decode_frame::<Response>(&frame).unwrap(), engine);
     }
 }
