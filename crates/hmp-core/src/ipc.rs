@@ -26,6 +26,21 @@ pub enum PlayRequest {
     LibraryPlaylist(i64),
 }
 
+impl PlayRequest {
+    /// 是否为无需 QQ 凭证的本地播放源。
+    ///
+    /// `Track` 仍可能来自媒体库等通用入口，因此不能只按枚举分支判断；
+    /// `local:` 身份前缀才是曲目 provider 的稳定判据。
+    pub fn is_local_source(&self) -> bool {
+        match self {
+            Self::Local(_) | Self::LibraryPlaylist(_) => true,
+            Self::Track(id) => TrackProvider::from_id(id.as_ref()) == TrackProvider::Local,
+            Self::Album(id) => id.as_ref().starts_with("local:"),
+            Self::Playlist(_) => false,
+        }
+    }
+}
+
 /// 曲目来源提供方。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrackProvider {
@@ -63,7 +78,7 @@ impl TrackRef {
                 id: id.0.clone(),
             },
             PlayRequest::Track(id) => Self {
-                provider: TrackProvider::QqMusic,
+                provider: TrackProvider::from_id(id.as_ref()),
                 id: id.0.clone(),
             },
             PlayRequest::Playlist(id) => Self {
@@ -554,5 +569,18 @@ mod tests {
         let r = TrackRef::from_play_request(&PlayRequest::Track(TrackId::new("m")));
         assert_eq!(r.provider, TrackProvider::QqMusic);
         assert_eq!(r.local_path(), None);
+        let r = TrackRef::from_play_request(&PlayRequest::Track(TrackId::new("local:/a.mp3")));
+        assert_eq!(r.provider, TrackProvider::Local);
+        assert_eq!(r.local_path(), Some("/a.mp3"));
+    }
+
+    #[test]
+    fn play_request_classifies_every_local_source() {
+        assert!(PlayRequest::Local(TrackId::new("local:/a.mp3")).is_local_source());
+        assert!(PlayRequest::Track(TrackId::new("local:/a.mp3")).is_local_source());
+        assert!(PlayRequest::Album(AlbumId::new("local:本地专辑")).is_local_source());
+        assert!(PlayRequest::LibraryPlaylist(1).is_local_source());
+        assert!(!PlayRequest::Track(TrackId::new("qq-mid")).is_local_source());
+        assert!(!PlayRequest::Album(AlbumId::new("qq-album")).is_local_source());
     }
 }

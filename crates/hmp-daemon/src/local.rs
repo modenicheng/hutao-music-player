@@ -162,6 +162,15 @@ impl SourceResolver for LocalSourceResolver {
                 let stub = self.local_stub(id);
                 Box::pin(async move { Ok(vec![stub]) })
             }
+            // 媒体库/GUI 等通用入口可能以 `Track(local:...)` 表达本地单曲；
+            // provider 由稳定 id 前缀识别，不能误送 QQ 解析器。
+            PlayRequest::Track(id)
+                if hmp_core::TrackProvider::from_id(id.as_ref())
+                    == hmp_core::TrackProvider::Local =>
+            {
+                let stub = self.local_stub(id);
+                Box::pin(async move { Ok(vec![stub]) })
+            }
             // 里程碑 E：`album:local:<专辑名>` → 本地专辑曲目列表（按名匹配）。
             PlayRequest::Album(id) if id.as_ref().starts_with("local:") => {
                 let album = id.as_ref().trim_start_matches("local:").to_string();
@@ -301,15 +310,10 @@ impl SourceResolver for CompositeSourceResolver {
         src: &PlayRequest,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
     {
-        match src {
-            PlayRequest::Local(_) => self.local.resolve_source_ids(src),
-            // 里程碑 F：本地 SQLite 歌单（`playlist:local:<id>`）→ 本地解析器。
-            PlayRequest::LibraryPlaylist(_) => self.local.resolve_source_ids(src),
-            // 里程碑 E：本地专辑（`album:local:` 前缀）→ 本地解析器。
-            PlayRequest::Album(id) if id.as_ref().starts_with("local:") => {
-                self.local.resolve_source_ids(src)
-            }
-            _ => self.qq.resolve_source_ids(src),
+        if src.is_local_source() {
+            self.local.resolve_source_ids(src)
+        } else {
+            self.qq.resolve_source_ids(src)
         }
     }
 
@@ -348,6 +352,18 @@ mod tests {
         );
         assert!(LocalSourceResolver::path_of(&TrackId::new("mid123")).is_err());
         assert!(LocalSourceResolver::path_of(&TrackId::new("local:")).is_err());
+    }
+
+    #[tokio::test]
+    async fn generic_track_with_local_id_resolves_as_local_source() {
+        let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let resolver = LocalSourceResolver::new(lib);
+        let source = PlayRequest::Track(TrackId::new("local:C:\\Music\\song.flac"));
+
+        let stubs = resolver.resolve_source_ids(&source).await.unwrap();
+
+        assert_eq!(stubs.len(), 1);
+        assert_eq!(stubs[0].id, TrackId::new("local:C:\\Music\\song.flac"));
     }
 
     /// 本地解析：无标签文件 → 文件名回退；入库后可再查；URI = file://（URL 编码）。

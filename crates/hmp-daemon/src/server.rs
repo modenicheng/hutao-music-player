@@ -58,13 +58,39 @@ fn requires_credential(req: &Request) -> bool {
         Request::Play(s) | Request::PlayNext(s) | Request::QueueAppend(s) => {
             // 本地源（Local/本地歌单）免凭证：离线意图合法；
             // 歌单内 QQ 曲目在曲目级 resolve_track 时再按凭证拦截。
-            !matches!(
-                s,
-                hmp_core::PlayRequest::Local(_) | hmp_core::PlayRequest::LibraryPlaylist(_)
-            )
+            !s.is_local_source()
         }
         Request::LibrarySync => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod credential_policy_tests {
+    use super::requires_credential;
+    use hmp_core::{AlbumId, PlayRequest, Request, TrackId};
+
+    #[test]
+    fn every_local_play_source_bypasses_qq_credentials() {
+        let sources = [
+            PlayRequest::Local(TrackId::new("local:C:\\Music\\song.flac")),
+            PlayRequest::Track(TrackId::new("local:C:\\Music\\song.flac")),
+            PlayRequest::Album(AlbumId::new("local:本地专辑")),
+            PlayRequest::LibraryPlaylist(1),
+        ];
+
+        for source in sources {
+            for request in [
+                Request::Play(source.clone()),
+                Request::PlayNext(source.clone()),
+                Request::QueueAppend(source.clone()),
+            ] {
+                assert!(
+                    !requires_credential(&request),
+                    "本地播放源不应要求 QQ 登录: {request:?}"
+                );
+            }
+        }
     }
 }
 
