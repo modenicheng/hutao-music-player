@@ -161,10 +161,8 @@ pub fn render(
                     )
                 })
                 .on_click(cx.listener(|app, _, _, cx| {
-                    if app.playback.current.is_some() {
-                        app.now_playing = true;
-                        cx.notify();
-                    }
+                    app.now_playing = true;
+                    cx.notify();
                 })),
         )
         .child(
