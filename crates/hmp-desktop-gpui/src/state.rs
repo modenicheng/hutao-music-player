@@ -1,5 +1,6 @@
 use hmp_desktop_common::{
-    AppEvent, UiAuthData, UiLoginPhase, UiLyricData, UiQueueData, UiSongData,
+    AppEvent, UiAuthData, UiLoginPhase, UiLyricData, UiPlaylistData, UiPlaylistTrackData,
+    UiQueueData, UiSongData,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,12 +59,27 @@ pub struct EventState {
     pub login_status: String,
     pub user_name: Option<String>,
     pub auth: UiAuthData,
+    pub login_modal_open: bool,
+    pub playlists: Vec<UiPlaylistData>,
+    pub selected_playlist: Option<i64>,
+    pub playlist_tracks: Vec<UiPlaylistTrackData>,
+    pub playlist_error: Option<String>,
 }
 
 impl EventState {
     pub fn begin_search(&mut self) {
         self.search_loading = true;
         self.search_error = None;
+    }
+
+    pub fn open_login_modal(&mut self) {
+        self.login_qr = None;
+        self.login_status.clear();
+        self.login_modal_open = true;
+    }
+
+    pub fn close_login_modal(&mut self) {
+        self.login_modal_open = false;
     }
 
     pub fn apply(&mut self, event: AppEvent) {
@@ -107,14 +123,43 @@ impl EventState {
                 self.login_status = auth.message.clone();
                 self.user_name =
                     (auth.phase == UiLoginPhase::LoggedIn).then(|| auth.display_name.clone());
-                if matches!(auth.phase, UiLoginPhase::LoggedOut | UiLoginPhase::LoggedIn) {
+                if auth.phase == UiLoginPhase::LoggedIn {
                     self.login_qr = None;
+                    self.login_modal_open = false;
+                } else if matches!(
+                    auth.phase,
+                    UiLoginPhase::CreatingQr
+                        | UiLoginPhase::WaitingScan
+                        | UiLoginPhase::WaitingConfirm
+                        | UiLoginPhase::Expired
+                        | UiLoginPhase::Error
+                ) {
+                    self.login_modal_open = true;
                 }
                 self.auth = auth;
             }
-            AppEvent::PlaylistsUpdated(_)
-            | AppEvent::PlaylistOpened { .. }
-            | AppEvent::PlaylistsFailed(_) => {}
+            AppEvent::PlaylistsUpdated(playlists) => {
+                if self
+                    .selected_playlist
+                    .is_some_and(|selected| !playlists.iter().any(|row| row.id == selected))
+                {
+                    self.selected_playlist = None;
+                    self.playlist_tracks.clear();
+                }
+                self.playlists = playlists;
+                self.playlist_error = None;
+            }
+            AppEvent::PlaylistOpened {
+                playlist_id,
+                tracks,
+            } => {
+                self.selected_playlist = Some(playlist_id);
+                self.playlist_tracks = tracks;
+                self.playlist_error = None;
+            }
+            AppEvent::PlaylistsFailed(message) => {
+                self.playlist_error = Some(message);
+            }
         }
     }
 }
@@ -204,5 +249,60 @@ mod tests {
         });
         assert!(!state.lyrics_loading);
         assert_eq!(state.lyrics_error.as_deref(), Some("missing"));
+    }
+
+    #[test]
+    fn auth_events_drive_modal_and_account_state() {
+        let mut state = EventState {
+            login_modal_open: true,
+            login_qr: Some(vec![1, 2, 3]),
+            ..EventState::default()
+        };
+
+        state.apply(AppEvent::AuthChanged(UiAuthData::logged_in("10001")));
+
+        assert_eq!(state.auth.phase, UiLoginPhase::LoggedIn);
+        assert_eq!(state.user_name.as_deref(), Some("10001"));
+        assert!(!state.login_modal_open);
+        assert!(state.login_qr.is_none());
+    }
+
+    #[test]
+    fn playlist_events_replace_only_playlist_state() {
+        let mut state = EventState::default();
+        state.apply(AppEvent::PlaylistsUpdated(vec![
+            hmp_desktop_common::UiPlaylistData {
+                id: 1,
+                name: "歌单".into(),
+                track_count: 2,
+                provider: "local".into(),
+                relation: "local".into(),
+                sync_state: "synced".into(),
+            },
+        ]));
+
+        assert_eq!(state.playlists.len(), 1);
+        assert_eq!(state.playlists[0].name, "歌单");
+        assert!(state.search_results.is_empty());
+    }
+
+    #[test]
+    fn playlist_open_and_failure_update_detail_state() {
+        let mut state = EventState::default();
+        state.apply(AppEvent::PlaylistOpened {
+            playlist_id: 4,
+            tracks: vec![hmp_desktop_common::UiPlaylistTrackData {
+                source_key: "mid-1".into(),
+                title: "一".into(),
+                artist: "歌手".into(),
+                album: "专辑".into(),
+                duration: "03:20".into(),
+            }],
+        });
+        assert_eq!(state.selected_playlist, Some(4));
+        assert_eq!(state.playlist_tracks.len(), 1);
+
+        state.apply(AppEvent::PlaylistsFailed("stale".into()));
+        assert_eq!(state.playlist_error.as_deref(), Some("stale"));
     }
 }

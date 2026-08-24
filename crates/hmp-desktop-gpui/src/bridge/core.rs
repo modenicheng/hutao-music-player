@@ -56,6 +56,30 @@ impl CoreCommandSender {
     pub fn set_shuffle(&self, shuffle: bool) {
         self.send(AppCommand::SetShuffle(shuffle));
     }
+
+    pub fn start_login(&self) {
+        self.send(AppCommand::LoginStart);
+    }
+
+    pub fn cancel_login(&self) {
+        self.send(AppCommand::LoginCancel);
+    }
+
+    pub fn logout(&self) {
+        self.send(AppCommand::Logout);
+    }
+
+    pub fn refresh_playlists(&self) {
+        self.send(AppCommand::RefreshPlaylists);
+    }
+
+    pub fn open_playlist(&self, id: i64) {
+        self.send(AppCommand::OpenPlaylist(id));
+    }
+
+    pub fn play_playlist_track(&self, playlist_id: i64, index: usize) {
+        self.send(AppCommand::PlayPlaylistTrack { playlist_id, index });
+    }
 }
 
 pub struct CoreBridge {
@@ -157,6 +181,38 @@ mod tests {
         assert!(matches!(
             rx.try_recv().unwrap(),
             AppCommand::PlayQueueIndex(2)
+        ));
+    }
+
+    #[test]
+    fn bridge_auth_and_playlist_methods_emit_exact_shared_commands() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let commands = CoreCommandSender::new(tx);
+
+        commands.start_login();
+        commands.cancel_login();
+        commands.logout();
+        commands.refresh_playlists();
+        commands.open_playlist(11);
+        commands.play_playlist_track(11, 3);
+
+        assert!(matches!(rx.try_recv().unwrap(), AppCommand::LoginStart));
+        assert!(matches!(rx.try_recv().unwrap(), AppCommand::LoginCancel));
+        assert!(matches!(rx.try_recv().unwrap(), AppCommand::Logout));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AppCommand::RefreshPlaylists
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AppCommand::OpenPlaylist(11)
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AppCommand::PlayPlaylistTrack {
+                playlist_id: 11,
+                index: 3
+            }
         ));
     }
 }
