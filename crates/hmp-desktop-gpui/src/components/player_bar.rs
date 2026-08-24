@@ -1,9 +1,11 @@
 //! Reference player surfaces adapted from `cradiy/gpui-apple-music-demo` (MIT).
 //! All playback actions are routed through HMP `AppCommand`.
 
+use std::{cell::Cell, rc::Rc, time::Duration};
+
 use gpui::{
-    AnyElement, Div, FontWeight, ObjectFit, Stateful, div, img, prelude::*, px, relative, rgb,
-    rgba, svg,
+    AnyElement, Bounds, Div, FontWeight, MouseButton, MouseDownEvent, ObjectFit, Pixels, Stateful,
+    canvas, div, img, prelude::*, px, relative, rgb, rgba, svg,
 };
 use uic::assets::LucideIcons;
 
@@ -73,6 +75,9 @@ pub fn render(
     let shuffle = app.playback.shuffle;
     let repeat = repeat_icon_state(app.playback.loop_mode);
     let muted = app.playback.volume <= f64::EPSILON;
+    let progress_bounds = Rc::new(Cell::<Option<Bounds<Pixels>>>::new(None));
+    let progress_bounds_for_paint = Rc::clone(&progress_bounds);
+    let progress_bounds_for_click = Rc::clone(&progress_bounds);
 
     div()
         .relative()
@@ -282,22 +287,35 @@ pub fn render(
                                 .flex()
                                 .flex_col()
                                 .cursor_pointer()
-                                .on_click(cx.listener(|app, _, _, _| {
-                                    if !app.playback.can_seek {
-                                        return;
-                                    }
-                                    let target = app
-                                        .playback
-                                        .duration
-                                        .map(|duration| {
-                                            app.playback
-                                                .position
-                                                .saturating_add(std::time::Duration::from_secs(10))
-                                                .min(duration)
-                                        })
-                                        .unwrap_or(app.playback.position);
-                                    app.commands.seek(target.as_secs_f32());
-                                }))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |app, event: &MouseDownEvent, _, _| {
+                                        let (Some(duration), Some(bounds)) = (
+                                            app.playback.duration,
+                                            progress_bounds_for_click.get(),
+                                        ) else {
+                                            return;
+                                        };
+                                        if app.playback.can_seek {
+                                            app.commands.seek(seek_seconds_for_click(
+                                                duration,
+                                                event.position.x.as_f32(),
+                                                bounds.origin.x.as_f32(),
+                                                bounds.size.width.as_f32(),
+                                            ));
+                                        }
+                                    }),
+                                )
+                                .child(
+                                    canvas(
+                                        move |bounds, _, _| {
+                                            progress_bounds_for_paint.set(Some(bounds));
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .inset_0(),
+                                )
                                 .child(
                                     div()
                                         .h(px(4.))
@@ -427,6 +445,9 @@ pub fn render_now_playing(app: &mut HmpGpuiApp, cx: &mut gpui::Context<HmpGpuiAp
         .unwrap_or_else(|| "−:--".into());
     let shuffle = app.playback.shuffle;
     let repeat = repeat_icon_state(app.playback.loop_mode);
+    let progress_bounds = Rc::new(Cell::<Option<Bounds<Pixels>>>::new(None));
+    let progress_bounds_for_paint = Rc::clone(&progress_bounds);
+    let progress_bounds_for_click = Rc::clone(&progress_bounds);
 
     div()
         .w_full()
@@ -439,22 +460,34 @@ pub fn render_now_playing(app: &mut HmpGpuiApp, cx: &mut gpui::Context<HmpGpuiAp
                 .w_full()
                 .h(px(16.))
                 .when(app.playback.can_seek, |bar| bar.cursor_pointer())
-                .on_click(cx.listener(|app, _, _, _| {
-                    if !app.playback.can_seek {
-                        return;
-                    }
-                    let target = app
-                        .playback
-                        .duration
-                        .map(|duration| {
-                            app.playback
-                                .position
-                                .saturating_add(std::time::Duration::from_secs(10))
-                                .min(duration)
-                        })
-                        .unwrap_or(app.playback.position);
-                    app.commands.seek(target.as_secs_f32());
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |app, event: &MouseDownEvent, _, _| {
+                        let (Some(duration), Some(bounds)) =
+                            (app.playback.duration, progress_bounds_for_click.get())
+                        else {
+                            return;
+                        };
+                        if app.playback.can_seek {
+                            app.commands.seek(seek_seconds_for_click(
+                                duration,
+                                event.position.x.as_f32(),
+                                bounds.origin.x.as_f32(),
+                                bounds.size.width.as_f32(),
+                            ));
+                        }
+                    }),
+                )
+                .child(
+                    canvas(
+                        move |bounds, _, _| {
+                            progress_bounds_for_paint.set(Some(bounds));
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
                 .child(
                     div()
                         .absolute()
@@ -565,6 +598,13 @@ pub fn render_now_playing(app: &mut HmpGpuiApp, cx: &mut gpui::Context<HmpGpuiAp
         .into_any_element()
 }
 
+fn seek_seconds_for_click(duration: Duration, click_x: f32, left: f32, width: f32) -> f32 {
+    if width <= f32::EPSILON {
+        return 0.0;
+    }
+    duration.as_secs_f32() * ((click_x - left) / width).clamp(0.0, 1.0)
+}
+
 fn now_playing_icon_button(
     id: &'static str,
     icon: LucideIcons,
@@ -585,4 +625,18 @@ fn now_playing_icon_button(
         } else {
             rgba(0xffffffb0)
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seek_target_uses_clicked_progress_ratio_and_clamps_edges() {
+        let duration = std::time::Duration::from_secs(200);
+        assert_eq!(seek_seconds_for_click(duration, 125.0, 25.0, 200.0), 100.0);
+        assert_eq!(seek_seconds_for_click(duration, -50.0, 25.0, 200.0), 0.0);
+        assert_eq!(seek_seconds_for_click(duration, 500.0, 25.0, 200.0), 200.0);
+        assert_eq!(seek_seconds_for_click(duration, 25.0, 25.0, 0.0), 0.0);
+    }
 }
