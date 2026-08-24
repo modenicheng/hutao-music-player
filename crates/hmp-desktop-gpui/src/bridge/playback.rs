@@ -78,12 +78,12 @@ pub fn remaining_text(state: &PlaybackState) -> String {
     state
         .duration
         .map(|duration| format_time(duration.saturating_sub(state.position)))
-        .unwrap_or_else(|| "--:--".into())
+        .unwrap_or_else(|| "--".into())
 }
 
 fn format_time(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
-    format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
+    format!("{}:{:02}", total_seconds / 60, total_seconds % 60)
 }
 
 #[cfg(test)]
@@ -141,7 +141,7 @@ mod tests {
         let mut state = PlaybackState::default();
         state.position = Duration::from_secs(10);
         assert_eq!(progress(&state), 0.0);
-        assert_eq!(remaining_text(&state), "--:--");
+        assert_eq!(remaining_text(&state), "--");
 
         state.duration = Some(Duration::ZERO);
         assert_eq!(progress(&state), 0.0);
@@ -153,12 +153,12 @@ mod tests {
         state.position = Duration::from_secs(50);
         state.duration = Some(Duration::from_secs(200));
         assert_eq!(progress(&state), 0.25);
-        assert_eq!(elapsed_text(&state), "00:50");
-        assert_eq!(remaining_text(&state), "02:30");
+        assert_eq!(elapsed_text(&state), "0:50");
+        assert_eq!(remaining_text(&state), "2:30");
 
         state.position = Duration::from_secs(250);
         assert_eq!(progress(&state), 1.0);
-        assert_eq!(remaining_text(&state), "00:00");
+        assert_eq!(remaining_text(&state), "0:00");
     }
 
     #[test]

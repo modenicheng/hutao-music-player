@@ -13,12 +13,27 @@ use uic::assets::LucideIcons;
 use crate::{
     app::{EffectsViewer, HmpGpuiApp},
     components::{lyrics_panel, player_bar},
+    theme::layout,
 };
 
 const FALLBACK_COVER: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 800 800">
-<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f04f71"/><stop offset=".52" stop-color="#765cf5"/><stop offset="1" stop-color="#151721"/></linearGradient></defs>
-<rect width="800" height="800" rx="120" fill="url(#g)"/><circle cx="400" cy="400" r="238" fill="none" stroke="white" stroke-opacity=".12" stroke-width="28"/><path d="M510 175v360c0 74-60 134-134 134s-134-60-134-134 60-134 134-134c28 0 54 9 75 23V232l59-57z" fill="white" fill-opacity=".9"/>
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ff375f"/><stop offset=".5" stop-color="#6e5bff"/><stop offset="1" stop-color="#10131d"/></linearGradient></defs>
+<rect width="800" height="800" rx="120" fill="url(#g)"/><path d="M510 175v360c0 74-60 134-134 134s-134-60-134-134 60-134 134-134c28 0 54 9 75 23V232l59-57z" fill="white" fill-opacity=".9"/>
 </svg>"##;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NowPlayingStage {
+    Lyrics,
+    Queue,
+}
+
+pub const fn now_playing_stage(show_lyrics: bool) -> NowPlayingStage {
+    if show_lyrics {
+        NowPlayingStage::Lyrics
+    } else {
+        NowPlayingStage::Queue
+    }
+}
 
 pub fn render(
     app: &mut HmpGpuiApp,
@@ -64,19 +79,13 @@ pub fn render(
     let subtitle = album
         .map(|album| format!("{artist} — {album}"))
         .unwrap_or(artist);
-    let show_lyrics = app.now_playing_lyrics;
-    let compact = window_width < 1040.;
-    let cover_size = (window_height - 300.)
-        .min(if compact {
-            window_width * 0.27
-        } else {
-            window_width * 0.31
-        })
-        .clamp(230., 430.);
-    let side_panel = if show_lyrics {
-        lyrics_panel::render_fullscreen(&app.playback, &app.events, &mut app.lyrics_panel)
-    } else {
-        render_queue(app, cx)
+    let stage = now_playing_stage(app.now_playing_lyrics);
+    let cover_size = layout::now_playing_cover_size(window_width, window_height);
+    let side_panel = match stage {
+        NowPlayingStage::Lyrics => {
+            lyrics_panel::render_fullscreen(&app.playback, &app.events, &mut app.lyrics_panel)
+        }
+        NowPlayingStage::Queue => render_queue(app, cx),
     };
 
     div()
@@ -86,9 +95,7 @@ pub fn render(
             root.font_family(crate::theme::FONT_FAMILY)
         })
         .overflow_hidden()
-        .when(cfg!(not(target_os = "windows")), |root| {
-            root.rounded(px(22.))
-        })
+        .rounded(px(22.))
         .text_color(rgba(0xffffffff))
         .child(
             div()
@@ -111,19 +118,19 @@ pub fn render(
                 .right_0()
                 .bottom_0()
                 .left_0()
-                .bg(rgba(0x080a1038)),
+                .bg(rgba(0x080a102b)),
         )
         .child(
             div()
                 .relative()
                 .size_full()
-                .px(px(if compact { 38. } else { 72. }))
-                .pt(px(76.))
-                .pb(px(58.))
+                .px(px(72.))
+                .pt(px(82.))
+                .pb(px(62.))
                 .flex()
                 .items_center()
                 .justify_center()
-                .gap(px(if compact { 42. } else { 82. }))
+                .gap(px(92.))
                 .child(
                     div()
                         .w(px(cover_size))
@@ -152,22 +159,46 @@ pub fn render(
                             div()
                                 .w_full()
                                 .mt(px(18.))
-                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .justify_between()
                                 .child(
                                     div()
-                                        .truncate()
-                                        .text_size(px(15.))
-                                        .font_weight(FontWeight::BOLD)
-                                        .child(title),
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(14.))
+                                                .font_weight(FontWeight::BOLD)
+                                                .child(title),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt(px(3.))
+                                                .truncate()
+                                                .text_size(px(11.5))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(rgba(0xffffffad))
+                                                .child(subtitle),
+                                        ),
                                 )
                                 .child(
                                     div()
-                                        .mt(px(3.))
-                                        .truncate()
-                                        .text_size(px(11.5))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgba(0xffffffad))
-                                        .child(subtitle),
+                                        .ml(px(16.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(7.))
+                                        .child(round_icon_button(
+                                            "favorite-track",
+                                            LucideIcons::Star,
+                                            15.,
+                                        ))
+                                        .child(round_icon_button(
+                                            "track-actions",
+                                            LucideIcons::Ellipsis,
+                                            17.,
+                                        )),
                                 ),
                         )
                         .child(
@@ -181,7 +212,7 @@ pub fn render(
                     div()
                         .h_full()
                         .flex_1()
-                        .min_w(px(if compact { 310. } else { 390. }))
+                        .min_w(px(390.))
                         .max_w(px(650.))
                         .child(side_panel),
                 ),
@@ -315,32 +346,55 @@ fn render_window_controls(cx: &mut gpui::Context<HmpGpuiApp>) -> AnyElement {
         .absolute()
         .top(px(18.))
         .left(px(18.))
+        .right(px(18.))
         .h(px(34.))
         .flex()
         .items_center()
-        .gap(px(14.))
+        .justify_between()
         .child(
             div()
-                .w(px(52.))
-                .h(px(12.))
                 .flex()
                 .items_center()
-                .gap(px(8.))
-                .when(cfg!(not(target_os = "macos")), |lights| {
-                    lights
-                        .child(traffic_light(0xff5f57))
-                        .child(traffic_light(0xfebc2e))
-                        .child(traffic_light(0x28c840))
-                }),
-        )
-        .child(
-            top_icon_button("close-now-playing", LucideIcons::X).on_click(cx.listener(
-                |app, _, _, cx| {
-                    app.now_playing = false;
-                    app.effects_viewer = None;
-                    cx.notify();
-                },
-            )),
+                .gap(px(14.))
+                .child(
+                    div()
+                        .w(px(52.))
+                        .h(px(12.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .when(cfg!(not(target_os = "macos")), |lights| {
+                            lights
+                                .child(traffic_light(0xff5f57))
+                                .child(traffic_light(0xfebc2e))
+                                .child(traffic_light(0x28c840))
+                        }),
+                )
+                .child(
+                    div()
+                        .h(px(32.))
+                        .px(px(7.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .rounded_full()
+                        .bg(rgba(0xffffff2a))
+                        .border_1()
+                        .border_color(rgba(0xffffff1a))
+                        .child(
+                            top_icon_button("close-now-playing", LucideIcons::X).on_click(
+                                cx.listener(|app, _, _, cx| {
+                                    app.now_playing = false;
+                                    app.effects_viewer = None;
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                        .child(top_icon_button(
+                            "picture-in-picture",
+                            LucideIcons::PictureInPicture2,
+                        )),
+                ),
         )
         .into_any_element()
 }
@@ -350,11 +404,11 @@ fn render_view_switcher(app: &mut HmpGpuiApp, cx: &mut gpui::Context<HmpGpuiApp>
         .absolute()
         .right(px(18.))
         .bottom(px(16.))
-        .h(px(38.))
-        .px(px(6.))
+        .h(px(36.))
+        .px(px(5.))
         .flex()
         .items_center()
-        .gap(px(5.))
+        .gap(px(12.))
         .rounded_full()
         .bg(rgba(0xffffff2a))
         .border_1()
@@ -395,20 +449,38 @@ fn view_switch_button(id: &'static str, icon: LucideIcons, active: bool) -> Stat
         .cursor_pointer()
         .when(active, |button| button.bg(rgba(0xffffff24)))
         .hover(|style| style.bg(rgba(0xffffff20)))
-        .child(svg().path(icon).size(px(19.)).text_color(rgba(0xffffffff)))
+        .child(svg().path(icon).size(px(20.)).text_color(rgba(0xffffffff)))
 }
 
-fn top_icon_button(id: &'static str, icon: LucideIcons) -> Stateful<Div> {
+fn round_icon_button(id: &'static str, icon: LucideIcons, icon_size: f32) -> Stateful<Div> {
     div()
         .id(id)
-        .size(px(30.))
+        .size(px(28.))
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
         .cursor_pointer()
-        .bg(rgba(0xffffff22))
-        .hover(|style| style.bg(rgba(0xffffff31)))
+        .bg(rgba(0xffffff13))
+        .hover(|style| style.bg(rgba(0xffffff22)))
+        .child(
+            svg()
+                .path(icon)
+                .size(px(icon_size))
+                .text_color(rgba(0xffffffe5)),
+        )
+}
+
+fn top_icon_button(id: &'static str, icon: LucideIcons) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(25.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xffffff16)))
         .child(svg().path(icon).size(px(20.)).text_color(rgba(0xffffffff)))
 }
 
@@ -424,4 +496,15 @@ fn fallback_cover() -> Arc<Image> {
         ImageFormat::Svg,
         FALLBACK_COVER.as_bytes().to_vec(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn now_playing_switch_keeps_lyrics_and_queue_in_one_stage() {
+        assert_eq!(now_playing_stage(true), NowPlayingStage::Lyrics);
+        assert_eq!(now_playing_stage(false), NowPlayingStage::Queue);
+    }
 }

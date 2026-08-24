@@ -1,6 +1,5 @@
 pub const ACCENT: u32 = 0xfa2d55;
 pub const BACKGROUND: u32 = 0x20222e;
-pub const TEXT_PRIMARY: u32 = 0xf7f7fa;
 pub const FONT_FAMILY: &str = "Noto Sans CJK SC";
 
 pub mod layout {
