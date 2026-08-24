@@ -79,6 +79,18 @@ impl Projection {
             shuffle: state.shuffle,
         }
     }
+
+    /// Whether both projections describe the same shell-visible media item.
+    ///
+    /// Timeline and transport capability changes are intentionally excluded:
+    /// rebuilding SMTC metadata for the 100 ms position tick repeatedly clears
+    /// its asynchronously opened thumbnail stream.
+    pub fn has_same_metadata(&self, other: &Self) -> bool {
+        self.title == other.title
+            && self.artist == other.artist
+            && self.album == other.album
+            && self.cover_url == other.cover_url
+    }
 }
 
 pub const fn map_button(button: ProjectedButton) -> Option<PlayerCommand> {

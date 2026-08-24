@@ -90,4 +90,28 @@ mod tests {
         );
         assert_eq!(map_repeat_request(99), None);
     }
+
+    #[test]
+    fn position_ticks_do_not_invalidate_smtc_metadata() {
+        let first = Projection::from_state(
+            &sample_playing_state(),
+            PlaybackCapabilities {
+                can_go_next: true,
+                can_go_previous: false,
+            },
+        );
+        let mut position_tick = first.clone();
+        position_tick.position += Duration::from_millis(100);
+
+        assert!(
+            first.has_same_metadata(&position_tick),
+            "position-only updates must not clear and recreate the async SMTC thumbnail"
+        );
+
+        position_tick.cover_url = Some("https://example.invalid/new-cover.jpg".into());
+        assert!(
+            !first.has_same_metadata(&position_tick),
+            "a new cover URL must refresh SMTC metadata"
+        );
+    }
 }
