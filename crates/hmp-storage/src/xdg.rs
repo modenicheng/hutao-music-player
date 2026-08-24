@@ -8,8 +8,18 @@ fn from_env_or_home(env: &str, fallback_dir: &str) -> PathBuf {
             return PathBuf::from(v);
         }
     }
-    let home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
-    PathBuf::from(home).join(fallback_dir)
+    platform_home().join(fallback_dir)
+}
+
+fn platform_home() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+        return PathBuf::from(home);
+    }
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|profile| !profile.is_empty()) {
+        return PathBuf::from(profile);
+    }
+    std::env::temp_dir()
 }
 
 /// 配置目录（`$XDG_CONFIG_HOME/hmp`，默认 `~/.config/hmp`）。
@@ -63,17 +73,28 @@ mod tests {
     }
 
     /// 保存并恢复 XDG/HOME 环境变量。
-    struct TempGuard;
+    struct TempGuard {
+        values: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
     impl TempGuard {
         fn new() -> Self {
-            TempGuard
+            Self {
+                values: ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "HOME"]
+                    .into_iter()
+                    .map(|name| (name, std::env::var_os(name)))
+                    .collect(),
+            }
         }
+
         fn restore(&self) {
             unsafe {
-                std::env::remove_var("XDG_CONFIG_HOME");
-                std::env::remove_var("XDG_DATA_HOME");
-                std::env::remove_var("XDG_CACHE_HOME");
-                std::env::remove_var("HOME");
+                for (name, value) in &self.values {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
             }
         }
     }

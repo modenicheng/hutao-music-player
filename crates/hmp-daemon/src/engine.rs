@@ -2013,21 +2013,18 @@ mod tests {
     #[tokio::test]
     async fn open_uri_file_plays_via_play_source() {
         let (driver, _sr, _er) = FakeDriver::new();
-        let resolver = FakeResolver::new(vec![vec![TrackId::new("local:/tmp/x.mp3")]]);
+        let path = std::env::temp_dir().join("hmp-open-uri-x.mp3");
+        let local_id = TrackId::new(format!("local:{}", path.display()));
+        let uri = url::Url::from_file_path(&path).unwrap().to_string();
+        let resolver = FakeResolver::new(vec![vec![local_id.clone()]]);
         let (handle, _st) = start_engine(driver.clone(), resolver).await;
-        handle
-            .cmd(Request::OpenUri("file:///tmp/x.mp3".into()))
-            .await
-            .unwrap();
+        handle.cmd(Request::OpenUri(uri)).await.unwrap();
         wait_idle().await;
         assert_eq!(handle.queue_rx.borrow().tracks.len(), 1);
-        assert_eq!(
-            handle.queue_rx.borrow().tracks[0].as_ref(),
-            "local:/tmp/x.mp3"
-        );
+        assert_eq!(handle.queue_rx.borrow().tracks[0], local_id);
         assert_eq!(
             driver.load_uris().last(),
-            Some(&"fake://local:/tmp/x.mp3".to_string())
+            Some(&format!("fake://local:{}", path.display()))
         );
     }
 

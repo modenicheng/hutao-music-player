@@ -43,7 +43,14 @@ pub fn persist_cover(cover: &[u8]) -> std::io::Result<String> {
     if !cpath.exists() {
         std::fs::write(&cpath, cover)?;
     }
-    Ok(format!("file://{}", cpath.display()))
+    url::Url::from_file_path(&cpath)
+        .map(|url| url.to_string())
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("封面路径无法编码为 file URI: {}", cpath.display()),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -73,8 +80,10 @@ mod tests {
         let uri1 = persist_cover(&cover).unwrap();
         let uri2 = persist_cover(&cover).unwrap();
         assert_eq!(uri1, uri2, "同封面去重（同 hash 文件名）");
-        assert!(uri1.starts_with("file://"), "{uri1}");
-        let p = uri1.strip_prefix("file://").unwrap();
-        assert!(std::path::Path::new(p).exists());
+        let p = url::Url::parse(&uri1)
+            .unwrap()
+            .to_file_path()
+            .expect("persisted covers must use a platform-valid file URI");
+        assert!(p.exists());
     }
 }
