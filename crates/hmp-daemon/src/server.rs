@@ -68,35 +68,6 @@ fn requires_credential(req: &Request) -> bool {
     }
 }
 
-#[cfg(test)]
-mod credential_policy_tests {
-    use super::requires_credential;
-    use hmp_core::{AlbumId, PlayRequest, Request, TrackId};
-
-    #[test]
-    fn every_local_play_source_bypasses_qq_credentials() {
-        let sources = [
-            PlayRequest::Local(TrackId::new("local:C:\\Music\\song.flac")),
-            PlayRequest::Track(TrackId::new("local:C:\\Music\\song.flac")),
-            PlayRequest::Album(AlbumId::new("local:本地专辑")),
-            PlayRequest::LibraryPlaylist(1),
-        ];
-
-        for source in sources {
-            for request in [
-                Request::Play(source.clone()),
-                Request::PlayNext(source.clone()),
-                Request::QueueAppend(source.clone()),
-            ] {
-                assert!(
-                    !requires_credential(&request),
-                    "本地播放源不应要求 QQ 登录: {request:?}"
-                );
-            }
-        }
-    }
-}
-
 /// 单连接处理：请求/响应循环 + 订阅事件推送（reader 任务 + channel 并发版）。
 ///
 /// 帧读取剥离到独立 reader 任务（阻塞 `read_frame`，逐帧经 channel 投递），
@@ -988,5 +959,34 @@ mod tests {
             0,
             "本地行应被删除"
         );
+    }
+}
+
+#[cfg(test)]
+mod credential_policy_tests {
+    use super::requires_credential;
+    use hmp_core::{AlbumId, PlayRequest, Request, TrackId};
+
+    #[test]
+    fn every_local_play_source_bypasses_qq_credentials() {
+        let sources = [
+            PlayRequest::Local(TrackId::new("local:C:\\Music\\song.flac")),
+            PlayRequest::Track(TrackId::new("local:C:\\Music\\song.flac")),
+            PlayRequest::Album(AlbumId::new("local:本地专辑")),
+            PlayRequest::LibraryPlaylist(1),
+        ];
+
+        for source in sources {
+            for request in [
+                Request::Play(source.clone()),
+                Request::PlayNext(source.clone()),
+                Request::QueueAppend(source.clone()),
+            ] {
+                assert!(
+                    !requires_credential(&request),
+                    "本地播放源不应要求 QQ 登录: {request:?}"
+                );
+            }
+        }
     }
 }
