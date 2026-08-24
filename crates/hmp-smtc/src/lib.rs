@@ -18,7 +18,8 @@ mod tests {
     };
 
     use crate::model::{
-        ProjectedButton, ProjectedStatus, Projection, map_button, map_repeat_request,
+        CoverSource, ProjectedButton, ProjectedStatus, Projection, classify_cover_source,
+        map_button, map_repeat_request,
     };
 
     fn sample_playing_state() -> PlaybackState {
@@ -112,6 +113,21 @@ mod tests {
         assert!(
             !first.has_same_metadata(&position_tick),
             "a new cover URL must refresh SMTC metadata"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_cover_uri_routes_to_a_local_storage_file() {
+        assert_eq!(
+            classify_cover_source("file:///C:/Users/HMP/cover%20art.jpg"),
+            Some(CoverSource::File(std::path::PathBuf::from(
+                r"C:\Users\HMP\cover art.jpg"
+            )))
+        );
+        assert_eq!(
+            classify_cover_source("https://example.invalid/cover.jpg"),
+            Some(CoverSource::Uri("https://example.invalid/cover.jpg".into()))
         );
     }
 }

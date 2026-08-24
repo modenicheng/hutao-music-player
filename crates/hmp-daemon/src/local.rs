@@ -9,7 +9,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use hmp_core::{AlbumRef, ArtistId, ArtistRef, AudioQuality, PlayRequest, Track, TrackId};
+use hmp_core::{
+    AlbumRef, ArtistId, ArtistRef, AudioQuality, CoverRef, PlayRequest, Track, TrackId,
+};
 use hmp_storage::LibraryDb;
 
 use crate::player::EngineError;
@@ -107,6 +109,7 @@ impl LocalSourceResolver {
         let artist = meta.as_ref().and_then(|m| m.artist.clone());
         let album = meta.as_ref().and_then(|m| m.album.clone());
         let duration = meta.as_ref().and_then(|m| m.duration_ms);
+        let cover = project_local_cover(&path, meta.as_ref());
 
         // 文件 URI 走 URL 编码（空格/#/%/Unicode 安全，P1）。
         let uri = url::Url::from_file_path(&path)
@@ -118,6 +121,13 @@ impl LocalSourceResolver {
             let mut lib = self.library.lock().unwrap();
             lib.add_local_file(&path, meta.as_ref())
                 .map_err(|e| EngineError::Internal(format!("媒体库写入失败: {e}")))?;
+            if let Some(cover) = &cover {
+                if let Err(error) =
+                    lib.set_track_cover(&format!("local:{}", path.display()), &cover.url)
+                {
+                    tracing::warn!(%error, path = %path.display(), "本地封面索引写入失败");
+                }
+            }
         }
         // 本地音质如实上报（按格式/码率；旧实现一律 Mp3_128，无损曲目被误报，P1）。
         let quality = local_quality(&path, meta.as_ref());
@@ -137,7 +147,7 @@ impl LocalSourceResolver {
                 name,
             }),
             duration: duration.map(|ms| std::time::Duration::from_millis(ms as u64)),
-            cover: None,
+            cover,
             url: Some(uri.clone()),
             available_qualities: vec![quality.clone()],
         };
@@ -149,6 +159,20 @@ impl LocalSourceResolver {
             replaygain_db: meta.as_ref().and_then(|m| m.replaygain_track_db),
         })
     }
+}
+
+fn project_local_cover(
+    track_path: &std::path::Path,
+    meta: Option<&hmp_storage::LocalMeta>,
+) -> Option<CoverRef> {
+    meta.and_then(|meta| meta.cover.as_deref())
+        .and_then(|bytes| match hmp_storage::scan::persist_cover(bytes) {
+            Ok(url) => Some(CoverRef { url }),
+            Err(error) => {
+                tracing::warn!(%error, path = %track_path.display(), "本地封面写入缓存失败");
+                None
+            }
+        })
 }
 
 impl SourceResolver for LocalSourceResolver {
@@ -392,6 +416,22 @@ mod tests {
             lib.local_path(db_id).unwrap().unwrap(),
             canonical.display().to_string()
         );
+    }
+
+    #[test]
+    fn embedded_cover_projects_as_a_persisted_file_uri() {
+        let meta = hmp_storage::LocalMeta {
+            cover: Some(vec![1, 2, 3, 4]),
+            ..Default::default()
+        };
+        let cover_url = project_local_cover(std::path::Path::new("fixture.flac"), Some(&meta))
+            .expect("local playback must project the embedded cover")
+            .url;
+        let cover_path = url::Url::parse(&cover_url)
+            .unwrap()
+            .to_file_path()
+            .expect("local covers must remain file URIs");
+        assert!(cover_path.exists(), "persisted cover must be readable");
     }
 
     /// P1：文件名含空格/`#`/Unicode 时，URI 必须正确编码并可往返解析。
