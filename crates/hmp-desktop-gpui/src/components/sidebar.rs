@@ -1,7 +1,7 @@
 //! Sidebar visuals adapted from `cradiy/gpui-apple-music-demo` (MIT).
 
 use gpui::{FontWeight, WindowControlArea, div, prelude::*, px, rgb, rgba, svg};
-use gpui_effects::{GlassMaterial, GlassPanel};
+use gpui_effects::{FrostedGlass, FrostedGlassAppearance};
 use uic::assets::LucideIcons;
 
 use crate::{app::HmpGpuiApp, state::Page, theme::layout};
@@ -73,18 +73,21 @@ fn nav_item(
 }
 
 pub fn render(app: &mut HmpGpuiApp, cx: &mut gpui::Context<HmpGpuiApp>) -> impl IntoElement {
-    GlassPanel::new()
-        .material(GlassMaterial::Regular)
-        .radius(px(25.))
+    let glass = FrostedGlassAppearance::dark()
+        .blur_radius(px(15.))
+        .saturation(1.8)
+        .brightness(1.12)
+        .tint(rgba(0x17102f78).into())
+        .edge(rgba(0x7656d48f).into())
+        .edge_width(px(1.))
+        .sheen(0.2);
+
+    FrostedGlass::with_appearance(glass)
+        .rounded(px(25.))
         .w(px(layout::SIDEBAR_WIDTH + layout::SIDEBAR_GUTTER))
         .flex_1()
-        .tint(rgba(0x17102f78))
+        .border_1()
         .border_color(rgba(0x7656d48f))
-        .optics([15.0, 1.8, 0.54, 1.12])
-        .surface([0.2, 0.54, 0.78, 0.82])
-        .shader_tint([0.055, 0.035, 0.16, 0.46])
-        .deformation(0.32)
-        .wave_strength(0.72)
         .child(
             div()
                 .h(px(41.))

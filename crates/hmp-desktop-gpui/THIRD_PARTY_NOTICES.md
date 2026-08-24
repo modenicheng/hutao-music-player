@@ -6,7 +6,7 @@ copyright (c) 2026 cradiy, under the MIT License. Adapted files identify the
 source in their module comments. No Apple Music branding or media assets are
 included.
 
-The pinned `cradiy/gpui` revision `18856bd9bb370a4f6cc58452705d24479b7c96b9`
+The pinned `cradiy/gpui` revision `4c8abab1401d7369da55d9aab928c9405f0af309`
 provides:
 
 - `gpui` and `gpui_platform` under Apache-2.0;

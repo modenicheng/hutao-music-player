@@ -10,21 +10,12 @@ use crate::app::HmpGpuiApp;
 
 fn appearance() -> InputAppearance {
     InputAppearance {
-        background: rgba(0x12141cbf).into(),
-        foreground: rgba(0xe2e2e7e8).into(),
         placeholder: rgba(0xe2e2e7c2).into(),
-        border: rgba(0xffffff16).into(),
         focus_border: rgba(0xec4168d9).into(),
         caret: rgba(0xf14367cf).into(),
         selection: rgba(0xec41683d).into(),
         caret_width: px(1.),
         caret_height: px(17.),
-        height: px(35.),
-        radius: px(16.),
-        border_width: px(2.),
-        padding_x: px(11.),
-        gap: px(7.),
-        font_size: px(10.5),
     }
 }
 
@@ -57,6 +48,15 @@ pub fn render(app: &mut HmpGpuiApp, compact: bool) -> impl IntoElement {
                 .child(
                     Input::new(&app.search_input)
                         .appearance(appearance())
+                        .h(px(35.))
+                        .px(px(11.))
+                        .gap(px(7.))
+                        .text_size(px(10.5))
+                        .text_color(rgba(0xe2e2e7e8))
+                        .rounded(px(16.))
+                        .border(px(2.))
+                        .border_color(rgba(0xffffff16))
+                        .bg(rgba(0x12141cbf))
                         .prefix(
                             svg()
                                 .path(LucideIcons::Search)
