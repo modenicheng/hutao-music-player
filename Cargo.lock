@@ -3653,23 +3653,30 @@ dependencies = [
 name = "hmp-desktop"
 version = "0.1.0"
 dependencies = [
+ "hmp-desktop-common",
+ "i-slint-backend-testing",
+ "image",
+ "serial_test",
+ "slint",
+ "slint-build",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "hmp-desktop-common"
+version = "0.1.0"
+dependencies = [
  "hmp-core",
  "hmp-media",
  "hmp-mpris",
  "hmp-player",
  "hmp-qqmusic-api",
  "hmp-storage",
- "i-slint-backend-testing",
- "image",
- "reqwest",
- "serde_json",
- "serial_test",
- "slint",
- "slint-build",
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

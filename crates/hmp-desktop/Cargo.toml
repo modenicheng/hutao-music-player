@@ -11,18 +11,10 @@ rust-version.workspace = true
 slint-build = "1.17"
 
 [dependencies]
-hmp-core = { path = "../hmp-core" }
-hmp-media = { path = "../hmp-media" }
-hmp-mpris = { path = "../hmp-mpris" }
-hmp-player = { path = "../hmp-player" }
-hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
-hmp-storage = { path = "../hmp-storage" }
+hmp-desktop-common = { path = "../hmp-desktop-common" }
 image = { workspace = true }
-reqwest = { workspace = true }
-serde_json = { workspace = true }
 slint = "1.17"
 tokio = { workspace = true }
-tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

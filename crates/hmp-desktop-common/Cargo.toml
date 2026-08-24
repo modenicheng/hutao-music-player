@@ -1,0 +1,19 @@
+[package]
+name = "hmp-desktop-common"
+description = "Shared HMP desktop application orchestration and frontend protocol"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hmp-core = { path = "../hmp-core" }
+hmp-media = { path = "../hmp-media" }
+hmp-mpris = { path = "../hmp-mpris" }
+hmp-player = { path = "../hmp-player" }
+hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
+hmp-storage = { path = "../hmp-storage" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
