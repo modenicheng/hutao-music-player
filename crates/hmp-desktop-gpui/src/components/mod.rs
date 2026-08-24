@@ -1,4 +1,5 @@
 pub mod content;
+pub mod login_overlay;
 pub mod lyrics_panel;
 pub mod now_playing;
 pub mod player_bar;

@@ -6,7 +6,7 @@ use uic::{
     components::input::{Input, InputAppearance},
 };
 
-use crate::app::HmpGpuiApp;
+use crate::{app::HmpGpuiApp, theme::layout};
 
 fn appearance() -> InputAppearance {
     InputAppearance {
@@ -28,7 +28,7 @@ fn drag_region() -> impl IntoElement {
 
 pub fn render(app: &mut HmpGpuiApp, compact: bool) -> impl IntoElement {
     div()
-        .h(px(56.))
+        .h(px(layout::TOP_BAR_HEIGHT))
         .px(px(18.))
         .flex()
         .items_center()
@@ -37,7 +37,11 @@ pub fn render(app: &mut HmpGpuiApp, compact: bool) -> impl IntoElement {
         .child(drag_region())
         .child(
             div()
-                .w(if compact { px(310.) } else { px(412.) })
+                .w(if compact {
+                    px(layout::TOP_BAR_SEARCH_WIDTH_COMPACT)
+                } else {
+                    px(layout::TOP_BAR_SEARCH_WIDTH)
+                })
                 .h(px(35.))
                 .flex_none()
                 .rounded(px(16.))

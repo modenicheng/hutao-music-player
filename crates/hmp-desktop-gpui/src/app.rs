@@ -8,7 +8,7 @@ use uic::components::input::{InputEvent, TextInput};
 
 use crate::{
     bridge::{CoreBridge, CoreCommandSender},
-    components::{content, lyrics_panel, now_playing, player_bar, sidebar, top_bar},
+    components::{content, login_overlay, lyrics_panel, now_playing, player_bar, sidebar, top_bar},
     state::{EventState, NavigationState, Page},
     theme::{BACKGROUND, layout},
 };
@@ -103,7 +103,7 @@ impl Render for HmpGpuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         #[cfg(target_os = "macos")]
         window.set_traffic_light_position(if self.now_playing {
-            gpui::point(px(20.), px(20.))
+            gpui::point(px(17.), px(28.))
         } else {
             gpui::point(px(34.), px(34.))
         });
@@ -116,8 +116,9 @@ impl Render for HmpGpuiApp {
             return now_playing::render(self, width.as_f32(), height.as_f32(), cx);
         }
 
-        let compact = width < px(layout::COMPACT_TOP_BAR_BELOW);
-        let hide_lyrics = width < px(layout::HIDE_LYRICS_BELOW);
+        let regular = layout::regular_layout(width.as_f32());
+        let compact = regular.compact;
+        let hide_lyrics = regular.hide_lyrics;
         let lyrics_page = self.navigation.page == Page::Lyrics;
         let main_content = if lyrics_page {
             lyrics_panel::render_fullscreen(&self.playback, &self.events, &mut self.lyrics_panel)
@@ -130,6 +131,7 @@ impl Render for HmpGpuiApp {
 
         div()
             .size_full()
+            .relative()
             .when(cfg!(target_os = "linux"), |root| {
                 root.font_family(crate::theme::FONT_FAMILY)
             })
@@ -175,7 +177,7 @@ impl Render for HmpGpuiApp {
                                     .absolute()
                                     .left_0()
                                     .right_0()
-                                    .bottom(px(14.))
+                                    .bottom(px(layout::FLOATING_PLAYER_BOTTOM))
                                     .flex()
                                     .justify_center()
                                     .child(player_bar::render(self, cx, compact)),
@@ -183,6 +185,9 @@ impl Render for HmpGpuiApp {
                     )
                     .when_some(inline_lyrics, |body, panel| body.child(panel)),
             )
+            .when(self.events.login_modal_open, |root| {
+                root.child(login_overlay::render(self, cx))
+            })
             .into_any_element()
     }
 }

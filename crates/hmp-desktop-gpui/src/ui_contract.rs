@@ -13,6 +13,19 @@ pub const TOP_BAR_SEARCH_WIDTH_COMPACT: f32 = 310.0;
 pub const FLOATING_PLAYER_WIDTH: f32 = 600.0;
 pub const FLOATING_PLAYER_WIDTH_COMPACT: f32 = 500.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegularLayout {
+    pub hide_lyrics: bool,
+    pub compact: bool,
+}
+
+pub fn regular_layout(window_width: f32) -> RegularLayout {
+    RegularLayout {
+        hide_lyrics: window_width < HIDE_LYRICS_BELOW,
+        compact: window_width < COMPACT_TOP_BAR_BELOW,
+    }
+}
+
 pub fn top_bar_search_width(window_width: f32) -> f32 {
     if window_width < COMPACT_TOP_BAR_BELOW {
         TOP_BAR_SEARCH_WIDTH_COMPACT
@@ -57,6 +70,31 @@ mod tests {
         assert_eq!(top_bar_search_width(900.0), 310.0);
         assert_eq!(floating_player_width(1280.0), 600.0);
         assert_eq!(floating_player_width(900.0), 500.0);
+    }
+
+    #[test]
+    fn regular_layout_uses_reference_breakpoint_edges() {
+        assert_eq!(
+            regular_layout(1080.0),
+            RegularLayout {
+                hide_lyrics: false,
+                compact: false,
+            }
+        );
+        assert_eq!(
+            regular_layout(1079.0),
+            RegularLayout {
+                hide_lyrics: true,
+                compact: false,
+            }
+        );
+        assert_eq!(
+            regular_layout(979.0),
+            RegularLayout {
+                hide_lyrics: true,
+                compact: true,
+            }
+        );
     }
 
     #[test]

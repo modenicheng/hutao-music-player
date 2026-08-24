@@ -80,6 +80,10 @@ impl EventState {
 
     pub fn close_login_modal(&mut self) {
         self.login_modal_open = false;
+        if self.auth.phase != UiLoginPhase::LoggedIn {
+            self.login_qr = None;
+            self.login_status.clear();
+        }
     }
 
     pub fn apply(&mut self, event: AppEvent) {
@@ -123,7 +127,7 @@ impl EventState {
                 self.login_status = auth.message.clone();
                 self.user_name =
                     (auth.phase == UiLoginPhase::LoggedIn).then(|| auth.display_name.clone());
-                if auth.phase == UiLoginPhase::LoggedIn {
+                if auth.phase == UiLoginPhase::LoggedIn && auth.message.is_empty() {
                     self.login_qr = None;
                     self.login_modal_open = false;
                 } else if matches!(
