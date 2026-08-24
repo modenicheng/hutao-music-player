@@ -11,6 +11,11 @@ rust-version.workspace = true
 gpui = { git = "https://github.com/cradiy/gpui.git", rev = "18856bd9bb370a4f6cc58452705d24479b7c96b9" }
 gpui_effects = { git = "https://github.com/cradiy/gpui.git", rev = "18856bd9bb370a4f6cc58452705d24479b7c96b9" }
 gpui_platform = { git = "https://github.com/cradiy/gpui.git", rev = "18856bd9bb370a4f6cc58452705d24479b7c96b9", features = ["font-kit", "wayland", "x11"] }
+hmp-core = { path = "../hmp-core" }
+hmp-desktop-common = { path = "../hmp-desktop-common" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 uic = { git = "https://github.com/cradiy/gpui.git", rev = "18856bd9bb370a4f6cc58452705d24479b7c96b9" }
 
 [target.'cfg(target_os = "windows")'.dependencies]

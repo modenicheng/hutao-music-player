@@ -3686,7 +3686,12 @@ dependencies = [
  "gpui",
  "gpui_effects",
  "gpui_platform",
+ "hmp-core",
+ "hmp-desktop-common",
  "raw-window-handle",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uic",
  "windows-sys 0.61.2",
 ]

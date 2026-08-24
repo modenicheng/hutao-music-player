@@ -1,3 +1,5 @@
+use hmp_desktop_common::{AppEvent, UiLyricData, UiQueueData, UiSongData};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Library,
@@ -40,6 +42,68 @@ impl Default for NavigationState {
     }
 }
 
+#[derive(Default)]
+pub struct EventState {
+    pub search_results: Vec<UiSongData>,
+    pub search_loading: bool,
+    pub search_error: Option<String>,
+    pub queue: Vec<UiQueueData>,
+    pub lyrics_mid: Option<String>,
+    pub lyrics: Vec<UiLyricData>,
+    pub lyrics_loading: bool,
+    pub lyrics_error: Option<String>,
+    pub login_qr: Option<Vec<u8>>,
+    pub login_status: String,
+    pub user_name: Option<String>,
+}
+
+impl EventState {
+    pub fn apply(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::SearchDone(results) => {
+                self.search_results = results;
+                self.search_loading = false;
+                self.search_error = None;
+            }
+            AppEvent::SearchFailed(message) => {
+                self.search_loading = false;
+                self.search_error = Some(message);
+            }
+            AppEvent::QueueUpdated(queue) => self.queue = queue,
+            AppEvent::LyricsLoading(mid) => {
+                if mid.trim().is_empty() {
+                    return;
+                }
+                self.lyrics_mid = Some(mid);
+                self.lyrics.clear();
+                self.lyrics_loading = true;
+                self.lyrics_error = None;
+            }
+            AppEvent::LyricsLoaded { mid, lines } => {
+                if self.lyrics_mid.as_deref() != Some(mid.as_str()) {
+                    return;
+                }
+                self.lyrics = lines;
+                self.lyrics_loading = false;
+                self.lyrics_error = None;
+            }
+            AppEvent::LyricsFailed { mid, message } => {
+                if self.lyrics_mid.as_deref() != Some(mid.as_str()) {
+                    return;
+                }
+                self.lyrics_loading = false;
+                self.lyrics_error = Some(message);
+            }
+            AppEvent::LoginQr(png) => self.login_qr = Some(png),
+            AppEvent::LoginStatus(status) => self.login_status = status,
+            AppEvent::LoginDone(name) => {
+                self.user_name = Some(name);
+                self.login_qr = None;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,5 +131,59 @@ mod tests {
         for (page, label) in expected {
             assert_eq!(page.label(), label);
         }
+    }
+
+    #[test]
+    fn app_events_replace_view_collections_without_touching_playback_state() {
+        let mut state = EventState::default();
+
+        state.apply(AppEvent::SearchDone(vec![UiSongData {
+            title: "星茶会".into(),
+            artist: "灰澈".into(),
+            duration: "04:11".into(),
+        }]));
+        assert_eq!(state.search_results.len(), 1);
+        assert_eq!(state.search_results[0].title, "星茶会");
+        assert!(state.search_error.is_none());
+
+        state.apply(AppEvent::QueueUpdated(vec![UiQueueData {
+            track_id: "qq:1".into(),
+            title: "星茶会".into(),
+            artist: "灰澈".into(),
+            duration: "04:11".into(),
+            is_current: true,
+            is_playing: true,
+        }]));
+        assert!(state.queue[0].is_current);
+
+        state.apply(AppEvent::LyricsLoading("1".into()));
+        state.apply(AppEvent::LyricsLoaded {
+            mid: "1".into(),
+            lines: vec![UiLyricData {
+                timestamp_ms: 1_000,
+                time: "00:01".into(),
+                text: "测试歌词".into(),
+                translation: "Test lyric".into(),
+            }],
+        });
+        assert_eq!(state.lyrics_mid.as_deref(), Some("1"));
+        assert_eq!(state.lyrics[0].translation, "Test lyric");
+        assert!(!state.lyrics_loading);
+    }
+
+    #[test]
+    fn failures_replace_loading_state_with_a_visible_error() {
+        let mut state = EventState::default();
+        state.apply(AppEvent::SearchFailed("network".into()));
+        assert_eq!(state.search_error.as_deref(), Some("network"));
+
+        state.apply(AppEvent::LyricsLoading("mid".into()));
+        assert!(state.lyrics_loading);
+        state.apply(AppEvent::LyricsFailed {
+            mid: "mid".into(),
+            message: "missing".into(),
+        });
+        assert!(!state.lyrics_loading);
+        assert_eq!(state.lyrics_error.as_deref(), Some("missing"));
     }
 }

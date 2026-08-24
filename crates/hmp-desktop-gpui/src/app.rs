@@ -1,22 +1,32 @@
 //! GPUI application view. Business state remains outside this module.
 
 use gpui::{AppContext, Render, Subscription, Window, div, prelude::*, px, rgb, rgba};
+use hmp_core::PlaybackState;
 use uic::components::input::{InputEvent, TextInput};
 
 use crate::{
+    bridge::{CoreBridge, CoreCommandSender},
     components::{content, sidebar, top_bar},
-    state::{NavigationState, Page},
+    state::{EventState, NavigationState, Page},
     theme::{BACKGROUND, layout},
 };
 
 pub struct HmpGpuiApp {
     pub navigation: NavigationState,
+    pub playback: PlaybackState,
+    pub events: EventState,
+    pub commands: CoreCommandSender,
     pub search_input: gpui::Entity<TextInput>,
+    _core_bridge: CoreBridge,
     _subscriptions: Vec<Subscription>,
 }
 
 impl HmpGpuiApp {
-    pub fn new(cx: &mut gpui::Context<Self>, window: &mut Window) -> Self {
+    pub fn new(
+        mut core_bridge: CoreBridge,
+        cx: &mut gpui::Context<Self>,
+        window: &mut Window,
+    ) -> Self {
         let search_input = cx.new(|cx| TextInput::new(cx).placeholder("搜索音乐"));
         let search_subscription = cx.subscribe(&search_input, |app, _, _event: &InputEvent, cx| {
             app.navigation.navigate(Page::Search);
@@ -24,9 +34,44 @@ impl HmpGpuiApp {
         });
         cx.focus_view(&search_input, window);
 
+        let commands = core_bridge.commands();
+        let mut playback_rx = core_bridge.playback_receiver();
+        let playback = playback_rx.borrow().clone();
+        cx.spawn(async move |this, cx| {
+            while playback_rx.changed().await.is_ok() {
+                let playback = playback_rx.borrow().clone();
+                let Some(this) = this.upgrade() else {
+                    break;
+                };
+                this.update(cx, |app, cx| {
+                    app.playback = playback;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+
+        let mut event_rx = core_bridge.take_event_receiver();
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = event_rx.recv().await {
+                let Some(this) = this.upgrade() else {
+                    break;
+                };
+                this.update(cx, |app, cx| {
+                    app.events.apply(event);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+
         Self {
             navigation: NavigationState::default(),
+            playback,
+            events: EventState::default(),
+            commands,
             search_input,
+            _core_bridge: core_bridge,
             _subscriptions: vec![search_subscription],
         }
     }
