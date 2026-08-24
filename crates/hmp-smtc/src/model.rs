@@ -1,6 +1,6 @@
 //! Pure projection between HMP domain state and Windows media concepts.
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use hmp_core::{LoopMode, PlaybackCapabilities, PlaybackState, PlaybackStatus, PlayerCommand};
 
@@ -37,6 +37,21 @@ pub struct Projection {
     pub can_previous: bool,
     pub loop_mode: LoopMode,
     pub shuffle: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CoverSource {
+    File(PathBuf),
+    Uri(String),
+}
+
+pub(crate) fn classify_cover_source(value: &str) -> Option<CoverSource> {
+    let uri = url::Url::parse(value).ok()?;
+    match uri.scheme() {
+        "file" => uri.to_file_path().ok().map(CoverSource::File),
+        "http" | "https" | "ms-appx" | "ms-appdata" => Some(CoverSource::Uri(value.to_owned())),
+        _ => None,
+    }
 }
 
 impl Projection {

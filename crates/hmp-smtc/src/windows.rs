@@ -18,12 +18,15 @@ use windows::{
         SystemMediaTransportControlsButton, SystemMediaTransportControlsButtonPressedEventArgs,
         SystemMediaTransportControlsTimelineProperties,
     },
-    Storage::Streams::RandomAccessStreamReference,
+    Storage::{StorageFile, Streams::RandomAccessStreamReference},
     Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
     core::{HSTRING, Result as WindowsResult},
 };
 
-use crate::model::{ProjectedButton, ProjectedStatus, Projection, map_button, map_repeat_request};
+use crate::model::{
+    CoverSource, ProjectedButton, ProjectedStatus, Projection, classify_cover_source, map_button,
+    map_repeat_request,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SmtcError {
@@ -288,12 +291,15 @@ impl SmtcOwner {
             ))?;
 
             if let Some(cover_url) = &projection.cover_url {
-                match Uri::CreateUri(&HSTRING::from(cover_url))
-                    .and_then(|uri| RandomAccessStreamReference::CreateFromUri(&uri))
-                {
-                    Ok(thumbnail) => updater.SetThumbnail(&thumbnail)?,
-                    Err(error) => {
-                        tracing::debug!(%error, %cover_url, "ignored unsupported SMTC cover URI");
+                match classify_cover_source(cover_url) {
+                    Some(source) => match thumbnail_reference(&source) {
+                        Ok(thumbnail) => updater.SetThumbnail(&thumbnail)?,
+                        Err(error) => {
+                            tracing::warn!(%error, %cover_url, "failed to load SMTC cover");
+                        }
+                    },
+                    None => {
+                        tracing::warn!(%cover_url, "ignored unsupported SMTC cover URI");
                     }
                 }
             }
@@ -313,6 +319,18 @@ impl SmtcOwner {
         timeline.SetMinSeekTime(zero)?;
         timeline.SetMaxSeekTime(if projection.can_seek { end } else { zero })?;
         self.controls.UpdateTimelineProperties(&timeline)
+    }
+}
+
+fn thumbnail_reference(source: &CoverSource) -> WindowsResult<RandomAccessStreamReference> {
+    match source {
+        CoverSource::File(path) => {
+            let path = HSTRING::from(path.to_string_lossy().as_ref());
+            let file = StorageFile::GetFileFromPathAsync(&path)?.get()?;
+            RandomAccessStreamReference::CreateFromFile(&file)
+        }
+        CoverSource::Uri(value) => Uri::CreateUri(&HSTRING::from(value))
+            .and_then(|uri| RandomAccessStreamReference::CreateFromUri(&uri)),
     }
 }
 
