@@ -449,6 +449,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    fn path_from_file_uri(uri: &str) -> PathBuf {
+        url::Url::parse(uri)
+            .unwrap()
+            .to_file_path()
+            .expect("media cache URI must map back to a platform path")
+    }
+
     #[tokio::test]
     async fn prepare_decrypts_plain_stream() {
         let root = test_cache_root().join("decrypts_plain");
@@ -482,8 +489,8 @@ mod tests {
         );
 
         // 读取文件内容，比对明文
-        let path = result.strip_prefix("file://").unwrap();
-        let decoded = std::fs::read(path).unwrap();
+        let path = path_from_file_uri(&result);
+        let decoded = std::fs::read(&path).unwrap();
         assert_eq!(decoded, plaintext, "decrypted content must match plaintext");
 
         cleanup(&root);
@@ -514,16 +521,17 @@ mod tests {
             .unwrap();
 
         assert!(result.starts_with("file://"));
-        let path = result.strip_prefix("file://").unwrap();
-        let decoded = std::fs::read(path).unwrap();
+        let path = path_from_file_uri(&result);
+        let decoded = std::fs::read(&path).unwrap();
 
         // 尾部已被剥离，内容 == 明文
         assert_eq!(decoded, plaintext, "stripped content must match plaintext");
 
         // 确认文件扩展名正确
         assert!(
-            path.ends_with(".ogg"),
-            "expected .ogg extension, got {path}"
+            path.extension().is_some_and(|extension| extension == "ogg"),
+            "expected .ogg extension, got {}",
+            path.display()
         );
 
         cleanup(&root);
@@ -733,7 +741,7 @@ mod tests {
 
         // 重试成功，返回 file:// URI，内容 == 明文
         assert!(result.starts_with("file://"));
-        let path = result.strip_prefix("file://").unwrap();
+        let path = path_from_file_uri(&result);
         let decoded = std::fs::read(path).unwrap();
         assert_eq!(
             decoded, plaintext,
