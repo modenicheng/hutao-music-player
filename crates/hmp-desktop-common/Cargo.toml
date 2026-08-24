@@ -17,3 +17,4 @@ hmp-storage = { path = "../hmp-storage" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }

@@ -126,6 +126,66 @@ pub struct UiFeatureData {
     pub detail: String,
 }
 
+/// 侧栏与歌单首页使用的持久化歌单摘要。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiPlaylistData {
+    pub id: i64,
+    pub name: String,
+    pub track_count: i64,
+    pub provider: String,
+    pub relation: String,
+    pub sync_state: String,
+}
+
+/// 歌单详情页使用的无工具包曲目投影。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiPlaylistTrackData {
+    pub source_key: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration: String,
+}
+
+fn load_playlist_summaries(db: &mut hmp_storage::LibraryDb) -> Result<Vec<UiPlaylistData>, String> {
+    db.list_playlists()
+        .map_err(|error| format!("读取歌单失败: {error}"))
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| UiPlaylistData {
+                    id: row.id,
+                    name: row.name,
+                    track_count: row.track_count,
+                    provider: row.provider,
+                    relation: row.relation,
+                    sync_state: row.sync_state,
+                })
+                .collect()
+        })
+}
+
+fn load_playlist_tracks(
+    db: &mut hmp_storage::LibraryDb,
+    playlist_id: i64,
+) -> Result<Vec<UiPlaylistTrackData>, String> {
+    db.local_playlist_stubs(playlist_id)
+        .map_err(|error| format!("读取歌单曲目失败: {error}"))
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| UiPlaylistTrackData {
+                    source_key: row.source_key,
+                    title: row.title,
+                    artist: row.artist.unwrap_or_default(),
+                    album: row.album.unwrap_or_default(),
+                    duration: row
+                        .duration_ms
+                        .map(|duration| format_secs(duration as f32 / 1000.0))
+                        .unwrap_or_else(|| "--:--".into()),
+                })
+                .collect()
+        })
+}
+
 /// 与 UI 工具包无关的 QQ 音乐登录阶段。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UiLoginPhase {
@@ -212,6 +272,15 @@ pub enum AppEvent {
     LoginQr(Vec<u8>),
     /// 不含凭证的登录状态快照。
     AuthChanged(UiAuthData),
+    /// 持久化歌单摘要更新。
+    PlaylistsUpdated(Vec<UiPlaylistData>),
+    /// 打开指定歌单并发布有序曲目。
+    PlaylistOpened {
+        playlist_id: i64,
+        tracks: Vec<UiPlaylistTrackData>,
+    },
+    /// 歌单数据库或选中项无效。
+    PlaylistsFailed(String),
 }
 
 /// 应用命令（UI/MPRIS 统一入口）。
@@ -243,6 +312,12 @@ pub enum AppCommand {
     LoginCancel,
     /// 退出登录并删除持久化凭证。
     Logout,
+    /// 从媒体库刷新歌单摘要。
+    RefreshPlaylists,
+    /// 打开持久化歌单。
+    OpenPlaylist(i64),
+    /// 播放持久化歌单中的指定曲目。
+    PlayPlaylistTrack { playlist_id: i64, index: usize },
     /// 重新加载当前歌曲歌词。
     ReloadLyrics,
     /// 退出。
@@ -328,6 +403,10 @@ enum PlayRequest {
         index: usize,
         item: QueueItem,
     },
+    Playlist {
+        index: usize,
+        item: QueueItem,
+    },
 }
 
 struct ResolvedStream {
@@ -340,13 +419,14 @@ struct ResolvedPlayback {
     index: usize,
     songs: Option<Vec<hmp_qqmusic_api::protocol::search::QuickSong>>,
     item: QueueItem,
-    file_type: SongFileType,
+    quality: AudioQuality,
     uri: String,
     media: Option<hmp_media::PreparedMedia>,
 }
 
 struct PlayResult {
     generation: u64,
+    report_playlist_error: bool,
     result: Result<ResolvedPlayback, String>,
 }
 
@@ -477,6 +557,8 @@ pub struct AppCore {
     events_tx: mpsc::UnboundedSender<AppEvent>,
     store: Box<dyn CredentialStore>,
     credential: Option<Credential>,
+    library: Option<hmp_storage::LibraryDb>,
+    library_error: Option<String>,
     songs: Vec<hmp_qqmusic_api::protocol::search::QuickSong>,
     queue: Vec<QueueItem>,
     queue_index: usize,
@@ -525,6 +607,15 @@ impl AppCore {
                 None
             }
         };
+        let (library, library_error) =
+            match hmp_storage::LibraryDb::open(&hmp_storage::data_dir().join("library.sqlite3")) {
+                Ok(library) => (Some(library), None),
+                Err(error) => {
+                    let message = format!("打开媒体库失败: {error}");
+                    tracing::warn!("{message}");
+                    (None, Some(message))
+                }
+            };
         let (login_results_tx, login_results_rx) = mpsc::unbounded_channel();
         let (login_updates_tx, login_updates_rx) = mpsc::unbounded_channel();
         let (lyric_results_tx, lyric_results_rx) = mpsc::unbounded_channel();
@@ -550,6 +641,8 @@ impl AppCore {
             events_tx,
             store,
             credential,
+            library,
+            library_error,
             songs: Vec::new(),
             queue: Vec::new(),
             queue_index: 0,
@@ -619,6 +712,7 @@ impl AppCore {
         let _ = self
             .events_tx
             .send(AppEvent::AuthChanged(self.auth_snapshot()));
+        self.publish_playlists();
         loop {
             tokio::select! {
                 command = self.cmd_rx.recv() => {
@@ -643,6 +737,11 @@ impl AppCore {
                         AppCommand::LoginStart => self.start_login(),
                         AppCommand::LoginCancel => self.cancel_login(),
                         AppCommand::Logout => self.logout(),
+                        AppCommand::RefreshPlaylists => self.publish_playlists(),
+                        AppCommand::OpenPlaylist(playlist_id) => self.open_playlist(playlist_id),
+                        AppCommand::PlayPlaylistTrack { playlist_id, index } => {
+                            self.play_playlist_track(playlist_id, index)
+                        }
                         AppCommand::ReloadLyrics => self.reload_lyrics(),
                         AppCommand::Quit => break,
                     }
@@ -797,7 +896,7 @@ impl AppCore {
             return;
         };
         self.pending_queue_index = Some(index);
-        self.start_play_request(PlayRequest::Queue { index, item });
+        self.start_play_request(PlayRequest::Playlist { index, item });
     }
 
     fn start_play_relative(&mut self, delta: isize) {
@@ -833,6 +932,7 @@ impl AppCore {
 
     fn start_play_request(&mut self, request: PlayRequest) {
         let (generation, cancel) = self.play_requests.begin();
+        let report_playlist_error = matches!(&request, PlayRequest::Playlist { .. });
         let client = QqMusicClient::with_config(self.client.config());
         let credential = self.credential.clone();
         let results_tx = self.play_results_tx.clone();
@@ -841,7 +941,11 @@ impl AppCore {
                 _ = cancel.cancelled() => return,
                 result = resolve_play_request(&client, credential.as_ref(), request) => result,
             };
-            let _ = results_tx.send(PlayResult { generation, result });
+            let _ = results_tx.send(PlayResult {
+                generation,
+                report_playlist_error,
+                result,
+            });
         });
     }
 
@@ -853,6 +957,11 @@ impl AppCore {
         let resolved = match result.result {
             Ok(resolved) => resolved,
             Err(message) => {
+                if result.report_playlist_error {
+                    let _ = self
+                        .events_tx
+                        .send(AppEvent::PlaylistsFailed(message.clone()));
+                }
                 tracing::error!("playback resolution failed: {message}");
                 return;
             }
@@ -870,15 +979,25 @@ impl AppCore {
         let mut item = queue_item.clone();
         // 供 MPRIS `xesam:url` 使用
         item.track.url = Some(resolved.uri.clone());
-        let quality = quality_from_file_type(resolved.file_type);
         self.player.load(LoadRequest {
             uri: resolved.uri,
             track: item.track.clone(),
-            quality,
+            quality: resolved.quality,
             load_gen: 0, // 桌面端直连驱动，无代际过滤需求
         });
-        self.current_lyrics = Some((item.mid.clone(), item.song_type));
-        self.start_lyrics_load(item.mid.clone(), item.song_type);
+        if item.mid.starts_with("local:") {
+            self.current_lyrics = None;
+            let _ = self
+                .events_tx
+                .send(AppEvent::LyricsLoading(item.mid.clone()));
+            let _ = self.events_tx.send(AppEvent::LyricsLoaded {
+                mid: item.mid.clone(),
+                lines: Vec::new(),
+            });
+        } else {
+            self.current_lyrics = Some((item.mid.clone(), item.song_type));
+            self.start_lyrics_load(item.mid.clone(), item.song_type);
+        }
         self.sync_capabilities();
         self.publish_queue_snapshot();
         tracing::info!(mid = item.mid, title = item.track.title, "playing");
@@ -941,6 +1060,77 @@ impl AppCore {
         let state = self.state_rx.borrow().clone();
         let snapshot = self.queue_snapshot_for_state(&state);
         let _ = self.events_tx.send(AppEvent::QueueUpdated(snapshot));
+    }
+
+    // -----------------------------------------------------------------
+    // 持久化歌单
+    // -----------------------------------------------------------------
+
+    fn publish_playlists(&mut self) {
+        let result = match self.library.as_mut() {
+            Some(library) => load_playlist_summaries(library),
+            None => Err(self
+                .library_error
+                .clone()
+                .unwrap_or_else(|| "媒体库不可用".into())),
+        };
+        let event = match result {
+            Ok(playlists) => AppEvent::PlaylistsUpdated(playlists),
+            Err(message) => AppEvent::PlaylistsFailed(message),
+        };
+        let _ = self.events_tx.send(event);
+    }
+
+    fn open_playlist(&mut self, playlist_id: i64) {
+        let result = match self.library.as_mut() {
+            Some(library) => load_playlist_tracks(library, playlist_id),
+            None => Err(self
+                .library_error
+                .clone()
+                .unwrap_or_else(|| "媒体库不可用".into())),
+        };
+        let event = match result {
+            Ok(tracks) => AppEvent::PlaylistOpened {
+                playlist_id,
+                tracks,
+            },
+            Err(message) => AppEvent::PlaylistsFailed(message),
+        };
+        let _ = self.events_tx.send(event);
+    }
+
+    fn play_playlist_track(&mut self, playlist_id: i64, index: usize) {
+        let tracks = match self.library.as_mut() {
+            Some(library) => load_playlist_tracks(library, playlist_id),
+            None => Err(self
+                .library_error
+                .clone()
+                .unwrap_or_else(|| "媒体库不可用".into())),
+        };
+        let tracks = match tracks {
+            Ok(tracks) => tracks,
+            Err(message) => {
+                let _ = self.events_tx.send(AppEvent::PlaylistsFailed(message));
+                return;
+            }
+        };
+        if index >= tracks.len() {
+            let _ = self.events_tx.send(AppEvent::PlaylistsFailed(format!(
+                "歌单曲目已变化，请刷新后重试（索引 {index}）"
+            )));
+            return;
+        }
+
+        let queue = tracks
+            .iter()
+            .map(queue_item_from_playlist_track)
+            .collect::<Vec<_>>();
+        let item = queue[index].clone();
+        self.queue = queue;
+        self.queue_index = index;
+        self.pending_queue_index = Some(index);
+        self.publish_queue_snapshot();
+        self.start_play_request(PlayRequest::Queue { index, item });
     }
 
     // -----------------------------------------------------------------
@@ -1057,6 +1247,7 @@ impl AppCore {
         match logout_credential(self.store.as_ref(), &mut self.credential) {
             Ok(auth) => {
                 let _ = self.events_tx.send(AppEvent::AuthChanged(auth));
+                self.publish_playlists();
             }
             Err(error) => {
                 let current = UiAuthData {
@@ -1090,6 +1281,7 @@ impl AppCore {
                 let _ = self
                     .events_tx
                     .send(AppEvent::AuthChanged(UiAuthData::logged_in(name)));
+                self.publish_playlists();
                 tracing::info!("login ok");
             }
             Err(message) => {
@@ -1128,12 +1320,15 @@ async fn resolve_play_request(
                 index,
                 songs: Some(songs),
                 item,
-                file_type: resolved.file_type,
+                quality: quality_from_file_type(resolved.file_type),
                 uri: resolved.uri,
                 media: resolved.media,
             })
         }
-        PlayRequest::Queue { index, mut item } => {
+        PlayRequest::Queue { index, mut item } | PlayRequest::Playlist { index, mut item } => {
+            if item.mid.starts_with("local:") {
+                return resolve_local_playback(index, item);
+            }
             resolve_queue_item(client, &mut item).await?;
             let resolved = resolve_stream(
                 client,
@@ -1149,7 +1344,7 @@ async fn resolve_play_request(
                 index,
                 songs: None,
                 item,
-                file_type: resolved.file_type,
+                quality: quality_from_file_type(resolved.file_type),
                 uri: resolved.uri,
                 media: resolved.media,
             })
@@ -1175,6 +1370,80 @@ fn queue_item_from_search_song(song: &hmp_qqmusic_api::protocol::search::QuickSo
         mid: song.mid.clone(),
         media_mid: String::new(),
         song_type: 0,
+    }
+}
+
+fn queue_item_from_playlist_track(row: &UiPlaylistTrackData) -> QueueItem {
+    let id = row.source_key.clone();
+    QueueItem {
+        track: Track {
+            id: TrackId::new(id.clone()),
+            title: row.title.clone(),
+            artists: (!row.artist.is_empty())
+                .then(|| {
+                    vec![hmp_core::ArtistRef {
+                        id: hmp_core::ArtistId::new(id.clone()),
+                        name: row.artist.clone(),
+                    }]
+                })
+                .unwrap_or_default(),
+            album: (!row.album.is_empty()).then(|| hmp_core::AlbumRef {
+                id: hmp_core::AlbumId::new(id.clone()),
+                name: row.album.clone(),
+            }),
+            duration: parse_clock_duration(&row.duration),
+            cover: None,
+            url: None,
+            available_qualities: Vec::new(),
+        },
+        mid: id,
+        media_mid: String::new(),
+        song_type: 0,
+    }
+}
+
+fn parse_clock_duration(value: &str) -> Option<Duration> {
+    let (minutes, seconds) = value.split_once(':')?;
+    let minutes = minutes.parse::<u64>().ok()?;
+    let seconds = seconds.parse::<u64>().ok()?;
+    (seconds < 60).then(|| Duration::from_secs(minutes * 60 + seconds))
+}
+
+fn resolve_local_playback(index: usize, mut item: QueueItem) -> Result<ResolvedPlayback, String> {
+    let raw_path = item
+        .mid
+        .strip_prefix("local:")
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| format!("无效的本地曲目地址: {}", item.mid))?;
+    let path = std::fs::canonicalize(raw_path)
+        .map_err(|error| format!("本地曲目不可用（{raw_path}）: {error}"))?;
+    let uri = url::Url::from_file_path(&path)
+        .map(|uri| uri.to_string())
+        .map_err(|_| format!("本地路径无法转换为播放地址: {}", path.display()))?;
+    let quality = local_file_quality(&path);
+    item.track.url = Some(uri.clone());
+    item.track.available_qualities = vec![quality.clone()];
+    Ok(ResolvedPlayback {
+        index,
+        songs: None,
+        item,
+        quality,
+        uri,
+        media: None,
+    })
+}
+
+fn local_file_quality(path: &std::path::Path) -> AudioQuality {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("flac" | "wav" | "ape") => AudioQuality::Flac,
+        Some("m4a" | "aac") => AudioQuality::Aac,
+        Some("ogg" | "opus") => AudioQuality::Mp3_320,
+        _ => AudioQuality::Mp3_128,
     }
 }
 
@@ -1545,6 +1814,58 @@ mod tests {
         assert!(deleted.load(std::sync::atomic::Ordering::SeqCst));
         assert!(credential.is_none());
         assert_eq!(auth, UiAuthData::logged_out());
+    }
+
+    #[test]
+    fn playlist_real_library_rows_project_to_safe_playlist_data() {
+        let mut db = hmp_storage::LibraryDb::open_in_memory().unwrap();
+        let id = db.create_playlist("测试歌单").unwrap();
+        db.add_playlist_track(id, "qq", "mid-1", "歌曲").unwrap();
+
+        let rows = load_playlist_summaries(&mut db).unwrap();
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].name, "测试歌单");
+        assert_eq!(rows[0].track_count, 1);
+    }
+
+    #[test]
+    fn playlist_tracks_preserve_storage_order() {
+        let mut db = hmp_storage::LibraryDb::open_in_memory().unwrap();
+        let id = db.create_playlist("p").unwrap();
+        db.add_playlist_track(id, "qq", "mid-1", "一").unwrap();
+        db.add_playlist_track(id, "local", "local:/two.flac", "二")
+            .unwrap();
+
+        let rows = load_playlist_tracks(&mut db, id).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            ["一", "二"]
+        );
+        assert_eq!(rows[1].source_key, "local:/two.flac");
+    }
+
+    #[test]
+    fn playlist_commands_are_part_of_the_shared_protocol() {
+        assert!(matches!(
+            AppCommand::RefreshPlaylists,
+            AppCommand::RefreshPlaylists
+        ));
+        assert!(matches!(
+            AppCommand::OpenPlaylist(7),
+            AppCommand::OpenPlaylist(7)
+        ));
+        assert!(matches!(
+            AppCommand::PlayPlaylistTrack {
+                playlist_id: 7,
+                index: 2,
+            },
+            AppCommand::PlayPlaylistTrack {
+                playlist_id: 7,
+                index: 2,
+            }
+        ));
     }
 
     #[test]

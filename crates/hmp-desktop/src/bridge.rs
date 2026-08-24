@@ -352,5 +352,8 @@ pub(crate) fn apply_event(ui: &crate::AppWindow, evt: AppEvent) {
                     | UiLoginPhase::Error
             ));
         }
+        AppEvent::PlaylistsUpdated(_)
+        | AppEvent::PlaylistOpened { .. }
+        | AppEvent::PlaylistsFailed(_) => {}
     }
 }

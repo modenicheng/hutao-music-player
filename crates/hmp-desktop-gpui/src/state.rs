@@ -112,6 +112,9 @@ impl EventState {
                 }
                 self.auth = auth;
             }
+            AppEvent::PlaylistsUpdated(_)
+            | AppEvent::PlaylistOpened { .. }
+            | AppEvent::PlaylistsFailed(_) => {}
         }
     }
 }
