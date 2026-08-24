@@ -19,6 +19,7 @@ mod bridge;
 mod components;
 mod state;
 mod theme;
+mod ui_contract;
 mod window;
 
 fn titlebar() -> Option<TitlebarOptions> {
