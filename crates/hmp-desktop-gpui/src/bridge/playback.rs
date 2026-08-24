@@ -1,6 +1,17 @@
 use std::time::Duration;
 
 use hmp_core::{PlaybackState, PlaybackStatus};
+use hmp_desktop_common::UiLyricData;
+
+pub fn active_lyric_index(lines: &[UiLyricData], position: Duration) -> Option<usize> {
+    let position_ms = position.as_millis();
+    lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, line)| u128::from(line.timestamp_ms) <= position_ms)
+        .map(|(index, _)| index)
+}
 
 pub fn is_playing(state: &PlaybackState) -> bool {
     state.status == PlaybackStatus::Playing
@@ -34,8 +45,9 @@ mod tests {
     use std::time::Duration;
 
     use hmp_core::{PlaybackState, PlaybackStatus};
+    use hmp_desktop_common::UiLyricData;
 
-    use super::{elapsed_text, is_playing, progress, remaining_text};
+    use super::{active_lyric_index, elapsed_text, is_playing, progress, remaining_text};
 
     #[test]
     fn progress_is_zero_without_a_positive_duration() {
@@ -79,5 +91,37 @@ mod tests {
         }
         state.status = PlaybackStatus::Playing;
         assert!(is_playing(&state));
+    }
+
+    #[test]
+    fn active_lyric_is_the_latest_line_not_after_playback_position() {
+        let lines = [
+            lyric(1_000, "one"),
+            lyric(2_500, "two"),
+            lyric(5_000, "three"),
+        ];
+
+        assert_eq!(active_lyric_index(&lines, Duration::from_millis(999)), None);
+        assert_eq!(
+            active_lyric_index(&lines, Duration::from_millis(1_000)),
+            Some(0)
+        );
+        assert_eq!(
+            active_lyric_index(&lines, Duration::from_millis(4_999)),
+            Some(1)
+        );
+        assert_eq!(
+            active_lyric_index(&lines, Duration::from_millis(9_000)),
+            Some(2)
+        );
+    }
+
+    fn lyric(timestamp_ms: u64, text: &str) -> UiLyricData {
+        UiLyricData {
+            timestamp_ms,
+            time: String::new(),
+            text: text.into(),
+            translation: String::new(),
+        }
     }
 }

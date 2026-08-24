@@ -6,7 +6,7 @@ use uic::components::input::{InputEvent, TextInput};
 
 use crate::{
     bridge::{CoreBridge, CoreCommandSender},
-    components::{content, player_bar, sidebar, top_bar},
+    components::{content, lyrics_panel, player_bar, sidebar, top_bar},
     state::{EventState, NavigationState, Page},
     theme::{BACKGROUND, layout},
 };
@@ -18,6 +18,7 @@ pub struct HmpGpuiApp {
     pub commands: CoreCommandSender,
     pub search_input: gpui::Entity<TextInput>,
     pub now_playing: bool,
+    pub lyrics_panel: lyrics_panel::LyricsPanelState,
     _core_bridge: CoreBridge,
     _subscriptions: Vec<Subscription>,
 }
@@ -80,6 +81,7 @@ impl HmpGpuiApp {
             commands,
             search_input,
             now_playing: false,
+            lyrics_panel: lyrics_panel::LyricsPanelState::default(),
             _core_bridge: core_bridge,
             _subscriptions: vec![search_subscription],
         }
@@ -92,6 +94,16 @@ impl Render for HmpGpuiApp {
         window.set_traffic_light_position(gpui::point(px(34.), px(34.)));
 
         let compact = window.bounds().size.width < px(layout::COMPACT_TOP_BAR_BELOW);
+        let hide_lyrics = window.bounds().size.width < px(layout::HIDE_LYRICS_BELOW);
+        let lyrics_page = self.navigation.page == Page::Lyrics;
+        let main_content = if lyrics_page {
+            lyrics_panel::render_fullscreen(&self.playback, &self.events, &mut self.lyrics_panel)
+        } else {
+            content::render(self, cx)
+        };
+        let inline_lyrics = (!hide_lyrics && !lyrics_page).then(|| {
+            lyrics_panel::render_inline(&self.playback, &self.events, &mut self.lyrics_panel)
+        });
 
         div()
             .size_full()
@@ -119,28 +131,34 @@ impl Render for HmpGpuiApp {
                     .child(sidebar::render(self, cx)),
             )
             .child(
-                div().flex_1().min_w_0().h_full().flex().child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .flex()
-                        .flex_col()
-                        .bg(rgb(0x20222d))
-                        .child(top_bar::render(self, compact))
-                        .child(content::render(self, cx))
-                        .child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom(px(14.))
-                                .flex()
-                                .justify_center()
-                                .child(player_bar::render(self, cx, compact)),
-                        ),
-                ),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .bg(rgb(0x20222d))
+                            .child(top_bar::render(self, compact))
+                            .child(main_content)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .right_0()
+                                    .bottom(px(14.))
+                                    .flex()
+                                    .justify_center()
+                                    .child(player_bar::render(self, cx, compact)),
+                            ),
+                    )
+                    .when_some(inline_lyrics, |body, panel| body.child(panel)),
             )
     }
 }
