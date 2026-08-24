@@ -8,6 +8,8 @@ use hmp_control::{
     Request as ControlRequest, Response as ControlResponse,
 };
 use hmp_core::{Event, IpcErrorCode, Request, Response};
+#[cfg(unix)]
+use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -62,35 +64,6 @@ fn requires_credential(req: &Request) -> bool {
         }
         Request::LibrarySync => true,
         _ => false,
-    }
-}
-
-#[cfg(test)]
-mod credential_policy_tests {
-    use super::requires_credential;
-    use hmp_core::{AlbumId, PlayRequest, Request, TrackId};
-
-    #[test]
-    fn every_local_play_source_bypasses_qq_credentials() {
-        let sources = [
-            PlayRequest::Local(TrackId::new("local:C:\\Music\\song.flac")),
-            PlayRequest::Track(TrackId::new("local:C:\\Music\\song.flac")),
-            PlayRequest::Album(AlbumId::new("local:本地专辑")),
-            PlayRequest::LibraryPlaylist(1),
-        ];
-
-        for source in sources {
-            for request in [
-                Request::Play(source.clone()),
-                Request::PlayNext(source.clone()),
-                Request::QueueAppend(source.clone()),
-            ] {
-                assert!(
-                    !requires_credential(&request),
-                    "本地播放源不应要求 QQ 登录: {request:?}"
-                );
-            }
-        }
     }
 }
 
@@ -1083,5 +1056,31 @@ mod tests {
         );
     }
 }
-#[cfg(unix)]
-use std::path::PathBuf;
+#[cfg(test)]
+mod credential_policy_tests {
+    use super::requires_credential;
+    use hmp_core::{AlbumId, PlayRequest, Request, TrackId};
+
+    #[test]
+    fn every_local_play_source_bypasses_qq_credentials() {
+        let sources = [
+            PlayRequest::Local(TrackId::new("local:C:\\Music\\song.flac")),
+            PlayRequest::Track(TrackId::new("local:C:\\Music\\song.flac")),
+            PlayRequest::Album(AlbumId::new("local:本地专辑")),
+            PlayRequest::LibraryPlaylist(1),
+        ];
+
+        for source in sources {
+            for request in [
+                Request::Play(source.clone()),
+                Request::PlayNext(source.clone()),
+                Request::QueueAppend(source.clone()),
+            ] {
+                assert!(
+                    !requires_credential(&request),
+                    "本地播放源不应要求 QQ 登录: {request:?}"
+                );
+            }
+        }
+    }
+}
