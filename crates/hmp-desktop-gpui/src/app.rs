@@ -29,8 +29,15 @@ impl HmpGpuiApp {
         window: &mut Window,
     ) -> Self {
         let search_input = cx.new(|cx| TextInput::new(cx).placeholder("搜索音乐"));
-        let search_subscription = cx.subscribe(&search_input, |app, _, _event: &InputEvent, cx| {
+        let search_subscription = cx.subscribe(&search_input, |app, _, event: &InputEvent, cx| {
             app.navigation.navigate(Page::Search);
+            if let InputEvent::Submit(text) = event {
+                let query = text.trim();
+                if !query.is_empty() {
+                    app.events.begin_search();
+                    app.commands.search(query.to_owned());
+                }
+            }
             cx.notify();
         });
         cx.focus_view(&search_input, window);
@@ -122,7 +129,7 @@ impl Render for HmpGpuiApp {
                         .flex_col()
                         .bg(rgb(0x20222d))
                         .child(top_bar::render(self, compact))
-                        .child(content::render(self.navigation.page))
+                        .child(content::render(self, cx))
                         .child(
                             div()
                                 .absolute()

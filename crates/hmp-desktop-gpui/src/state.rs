@@ -58,6 +58,11 @@ pub struct EventState {
 }
 
 impl EventState {
+    pub fn begin_search(&mut self) {
+        self.search_loading = true;
+        self.search_error = None;
+    }
+
     pub fn apply(&mut self, event: AppEvent) {
         match event {
             AppEvent::SearchDone(results) => {
@@ -174,6 +179,10 @@ mod tests {
     #[test]
     fn failures_replace_loading_state_with_a_visible_error() {
         let mut state = EventState::default();
+        state.begin_search();
+        assert!(state.search_loading);
+        assert!(state.search_error.is_none());
+
         state.apply(AppEvent::SearchFailed("network".into()));
         assert_eq!(state.search_error.as_deref(), Some("network"));
 
