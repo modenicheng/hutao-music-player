@@ -7,7 +7,12 @@ pub mod local;
 pub mod mpris;
 pub mod player;
 pub mod reconcile;
+#[cfg(unix)]
 pub mod serve;
+#[cfg(not(unix))]
+#[path = "serve_unsupported.rs"]
+pub mod serve;
+#[cfg(unix)]
 pub mod server; // Task 3 // Task 5
 #[cfg(windows)]
 pub mod smtc;

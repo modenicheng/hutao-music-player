@@ -8,6 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# GPUI view/runtime plus the demo's reusable shader and component libraries.
+# All Git dependencies are pinned to one reviewed revision to avoid API drift.
 gpui = { git = "https://github.com/cradiy/gpui.git", rev = "18856bd9bb370a4f6cc58452705d24479b7c96b9" }
 gpui_effects = { git = "https://github.com/cradiy/gpui.git", rev = "18856bd9bb370a4f6cc58452705d24479b7c96b9" }
 gpui_platform = { git = "https://github.com/cradiy/gpui.git", rev = "18856bd9bb370a4f6cc58452705d24479b7c96b9", features = ["font-kit", "wayland", "x11"] }

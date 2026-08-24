@@ -13,6 +13,10 @@ use clap::{Parser, Subcommand};
 
 mod account;
 mod auth;
+#[cfg(unix)]
+mod client;
+#[cfg(not(unix))]
+#[path = "client_unsupported.rs"]
 mod client;
 mod commands;
 mod comment;
