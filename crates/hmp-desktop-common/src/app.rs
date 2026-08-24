@@ -171,6 +171,10 @@ pub enum AppCommand {
     Seek(f32),
     /// 音量（0..1）。
     SetVolume(f32),
+    /// 循环模式。
+    SetLoopMode(LoopMode),
+    /// 是否随机播放。
+    SetShuffle(bool),
     /// 开始登录。
     LoginStart,
     /// 取消登录。
@@ -537,6 +541,12 @@ impl AppCore {
                             self.player.seek(Duration::from_secs_f32(secs.max(0.0)));
                         }
                         AppCommand::SetVolume(v) => self.player.set_volume(v.clamp(0.0, 1.0) as f64),
+                        AppCommand::SetLoopMode(mode) => {
+                            let _ = self.player.command_sender().send(PlayerCommand::SetLoopMode(mode));
+                        }
+                        AppCommand::SetShuffle(shuffle) => {
+                            let _ = self.player.command_sender().send(PlayerCommand::SetShuffle(shuffle));
+                        }
                         AppCommand::LoginStart => self.start_login(),
                         AppCommand::LoginCancel => self.cancel_login(),
                         AppCommand::ReloadLyrics => self.reload_lyrics(),

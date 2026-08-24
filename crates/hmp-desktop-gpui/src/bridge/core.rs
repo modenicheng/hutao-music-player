@@ -1,4 +1,4 @@
-use hmp_core::PlaybackState;
+use hmp_core::{LoopMode, PlaybackState};
 use hmp_desktop_common::{AppCommand, AppCore, AppEvent};
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, watch};
@@ -47,6 +47,14 @@ impl CoreCommandSender {
 
     pub fn set_volume(&self, volume: f32) {
         self.send(AppCommand::SetVolume(volume));
+    }
+
+    pub fn set_loop_mode(&self, mode: LoopMode) {
+        self.send(AppCommand::SetLoopMode(mode));
+    }
+
+    pub fn set_shuffle(&self, shuffle: bool) {
+        self.send(AppCommand::SetShuffle(shuffle));
     }
 }
 
@@ -101,6 +109,7 @@ impl Drop for CoreBridge {
 
 #[cfg(test)]
 mod tests {
+    use hmp_core::LoopMode;
     use hmp_desktop_common::AppCommand;
     use tokio::sync::mpsc;
 
@@ -116,12 +125,22 @@ mod tests {
         commands.previous();
         commands.seek(42.5);
         commands.set_volume(0.35);
+        commands.set_shuffle(true);
+        commands.set_loop_mode(LoopMode::Track);
 
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::TogglePlay));
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::Next));
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::Previous));
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::Seek(v) if v == 42.5));
         assert!(matches!(rx.try_recv().unwrap(), AppCommand::SetVolume(v) if v == 0.35));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AppCommand::SetShuffle(true)
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AppCommand::SetLoopMode(LoopMode::Track)
+        ));
     }
 
     #[test]

@@ -8,7 +8,10 @@ use uic::assets::LucideIcons;
 
 use crate::{
     app::HmpGpuiApp,
-    bridge::{elapsed_text, is_playing, progress, remaining_text},
+    bridge::{
+        RepeatIconState, elapsed_text, is_playing, next_loop_mode, progress, remaining_text,
+        repeat_icon_state, track_display,
+    },
     theme::{ACCENT, TEXT_PRIMARY},
 };
 
@@ -45,17 +48,9 @@ pub fn render(
     let volume = playback.volume.clamp(0.0, 1.0) as f32;
     let elapsed = elapsed_text(playback);
     let remaining = remaining_text(playback);
-    let title = playback
-        .current
-        .as_ref()
-        .map(|track| track.title.clone())
-        .unwrap_or_else(|| "尚未播放".into());
-    let artist = playback
-        .current
-        .as_ref()
-        .map(|track| track.artist_names())
-        .filter(|artist| !artist.is_empty())
-        .unwrap_or_else(|| "从搜索或媒体库选择歌曲".into());
+    let track_display = track_display(playback);
+    let title = track_display.title;
+    let artist = track_display.artist;
     let cover_url = playback
         .current
         .as_ref()
@@ -298,6 +293,8 @@ pub fn render_now_playing(app: &mut HmpGpuiApp, cx: &mut gpui::Context<HmpGpuiAp
     let elapsed = elapsed_text(&app.playback);
     let remaining = remaining_text(&app.playback);
     let can_seek = app.playback.can_seek;
+    let shuffle = app.playback.shuffle;
+    let repeat = repeat_icon_state(app.playback.loop_mode);
 
     div()
         .w_full()
@@ -364,11 +361,26 @@ pub fn render_now_playing(app: &mut HmpGpuiApp, cx: &mut gpui::Context<HmpGpuiAp
                 .h(px(48.))
                 .flex()
                 .items_center()
-                .justify_center()
-                .gap(px(20.))
+                .justify_between()
                 .child(
-                    now_playing_icon_button("now-playing-previous", LucideIcons::SkipBack, 24.)
-                        .on_click(cx.listener(|app, _, _, _| app.commands.previous())),
+                    now_playing_icon_button(
+                        "now-playing-shuffle",
+                        LucideIcons::Shuffle,
+                        17.,
+                        shuffle,
+                    )
+                    .on_click(cx.listener(|app, _, _, _| {
+                        app.commands.set_shuffle(!app.playback.shuffle);
+                    })),
+                )
+                .child(
+                    now_playing_icon_button(
+                        "now-playing-previous",
+                        LucideIcons::SkipBack,
+                        24.,
+                        false,
+                    )
+                    .on_click(cx.listener(|app, _, _, _| app.commands.previous())),
                 )
                 .child(
                     div()
@@ -394,14 +406,40 @@ pub fn render_now_playing(app: &mut HmpGpuiApp, cx: &mut gpui::Context<HmpGpuiAp
                         ),
                 )
                 .child(
-                    now_playing_icon_button("now-playing-next", LucideIcons::SkipForward, 24.)
-                        .on_click(cx.listener(|app, _, _, _| app.commands.next())),
+                    now_playing_icon_button(
+                        "now-playing-next",
+                        LucideIcons::SkipForward,
+                        24.,
+                        false,
+                    )
+                    .on_click(cx.listener(|app, _, _, _| app.commands.next())),
+                )
+                .child(
+                    now_playing_icon_button(
+                        "now-playing-repeat",
+                        if repeat == RepeatIconState::One {
+                            LucideIcons::Repeat1
+                        } else {
+                            LucideIcons::Repeat
+                        },
+                        17.,
+                        repeat != RepeatIconState::Off,
+                    )
+                    .on_click(cx.listener(|app, _, _, _| {
+                        app.commands
+                            .set_loop_mode(next_loop_mode(app.playback.loop_mode));
+                    })),
                 ),
         )
         .into_any_element()
 }
 
-fn now_playing_icon_button(id: &'static str, icon: LucideIcons, icon_size: f32) -> Stateful<Div> {
+fn now_playing_icon_button(
+    id: &'static str,
+    icon: LucideIcons,
+    icon_size: f32,
+    active: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
         .size(px(42.))
@@ -410,11 +448,11 @@ fn now_playing_icon_button(id: &'static str, icon: LucideIcons, icon_size: f32) 
         .justify_center()
         .rounded_full()
         .cursor_pointer()
+        .when(active, |button| button.bg(rgba(0xffffff20)))
         .hover(|style| style.bg(rgba(0xffffff12)))
-        .child(
-            svg()
-                .path(icon)
-                .size(px(icon_size))
-                .text_color(rgba(0xffffffff)),
-        )
+        .child(svg().path(icon).size(px(icon_size)).text_color(if active {
+            rgba(0xffffffff)
+        } else {
+            rgba(0xffffffb0)
+        }))
 }

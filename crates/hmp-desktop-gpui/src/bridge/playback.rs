@@ -1,7 +1,53 @@
 use std::time::Duration;
 
-use hmp_core::{PlaybackState, PlaybackStatus};
+use hmp_core::{LoopMode, PlaybackState, PlaybackStatus};
 use hmp_desktop_common::UiLyricData;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepeatIconState {
+    Off,
+    All,
+    One,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackDisplay {
+    pub title: String,
+    pub artist: String,
+}
+
+pub fn track_display(state: &PlaybackState) -> TrackDisplay {
+    state
+        .current
+        .as_ref()
+        .map(|track| TrackDisplay {
+            title: track.title.clone(),
+            artist: match track.artist_names() {
+                artist if !artist.is_empty() => artist,
+                _ => "未知歌手".to_owned(),
+            },
+        })
+        .unwrap_or_else(|| TrackDisplay {
+            title: "尚未播放".to_owned(),
+            artist: "从搜索或媒体库选择歌曲".to_owned(),
+        })
+}
+
+pub const fn repeat_icon_state(mode: LoopMode) -> RepeatIconState {
+    match mode {
+        LoopMode::None => RepeatIconState::Off,
+        LoopMode::List => RepeatIconState::All,
+        LoopMode::Track => RepeatIconState::One,
+    }
+}
+
+pub const fn next_loop_mode(mode: LoopMode) -> LoopMode {
+    match mode {
+        LoopMode::None => LoopMode::List,
+        LoopMode::List => LoopMode::Track,
+        LoopMode::Track => LoopMode::None,
+    }
+}
 
 pub fn active_lyric_index(lines: &[UiLyricData], position: Duration) -> Option<usize> {
     let position_ms = position.as_millis();
@@ -44,10 +90,51 @@ fn format_time(duration: Duration) -> String {
 mod tests {
     use std::time::Duration;
 
-    use hmp_core::{PlaybackState, PlaybackStatus};
+    use hmp_core::{ArtistId, ArtistRef, LoopMode, PlaybackState, PlaybackStatus, Track, TrackId};
     use hmp_desktop_common::UiLyricData;
 
-    use super::{active_lyric_index, elapsed_text, is_playing, progress, remaining_text};
+    use super::{
+        RepeatIconState, active_lyric_index, elapsed_text, is_playing, next_loop_mode, progress,
+        remaining_text, repeat_icon_state, track_display,
+    };
+
+    #[test]
+    fn loop_modes_map_to_stable_icon_states_and_cycle() {
+        assert_eq!(repeat_icon_state(LoopMode::None), RepeatIconState::Off);
+        assert_eq!(repeat_icon_state(LoopMode::List), RepeatIconState::All);
+        assert_eq!(repeat_icon_state(LoopMode::Track), RepeatIconState::One);
+
+        assert_eq!(next_loop_mode(LoopMode::None), LoopMode::List);
+        assert_eq!(next_loop_mode(LoopMode::List), LoopMode::Track);
+        assert_eq!(next_loop_mode(LoopMode::Track), LoopMode::None);
+    }
+
+    #[test]
+    fn track_display_handles_empty_track_change_and_buffering_states() {
+        let mut state = PlaybackState::default();
+        let empty = track_display(&state);
+        assert_eq!(empty.title, "尚未播放");
+
+        let mut first = Track::new(TrackId::new("first"), "First Song");
+        first.artists.push(ArtistRef {
+            id: ArtistId::new("artist"),
+            name: "Singer".to_owned(),
+        });
+        state.current = Some(first);
+        state.status = PlaybackStatus::Playing;
+        assert_eq!(track_display(&state).artist, "Singer");
+
+        state.current = Some(Track::new(TrackId::new("second"), "Second Song"));
+        state.status = PlaybackStatus::Buffering;
+        state.buffering = Some(0.5);
+        let changed = track_display(&state);
+        assert_eq!(changed.title, "Second Song");
+        assert_eq!(changed.artist, "未知歌手");
+
+        state.status = PlaybackStatus::Paused;
+        state.duration = None;
+        assert_eq!(track_display(&state), changed);
+    }
 
     #[test]
     fn progress_is_zero_without_a_positive_duration() {
