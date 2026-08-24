@@ -5,30 +5,20 @@
 
 use std::process::ExitCode;
 
+#[cfg(target_os = "macos")]
+use gpui::point;
 use gpui::{
-    App, AppContext, Bounds, Render, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size,
+    App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, px, size,
 };
 use gpui_platform::application;
 use uic::assets::LucideAssets;
 
+mod app;
+mod components;
+mod state;
 mod theme;
 mod window;
-
-struct HmpGpuiApp;
-
-impl Render for HmpGpuiApp {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgb(theme::BACKGROUND))
-            .text_color(rgb(theme::TEXT_PRIMARY))
-            .child("Hutao Music Player")
-    }
-}
 
 fn titlebar() -> Option<TitlebarOptions> {
     #[cfg(target_os = "macos")]
@@ -41,7 +31,6 @@ fn titlebar() -> Option<TitlebarOptions> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = point(px(0.), px(0.));
         None
     }
 }
@@ -61,7 +50,7 @@ fn main() -> ExitCode {
                 },
                 |window, cx| {
                     window::remove_frame(window);
-                    cx.new(|_| HmpGpuiApp)
+                    cx.new(|cx| app::HmpGpuiApp::new(cx, window))
                 },
             )
             .expect("failed to open HMP GPUI desktop window");
