@@ -150,7 +150,7 @@ fn playlist_item(
         .text_color(rgba(0xe9e9efdc))
         .hover(|style| style.bg(rgba(0xffffff10)))
         .on_click(cx.listener(move |app, _, _, cx| {
-            app.navigation.navigate(Page::Library);
+            app.navigation.open_playlist(playlist_id);
             app.commands.open_playlist(playlist_id);
             cx.notify();
         }))

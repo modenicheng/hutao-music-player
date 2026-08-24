@@ -69,6 +69,7 @@ impl CoreCommandSender {
         self.send(AppCommand::Logout);
     }
 
+    #[allow(dead_code)] // protocol hook for an explicit future refresh surface
     pub fn refresh_playlists(&self) {
         self.send(AppCommand::RefreshPlaylists);
     }

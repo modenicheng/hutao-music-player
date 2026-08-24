@@ -29,11 +29,18 @@ impl Page {
 #[derive(Debug, PartialEq, Eq)]
 pub struct NavigationState {
     pub page: Page,
+    pub selected_playlist_id: Option<i64>,
 }
 
 impl NavigationState {
     pub fn navigate(&mut self, page: Page) {
         self.page = page;
+        self.selected_playlist_id = None;
+    }
+
+    pub fn open_playlist(&mut self, playlist_id: i64) {
+        self.page = Page::Library;
+        self.selected_playlist_id = Some(playlist_id);
     }
 }
 
@@ -41,6 +48,7 @@ impl Default for NavigationState {
     fn default() -> Self {
         Self {
             page: Page::Library,
+            selected_playlist_id: None,
         }
     }
 }
@@ -195,6 +203,14 @@ mod tests {
         for (page, label) in expected {
             assert_eq!(page.label(), label);
         }
+    }
+
+    #[test]
+    fn content_playlist_selection_is_stable_by_database_id() {
+        let mut navigation = NavigationState::default();
+        navigation.open_playlist(42);
+        assert_eq!(navigation.selected_playlist_id, Some(42));
+        assert_eq!(navigation.page, Page::Library);
     }
 
     #[test]
