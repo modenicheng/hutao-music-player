@@ -6,7 +6,7 @@ use uic::components::input::{InputEvent, TextInput};
 
 use crate::{
     bridge::{CoreBridge, CoreCommandSender},
-    components::{content, sidebar, top_bar},
+    components::{content, player_bar, sidebar, top_bar},
     state::{EventState, NavigationState, Page},
     theme::{BACKGROUND, layout},
 };
@@ -17,6 +17,7 @@ pub struct HmpGpuiApp {
     pub events: EventState,
     pub commands: CoreCommandSender,
     pub search_input: gpui::Entity<TextInput>,
+    pub now_playing: bool,
     _core_bridge: CoreBridge,
     _subscriptions: Vec<Subscription>,
 }
@@ -71,6 +72,7 @@ impl HmpGpuiApp {
             events: EventState::default(),
             commands,
             search_input,
+            now_playing: false,
             _core_bridge: core_bridge,
             _subscriptions: vec![search_subscription],
         }
@@ -120,7 +122,17 @@ impl Render for HmpGpuiApp {
                         .flex_col()
                         .bg(rgb(0x20222d))
                         .child(top_bar::render(self, compact))
-                        .child(content::render(self.navigation.page)),
+                        .child(content::render(self.navigation.page))
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom(px(14.))
+                                .flex()
+                                .justify_center()
+                                .child(player_bar::render(self, cx, compact)),
+                        ),
                 ),
             )
     }
