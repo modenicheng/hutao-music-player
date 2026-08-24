@@ -229,11 +229,19 @@ impl SmtcOwner {
     }
 
     fn run(self, control_rx: Receiver<ControlMessage>) {
+        let mut applied_metadata: Option<Projection> = None;
         while let Ok(message) = control_rx.recv() {
             match message {
                 ControlMessage::Update(projection) => {
-                    if let Err(error) = self.apply_projection(&projection) {
-                        tracing::warn!(%error, "failed to update Windows media controls");
+                    let metadata_changed = applied_metadata
+                        .as_ref()
+                        .is_none_or(|last| !last.has_same_metadata(&projection));
+                    match self.apply_projection(&projection, metadata_changed) {
+                        Ok(()) if metadata_changed => applied_metadata = Some(projection),
+                        Ok(()) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to update Windows media controls");
+                        }
                     }
                 }
                 ControlMessage::Stop => break,
@@ -241,7 +249,11 @@ impl SmtcOwner {
         }
     }
 
-    fn apply_projection(&self, projection: &Projection) -> WindowsResult<()> {
+    fn apply_projection(
+        &self,
+        projection: &Projection,
+        metadata_changed: bool,
+    ) -> WindowsResult<()> {
         self.controls.SetIsPlayEnabled(projection.can_play)?;
         self.controls.SetIsPauseEnabled(projection.can_pause)?;
         self.controls.SetIsStopEnabled(projection.can_stop)?;
@@ -254,7 +266,9 @@ impl SmtcOwner {
         self.controls
             .SetAutoRepeatMode(project_loop_mode(projection.loop_mode))?;
 
-        self.update_metadata(projection)?;
+        if metadata_changed {
+            self.update_metadata(projection)?;
+        }
         self.update_timeline(projection)?;
         Ok(())
     }
