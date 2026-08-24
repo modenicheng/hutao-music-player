@@ -1,7 +1,9 @@
 //! Player bar visuals adapted from `cradiy/gpui-apple-music-demo` (MIT).
 //! All playback actions are routed through HMP `AppCommand`.
 
-use gpui::{Div, FontWeight, ObjectFit, Stateful, div, img, prelude::*, px, relative, rgba, svg};
+use gpui::{
+    AnyElement, Div, FontWeight, ObjectFit, Stateful, div, img, prelude::*, px, relative, rgba, svg,
+};
 use uic::assets::LucideIcons;
 
 use crate::{
@@ -286,5 +288,133 @@ pub fn render(
                         }),
                     ),
                 ),
+        )
+}
+
+/// Larger controls used by the immersive Now Playing surface.
+pub fn render_now_playing(app: &mut HmpGpuiApp, cx: &mut gpui::Context<HmpGpuiApp>) -> AnyElement {
+    let playing = is_playing(&app.playback);
+    let progress = progress(&app.playback);
+    let elapsed = elapsed_text(&app.playback);
+    let remaining = remaining_text(&app.playback);
+    let can_seek = app.playback.can_seek;
+
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .id("now-playing-seek")
+                .relative()
+                .w_full()
+                .h(px(16.))
+                .when(can_seek, |bar| bar.cursor_pointer())
+                .on_click(cx.listener(|app, _, _, _| {
+                    if !app.playback.can_seek {
+                        return;
+                    }
+                    let target = app
+                        .playback
+                        .duration
+                        .map(|duration| {
+                            app.playback
+                                .position
+                                .saturating_add(std::time::Duration::from_secs(10))
+                                .min(duration)
+                        })
+                        .unwrap_or(app.playback.position);
+                    app.commands.seek(target.as_secs_f32());
+                }))
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(7.))
+                        .h(px(4.))
+                        .rounded_full()
+                        .bg(rgba(0xffffff4c)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(7.))
+                        .w(relative(progress))
+                        .h(px(4.))
+                        .rounded_full()
+                        .bg(rgba(0xffffffe0)),
+                ),
+        )
+        .child(
+            div()
+                .mt(px(-1.))
+                .flex()
+                .justify_between()
+                .text_size(px(9.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgba(0xffffff72))
+                .child(elapsed)
+                .child(remaining),
+        )
+        .child(
+            div()
+                .mt(px(5.))
+                .h(px(48.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(20.))
+                .child(
+                    now_playing_icon_button("now-playing-previous", LucideIcons::SkipBack, 24.)
+                        .on_click(cx.listener(|app, _, _, _| app.commands.previous())),
+                )
+                .child(
+                    div()
+                        .id("now-playing-play-pause")
+                        .size(px(48.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .bg(rgba(0xffffff18))
+                        .hover(|style| style.bg(rgba(0xffffff2a)))
+                        .on_click(cx.listener(|app, _, _, _| app.commands.toggle_play()))
+                        .child(
+                            svg()
+                                .path(if playing {
+                                    LucideIcons::Pause
+                                } else {
+                                    LucideIcons::Play
+                                })
+                                .size(px(31.))
+                                .text_color(rgba(0xffffffff)),
+                        ),
+                )
+                .child(
+                    now_playing_icon_button("now-playing-next", LucideIcons::SkipForward, 24.)
+                        .on_click(cx.listener(|app, _, _, _| app.commands.next())),
+                ),
+        )
+        .into_any_element()
+}
+
+fn now_playing_icon_button(id: &'static str, icon: LucideIcons, icon_size: f32) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(42.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xffffff12)))
+        .child(
+            svg()
+                .path(icon)
+                .size(px(icon_size))
+                .text_color(rgba(0xffffffff)),
         )
 }

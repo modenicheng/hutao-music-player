@@ -1,15 +1,22 @@
 //! GPUI application view. Business state remains outside this module.
 
+use std::time::Instant;
+
 use gpui::{AppContext, Render, Subscription, Window, div, prelude::*, px, rgb, rgba};
 use hmp_core::PlaybackState;
 use uic::components::input::{InputEvent, TextInput};
 
 use crate::{
     bridge::{CoreBridge, CoreCommandSender},
-    components::{content, lyrics_panel, player_bar, sidebar, top_bar},
+    components::{content, lyrics_panel, now_playing, player_bar, sidebar, top_bar},
     state::{EventState, NavigationState, Page},
     theme::{BACKGROUND, layout},
 };
+
+pub struct EffectsViewer {
+    pub cover_key: String,
+    pub started_at: Instant,
+}
 
 pub struct HmpGpuiApp {
     pub navigation: NavigationState,
@@ -18,6 +25,8 @@ pub struct HmpGpuiApp {
     pub commands: CoreCommandSender,
     pub search_input: gpui::Entity<TextInput>,
     pub now_playing: bool,
+    pub now_playing_lyrics: bool,
+    pub effects_viewer: Option<EffectsViewer>,
     pub lyrics_panel: lyrics_panel::LyricsPanelState,
     _core_bridge: CoreBridge,
     _subscriptions: Vec<Subscription>,
@@ -81,6 +90,8 @@ impl HmpGpuiApp {
             commands,
             search_input,
             now_playing: false,
+            now_playing_lyrics: true,
+            effects_viewer: None,
             lyrics_panel: lyrics_panel::LyricsPanelState::default(),
             _core_bridge: core_bridge,
             _subscriptions: vec![search_subscription],
@@ -91,10 +102,22 @@ impl HmpGpuiApp {
 impl Render for HmpGpuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         #[cfg(target_os = "macos")]
-        window.set_traffic_light_position(gpui::point(px(34.), px(34.)));
+        window.set_traffic_light_position(if self.now_playing {
+            gpui::point(px(20.), px(20.))
+        } else {
+            gpui::point(px(34.), px(34.))
+        });
 
-        let compact = window.bounds().size.width < px(layout::COMPACT_TOP_BAR_BELOW);
-        let hide_lyrics = window.bounds().size.width < px(layout::HIDE_LYRICS_BELOW);
+        let width = window.bounds().size.width;
+        let height = window.bounds().size.height;
+        if self.now_playing {
+            // AlbumGlow is time-based; ordinary pages remain completely event-driven.
+            window.request_animation_frame();
+            return now_playing::render(self, width.as_f32(), height.as_f32(), cx);
+        }
+
+        let compact = width < px(layout::COMPACT_TOP_BAR_BELOW);
+        let hide_lyrics = width < px(layout::HIDE_LYRICS_BELOW);
         let lyrics_page = self.navigation.page == Page::Lyrics;
         let main_content = if lyrics_page {
             lyrics_panel::render_fullscreen(&self.playback, &self.events, &mut self.lyrics_panel)
@@ -160,5 +183,6 @@ impl Render for HmpGpuiApp {
                     )
                     .when_some(inline_lyrics, |body, panel| body.child(panel)),
             )
+            .into_any_element()
     }
 }
