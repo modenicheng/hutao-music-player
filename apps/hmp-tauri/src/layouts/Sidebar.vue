@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import AppIcon from "../components/AppIcon.vue";
 import Button from "../components/Button.vue";
+import HoverGroup from "../components/HoverGroup.vue";
+import HoverItem from "../components/HoverItem.vue";
 import Scroll from "../components/Scroll.vue";
 import accountIcon from "../assets/icons/account-circle-rounded.svg?raw";
 import addIcon from "../assets/icons/add-rounded.svg?raw";
@@ -43,32 +45,50 @@ defineEmits<{ "update:collapsed": [value: boolean] }>();
       </div>
     </section>
     <Scroll direction="vertical">
-      <nav class="primary-nav" aria-label="主导航">
-        <Button variant="ghost" class="sidebar-button nav-item">
-          <AppIcon :src="homeIcon" />
-          <span>首页</span>
-        </Button>
-        <Button variant="ghost" class="sidebar-button nav-item">
-          <AppIcon :src="favoriteIcon" />
-          <span>我喜欢</span>
-        </Button>
-        <Button variant="ghost" class="sidebar-button nav-item">
-          <AppIcon :src="historyIcon" />
-          <span>最近播放</span>
-        </Button>
-        <Button variant="ghost" class="sidebar-button nav-item">
-          <AppIcon :src="downloadIcon" />
-          <span>本地和下载</span>
-        </Button>
-        <Button variant="ghost" class="sidebar-button nav-item">
-          <AppIcon :src="libraryIcon" />
-          <span>已购音乐</span>
-        </Button>
-        <Button variant="ghost" class="sidebar-button nav-item">
-          <AppIcon :src="queueIcon" />
-          <span>试听列表</span>
-        </Button>
-      </nav>
+      <HoverGroup
+        class="primary-nav"
+        role="navigation"
+        aria-label="主导航"
+        highlight-color="var(--neutral-200)"
+        :highlight-opacity="0.6"
+      >
+        <HoverItem>
+          <Button variant="ghost" class="sidebar-button nav-item">
+            <AppIcon :src="homeIcon" />
+            <span>首页</span>
+          </Button>
+        </HoverItem>
+        <HoverItem>
+          <Button variant="ghost" class="sidebar-button nav-item">
+            <AppIcon :src="favoriteIcon" />
+            <span>我喜欢</span>
+          </Button>
+        </HoverItem>
+        <HoverItem>
+          <Button variant="ghost" class="sidebar-button nav-item">
+            <AppIcon :src="historyIcon" />
+            <span>最近播放</span>
+          </Button>
+        </HoverItem>
+        <HoverItem>
+          <Button variant="ghost" class="sidebar-button nav-item">
+            <AppIcon :src="downloadIcon" />
+            <span>本地和下载</span>
+          </Button>
+        </HoverItem>
+        <HoverItem>
+          <Button variant="ghost" class="sidebar-button nav-item">
+            <AppIcon :src="libraryIcon" />
+            <span>已购音乐</span>
+          </Button>
+        </HoverItem>
+        <HoverItem>
+          <Button variant="ghost" class="sidebar-button nav-item">
+            <AppIcon :src="queueIcon" />
+            <span>试听列表</span>
+          </Button>
+        </HoverItem>
+      </HoverGroup>
 
       <section class="playlist-area">
         <div class="playlist-section-title">我的歌单</div>
@@ -225,6 +245,16 @@ defineEmits<{ "update:collapsed": [value: boolean] }>();
 .playlist-items {
   display: grid;
   gap: 0.25rem;
+}
+
+/* 主导航改用统一高亮块：去掉逐项按钮自身的 hover 背景，让滑动高亮成为唯一效果 */
+.primary-nav :deep(.button:hover:not(:disabled):not([aria-disabled="true"])) {
+  background: transparent;
+}
+
+/* 让高亮块复制到与按钮一致的圆角 */
+.primary-nav :deep(.hover-item) {
+  border-radius: var(--radius-md);
 }
 
 .sidebar-button {

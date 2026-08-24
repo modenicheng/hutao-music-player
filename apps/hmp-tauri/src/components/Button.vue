@@ -32,7 +32,7 @@ withDefaults(
   <component
     :is="as"
     class="button"
-    :class="[`button-${variant}`, `button-${size}`]"
+    :class="[`button-${variant}`, size !== 'default' ? `button-${size}` : '']"
     :type="as === 'button' ? type : undefined"
     :disabled="as === 'button' ? disabled : undefined"
     :aria-disabled="disabled || undefined"
