@@ -1,4 +1,6 @@
-use hmp_desktop_common::{AppEvent, UiLyricData, UiQueueData, UiSongData};
+use hmp_desktop_common::{
+    AppEvent, UiAuthData, UiLoginPhase, UiLyricData, UiQueueData, UiSongData,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -55,6 +57,7 @@ pub struct EventState {
     pub login_qr: Option<Vec<u8>>,
     pub login_status: String,
     pub user_name: Option<String>,
+    pub auth: UiAuthData,
 }
 
 impl EventState {
@@ -100,10 +103,14 @@ impl EventState {
                 self.lyrics_error = Some(message);
             }
             AppEvent::LoginQr(png) => self.login_qr = Some(png),
-            AppEvent::LoginStatus(status) => self.login_status = status,
-            AppEvent::LoginDone(name) => {
-                self.user_name = Some(name);
-                self.login_qr = None;
+            AppEvent::AuthChanged(auth) => {
+                self.login_status = auth.message.clone();
+                self.user_name =
+                    (auth.phase == UiLoginPhase::LoggedIn).then(|| auth.display_name.clone());
+                if matches!(auth.phase, UiLoginPhase::LoggedOut | UiLoginPhase::LoggedIn) {
+                    self.login_qr = None;
+                }
+                self.auth = auth;
             }
         }
     }

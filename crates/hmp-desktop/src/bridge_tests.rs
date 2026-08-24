@@ -557,7 +557,10 @@ fn app_starts_in_library_and_accepts_theme_modes() {
         ui.set_lyrics_state("loading".into());
         ui.set_lyrics_request_mid("lyric sentinel".into());
         let weak = ui.as_weak();
-        handle_event(&weak, AppEvent::LoginDone("10001".into()));
+        handle_event(
+            &weak,
+            AppEvent::AuthChanged(crate::app::UiAuthData::logged_in("10001")),
+        );
         assert!(ui.get_logged_in());
         assert_eq!(ui.get_user_name(), "10001");
         assert!(!ui.get_show_login());

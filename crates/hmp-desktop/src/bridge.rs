@@ -2,7 +2,9 @@
 
 use slint::{ComponentHandle, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
-use crate::app::{AppCommand, AppEvent, ThemeMode, UiLyricData, UiPage, UiQueueData, UiSongData};
+use crate::app::{
+    AppCommand, AppEvent, ThemeMode, UiLoginPhase, UiLyricData, UiPage, UiQueueData, UiSongData,
+};
 
 /// 绑定 UI 回调 → 应用命令通道。
 pub fn bind_callbacks(
@@ -332,13 +334,23 @@ pub(crate) fn apply_event(ui: &crate::AppWindow, evt: AppEvent) {
                 ui.set_login_status(format!("二维码解码失败: {e}").into());
             }
         },
-        AppEvent::LoginStatus(msg) => {
-            ui.set_login_status(msg.into());
-        }
-        AppEvent::LoginDone(name) => {
-            ui.set_logged_in(true);
-            ui.set_user_name(name.into());
-            ui.set_show_login(false);
+        AppEvent::AuthChanged(auth) => {
+            let logged_in = auth.phase == UiLoginPhase::LoggedIn;
+            ui.set_logged_in(logged_in);
+            ui.set_user_name(if logged_in {
+                auth.display_name.into()
+            } else {
+                "".into()
+            });
+            ui.set_login_status(auth.message.into());
+            ui.set_show_login(matches!(
+                auth.phase,
+                UiLoginPhase::CreatingQr
+                    | UiLoginPhase::WaitingScan
+                    | UiLoginPhase::WaitingConfirm
+                    | UiLoginPhase::Expired
+                    | UiLoginPhase::Error
+            ));
         }
     }
 }

@@ -7,7 +7,7 @@ pub mod app;
 pub mod lyrics;
 
 pub use app::{
-    AppCommand, AppCore, AppEvent, ThemeMode, UiFeatureData, UiLyricData, UiPage, UiQueueData,
-    UiSongData,
+    AppCommand, AppCore, AppEvent, ThemeMode, UiAuthData, UiFeatureData, UiLoginPhase, UiLyricData,
+    UiPage, UiQueueData, UiSongData,
 };
 pub use lyrics::parse_lrc;

@@ -583,6 +583,24 @@ impl<'a> LoginApi<'a> {
         timeout: Duration,
         cancel: Option<&CancellationToken>,
     ) -> Result<Credential, QqMusicError> {
+        self.wait_qrcode_login_with_updates(qrcode, interval, timeout, cancel, |_| {})
+            .await
+    }
+
+    /// 等待二维码登录完成，并在二维码状态发生变化时通知调用方。
+    ///
+    /// 连续相同状态只通知一次，保持上游 `emit_repeat=false` 的行为。
+    pub async fn wait_qrcode_login_with_updates<F>(
+        &self,
+        qrcode: &QR,
+        interval: PollInterval,
+        timeout: Duration,
+        cancel: Option<&CancellationToken>,
+        mut on_update: F,
+    ) -> Result<Credential, QqMusicError>
+    where
+        F: FnMut(QRCodeLoginEvents),
+    {
         let deadline = Instant::now() + timeout;
         let mut last_event: Option<QRCodeLoginEvents> = None;
         let mut error_retries: u32 = 0;
@@ -651,6 +669,7 @@ impl<'a> LoginApi<'a> {
                 continue;
             }
             last_event = Some(item.event);
+            on_update(item.event);
 
             match item.event {
                 QRCodeLoginEvents::Done => {
@@ -887,6 +906,17 @@ async fn sleep_before_deadline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[allow(dead_code)]
+    fn login_update_callback_api_is_available(api: &LoginApi<'_>, qr: &QR) {
+        let _future = api.wait_qrcode_login_with_updates(
+            qr,
+            PollInterval::default(),
+            Duration::from_secs(1),
+            None,
+            |_| {},
+        );
+    }
 
     #[test]
     fn event_by_value() {

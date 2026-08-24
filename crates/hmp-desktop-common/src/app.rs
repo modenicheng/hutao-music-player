@@ -18,7 +18,7 @@ use hmp_media;
 use hmp_mpris::MprisService;
 use hmp_player::PlayerCore;
 use hmp_qqmusic_api::{
-    Credential, LoginApi, LyricApi, QRLoginType, QqMusicClient, SongFileType,
+    Credential, LoginApi, LyricApi, QRCodeLoginEvents, QRLoginType, QqMusicClient, SongFileType,
     song::{SongApi, SongFileInfo},
 };
 
@@ -126,6 +126,70 @@ pub struct UiFeatureData {
     pub detail: String,
 }
 
+/// 与 UI 工具包无关的 QQ 音乐登录阶段。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UiLoginPhase {
+    #[default]
+    LoggedOut,
+    CreatingQr,
+    WaitingScan,
+    WaitingConfirm,
+    Expired,
+    Error,
+    LoggedIn,
+}
+
+/// 可安全发布给 UI 的登录快照；不包含任何凭证或令牌。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UiAuthData {
+    pub phase: UiLoginPhase,
+    pub display_name: String,
+    pub message: String,
+}
+
+impl UiAuthData {
+    pub fn logged_out() -> Self {
+        Self::default()
+    }
+
+    pub fn logged_in(name: impl Into<String>) -> Self {
+        Self {
+            phase: UiLoginPhase::LoggedIn,
+            display_name: name.into(),
+            message: String::new(),
+        }
+    }
+
+    fn phase(phase: UiLoginPhase, message: impl Into<String>) -> Self {
+        Self {
+            phase,
+            display_name: String::new(),
+            message: message.into(),
+        }
+    }
+}
+
+fn login_phase(event: QRCodeLoginEvents) -> UiLoginPhase {
+    match event {
+        QRCodeLoginEvents::Done => UiLoginPhase::LoggedIn,
+        QRCodeLoginEvents::Scan => UiLoginPhase::WaitingScan,
+        QRCodeLoginEvents::Conf => UiLoginPhase::WaitingConfirm,
+        QRCodeLoginEvents::Timeout => UiLoginPhase::Expired,
+        QRCodeLoginEvents::Refuse => UiLoginPhase::Error,
+    }
+}
+
+fn login_phase_message(phase: UiLoginPhase) -> &'static str {
+    match phase {
+        UiLoginPhase::LoggedOut | UiLoginPhase::LoggedIn => "",
+        UiLoginPhase::CreatingQr => "正在获取登录二维码…",
+        UiLoginPhase::WaitingScan => "请用 QQ 手机版扫码",
+        UiLoginPhase::WaitingConfirm => "已扫码，请在手机上确认",
+        UiLoginPhase::Expired => "二维码已过期，请重试",
+        UiLoginPhase::Error => "登录失败，请重试",
+    }
+}
+
 /// 应用事件（AppCore → UI）。
 #[derive(Clone, Debug)]
 pub enum AppEvent {
@@ -146,10 +210,8 @@ pub enum AppEvent {
     LyricsFailed { mid: String, message: String },
     /// 登录二维码（PNG 字节）。
     LoginQr(Vec<u8>),
-    /// 登录状态文本。
-    LoginStatus(String),
-    /// 登录完成（用户昵称/UID）。
-    LoginDone(String),
+    /// 不含凭证的登录状态快照。
+    AuthChanged(UiAuthData),
 }
 
 /// 应用命令（UI/MPRIS 统一入口）。
@@ -179,6 +241,8 @@ pub enum AppCommand {
     LoginStart,
     /// 取消登录。
     LoginCancel,
+    /// 退出登录并删除持久化凭证。
+    Logout,
     /// 重新加载当前歌曲歌词。
     ReloadLyrics,
     /// 退出。
@@ -362,7 +426,7 @@ impl LyricRequestState {
 #[derive(Debug)]
 enum LoginUpdatePayload {
     Qr(Vec<u8>),
-    Status(String),
+    Auth(UiAuthData),
 }
 
 #[derive(Debug)]
@@ -381,9 +445,27 @@ fn forward_login_update(
     }
     let event = match update.payload {
         LoginUpdatePayload::Qr(png) => AppEvent::LoginQr(png),
-        LoginUpdatePayload::Status(status) => AppEvent::LoginStatus(status),
+        LoginUpdatePayload::Auth(auth) => AppEvent::AuthChanged(auth),
     };
     let _ = events_tx.send(event);
+}
+
+fn logout_credential(
+    store: &dyn CredentialStore,
+    credential: &mut Option<Credential>,
+) -> Result<UiAuthData, hmp_core::HmpError> {
+    store.delete()?;
+    *credential = None;
+    Ok(UiAuthData::logged_out())
+}
+
+fn failed_login_auth(message: String) -> UiAuthData {
+    let phase = if message.contains("超时") || message.contains("过期") {
+        UiLoginPhase::Expired
+    } else {
+        UiLoginPhase::Error
+    };
+    UiAuthData::phase(phase, message)
 }
 
 /// 应用核心。
@@ -509,6 +591,14 @@ impl AppCore {
             .unwrap_or_default()
     }
 
+    fn auth_snapshot(&self) -> UiAuthData {
+        if self.logged_in() {
+            UiAuthData::logged_in(self.user_name())
+        } else {
+            UiAuthData::logged_out()
+        }
+    }
+
     /// 当前搜索结果（UI 拉取）。
     pub fn songs(&self) -> &[hmp_qqmusic_api::protocol::search::QuickSong] {
         &self.songs
@@ -526,6 +616,9 @@ impl AppCore {
 
     /// 事件循环（消费命令及后台登录结果）。
     pub async fn run(&mut self) {
+        let _ = self
+            .events_tx
+            .send(AppEvent::AuthChanged(self.auth_snapshot()));
         loop {
             tokio::select! {
                 command = self.cmd_rx.recv() => {
@@ -549,6 +642,7 @@ impl AppCore {
                         }
                         AppCommand::LoginStart => self.start_login(),
                         AppCommand::LoginCancel => self.cancel_login(),
+                        AppCommand::Logout => self.logout(),
                         AppCommand::ReloadLyrics => self.reload_lyrics(),
                         AppCommand::Quit => break,
                     }
@@ -855,6 +949,10 @@ impl AppCore {
 
     fn start_login(&mut self) {
         let (generation, cancel) = self.begin_login_session();
+        let _ = self.events_tx.send(AppEvent::AuthChanged(UiAuthData::phase(
+            UiLoginPhase::CreatingQr,
+            login_phase_message(UiLoginPhase::CreatingQr),
+        )));
         let client = QqMusicClient::with_config(self.client.config());
         let updates_tx = self.login_updates_tx.clone();
         let results_tx = self.login_results_tx.clone();
@@ -874,14 +972,34 @@ impl AppCore {
                 });
                 let _ = updates_tx.send(LoginUpdate {
                     generation,
-                    payload: LoginUpdatePayload::Status("请用 QQ 手机版扫码并确认".into()),
+                    payload: LoginUpdatePayload::Auth(UiAuthData::phase(
+                        UiLoginPhase::WaitingScan,
+                        login_phase_message(UiLoginPhase::WaitingScan),
+                    )),
                 });
                 login
-                    .wait_qrcode_login(
+                    .wait_qrcode_login_with_updates(
                         &qr,
                         Default::default(),
                         Duration::from_secs(180),
                         Some(&cancel),
+                        |event| {
+                            let phase = login_phase(event);
+                            if phase == UiLoginPhase::LoggedIn {
+                                return;
+                            }
+                            let message = if event == QRCodeLoginEvents::Refuse {
+                                "已拒绝登录，请重试"
+                            } else {
+                                login_phase_message(phase)
+                            };
+                            let _ = updates_tx.send(LoginUpdate {
+                                generation,
+                                payload: LoginUpdatePayload::Auth(UiAuthData::phase(
+                                    phase, message,
+                                )),
+                            });
+                        },
                     )
                     .await
                     .map_err(|error| error.to_string())
@@ -931,7 +1049,25 @@ impl AppCore {
         self.cancel_login_session();
         let _ = self
             .events_tx
-            .send(AppEvent::LoginStatus("登录已取消".into()));
+            .send(AppEvent::AuthChanged(self.auth_snapshot()));
+    }
+
+    fn logout(&mut self) {
+        self.cancel_login_session();
+        match logout_credential(self.store.as_ref(), &mut self.credential) {
+            Ok(auth) => {
+                let _ = self.events_tx.send(AppEvent::AuthChanged(auth));
+            }
+            Err(error) => {
+                let current = UiAuthData {
+                    phase: UiLoginPhase::LoggedIn,
+                    display_name: self.user_name(),
+                    message: format!("退出登录失败: {error}"),
+                };
+                let _ = self.events_tx.send(AppEvent::AuthChanged(current));
+                tracing::error!("logout failed: {error}");
+            }
+        }
     }
 
     fn finish_login(&mut self, login: LoginResult) {
@@ -942,18 +1078,24 @@ impl AppCore {
             Ok(credential) => {
                 if let Err(error) = self.store.save(&credential) {
                     let message = format!("保存登录凭证失败: {error}");
-                    let _ = self.events_tx.send(AppEvent::LoginStatus(message));
+                    let _ = self
+                        .events_tx
+                        .send(AppEvent::AuthChanged(failed_login_auth(message)));
                     tracing::error!("save credential failed: {error}");
                     return;
                 }
                 let name = credential.uin.clone();
                 self.credential = Some(credential);
                 self.cancel_login_session();
-                let _ = self.events_tx.send(AppEvent::LoginDone(name));
+                let _ = self
+                    .events_tx
+                    .send(AppEvent::AuthChanged(UiAuthData::logged_in(name)));
                 tracing::info!("login ok");
             }
             Err(message) => {
-                let _ = self.events_tx.send(AppEvent::LoginStatus(message.clone()));
+                let _ = self
+                    .events_tx
+                    .send(AppEvent::AuthChanged(failed_login_auth(message.clone())));
                 tracing::warn!("login failed: {message}");
             }
         }
@@ -1313,6 +1455,98 @@ pub fn format_secs(s: f32) -> String {
 mod tests {
     use super::*;
 
+    struct FakeCredentialStore {
+        fail_delete: bool,
+        deleted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl CredentialStore for FakeCredentialStore {
+        fn save(&self, _credential: &Credential) -> Result<(), hmp_core::HmpError> {
+            Ok(())
+        }
+
+        fn load(&self) -> Result<Option<Credential>, hmp_core::HmpError> {
+            Ok(None)
+        }
+
+        fn delete(&self) -> Result<(), hmp_core::HmpError> {
+            if self.fail_delete {
+                return Err(hmp_core::HmpError::Storage("delete failed".into()));
+            }
+            self.deleted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn test_credential() -> Credential {
+        Credential {
+            uin: "10001".into(),
+            music_id: "10001".into(),
+            music_key: "secret".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn auth_qr_events_map_to_stable_ui_phases() {
+        use hmp_qqmusic_api::QRCodeLoginEvents;
+
+        assert_eq!(
+            login_phase(QRCodeLoginEvents::Scan),
+            UiLoginPhase::WaitingScan
+        );
+        assert_eq!(
+            login_phase(QRCodeLoginEvents::Conf),
+            UiLoginPhase::WaitingConfirm
+        );
+        assert_eq!(
+            login_phase(QRCodeLoginEvents::Timeout),
+            UiLoginPhase::Expired
+        );
+    }
+
+    #[test]
+    fn auth_snapshot_never_contains_credentials() {
+        let auth = UiAuthData::logged_in("10001");
+        assert_eq!(auth.phase, UiLoginPhase::LoggedIn);
+        assert_eq!(auth.display_name, "10001");
+        assert!(auth.message.is_empty());
+    }
+
+    #[test]
+    fn auth_logout_command_is_part_of_the_shared_protocol() {
+        assert!(matches!(AppCommand::Logout, AppCommand::Logout));
+    }
+
+    #[test]
+    fn auth_logout_delete_failure_retains_the_in_memory_credential() {
+        let deleted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let store = FakeCredentialStore {
+            fail_delete: true,
+            deleted,
+        };
+        let mut credential = Some(test_credential());
+
+        assert!(logout_credential(&store, &mut credential).is_err());
+        assert!(credential.is_some());
+    }
+
+    #[test]
+    fn auth_logout_success_deletes_and_clears_the_credential() {
+        let deleted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let store = FakeCredentialStore {
+            fail_delete: false,
+            deleted: deleted.clone(),
+        };
+        let mut credential = Some(test_credential());
+
+        let auth = logout_credential(&store, &mut credential).expect("logout should succeed");
+        assert!(deleted.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(credential.is_none());
+        assert_eq!(auth, UiAuthData::logged_out());
+    }
+
     #[test]
     fn starting_or_cancelling_login_invalidates_the_previous_session() {
         let mut state = LoginSessionState::default();
@@ -1466,12 +1700,16 @@ mod tests {
             &state,
             LoginUpdate {
                 generation: second_generation,
-                payload: LoginUpdatePayload::Status("扫码".into()),
+                payload: LoginUpdatePayload::Auth(UiAuthData::phase(
+                    UiLoginPhase::WaitingScan,
+                    "扫码",
+                )),
             },
         );
         assert!(matches!(
             events_rx.try_recv(),
-            Ok(AppEvent::LoginStatus(status)) if status == "扫码"
+            Ok(AppEvent::AuthChanged(UiAuthData { phase: UiLoginPhase::WaitingScan, message, .. }))
+                if message == "扫码"
         ));
 
         state.cancel();
