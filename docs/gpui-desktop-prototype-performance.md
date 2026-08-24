@@ -6,6 +6,8 @@ Branch: `feat/gpui-desktop-prototype`
 
 Build: Cargo `release`, rustc 1.97.1
 
+GPUI revision: `4c8abab1401d7369da55d9aab928c9405f0af309`
+
 ## Result
 
 The prototype validates the architecture and visual direction, but it does not
@@ -22,6 +24,30 @@ yet demonstrate a performance advantage over the existing Slint desktop.
 This is a prototype result, not a recommendation to remove Slint. A replacement
 decision should wait for CPU profiling, an authenticated playback run, and a
 native Linux Wayland measurement.
+
+## UI fidelity refresh
+
+The 2026-08-24 fidelity pass replaced the earlier exploratory shell with the
+component hierarchy and fixed geometry from `cradiy/gpui-apple-music-demo`.
+The regular shell, sidebar, top bar, content slot, inline lyrics, floating
+player, and Now Playing surface now follow the reference render structure.
+HMP only substitutes application copy, real data, semantic icons, and command
+handlers. The one approved structural addition is the account row at the
+bottom of the sidebar.
+
+This pass also connected visual QQ Music QR login, logout, persisted HMP
+playlists, playlist detail/playback, queue, line-synced lyrics, and the existing
+authoritative `PlaybackState`. It did not add a second authentication, media,
+or playback implementation.
+
+On Windows, the final release binary was visually checked at 1280 x 800. The
+regular shell and a live QQ Music QR login overlay rendered successfully, and
+cancel returned to the unchanged shell. The 1080 px and 980 px responsive
+decisions are covered by layout-contract tests. Interactive resize/maximize and
+the refreshed Now Playing surface were not re-exercised in this pass because
+the UI automation detected concurrent user input and stopped injecting input;
+they remain explicit runtime recheck items. Native Linux and macOS runtime
+status is unchanged below.
 
 ## Test system
 
@@ -62,6 +88,24 @@ cache could not be flushed, so the range below is a cold-ish launch range rather
 than a laboratory cold-boot measurement.
 
 ## Windows measurements
+
+### Fidelity-pass quick sample
+
+After the final release build, the benchmark script was run once per frontend
+with a two-second warm-up and three GPU samples. These short samples verify that
+both binaries reach a window and provide a fresh workload snapshot; they do not
+replace the longer stable measurements below.
+
+| Scenario | Window ready | Working set | Private | CPU, one core | CPU, system | GPU engine | Binary |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Slint quick sample | 1.616 s | 117.7 MiB | 78.2 MiB | 122.62% | 7.664% | 0.30% | 30.6 MiB |
+| GPUI fidelity quick sample | 1.567 s | 162.7 MiB | 111.8 MiB | 132.61% | 8.288% | 2.70% | 25.1 MiB |
+
+The quick GPUI sample used 45.0 MiB more working-set memory than Slint and a
+5.5 MiB smaller executable. The single short run is not sufficient to infer a
+stable CPU or GPU advantage.
+
+### Earlier stable samples
 
 | Scenario | Window ready | Working set | Private | CPU, one core | CPU, system | GPU engine | Binary |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

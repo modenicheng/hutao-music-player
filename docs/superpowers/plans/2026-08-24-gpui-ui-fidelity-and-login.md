@@ -36,7 +36,7 @@
 - Produces: `RegularLayout`, `regular_layout(width: f32) -> RegularLayout`, and stable geometry constants consumed by the shell and tests.
 - Consumes: no business state.
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
 Add tests before the module is exported:
 
@@ -67,7 +67,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -77,7 +77,7 @@ cargo test -p hmp-desktop-gpui ui_contract --quiet
 
 Expected: compilation fails because `ui_contract` and its constants do not exist.
 
-- [ ] **Step 3: Implement the reference contract**
+- [x] **Step 3: Implement the reference contract**
 
 Create the module with the exact public surface:
 
@@ -110,7 +110,7 @@ pub fn regular_layout(width: f32) -> RegularLayout {
 
 Export the module from `main.rs`. Make `theme::layout` re-export these constants so existing component imports remain stable.
 
-- [ ] **Step 4: Run the tests and verify GREEN**
+- [x] **Step 4: Run the tests and verify GREEN**
 
 Run:
 
@@ -121,7 +121,7 @@ cargo check -p hmp-desktop-gpui
 
 Expected: contract tests pass and the GPUI crate compiles.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```text
 git add crates/hmp-desktop-gpui/src/ui_contract.rs crates/hmp-desktop-gpui/src/main.rs crates/hmp-desktop-gpui/src/theme.rs
@@ -141,7 +141,7 @@ git commit -m "test(gpui): lock reference layout contract"
 - Produces: `LoginApi::wait_qrcode_login_with_updates` while preserving the existing `wait_qrcode_login` API.
 - Consumes: `CredentialStore::save/delete`, `QRCodeLoginEvents`, and existing generation cancellation.
 
-- [ ] **Step 1: Write failing authentication tests**
+- [x] **Step 1: Write failing authentication tests**
 
 Add tests for public, credential-free UI state and the exact phase mapping:
 
@@ -169,7 +169,7 @@ fn logout_command_is_part_of_the_shared_protocol() {
 
 Add a fake `CredentialStore` test that verifies delete failure retains the logged-in credential and successful delete publishes `LoggedOut`.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run:
 
@@ -180,7 +180,7 @@ cargo test -p hmp-qqmusic-api login --quiet
 
 Expected: compilation fails because the new state, command, event, and callback API do not exist.
 
-- [ ] **Step 3: Add the shared UI authentication types**
+- [x] **Step 3: Add the shared UI authentication types**
 
 Add:
 
@@ -214,7 +214,7 @@ impl UiAuthData {
 
 Replace string-only login events with `AppEvent::AuthChanged(UiAuthData)` plus the existing QR PNG event. Add `AppCommand::Logout`.
 
-- [ ] **Step 4: Expose QR transition callbacks without breaking CLI callers**
+- [x] **Step 4: Expose QR transition callbacks without breaking CLI callers**
 
 Implement:
 
@@ -233,7 +233,7 @@ where
 
 Call `on_update(item.event)` only when `last_event` changes. Make the existing `wait_qrcode_login` delegate with `|_| {}` so CLI behavior and tests remain unchanged.
 
-- [ ] **Step 5: Implement AppCore lifecycle events and logout**
+- [x] **Step 5: Implement AppCore lifecycle events and logout**
 
 At core startup publish `UiAuthData::logged_in(core.user_name())` or `logged_out()`. In `start_login`, publish `CreatingQr`, then `WaitingScan` with QR bytes, then map callback events to `WaitingScan`/`WaitingConfirm`. Map timeout/refusal/network failures to `Expired` or `Error` with stable messages. On success, save first, update memory second, publish `LoggedIn` last.
 
@@ -261,7 +261,7 @@ fn logout(&mut self) {
 
 Update the Slint bridge to translate `AuthChanged` into its existing properties without modifying any Slint file.
 
-- [ ] **Step 6: Run tests and verify GREEN**
+- [x] **Step 6: Run tests and verify GREEN**
 
 Run:
 
@@ -273,7 +273,7 @@ cargo test -p hmp-desktop --quiet
 
 Expected: all focused tests pass, including existing CLI-compatible login behavior.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```text
 git add crates/hmp-qqmusic-api/src/login.rs crates/hmp-desktop-common/src/app.rs crates/hmp-desktop/src/bridge.rs
@@ -292,7 +292,7 @@ git commit -m "feat(desktop): expose visual QQ Music auth state"
 - Produces events: `PlaylistsUpdated`, `PlaylistOpened`, `PlaylistsFailed`.
 - Consumes: `LibraryDb::list_playlists`, `LibraryDb::local_playlist_stubs`, and the existing HMP playback resolver.
 
-- [ ] **Step 1: Write failing playlist projection tests**
+- [x] **Step 1: Write failing playlist projection tests**
 
 Use an in-memory real database:
 
@@ -320,7 +320,7 @@ fn playlist_tracks_preserve_storage_order() {
 }
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -330,7 +330,7 @@ cargo test -p hmp-desktop-common playlist --quiet
 
 Expected: compilation fails because the view models and loaders do not exist.
 
-- [ ] **Step 3: Implement safe playlist projections**
+- [x] **Step 3: Implement safe playlist projections**
 
 Define:
 
@@ -357,11 +357,11 @@ pub struct UiPlaylistTrackData {
 
 Implement `load_playlist_summaries` and `load_playlist_tracks` as pure `LibraryDb` adapters. Open `data_dir().join("library.sqlite3")` in AppCore as an optional library: publish `PlaylistsFailed` if it cannot open, but do not block search or playback startup.
 
-- [ ] **Step 4: Add AppCore commands and events**
+- [x] **Step 4: Add AppCore commands and events**
 
 On startup, successful login, and successful logout, call `publish_playlists`. `OpenPlaylist(id)` publishes ordered track rows. `PlayPlaylistTrack` validates the selected row, constructs the existing local or QQ play request, and enters the same queue/playback resolver used by all other UI entry points. A missing/stale row emits `PlaylistsFailed` and leaves the queue unchanged.
 
-- [ ] **Step 5: Run tests and verify GREEN**
+- [x] **Step 5: Run tests and verify GREEN**
 
 Run:
 
@@ -372,7 +372,7 @@ cargo check -p hmp-desktop-common
 
 Expected: real in-memory database tests and command/event tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```text
 git add crates/hmp-desktop-common/src/app.rs
@@ -389,7 +389,7 @@ git commit -m "feat(desktop): expose stored playlists to frontends"
 - Consumes: authentication and playlist protocol from Tasks 2-3.
 - Produces: command sender methods and `EventState` fields used by all view components.
 
-- [ ] **Step 1: Write failing bridge and state tests**
+- [x] **Step 1: Write failing bridge and state tests**
 
 Extend `CoreCommandSender` tests to assert exact auth and playlist commands. Add state tests:
 
@@ -413,7 +413,7 @@ fn playlist_events_replace_only_playlist_state() {
 }
 ```
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -424,7 +424,7 @@ cargo test -p hmp-desktop-gpui state --quiet
 
 Expected: missing methods/fields/variants fail compilation.
 
-- [ ] **Step 3: Implement command and state mapping**
+- [x] **Step 3: Implement command and state mapping**
 
 Add sender methods:
 
@@ -441,11 +441,11 @@ pub fn play_playlist_track(&self, playlist_id: i64, index: usize) {
 
 Extend `EventState` with `auth`, `login_modal_open`, `login_qr`, `playlists`, `selected_playlist`, `playlist_tracks`, and `playlist_error`. Clear the QR and close the modal only on `LoggedIn`; keep it open for `Expired`/`Error`.
 
-- [ ] **Step 4: Run tests and verify GREEN**
+- [x] **Step 4: Run tests and verify GREEN**
 
 Run the two focused commands from Step 2. Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```text
 git add crates/hmp-desktop-gpui/src/bridge/core.rs crates/hmp-desktop-gpui/src/state.rs
@@ -465,7 +465,7 @@ git commit -m "feat(gpui): map auth and playlist events"
 - Consumes: `regular_layout`, GPUI `EventState`, and command sender methods.
 - Produces: reference-faithful regular shell plus the approved sidebar footer and centered login overlay.
 
-- [ ] **Step 1: Add failing pure view-helper tests**
+- [x] **Step 1: Add failing pure view-helper tests**
 
 Add tests for the six fixed navigation slots, account copy, login actions, and playlist viewport projection:
 
@@ -485,7 +485,7 @@ fn account_copy_tracks_auth_phase() {
 }
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run:
 
@@ -496,11 +496,11 @@ cargo test -p hmp-desktop-gpui login_overlay --quiet
 
 Expected: helper functions and overlay module are missing.
 
-- [ ] **Step 3: Restore `app.rs` from the demo hierarchy**
+- [x] **Step 3: Restore `app.rs` from the demo hierarchy**
 
 Use `.deps/gpui-apple-music-demo/src/app.rs` as the direct structural source. Preserve the root/div nesting, sidebar margin, main column, top bar, content slot, player absolute position, responsive lyrics panel, border, background, shadow, and platform conditionals. Use `regular_layout(width.as_f32())` rather than duplicating thresholds. Render `login_overlay::render(self, cx)` as the final child only when `events.login_modal_open` is true, so it layers above the unchanged shell.
 
-- [ ] **Step 4: Restore sidebar and top bar**
+- [x] **Step 4: Restore sidebar and top bar**
 
 Use the demo `nav_section`, `nav_item`, `playlist_art`, `playlist_item`, traffic lights, row metrics, and glass appearance. Adapt only:
 
@@ -513,7 +513,7 @@ Use `FrostedGlass`/`FrostedGlassAppearance` from the pinned GPUI revision while 
 
 Keep top-bar drag regions, widths, height, input appearance, and shadow identical to the demo.
 
-- [ ] **Step 5: Implement the central login overlay**
+- [x] **Step 5: Implement the central login overlay**
 
 Render a full-shell absolute scrim and centered frosted panel. Decode QR bytes with `gpui::Image::from_bytes(ImageFormat::Png, bytes.clone())`. Buttons send only the bridge commands:
 
@@ -528,7 +528,7 @@ match app.events.auth.phase {
 
 Closing the overlay sends `cancel_login` unless already logged in. Never print or retain credential fields.
 
-- [ ] **Step 6: Run tests/check and verify GREEN**
+- [x] **Step 6: Run tests/check and verify GREEN**
 
 ```text
 cargo test -p hmp-desktop-gpui sidebar --quiet
@@ -536,7 +536,7 @@ cargo test -p hmp-desktop-gpui login_overlay --quiet
 cargo check -p hmp-desktop-gpui
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```text
 git add crates/hmp-desktop-gpui/src/app.rs crates/hmp-desktop-gpui/src/components
@@ -553,7 +553,7 @@ git commit -m "feat(gpui): restore reference desktop shell"
 - Consumes: navigation, search, queue, playlists, playlist tracks, and errors from `EventState`.
 - Produces: page bodies that do not alter the demo content-slot geometry.
 
-- [ ] **Step 1: Write failing content projection tests**
+- [x] **Step 1: Write failing content projection tests**
 
 Test that each HMP page maps to the intended demo slot copy/icon family, opening a playlist retains the selected stable ID, and list rows keep 58 px search/playlist-track rhythm.
 
@@ -567,13 +567,13 @@ fn playlist_selection_is_stable_by_database_id() {
 }
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 ```text
 cargo test -p hmp-desktop-gpui content --quiet
 ```
 
-- [ ] **Step 3: Implement page bodies**
+- [x] **Step 3: Implement page bodies**
 
 Keep the demo outer content container. Render:
 
@@ -585,14 +585,14 @@ Keep the demo outer content container. Render:
 
 Every loading/error/empty state remains inside the same `flex_1/min_h_0` slot and reserves bottom space for the floating player.
 
-- [ ] **Step 4: Run tests/check and verify GREEN**
+- [x] **Step 4: Run tests/check and verify GREEN**
 
 ```text
 cargo test -p hmp-desktop-gpui content --quiet
 cargo check -p hmp-desktop-gpui
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```text
 git add crates/hmp-desktop-gpui/src/components/content.rs crates/hmp-desktop-gpui/src/state.rs
@@ -611,7 +611,7 @@ git commit -m "feat(gpui): render real playlists in reference content"
 - Consumes: exact HMP `PlaybackState`, `EventState` lyrics/queue, and `CoreCommandSender`.
 - Produces: reference-faithful playback surfaces with no demo player state.
 
-- [ ] **Step 1: Add failing adapter tests**
+- [x] **Step 1: Add failing adapter tests**
 
 Cover progress, elapsed/remaining text, status-to-icon, repeat mode, shuffle selection, duration unknown, empty track, lyric active index, focus direction, and queue/lyrics Now Playing switch.
 
@@ -630,33 +630,33 @@ fn loop_mode_maps_to_reference_repeat_state() {
 }
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 ```text
 cargo test -p hmp-desktop-gpui playback --quiet
 cargo test -p hmp-desktop-gpui lyrics --quiet
 ```
 
-- [ ] **Step 3: Restore player bar**
+- [x] **Step 3: Restore player bar**
 
 Use the demo file as the structural body. Preserve 27/31 px controls, grouping, cover/metadata placement, progress hover zone, right controls, glass/background/border/shadow, and 500/600 px widths. Replace only demo calls with bridge commands. Seek uses the clicked/dragged HMP duration and submits seconds through `AppCommand::Seek`.
 
-- [ ] **Step 4: Restore lyrics panel**
+- [x] **Step 4: Restore lyrics panel**
 
 Preserve the demo panel/header/gradient/range/row/animation structure. Map `UiLyricData` to line-level rows and label the mode `LINE SYNC`. Keep focus-change animation generation stable so idle pages do not animate continuously.
 
-- [ ] **Step 5: Restore Now Playing**
+- [x] **Step 5: Restore Now Playing**
 
 Preserve Album Glow, cover formula, stage padding, 92 px gap, metadata, controls, window buttons, and view switcher. Lyrics and queue occupy the same right stage. Only this render branch calls `window.request_animation_frame()`.
 
-- [ ] **Step 6: Run tests/check and verify GREEN**
+- [x] **Step 6: Run tests/check and verify GREEN**
 
 ```text
 cargo test -p hmp-desktop-gpui --quiet
 cargo check -p hmp-desktop-gpui
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```text
 git add crates/hmp-desktop-gpui/src/components/player_bar.rs crates/hmp-desktop-gpui/src/components/lyrics_panel.rs crates/hmp-desktop-gpui/src/components/now_playing.rs crates/hmp-desktop-gpui/src/bridge/playback.rs
@@ -675,7 +675,7 @@ git commit -m "refactor(gpui): restore reference playback surfaces"
 - Consumes: completed implementation from Tasks 1-7.
 - Produces: verified release artifacts and source-backed documentation.
 
-- [ ] **Step 1: Run automated verification**
+- [x] **Step 1: Run automated verification**
 
 Run fresh commands and require exit code 0:
 
@@ -694,7 +694,9 @@ Launch the release GPUI binary and inspect it through Windows Computer Use at 12
 
 Expected: only HMP copy/data/semantic glyphs and the approved account footer differ from the demo. Fixed bounds differ by no more than one physical pixel at the same viewport.
 
-- [ ] **Step 3: Re-run the bounded release benchmark if the render workload changed**
+Execution record: the 1280×800 shell and live QR/cancel flow passed. Computer Use stopped two resize attempts after detecting concurrent user input, so below-1080, below-980, maximize/restore, and the refreshed Now Playing surface remain unchecked runtime items; their pure geometry/state contracts are covered by automated tests.
+
+- [x] **Step 3: Re-run the bounded release benchmark if the render workload changed**
 
 Use:
 
@@ -704,7 +706,7 @@ powershell -File scripts/benchmark-desktop.ps1 -AppPath target/release/hmp-deskt
 
 Record startup/RSS/CPU/GPU output without claiming authenticated playback measurements unless a deterministic playback run was actually completed.
 
-- [ ] **Step 4: Update documentation from verified evidence**
+- [x] **Step 4: Update documentation from verified evidence**
 
 Update, in this order:
 
@@ -713,7 +715,7 @@ Update, in this order:
 3. `docs/gpui-desktop-prototype-performance.md`: pinned revision, restored UI workload, new measurements, and remaining platform gaps.
 4. `THIRD_PARTY_NOTICES.md`: confirm demo attribution and pinned fork revision remain correct.
 
-- [ ] **Step 5: Verify documentation and repository state**
+- [x] **Step 5: Verify documentation and repository state**
 
 ```text
 rg -n "4c8abab1401d7369da55d9aab928c9405f0af309|QQ 音乐|hmp-desktop-gpui" docs crates/hmp-desktop-gpui/THIRD_PARTY_NOTICES.md

@@ -3,7 +3,7 @@
 > 项目名：hutao-music-player
 > 缩写：HMP
 > 主程序命令：`hmp`
-> 当前阶段：CLI 原型（login/search/play 闭环）/ 主项目 crate 骨架
+> 当前阶段：CLI 播放闭环 / Slint 桌面端 / GPUI 参考 UI 保真原型并行验证
 > 目标平台：Windows 与 Linux 桌面；Windows 使用 SMTC，Linux 使用 MPRIS
 > 文档用途：作为仓库内的项目总纲、架构说明、开发路线和验收标准
 
@@ -290,13 +290,26 @@ pub struct PlaybackState {
 
 | 功能 | 状态 | 说明 |
 | --- | --- | --- |
-| 登录 | 已接入 | QQ 音乐扫码登录与凭据状态 |
+| 登录 | 已接入 | CLI 终端扫码；GPUI 提供真实二维码、扫码/确认/过期/错误/取消/退出登录的完整可视化状态 |
 | 搜索 | 已接入 | 使用 QQ Music Rust API |
 | 播放控制 | 已接入 | 播放、暂停、上一首、下一首、Seek、音量 |
 | 队列展示 | 已接入 | 展示 AppCore 当前真实队列 |
-| 歌词展示 | 部分接入 | 已接入接口与空状态，按真实返回展示 |
-| 推荐内容 | 开发中 / 演示数据 | 当前使用本地演示数据 |
-| 收藏与资料库同步 | 开发中 | 尚未接入账号云端同步 |
+| 歌词展示 | 已接入 | GPUI 使用 AppCore 发布的逐行歌词与翻译，不维护第二份歌词状态 |
+| 本地歌单 | 已接入 | GPUI 从 `LibraryDb` 显示真实歌单、详情与歌曲，并经 AppCore 播放 |
+| 推荐内容 | 开发中 | 当前显示明确空状态，不注入演示数据 |
+| QQ 云端歌单同步 | 开发中 | 当前只显示已经写入 HMP 媒体库的本地或已同步记录 |
+
+### GPUI 保真原型（2026-08-24）
+
+`hmp-desktop-gpui` 与 Slint 桌面端并行存在，当前不替换 `hmp-desktop`。它复用同一个 `hmp-desktop-common::AppCore`、`AppCommand`、`AppEvent` 和 `hmp_core::PlaybackState`，不直接访问 QQ 音乐 API、凭据、SQLite 或音频驱动。
+
+可见界面以 `cradiy/gpui-apple-music-demo` 为唯一设计基准。根层级、侧栏、顶栏、内容槽、360 px 歌词列、底部浮动播放器和 Now Playing 的固定几何均保持参考实现；HMP 只替换文案、真实数据、语义图标和事件处理。唯一有意新增的持久结构是侧栏底部 35 px 的 QQ 音乐账户行。
+
+固定 UI 契约集中在 `crates/hmp-desktop-gpui/src/ui_contract.rs` 并有单元测试保护，包括 230 px 侧栏、7 px gutter、56 px 顶栏、1080/980 px 响应式阈值、600/500 px 播放器宽度和 Now Playing 封面尺寸公式。GPUI 依赖统一固定在 `cradiy/gpui` 提交 `4c8abab1401d7369da55d9aab928c9405f0af309`。
+
+认证界面只消费不含凭据的 `UiAuthData`；二维码通过事件传递 PNG 数据，Cookie、music key 和 refresh key 从不进入 GPUI。登录成功后由 AppCore 持久化凭据并刷新歌单；退出登录仅在凭据删除成功后清空内存状态。歌单同样由 AppCore 查询 `LibraryDb` 后投影为安全 UI 数据。
+
+详细设计、允许的差异和验证范围见 [`docs/superpowers/specs/2026-08-24-gpui-ui-fidelity-and-login-design.md`](superpowers/specs/2026-08-24-gpui-ui-fidelity-and-login-design.md)，性能数据见 [`docs/gpui-desktop-prototype-performance.md`](gpui-desktop-prototype-performance.md)。
 
 ---
 
