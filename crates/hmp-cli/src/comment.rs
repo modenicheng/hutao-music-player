@@ -17,7 +17,7 @@ use super::commands;
 /// 评论列表。
 pub async fn list(mid: &str, sort: &str) -> Result<(), Box<dyn std::error::Error>> {
     if !matches!(sort, "hot" | "new" | "recommend") {
-        return Err(format!("未知排序: {sort}（hot | new | recommend）").into());
+        return Err(format!("unknown sort: {sort} (hot | new | recommend)").into());
     }
     let mut c = DaemonClient::connect_or_spawn().await?;
     let resp = commands::send(
@@ -30,19 +30,21 @@ pub async fn list(mid: &str, sort: &str) -> Result<(), Box<dyn std::error::Error
     .await?;
     match resp {
         Response::CommentList(page) => print_page(&page),
-        Response::Err { code, message } => Err(format!("查询失败({code:?}): {message}").into()),
-        _ => Err("评论响应异常".into()),
+        Response::Err { code, message } => {
+            Err(format!("query failed ({code:?}): {message}").into())
+        }
+        _ => Err("unexpected comment response".into()),
     }
 }
 
 fn print_page(page: &CommentPage) -> Result<(), Box<dyn std::error::Error>> {
     let mut out = std::io::stdout().lock();
     if page.comments.is_empty() {
-        writeln!(out, "暂无评论")?;
+        writeln!(out, "No comments yet")?;
     } else {
         writeln!(
             out,
-            "共 {} 条评论（显示前 {} 条）",
+            "{} comment(s) (showing first {})",
             page.total,
             page.comments.len()
         )?;
@@ -50,7 +52,7 @@ fn print_page(page: &CommentPage) -> Result<(), Box<dyn std::error::Error>> {
             let time = format_time(c.time);
             writeln!(
                 out,
-                "[{}] {}  {}  (赞 {})",
+                "[{}] {}  {}  ({} likes)",
                 c.cm_id, c.nickname, time, c.like_count
             )?;
             writeln!(out, "   {}", c.content)?;
@@ -106,7 +108,7 @@ pub async fn post(mid: &str, content: &str) -> Result<(), Box<dyn std::error::Er
         },
     )
     .await?;
-    println!("已发表评论");
+    println!("Comment posted");
     Ok(())
 }
 
@@ -126,7 +128,7 @@ pub async fn reply(
         },
     )
     .await?;
-    println!("已回复 {cm_id}");
+    println!("Replied to {cm_id}");
     Ok(())
 }
 
@@ -140,7 +142,7 @@ pub async fn delete(cm_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         },
     )
     .await?;
-    println!("已删除评论 {cm_id}");
+    println!("Deleted comment {cm_id}");
     Ok(())
 }
 

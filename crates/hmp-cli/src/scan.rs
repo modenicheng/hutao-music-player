@@ -53,7 +53,7 @@ fn collect_audio(
 pub fn scan_dir(root: &Path, db: &mut LibraryDb) -> Result<ScanReport, Box<dyn std::error::Error>> {
     let dir = root
         .canonicalize()
-        .map_err(|_| format!("不是目录: {}", root.display()))?;
+        .map_err(|_| format!("not a directory: {}", root.display()))?;
     let (root_id, generation) = db.begin_scan(&dir)?;
     let mut files = Vec::new();
     let mut visited = HashSet::new();
@@ -97,7 +97,7 @@ pub async fn run(dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = std::io::stdout().lock();
     writeln!(
         stdout,
-        "扫描完成：新增 {} 首，更新 {} 首，跳过 {} 首，缺失 {} 首（库: {}）",
+        "Scan finished: {} added, {} updated, {} skipped, {} missing (library: {})",
         report.added,
         report.updated,
         report.skipped,

@@ -188,8 +188,10 @@ impl<'a> AlbumApi<'a> {
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        let mut resp: GetAlbumDetailResponse = serde_json::from_value(data.clone())
-            .map_err(|e| QqMusicError::InvalidResponse(format!("album detail 解析失败: {e}")))?;
+        let mut resp: GetAlbumDetailResponse =
+            serde_json::from_value(data.clone()).map_err(|e| {
+                QqMusicError::InvalidResponse(format!("failed to parse album detail: {e}"))
+            })?;
         resp.singers = extract_singers(&data);
         Ok(resp)
     }
@@ -214,8 +216,9 @@ impl<'a> AlbumApi<'a> {
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        let mut resp: GetAlbumSongResponse = serde_json::from_value(data.clone())
-            .map_err(|e| QqMusicError::InvalidResponse(format!("album songs 解析失败: {e}")))?;
+        let mut resp: GetAlbumSongResponse = serde_json::from_value(data.clone()).map_err(|e| {
+            QqMusicError::InvalidResponse(format!("failed to parse album songs: {e}"))
+        })?;
         resp.song_list = extract_song_list(&data);
         Ok(resp)
     }
@@ -237,7 +240,7 @@ impl<'a> AlbumApi<'a> {
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value::<GetNewAlbumResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("new album 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse new album: {e}")))
     }
 
     /// 收藏专辑（上游 `fav_album`）。
@@ -276,7 +279,7 @@ impl<'a> AlbumApi<'a> {
             .await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value::<AlbumFavWriteResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("album fav 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse album fav: {e}")))
     }
 }
 

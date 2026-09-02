@@ -117,17 +117,17 @@ impl std::fmt::Debug for ResolvedTrack {
 /// 解析错误（引擎内部；映射为 `IpcErrorCode`）。
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    #[error("未登录或凭证已过期")]
+    #[error("not logged in or credentials expired")]
     NotLoggedIn,
-    #[error("曲目不存在")]
+    #[error("track not found")]
     TrackNotFound,
-    #[error("歌单/专辑拉取失败: {0}")]
+    #[error("failed to fetch playlist/album: {0}")]
     PlaylistNotFound(String),
-    #[error("所有音质均不可用: {0}")]
+    #[error("no available audio quality: {0}")]
     QualityUnavailable(String),
-    #[error("驱动未在 5s 内应用装载")]
+    #[error("driver did not apply the load within 5s")]
     Timeout,
-    #[error("内部错误: {0}")]
+    #[error("internal error: {0}")]
     Internal(String),
 }
 
@@ -157,7 +157,11 @@ pub trait SourceResolver: Send + Sync + std::fmt::Debug {
         uri: &str,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
         let msg = uri.to_string();
-        Box::pin(async move { Err(EngineError::Internal(format!("URI 播放暂不支持: {msg}"))) })
+        Box::pin(async move {
+            Err(EngineError::Internal(format!(
+                "URI playback not supported: {msg}"
+            )))
+        })
     }
 }
 
@@ -195,7 +199,7 @@ impl QqSourceResolver {
     fn load_credential(&self) -> Result<hmp_storage::credential::Credential, EngineError> {
         self.store
             .load()
-            .map_err(|e| EngineError::Internal(format!("读取凭证失败: {e}")))?
+            .map_err(|e| EngineError::Internal(format!("failed to read credentials: {e}")))?
             .ok_or(EngineError::NotLoggedIn)
     }
 }
@@ -257,7 +261,7 @@ pub async fn resolve_track_impl(
     let detail = song_api
         .get_detail(track_id.as_ref())
         .await
-        .map_err(|e| EngineError::Internal(format!("详情请求失败: {e}")))?;
+        .map_err(|e| EngineError::Internal(format!("track detail request failed: {e}")))?;
     let media_mid = detail.track.file.media_mid.clone();
     if media_mid.is_empty() {
         return Err(EngineError::TrackNotFound);
@@ -402,16 +406,17 @@ pub async fn resolve_source_ids_impl(
     match src {
         hmp_core::PlayRequest::Track(id) => Ok(vec![id_stub(id)]),
         hmp_core::PlayRequest::Local(_) => Err(EngineError::Internal(
-            "QQ 解析器不支持本地源（组合解析器负责分发）".into(),
+            "QQ resolver does not support local sources (handled by the combined resolver)".into(),
         )),
         hmp_core::PlayRequest::LibraryPlaylist(_) => Err(EngineError::Internal(
-            "QQ 解析器不支持本地歌单（组合解析器负责分发）".into(),
+            "QQ resolver does not support local playlists (handled by the combined resolver)"
+                .into(),
         )),
         hmp_core::PlayRequest::Playlist(id) => {
             let list_id: i64 = id
                 .as_ref()
                 .parse()
-                .map_err(|_| EngineError::PlaylistNotFound("歌单 id 非数字".into()))?;
+                .map_err(|_| EngineError::PlaylistNotFound("playlist id is not numeric".into()))?;
             let api = SonglistApi::new(client);
             let out = collect_paged(|page| {
                 let api = &api;
@@ -426,7 +431,7 @@ pub async fn resolve_source_ids_impl(
             })
             .await?;
             if out.is_empty() {
-                return Err(EngineError::PlaylistNotFound("歌单为空".into()));
+                return Err(EngineError::PlaylistNotFound("playlist is empty".into()));
             }
             Ok(out)
         }
@@ -445,7 +450,7 @@ pub async fn resolve_source_ids_impl(
             })
             .await?;
             if out.is_empty() {
-                return Err(EngineError::PlaylistNotFound("专辑为空".into()));
+                return Err(EngineError::PlaylistNotFound("album is empty".into()));
             }
             Ok(out)
         }

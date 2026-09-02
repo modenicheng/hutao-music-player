@@ -29,7 +29,11 @@ use hmp_core::{LoopMode, Request};
 
 /// HMP 命令行客户端。
 #[derive(Parser)]
-#[command(name = "hmp", version, about = "胡桃音乐播放器命令行客户端")]
+#[command(
+    name = "hmp",
+    version,
+    about = "Hutao Music Player command-line client"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -39,63 +43,63 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     // —— 高频 alias（保留）——
-    /// 播放（单曲 / playlist:<id> / album:<id>；遥控后端）。
+    /// Play (track / playlist:<id> / album:<id>; controls the daemon).
     Play { source: String },
-    /// 插队播放。
+    /// Play next (insert after current and play).
     PlayNext { source: String },
-    /// 暂停。
+    /// Pause playback.
     Pause,
-    /// 继续播放。
+    /// Resume playback.
     Resume,
-    /// 下一首。
+    /// Next track.
     Next,
-    /// 上一首。
+    /// Previous track.
     Prev,
-    /// 停止。
+    /// Stop playback.
     Stop,
-    /// 跳转（秒）。
+    /// Seek to position (seconds).
     Seek { secs: u64 },
-    /// 音量（0..1）。
+    /// Set volume (0..1).
     Volume { value: f64 },
-    /// 查询状态。
+    /// Show daemon status.
     Status,
-    /// 退出后端。
+    /// Quit the daemon.
     Quit,
-    /// 前台运行后端（--background 由 CLI 自动拉起使用）。
+    /// Run the daemon in the foreground (daemon auto-spawn uses --background).
     Serve {
-        /// 后台模式（脱离终端）。
+        /// Run in the background (detached from the terminal).
         #[arg(long)]
         background: bool,
     },
-    /// 搜索歌曲。
+    /// Search songs.
     Search { keyword: String },
-    /// QQ 扫码登录（终端 ASCII 二维码）。
+    /// Log in via QQ QR code (ASCII art in the terminal).
     Login,
-    /// 显示登录状况（本地凭证检查）。
+    /// Show login status (local credential check).
     Auth,
-    /// 递归扫描本地音乐目录入库。
+    /// Recursively scan a local music directory into the library.
     Scan { dir: String },
-    /// 本地收藏管理：add / remove / list（直读媒体库）。
+    /// Local favorites: add / remove / list (reads the library directly).
     #[command(subcommand)]
     Favorite(FavoriteCmd),
 
     // —— 二级命令面 ——
-    /// 播放器控制。
+    /// Player control.
     #[command(subcommand)]
     Player(PlayerCmd),
-    /// 队列管理。
+    /// Queue management.
     #[command(subcommand)]
     Queue(QueueCmd),
-    /// 本地歌单管理。
+    /// Playlist management.
     #[command(subcommand)]
     Playlist(PlaylistCmd),
-    /// 媒体库查询与 QQ 同步。
+    /// Library queries and QQ sync.
     #[command(subcommand)]
     Library(LibraryCmd),
-    /// QQ 账号信息。
+    /// QQ account info.
     #[command(subcommand)]
     Account(AccountCmd),
-    /// 评论（list/post/reply/delete）。
+    /// Comments (list/post/reply/delete).
     #[command(subcommand)]
     Comment(CommentCmd),
 }
@@ -103,27 +107,27 @@ enum Command {
 /// `hmp player` 子命令。
 #[derive(Subcommand)]
 enum PlayerCmd {
-    /// 查询状态。
+    /// Show daemon status.
     Status,
-    /// 暂停。
+    /// Pause playback.
     Pause,
-    /// 继续播放。
+    /// Resume playback.
     Resume,
-    /// 下一首。
+    /// Next track.
     Next,
-    /// 上一首。
+    /// Previous track.
     Prev,
-    /// 停止。
+    /// Stop playback.
     Stop,
-    /// 跳转（秒）。
+    /// Seek to position (seconds).
     Seek { secs: u64 },
-    /// 音量（0..1）。
+    /// Set volume (0..1).
     Volume { value: f64 },
-    /// 音质策略：无参显示；auto|master|hires|atmos|flac|aac|320|128 设置。
+    /// Quality policy: no arg = show; auto|master|hires|atmos|flac|aac|320|128 to set.
     Quality {
-        /// 音质别名（缺省 = 仅显示）。
+        /// Quality alias (omit to show current policy).
         alias: Option<String>,
-        /// 禁止向下降级回退（仅尝试指定档位）。
+        /// Disable fallback to lower tiers (try the requested tier only).
         #[arg(long)]
         no_fallback: bool,
     },
@@ -132,136 +136,136 @@ enum PlayerCmd {
 /// `hmp queue` 子命令。
 #[derive(Subcommand)]
 enum QueueCmd {
-    /// 列出队列（分页；标题/歌手经本地媒体库投影）。
+    /// List the queue (paged; title/artist projected via the local library).
     List {
-        /// 全部（自动翻页，默认 50/页）。
+        /// All pages (auto-paging, 50 per page by default).
         #[arg(long)]
         all: bool,
-        /// 页大小（默认 50）。
+        /// Page size (default 50).
         #[arg(long)]
         limit: Option<usize>,
     },
-    /// list 别名。
+    /// Alias for list.
     Show,
-    /// 追加到队尾（不播放）。
+    /// Append to the end of the queue (without playing).
     Add { source: String },
-    /// 插到当前曲之后并立即播放。
+    /// Insert after the current track and play it now.
     PlayNext { source: String },
-    /// 移除 0 基位置曲目。
+    /// Remove the track at a 0-based index.
     Remove { index: usize },
-    /// 清空队列：默认保留当前曲；--all 清空并停止。
+    /// Clear the queue: keeps the current track by default; --all clears and stops.
     Clear {
-        /// 连当前曲一起清空（并停止播放）。
+        /// Also clear the current track (and stop playback).
         #[arg(long)]
         all: bool,
     },
-    /// 随机播放：on / off。
+    /// Shuffle: on / off.
     Shuffle { value: String },
-    /// 循环模式：none / list / track。
+    /// Loop mode: none / list / track.
     Loop { mode: String },
 }
 
 /// `hmp playlist` 子命令。
 #[derive(Subcommand)]
 enum PlaylistCmd {
-    /// 列出歌单（--scope all|local|owned|favorite，默认 all）。
+    /// List playlists (--scope all|local|owned|favorite, default all).
     List {
-        /// 范围：all | local | owned | favorite。
+        /// Scope: all | local | owned | favorite.
         #[arg(long)]
         scope: Option<String>,
     },
-    /// 查看歌单内曲目。
+    /// Show tracks in a playlist.
     Show { id: i64 },
-    /// 新建歌单。
+    /// Create a playlist.
     Create { name: String },
-    /// 重命名。
+    /// Rename a playlist.
     Rename { id: i64, name: String },
-    /// 追加曲目（QQ mid 或 local:<path>）。
+    /// Add a track (QQ mid or local:<path>).
     Add { id: i64, track: String },
-    /// 按序号移除曲目。
+    /// Remove a track by position.
     Remove { id: i64, position: i64 },
-    /// 删除歌单。
+    /// Delete a playlist.
     Delete { id: i64 },
 }
 
 /// `hmp library` 子命令。
 #[derive(Subcommand)]
 enum LibraryCmd {
-    /// 最近播放（直读媒体库）。
+    /// Recently played (reads the library directly).
     History { count: Option<u32> },
-    /// 从 QQ 拉用户库快照 reconcile（需登录）。
+    /// Reconcile a snapshot of your QQ library (login required).
     Sync,
-    /// 待同步意图/错误（直读媒体库）。
+    /// Pending sync intents/errors (reads the library directly).
     SyncStatus,
-    /// 本地曲目浏览（默认全部本地曲目；里程碑 E）。
+    /// Browse local tracks (all local tracks by default).
     Tracks {
-        /// 搜索（标题/歌手/专辑子串）。
+        /// Search (substring in title/artist/album).
         #[arg(long)]
         search: Option<String>,
-        /// 按歌手过滤（多艺术家命中）。
+        /// Filter by artist (matches any artist).
         #[arg(long)]
         artist: Option<String>,
-        /// 按专辑过滤。
+        /// Filter by album.
         #[arg(long)]
         album: Option<String>,
-        /// 只看已收藏。
+        /// Show liked only.
         #[arg(long)]
         liked: bool,
     },
-    /// 本地专辑聚合（里程碑 E）。
+    /// Local album aggregation.
     Albums {
-        /// 专辑名子串过滤。
+        /// Filter by album name substring.
         #[arg(long)]
         search: Option<String>,
-        /// 只看已收藏（兼容旧入口）。
+        /// Show liked only (legacy entry).
         #[arg(long)]
         liked: bool,
     },
-    /// 本地歌手聚合（里程碑 E）。
+    /// Local artist aggregation.
     Artists,
-    /// 扫描本地目录入库（注册为扫描根；里程碑 E）。
+    /// Scan a local directory into the library (registers it as a scan root).
     Scan { dir: String },
 }
 
 /// `hmp account` 子命令。
 #[derive(Subcommand)]
 enum AccountCmd {
-    /// 主页头部（昵称等）。
+    /// Profile header (nickname etc.).
     Profile,
-    /// VIP 信息。
+    /// VIP info.
     Vip,
 }
 
 /// `hmp comment` 子命令。
 #[derive(Subcommand)]
 enum CommentCmd {
-    /// 评论列表。
+    /// List comments.
     List {
-        /// 曲目 mid。
+        /// Track mid.
         mid: String,
-        /// 排序：hot | new | recommend（默认 hot）。
+        /// Sort: hot | new | recommend (default hot).
         #[arg(long, default_value = "hot")]
         sort: String,
     },
-    /// 发表评论。
+    /// Post a comment.
     Post {
-        /// 曲目 mid。
+        /// Track mid.
         mid: String,
-        /// 评论内容。
+        /// Comment text.
         text: String,
     },
-    /// 回复评论。
+    /// Reply to a comment.
     Reply {
-        /// 曲目 mid。
+        /// Track mid.
         mid: String,
-        /// 被回复评论 id。
+        /// Comment id to reply to.
         cm_id: String,
-        /// 回复内容。
+        /// Reply text.
         text: String,
     },
-    /// 删除评论。
+    /// Delete a comment.
     Delete {
-        /// 评论 id。
+        /// Comment id.
         cm_id: String,
     },
 }
@@ -269,11 +273,11 @@ enum CommentCmd {
 /// `hmp favorite` 子命令。
 #[derive(Subcommand)]
 enum FavoriteCmd {
-    /// 收藏曲目（QQ mid 或 local:<path>）。
+    /// Like a track (QQ mid or local:<path>).
     Add { id: String },
-    /// 取消收藏。
+    /// Unlike a track.
     Remove { id: String },
-    /// 列出收藏。
+    /// List liked tracks.
     List,
 }
 
@@ -285,7 +289,7 @@ async fn main() {
 
     let cli = Cli::parse();
     if let Err(e) = run(cli).await {
-        eprintln!("错误: {e}");
+        eprintln!("error: {e}");
         std::process::exit(1);
     }
 }
@@ -443,7 +447,7 @@ fn parse_loop_mode(s: &str) -> Result<LoopMode, Box<dyn std::error::Error>> {
         "none" => Ok(LoopMode::None),
         "list" => Ok(LoopMode::List),
         "track" => Ok(LoopMode::Track),
-        _ => Err(format!("未知循环模式: {s}（none / list / track）").into()),
+        _ => Err(format!("unknown loop mode: {s} (none / list / track)").into()),
     }
 }
 
@@ -452,6 +456,6 @@ fn parse_bool(s: &str) -> Result<bool, Box<dyn std::error::Error>> {
     match s {
         "on" => Ok(true),
         "off" => Ok(false),
-        _ => Err(format!("未知取值: {s}（on / off）").into()),
+        _ => Err(format!("unknown value: {s} (on / off)").into()),
     }
 }

@@ -136,8 +136,9 @@ impl<'a> CommentApi<'a> {
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        let resp: CommentListResponse = serde_json::from_value(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("hot comments 解析失败: {e}")))?;
+        let resp: CommentListResponse = serde_json::from_value(data).map_err(|e| {
+            QqMusicError::InvalidResponse(format!("failed to parse hot comments: {e}"))
+        })?;
         Ok(resp.comment_list.map(|l| l.comments).unwrap_or_default())
     }
 
@@ -166,8 +167,9 @@ impl<'a> CommentApi<'a> {
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        let resp: CommentListResponse = serde_json::from_value(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("new comments 解析失败: {e}")))?;
+        let resp: CommentListResponse = serde_json::from_value(data).map_err(|e| {
+            QqMusicError::InvalidResponse(format!("failed to parse new comments: {e}"))
+        })?;
         Ok(resp.comment_list.map(|l| l.comments).unwrap_or_default())
     }
 
@@ -197,7 +199,7 @@ impl<'a> CommentApi<'a> {
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         let resp: CommentListResponse = serde_json::from_value(data).map_err(|e| {
-            QqMusicError::InvalidResponse(format!("recommend comments 解析失败: {e}"))
+            QqMusicError::InvalidResponse(format!("failed to parse recommend comments: {e}"))
         })?;
         Ok(resp.comment_list.map(|l| l.comments).unwrap_or_default())
     }
@@ -230,7 +232,7 @@ impl<'a> CommentApi<'a> {
             .await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("add comment 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse add comment: {e}")))
     }
 
     /// 删除评论（上游 `delete_comment`；评论不存在也返回 true）。

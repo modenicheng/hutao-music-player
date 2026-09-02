@@ -9,9 +9,9 @@ pub fn format_recent(r: &RecentPlay) -> String {
     let artist = r.artist.as_deref().unwrap_or("");
     let listened = r.listened_ms / 1000;
     let status = if r.ended_at.is_some() {
-        format!("(听过 {listened}s · {})", r.reason)
+        format!("(listened {listened}s · {})", r.reason)
     } else {
-        "（播放中）".to_string()
+        "(playing now)".to_string()
     };
     format!(
         "{:>2}. {} - {artist}  {status}  {}",
@@ -25,14 +25,17 @@ pub fn format_recent(r: &RecentPlay) -> String {
 pub async fn run(limit: Option<u32>) -> Result<(), Box<dyn std::error::Error>> {
     let path = hmp_storage::data_dir().join("library.sqlite3");
     if !path.exists() {
-        eprintln!("媒体库不存在（尚无播放记录）：{}", path.display());
+        eprintln!(
+            "library not available (no play history yet): {}",
+            path.display()
+        );
         return Ok(());
     }
     let mut db = LibraryDb::open(&path)?;
     let plays = db.recent_plays(limit.unwrap_or(10))?;
     let mut stdout = std::io::stdout().lock();
     if plays.is_empty() {
-        writeln!(stdout, "暂无播放记录")?;
+        writeln!(stdout, "No play history yet")?;
     } else {
         for r in &plays {
             writeln!(stdout, "{}", format_recent(r))?;
@@ -90,6 +93,6 @@ mod tests {
         };
         let s = format_recent(&r);
         assert!(s.contains("测试曲 - 歌手"));
-        assert!(s.contains("听过 95s · ended"));
+        assert!(s.contains("listened 95s · ended"));
     }
 }

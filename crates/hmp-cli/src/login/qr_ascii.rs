@@ -12,9 +12,9 @@ use image::imageops::FilterType;
 /// 渲染错误。
 #[derive(Debug, thiserror::Error)]
 pub enum QrRenderError {
-    #[error("图像解码失败: {0}")]
+    #[error("image decode failed: {0}")]
     Decode(String),
-    #[error("图像尺寸无效")]
+    #[error("invalid image size")]
     InvalidSize,
 }
 

@@ -51,7 +51,7 @@ impl LocalWatcher {
             match lib.scan_roots() {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(%e, "读取 scan_roots 失败");
+                    tracing::warn!(%e, "failed to read scan roots");
                     return None;
                 }
             }
@@ -87,7 +87,7 @@ impl LocalWatcher {
             }) {
                 Ok(w) => w,
                 Err(e) => {
-                    tracing::warn!(%e, "notify watcher 创建失败");
+                    tracing::warn!(%e, "failed to create notify watcher");
                     return None;
                 }
             };
@@ -98,7 +98,9 @@ impl LocalWatcher {
                 Ok(()) => {
                     watched.insert(p);
                 }
-                Err(e) => tracing::warn!(%e, root = %p.display(), "监听扫描根失败（外接盘离线？）"),
+                Err(e) => {
+                    tracing::warn!(%e, root = %p.display(), "failed to watch scan root (drive offline?)")
+                }
             }
         }
         if watched.is_empty() {
@@ -171,16 +173,16 @@ impl LocalWatcher {
                         let _ = lib.set_track_cover(&format!("local:{}", p.display()), uri);
                     }
                 }
-                Err(e) => tracing::warn!(%e, path = %p.display(), "watcher 入库失败"),
+                Err(e) => tracing::warn!(%e, path = %p.display(), "watcher ingestion failed"),
             }
         } else if hmp_storage::is_audio_ext(p) {
             match lib.mark_missing_by_path(p) {
                 Ok(n) => {
                     if n > 0 {
-                        tracing::debug!(path = %p.display(), "文件缺失标记");
+                        tracing::debug!(path = %p.display(), "marked file missing");
                     }
                 }
-                Err(e) => tracing::warn!(%e, path = %p.display(), "watcher 删除标记失败"),
+                Err(e) => tracing::warn!(%e, path = %p.display(), "watcher missing-mark failed"),
             }
         }
     }
@@ -206,7 +208,7 @@ impl LocalWatcher {
                 Ok(()) => {
                     watched.insert(p);
                 }
-                Err(e) => tracing::warn!(%e, root = %p.display(), "监听新扫描根失败"),
+                Err(e) => tracing::warn!(%e, root = %p.display(), "failed to watch new scan root"),
             }
         }
     }

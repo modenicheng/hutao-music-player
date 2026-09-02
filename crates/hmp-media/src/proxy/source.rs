@@ -112,7 +112,7 @@ async fn fetch_and_decrypt_range(
     let permit = sem
         .acquire_owned()
         .await
-        .map_err(|e| io::Error::other(format!("信号量获取失败: {e}")))?;
+        .map_err(|e| io::Error::other(format!("failed to acquire semaphore: {e}")))?;
     let start = range.start;
     let end = range.end;
     let expected_len = end - start + 1;
@@ -124,7 +124,7 @@ async fn fetch_and_decrypt_range(
         .header("Range", &range_header)
         .send()
         .await
-        .map_err(|e| io::Error::other(format!("CDN 请求失败: {e}")))?;
+        .map_err(|e| io::Error::other(format!("CDN request failed: {e}")))?;
     let status = response.status();
 
     if status == reqwest::StatusCode::PARTIAL_CONTENT {
@@ -134,13 +134,17 @@ async fn fetch_and_decrypt_range(
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| parse_content_range(v) == Some((start, end, total_len)));
         if !valid_range {
-            return Err(io::Error::other("CDN 206 Content-Range 与请求不一致"));
+            return Err(io::Error::other(
+                "CDN 206 Content-Range does not match the request",
+            ));
         }
         if response
             .content_length()
             .is_some_and(|len| len != expected_len)
         {
-            return Err(io::Error::other("CDN 206 body 长度与请求区间不一致"));
+            return Err(io::Error::other(
+                "CDN 206 body length does not match the requested range",
+            ));
         }
         let byte_stream = response.bytes_stream();
         Ok(Box::pin(futures_util::stream::unfold(
@@ -156,7 +160,9 @@ async fn fetch_and_decrypt_range(
                             let chunk_len = chunk.len() as u64;
                             if chunk_len > expected_len.saturating_sub(delivered) {
                                 return Some((
-                                    Err(io::Error::other("CDN 206 body 超出请求区间")),
+                                    Err(io::Error::other(
+                                        "CDN 206 body exceeds the requested range",
+                                    )),
                                     (byte_stream, offset, delivered, true, permit),
                                 ));
                             }
@@ -174,12 +180,14 @@ async fn fetch_and_decrypt_range(
                             ))
                         }
                         Some(Err(e)) => Some((
-                            Err(io::Error::other(format!("读取流错误: {e}"))),
+                            Err(io::Error::other(format!("stream read error: {e}"))),
                             (byte_stream, offset, delivered, true, permit),
                         )),
                         None if delivered == expected_len => None,
                         None => Some((
-                            Err(io::Error::other("CDN 206 body 在请求区间前结束")),
+                            Err(io::Error::other(
+                                "CDN 206 body ended before the requested range",
+                            )),
                             (byte_stream, offset, delivered, true, permit),
                         )),
                     }
@@ -187,7 +195,7 @@ async fn fetch_and_decrypt_range(
             },
         )))
     } else if status == reqwest::StatusCode::OK {
-        warn!(cdn_url = %cdn_url, "CDN 返回 200（忽略 Range），流式跳过");
+        warn!(cdn_url = %cdn_url, "CDN returned 200 (Range ignored); streaming skip");
         let byte_stream = response.bytes_stream();
         Ok(Box::pin(futures_util::stream::unfold(
             (byte_stream, start, start, 0_u64, false, permit),
@@ -252,7 +260,7 @@ async fn fetch_and_decrypt_range(
                             }
                             Some(Err(e)) => {
                                 return Some((
-                                    Err(io::Error::other(format!("读取流错误: {e}"))),
+                                    Err(io::Error::other(format!("stream read error: {e}"))),
                                     (byte_stream, 0, decrypt_offset, delivered, true, permit),
                                 ));
                             }
@@ -261,7 +269,9 @@ async fn fetch_and_decrypt_range(
                                     return None;
                                 }
                                 return Some((
-                                    Err(io::Error::other("CDN body 在请求区间前结束")),
+                                    Err(io::Error::other(
+                                        "CDN body ended before the requested range",
+                                    )),
                                     (byte_stream, 0, decrypt_offset, delivered, true, permit),
                                 ));
                             }
@@ -271,7 +281,9 @@ async fn fetch_and_decrypt_range(
             },
         )))
     } else {
-        Err(io::Error::other(format!("CDN 返回非预期状态码: {status}")))
+        Err(io::Error::other(format!(
+            "CDN returned unexpected status: {status}"
+        )))
     }
 }
 
@@ -300,7 +312,7 @@ pub async fn prepare_stream(
     let total_len = match probe_cdn(&client, url).await {
         Ok(tl) => tl,
         Err(_) => {
-            debug!("CDN 探测失败，回退到全量下载-解密-缓存");
+            debug!("CDN probe failed; falling back to full download-decrypt-cache");
             return fallback_playable(url, ekey, progress).await;
         }
     };
@@ -310,7 +322,7 @@ pub async fn prepare_stream(
     let tail_start = total_len.saturating_sub(TAIL_PROBE);
     let mut tail_bytes = fetch_range(&client, url, tail_start, tail_end)
         .await
-        .map_err(|e| MediaError::Network(format!("尾部拉取失败: {e}")))?;
+        .map_err(|e| MediaError::Network(format!("tail fetch failed: {e}")))?;
 
     let mut footer = qmc2::detect_footer(total_len as usize, &tail_bytes);
 
@@ -330,11 +342,11 @@ pub async fn prepare_stream(
         };
         debug!(
             audio_len = al,
-            total_len, "ekey 文本区超出 0x40，拉取精确尾部"
+            total_len, "ekey text region exceeds 0x40; fetching exact tail"
         );
         tail_bytes = fetch_range(&client, url, al, tail_end)
             .await
-            .map_err(|e| MediaError::Network(format!("精确尾部拉取失败: {e}")))?;
+            .map_err(|e| MediaError::Network(format!("exact tail fetch failed: {e}")))?;
         // 用精确尾部重新检测
         footer = qmc2::detect_footer(al as usize + tail_bytes.len(), &tail_bytes);
         have_full_tail = true;
@@ -357,7 +369,7 @@ pub async fn prepare_stream(
                 Arc::from(c)
             }
             Err(_) => {
-                warn!("内嵌 ekey 提取失败，回退到全量下载");
+                warn!("embedded ekey extraction failed; falling back to full download");
                 return fallback_playable(url, None, progress).await;
             }
         }
@@ -365,7 +377,7 @@ pub async fn prepare_stream(
         // 无 API ekey → 从尾部提取内嵌 ekey
         let ekey_tail = fetch_range(&client, url, audio_len as u64, tail_end)
             .await
-            .map_err(|e| MediaError::Network(format!("ekey 尾部拉取失败: {e}")))?;
+            .map_err(|e| MediaError::Network(format!("ekey tail fetch failed: {e}")))?;
 
         match embedded_ekey_from_bytes(&ekey_tail, audio_len) {
             Ok(e) => {
@@ -373,7 +385,7 @@ pub async fn prepare_stream(
                 Arc::from(c)
             }
             Err(_) => {
-                warn!("内嵌 ekey 提取失败，回退到全量下载");
+                warn!("embedded ekey extraction failed; falling back to full download");
                 return fallback_playable(url, None, progress).await;
             }
         }
@@ -421,7 +433,7 @@ async fn probe_cdn(client: &reqwest::Client, url: &str) -> Result<u64, MediaErro
         .head(url)
         .send()
         .await
-        .map_err(|e| MediaError::Network(format!("HEAD 请求失败: {e}")))?;
+        .map_err(|e| MediaError::Network(format!("HEAD request failed: {e}")))?;
 
     let head_status = head_resp.status();
     if head_status != reqwest::StatusCode::OK {
@@ -434,7 +446,9 @@ async fn probe_cdn(client: &reqwest::Client, url: &str) -> Result<u64, MediaErro
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&total| total > 0)
-        .ok_or_else(|| MediaError::Unsupported("CDN HEAD 缺少有效 Content-Length".to_string()))?;
+        .ok_or_else(|| {
+            MediaError::Unsupported("CDN HEAD missing a valid Content-Length".to_string())
+        })?;
 
     // GET Range: bytes=0-0
     let range_resp = client
@@ -442,12 +456,14 @@ async fn probe_cdn(client: &reqwest::Client, url: &str) -> Result<u64, MediaErro
         .header("Range", "bytes=0-0")
         .send()
         .await
-        .map_err(|e| MediaError::Network(format!("Range 探测请求失败: {e}")))?;
+        .map_err(|e| MediaError::Network(format!("range probe request failed: {e}")))?;
 
     let range_status = range_resp.status();
     if range_status != reqwest::StatusCode::PARTIAL_CONTENT {
         debug!(%range_status, "CDN Range 探测: 未返回 206");
-        return Err(MediaError::Unsupported("CDN 不支持 Range 请求".to_string()));
+        return Err(MediaError::Unsupported(
+            "CDN does not support range requests".to_string(),
+        ));
     }
 
     // 解析 Content-Range
@@ -456,11 +472,13 @@ async fn probe_cdn(client: &reqwest::Client, url: &str) -> Result<u64, MediaErro
         .get("content-range")
         .and_then(|v| v.to_str().ok())
         .and_then(parse_content_range_00)
-        .ok_or_else(|| MediaError::Unsupported("CDN 未返回严格的 Content-Range".to_string()))?;
+        .ok_or_else(|| {
+            MediaError::Unsupported("CDN did not return a strict Content-Range".to_string())
+        })?;
 
     if total != head_total {
         return Err(MediaError::Unsupported(
-            "CDN HEAD 与 Range 探测总长度不一致".to_string(),
+            "CDN HEAD and range probe disagree on total length".to_string(),
         ));
     }
 
@@ -495,18 +513,20 @@ async fn fetch_range(
         .header("Range", &range_header)
         .send()
         .await
-        .map_err(|e| io::Error::other(format!("区间请求失败: {e}")))?;
+        .map_err(|e| io::Error::other(format!("range request failed: {e}")))?;
 
     let status = response.status();
     let body = response
         .bytes()
         .await
-        .map_err(|e| io::Error::other(format!("读取区间失败: {e}")))?;
+        .map_err(|e| io::Error::other(format!("range read failed: {e}")))?;
 
     if status == reqwest::StatusCode::PARTIAL_CONTENT {
         Ok(body.to_vec())
     } else {
-        Err(io::Error::other(format!("CDN 区间请求返回 {status}")))
+        Err(io::Error::other(format!(
+            "CDN range request returned {status}"
+        )))
     }
 }
 

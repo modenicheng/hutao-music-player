@@ -162,8 +162,9 @@ impl<'a> TopApi<'a> {
         let request = CgiRequest::new("music.musicToplist.Toplist", "GetAll", json!({}));
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        serde_json::from_value::<TopCategoryResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("top category 解析失败: {e}")))
+        serde_json::from_value::<TopCategoryResponse>(data).map_err(|e| {
+            QqMusicError::InvalidResponse(format!("failed to parse top category: {e}"))
+        })
     }
 
     /// 获取排行榜详情及其歌曲列表（上游 `get_detail`）。
@@ -182,7 +183,7 @@ impl<'a> TopApi<'a> {
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value::<TopDetailResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("top detail 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse top detail: {e}")))
     }
 }
 

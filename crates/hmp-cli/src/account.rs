@@ -11,10 +11,10 @@ use hmp_qqmusic_api::{QqMusicClient, UserApi, credential::Credential};
 fn load_credential() -> Result<Credential, Box<dyn std::error::Error>> {
     let stored = hmp_storage::credential::store_from_env()
         .load()
-        .map_err(|e| format!("读取凭证失败: {e}"))?;
+        .map_err(|e| format!("failed to read credentials: {e}"))?;
     stored
         .filter(|c| c.is_logged_in())
-        .ok_or_else(|| "未登录，请先运行 hmp login".into())
+        .ok_or_else(|| "not logged in; run `hmp login` first".into())
 }
 
 /// 展示型字段提取：从 JSON 的任意层级找第一个指定 key 的字符串值。
@@ -35,7 +35,7 @@ fn find_str<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 pub async fn profile() -> Result<(), Box<dyn std::error::Error>> {
     let cred = load_credential()?;
     if cred.encrypt_uin.is_empty() {
-        return Err("凭证缺少 encrypt_uin".into());
+        return Err("credential is missing encrypt_uin".into());
     }
     let client = QqMusicClient::new();
     let api = UserApi::new(&client);
@@ -43,9 +43,9 @@ pub async fn profile() -> Result<(), Box<dyn std::error::Error>> {
     let nick = find_str(&data, "nick")
         .or_else(|| find_str(&data, "nickname"))
         .or_else(|| find_str(&data, "name"))
-        .unwrap_or("（未知）");
+        .unwrap_or("(unknown)");
     println!("QQ: {}", cred.uin);
-    println!("昵称: {nick}");
+    println!("Nickname: {nick}");
     // 原始头部摘要（保留扩展空间）。
     if let Some(obj) = data.as_object() {
         for k in ["gender", "level", "city", "signature"] {
@@ -63,7 +63,7 @@ pub async fn vip() -> Result<(), Box<dyn std::error::Error>> {
     let client = QqMusicClient::new();
     let api = UserApi::new(&client);
     let data = api.get_vip_info(&cred).await?;
-    println!("VIP 信息: {data}");
+    println!("VIP info: {data}");
     Ok(())
 }
 

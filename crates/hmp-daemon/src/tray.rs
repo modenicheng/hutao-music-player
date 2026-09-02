@@ -40,9 +40,9 @@ impl HmpTray {
     fn menu_items(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::StandardItem;
         let play_label = if self.playing.load(Ordering::Relaxed) {
-            "暂停"
+            "Pause"
         } else {
-            "播放"
+            "Play"
         };
         vec![
             StandardItem {
@@ -57,7 +57,7 @@ impl HmpTray {
             }
             .into(),
             StandardItem {
-                label: "上一首".into(),
+                label: "Previous".into(),
                 icon_name: "media-skip-backward".into(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this
@@ -68,7 +68,7 @@ impl HmpTray {
             }
             .into(),
             StandardItem {
-                label: "下一首".into(),
+                label: "Next".into(),
                 icon_name: "media-skip-forward".into(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this.command_tx.send(Request::Command(PlayerCommand::Next));
@@ -77,7 +77,7 @@ impl HmpTray {
             }
             .into(),
             StandardItem {
-                label: "停止".into(),
+                label: "Stop".into(),
                 icon_name: "media-playback-stop".into(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this.command_tx.send(Request::Command(PlayerCommand::Stop));
@@ -86,7 +86,7 @@ impl HmpTray {
             }
             .into(),
             StandardItem {
-                label: "退出".into(),
+                label: "Quit".into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this.command_tx.send(Request::Quit);
@@ -103,7 +103,7 @@ impl ksni::Tray for HmpTray {
         "hmp".into()
     }
     fn title(&self) -> String {
-        "胡桃音乐播放器".into()
+        "Hutao Music Player".into()
     }
     fn icon_name(&self) -> String {
         if self.playing.load(Ordering::Relaxed) {
@@ -154,11 +154,11 @@ pub fn spawn_tray(handle: &EngineHandle) -> Option<ksni::Handle<HmpTray>> {
     match setup_rx.recv_timeout(std::time::Duration::from_millis(100)) {
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Some(tray_handle),
         Ok(Some(msg)) => {
-            tracing::warn!(%msg, "tray 启动失败（可能无桌面会话），跳过");
+            tracing::warn!(%msg, "tray failed to start (no desktop session?); skipping");
             None
         }
         Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            tracing::warn!("tray 服务在启动窗口内退出（可能无桌面会话），跳过");
+            tracing::warn!("tray service exited during startup (no desktop session?); skipping");
             None
         }
     }

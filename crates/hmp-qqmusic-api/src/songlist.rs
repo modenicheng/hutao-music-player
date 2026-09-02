@@ -140,8 +140,9 @@ impl<'a> SonglistApi<'a> {
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        serde_json::from_value::<GetSonglistDetailResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("songlist detail 解析失败: {e}")))
+        serde_json::from_value::<GetSonglistDetailResponse>(data).map_err(|e| {
+            QqMusicError::InvalidResponse(format!("failed to parse songlist detail: {e}"))
+        })
     }
 
     /// 创建歌单（上游 `create`）。重名不失败，服务端自动加时间戳。
@@ -224,8 +225,10 @@ impl<'a> SonglistApi<'a> {
             .musicu_request(&request, Some(credential))
             .await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        let mut resp: CreateDeleteSonglistResp = serde_json::from_value(data.clone())
-            .map_err(|e| QqMusicError::InvalidResponse(format!("playlist write 解析失败: {e}")))?;
+        let mut resp: CreateDeleteSonglistResp =
+            serde_json::from_value(data.clone()).map_err(|e| {
+                QqMusicError::InvalidResponse(format!("failed to parse playlist write: {e}"))
+            })?;
         extract_result_fields(&data, &mut resp);
         Ok(resp)
     }

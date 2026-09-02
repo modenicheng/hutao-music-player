@@ -36,7 +36,7 @@ fn read_session_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Optio
         Ok(bytes) => match serde_json::from_slice(&bytes) {
             Ok(f) => Ok(Some(f)),
             Err(e) => {
-                tracing::warn!(%e, "会话文件损坏，忽略");
+                tracing::warn!(%e, "corrupt session file; ignoring");
                 Ok(None)
             }
         },
@@ -233,7 +233,7 @@ impl PlaybackEngine {
             Some(p) => match read_session_file(p) {
                 Ok(f) => f,
                 Err(e) => {
-                    tracing::warn!(%e, "读取会话文件失败");
+                    tracing::warn!(%e, "failed to read session file");
                     None
                 }
             },
@@ -389,7 +389,7 @@ impl PlaybackEngine {
                                         self.end_session("manual");
                                         self.last_error = None;
                                         self.driver.stop();
-                                        self.phase = hmp_core::EnginePhase::Idle;
+                                        self.enter_idle();
                                         self.publish();
                                     }
                                 } else {
@@ -403,7 +403,7 @@ impl PlaybackEngine {
                                 self.queue.clear();
                                 self.end_session("stop");
                                 self.last_error = None;
-                                self.phase = hmp_core::EnginePhase::Idle;
+                                self.enter_idle();
                                 self.driver.stop();
                             } else {
                                 // 保留当前曲：清除待播曲目，播放/会话不受影响。
@@ -427,7 +427,7 @@ impl PlaybackEngine {
                                 None => {
                                     self.last_error = Some(ErrorInfo {
                                         code: IpcErrorCode::Internal,
-                                        message: format!("不支持的 URI: {uri}"),
+                                        message: format!("unsupported URI: {uri}"),
                                     });
                                     self.seq += 1;
                                     self.publish();
@@ -538,7 +538,7 @@ impl PlaybackEngine {
                 self.saved.position = position;
                 self.saved.last_write = Some(std::time::Instant::now());
             }
-            Err(e) => tracing::warn!(%e, "写入会话文件失败"),
+            Err(e) => tracing::warn!(%e, "failed to write session file"),
         }
     }
 
@@ -656,7 +656,7 @@ impl PlaybackEngine {
             // 空源是确定性失败：携带错误，CLI 不用等到超时。
             self.last_error = Some(ErrorInfo {
                 code: IpcErrorCode::Internal,
-                message: "源解析结果为空，无曲目可播放".into(),
+                message: "source resolved to no tracks".into(),
             });
             self.restore_phase_after_failure();
             self.seq += 1;
@@ -724,10 +724,9 @@ impl PlaybackEngine {
             }
             self.publish();
         } else {
-            // 无续播：阶段 → Idle。RG 增益随曲目清空（Review 打磨：
+            // 无续播：阶段 → Idle，RG 增益随曲目清空（Review 打磨：
             // 避免 status 在曲目为空时残留上一曲的增益）。
-            self.current_rg_db = None;
-            self.phase = hmp_core::EnginePhase::Idle;
+            self.enter_idle();
             self.publish();
         }
     }
@@ -747,9 +746,9 @@ impl PlaybackEngine {
                 Ok(event_id) => {
                     self.session = Some(PlaybackSession { track_id, event_id });
                 }
-                Err(e) => tracing::warn!(%e, "媒体库会话开启失败"),
+                Err(e) => tracing::warn!(%e, "failed to start library play session"),
             },
-            Err(e) => tracing::warn!(%e, "媒体库 upsert 失败"),
+            Err(e) => tracing::warn!(%e, "library upsert failed"),
         }
     }
 
@@ -775,7 +774,7 @@ impl PlaybackEngine {
             reason,
         };
         if let Err(e) = library.record_play_end(s.event_id, &end) {
-            tracing::warn!(%e, "媒体库会话结束回写失败");
+            tracing::warn!(%e, "failed to close library play session");
         }
     }
 
@@ -788,7 +787,7 @@ impl PlaybackEngine {
         let rows: Vec<hmp_storage::TrackRow> = stubs.iter().map(stub_row).collect();
         let mut library = library.lock().unwrap();
         if let Err(e) = library.upsert_tracks_batch(&rows) {
-            tracing::warn!(%e, "媒体库批量缓存失败");
+            tracing::warn!(%e, "library batch cache failed");
         }
     }
 
@@ -814,7 +813,7 @@ impl PlaybackEngine {
             None => match self.resolver.resolve_track(&id).await {
                 Ok(res) => res,
                 Err(e) => {
-                    tracing::error!(%e, "解析失败: {id}");
+                    tracing::error!(%e, "resolve failed: {id}");
                     // 队列位置保持；错误详情进入复合状态（Finding 2）；阶段 → Failed。
                     self.last_error = Some(error_info(&e));
                     self.phase = hmp_core::EnginePhase::Failed;
@@ -934,6 +933,15 @@ impl PlaybackEngine {
         });
     }
 
+    /// 进入 Idle（队列已清空/播完）：同步清 RG 残留——`current_rg_db` 不再
+    /// 随 status 显示已消失曲目的增益，`rg_factor` 归一避免此后 SetVolume
+    /// 被旧曲增益污染（与自然播完路径同一语义）。
+    fn enter_idle(&mut self) {
+        self.current_rg_db = None;
+        self.rg_factor = 1.0;
+        self.phase = hmp_core::EnginePhase::Idle;
+    }
+
     /// 装载/解析失败后的阶段恢复：旧曲仍在播 → Playing，否则 Idle。
     /// 回滚调用方（navigate/QueueRemove/on_ended）在 restore 后调用。
     fn restore_phase_after_failure(&mut self) {
@@ -971,7 +979,7 @@ impl PlaybackEngine {
             .await
             {
                 Ok(Ok(())) => {}
-                Ok(Err(_)) => return Err(EngineError::Internal("状态通道已关闭".into())),
+                Ok(Err(_)) => return Err(EngineError::Internal("state channel closed".into())),
                 Err(_elapsed) => return Err(EngineError::Timeout),
             }
         }
@@ -994,7 +1002,7 @@ impl PlaybackEngine {
             self.driver.seek(position);
             self.driver.play();
         } else {
-            tracing::warn!("回滚装载未确认（旧曲可能无法恢复）");
+            tracing::warn!("rollback load not confirmed (previous track may not be restored)");
         }
     }
 }
@@ -1822,6 +1830,46 @@ mod tests {
             handle.state_rx.borrow().replaygain_db,
             None,
             "无 RG 曲目应为 None"
+        );
+    }
+
+    /// 清空进入 Idle 时 RG 残留必须清零（QueueClear --all / Remove 清空到空）：
+    /// status 不再显示已消失曲目的增益，此后 SetVolume 不被旧增益污染。
+    #[tokio::test]
+    // 锁仅用于串行化改 env 的测试；引擎任务从不获取该锁，无死锁风险。
+    #[allow(clippy::await_holding_lock)]
+    async fn idle_transitions_clear_replaygain() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        // QueueClear{all}：清空后 replaygain_db = None，SetVolume 无补偿。
+        let (driver, _sr, _er) = FakeDriver::new();
+        let resolver = FakeResolver::new(vec![vec![TrackId::new("a")]]);
+        resolver
+            .replaygain
+            .lock()
+            .unwrap()
+            .push((TrackId::new("a"), 6.0));
+        let (handle, _st) = start_engine(driver.clone(), resolver).await;
+        handle
+            .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+            .await
+            .unwrap();
+        wait_idle().await;
+        handle.cmd(Request::QueueClear { all: true }).await.unwrap();
+        wait_idle().await;
+        assert_eq!(
+            handle.state_rx.borrow().replaygain_db,
+            None,
+            "清空队列后不应残留上一曲增益"
+        );
+        handle
+            .cmd(Request::Command(PlayerCommand::SetVolume(0.5)))
+            .await
+            .unwrap();
+        wait_idle().await;
+        let vol = handle.state_rx.borrow().playback.volume;
+        assert!(
+            (vol - 0.5).abs() < 1e-9,
+            "Idle 后 SetVolume 无 RG 补偿: {vol}"
         );
     }
 

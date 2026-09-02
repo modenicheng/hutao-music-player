@@ -11,10 +11,10 @@ use super::tea::{derive_tea_key, tea_cbc_decrypt, tea_cbc_encrypt};
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum Qmc2Error {
     /// ekey 解析失败（Base64 解码错误或格式不符）。
-    #[error("ekey 解析失败")]
+    #[error("ekey parse failed")]
     EKeyParse,
     /// 密钥派生失败（TEA 解密错误）。
-    #[error("QMC2 密钥派生失败")]
+    #[error("QMC2 key derivation failed")]
     KeyDerive,
 }
 

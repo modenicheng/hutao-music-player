@@ -127,7 +127,7 @@ impl<'a> LyricApi<'a> {
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         let resp: GetLyricResponse = serde_json::from_value(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("lyric 解析失败: {e}")))?;
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse lyric: {e}")))?;
         Ok(resp.decrypt_fields())
     }
 }

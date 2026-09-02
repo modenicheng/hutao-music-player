@@ -35,7 +35,7 @@ pub fn provider_of(id: &str) -> (&'static str, String) {
 pub async fn sync() -> Result<(), Box<dyn std::error::Error>> {
     let mut c = DaemonClient::connect_or_spawn().await?;
     commands::cmd_simple(&mut c, Request::LibrarySync).await?;
-    println!("已触发 QQ 媒体库同步");
+    println!("QQ library sync triggered");
     // 轮询本地 outbox 直至空闲（reconcile 写入 synced 事实，pending 为空）。
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
@@ -50,11 +50,11 @@ pub async fn sync() -> Result<(), Box<dyn std::error::Error>> {
             rels.len() + pls.len() + ops.len()
         };
         if pending == 0 {
-            println!("媒体库已同步");
+            println!("Library synced");
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
-            println!("同步超时（仍有 {pending} 条待同步意图，稍后自动重试）");
+            println!("Sync timed out ({pending} intents still pending; will retry automatically)");
             return Ok(());
         }
     }
@@ -70,13 +70,13 @@ pub async fn sync_status() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = std::io::stdout().lock();
     let total = rels.len() + pls.len() + ops.len();
     if total == 0 {
-        writeln!(stdout, "媒体库已同步（无待处理意图）")?;
+        writeln!(stdout, "Library synced (no pending intents)")?;
     } else {
-        writeln!(stdout, "待同步意图: {} 条", total)?;
+        writeln!(stdout, "Pending sync intents: {total}")?;
         for r in rels.iter().filter(|r| r.sync_state == "error") {
             writeln!(
                 stdout,
-                "  错误: {}/{} {} (重试 {} 次: {})",
+                "  error: {}/{} {} (retried {} times: {})",
                 r.entity_type,
                 r.relation,
                 r.entity_key,
@@ -87,7 +87,7 @@ pub async fn sync_status() -> Result<(), Box<dyn std::error::Error>> {
         for p in pls.iter().filter(|p| p.sync_state == "error") {
             writeln!(
                 stdout,
-                "  错误: 歌单 #{} {} (重试 {} 次: {})",
+                "  error: playlist #{} {} (retried {} times: {})",
                 p.id,
                 p.name,
                 p.retry_count,
@@ -97,7 +97,7 @@ pub async fn sync_status() -> Result<(), Box<dyn std::error::Error>> {
         for o in ops.iter().filter(|o| o.sync_state == "error") {
             writeln!(
                 stdout,
-                "  错误: 歌单操作 #{} {} (重试 {} 次: {})",
+                "  error: playlist op #{} {} (retried {} times: {})",
                 o.id,
                 o.op,
                 o.retry_count,
@@ -117,7 +117,7 @@ pub async fn tracks_liked() -> Result<(), Box<dyn std::error::Error>> {
     if rows.is_empty() {
         writeln!(
             stdout,
-            "暂无收藏（hmp favorite add <track-id> 或 hmp library sync）"
+            "No favorites yet (try `hmp favorite add <track-id>` or `hmp library sync`)"
         )?;
     } else {
         for (i, r) in rows.iter().enumerate() {
@@ -139,10 +139,13 @@ pub async fn tracks_local(
     let rows = db.library_tracks(search, artist, album, liked)?;
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
-        writeln!(stdout, "本地库无匹配曲目（先 hmp library scan <目录>）")?;
+        writeln!(
+            stdout,
+            "no matching local tracks (run `hmp library scan <dir>` first)"
+        )?;
     } else {
         for (i, r) in rows.iter().enumerate() {
-            let missing = if r.missing { " [缺失]" } else { "" };
+            let missing = if r.missing { " [missing]" } else { "" };
             writeln!(
                 stdout,
                 "{:>3}. {}{}  {}",
@@ -163,15 +166,18 @@ pub async fn albums_local(search: Option<&str>) -> Result<(), Box<dyn std::error
     let rows = db.library_albums(search)?;
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
-        writeln!(stdout, "本地库无专辑（先 hmp library scan <目录>）")?;
+        writeln!(
+            stdout,
+            "no local albums (run `hmp library scan <dir>` first)"
+        )?;
     } else {
         for (i, g) in rows.iter().enumerate() {
             writeln!(
                 stdout,
-                "{:>3}. {}  {}（{} 首）",
+                "{:>3}. {}  {} ({} tracks)",
                 i + 1,
                 g.album,
-                g.artist.as_deref().unwrap_or("未知歌手"),
+                g.artist.as_deref().unwrap_or("(unknown artist)"),
                 g.track_count
             )?;
         }
@@ -186,10 +192,19 @@ pub async fn artists_local() -> Result<(), Box<dyn std::error::Error>> {
     let rows = db.library_artists()?;
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
-        writeln!(stdout, "本地库无歌手（先 hmp library scan <目录>）")?;
+        writeln!(
+            stdout,
+            "no local artists (run `hmp library scan <dir>` first)"
+        )?;
     } else {
         for (i, g) in rows.iter().enumerate() {
-            writeln!(stdout, "{:>3}. {}（{} 首）", i + 1, g.artist, g.track_count)?;
+            writeln!(
+                stdout,
+                "{:>3}. {} ({} tracks)",
+                i + 1,
+                g.artist,
+                g.track_count
+            )?;
         }
     }
     stdout.flush()?;
@@ -202,7 +217,7 @@ pub async fn albums_liked() -> Result<(), Box<dyn std::error::Error>> {
     let rows = db.relation_rows("album", "liked")?;
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
-        writeln!(stdout, "暂无收藏专辑（hmp library sync）")?;
+        writeln!(stdout, "No liked albums yet (try `hmp library sync`)")?;
     } else {
         for (i, r) in rows.iter().enumerate() {
             writeln!(

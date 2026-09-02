@@ -59,9 +59,9 @@ impl CommentService {
     fn load_credential(&self) -> Result<Credential, String> {
         self.store
             .load()
-            .map_err(|e| format!("读取凭证失败: {e}"))?
+            .map_err(|e| format!("failed to read credentials: {e}"))?
             .filter(|c| c.is_logged_in())
-            .ok_or_else(|| "未登录，请先运行 hmp login".to_string())
+            .ok_or_else(|| "not logged in; run `hmp login` first".to_string())
     }
 
     /// mid → QQ numeric song id：库缓存 → 详情补全（写回库）。
@@ -71,7 +71,7 @@ impl CommentService {
             let mut lib = self.library.lock().unwrap();
             if let Some(id) = lib
                 .qq_song_id("qq", mid)
-                .map_err(|e| format!("媒体库查询失败: {e}"))?
+                .map_err(|e| format!("library query failed: {e}"))?
             {
                 return Ok(id);
             }
@@ -79,12 +79,14 @@ impl CommentService {
         let api = SongApi::new(&self.client);
         let resp = api.get_detail(mid).await.map_err(|e| e.to_string())?;
         if resp.track.id <= 0 {
-            return Err(format!("曲目 {mid} 无 numeric id（QQ 详情缺失）"));
+            return Err(format!(
+                "track {mid} has no numeric id (missing from QQ detail)"
+            ));
         }
         {
             let mut lib = self.library.lock().unwrap();
             lib.set_track_qq_song_id("qq", mid, resp.track.id)
-                .map_err(|e| format!("媒体库写入失败: {e}"))?;
+                .map_err(|e| format!("library write failed: {e}"))?;
         }
         Ok(resp.track.id)
     }
@@ -157,7 +159,7 @@ impl CommentService {
         if ok {
             Ok(())
         } else {
-            Err("QQ 删除评论失败".to_string())
+            Err("failed to delete QQ comment".to_string())
         }
     }
 }

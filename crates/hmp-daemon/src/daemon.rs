@@ -29,22 +29,23 @@ impl Daemon {
         };
         // 媒体库（`$XDG_DATA_HOME/hmp/library.sqlite3`）；打开失败回退内存库
         // （播放历史不持久，播放不受阻断）。
-        let library =
-            match hmp_storage::LibraryDb::open(&hmp_storage::data_dir().join("library.sqlite3")) {
-                Ok(mut db) => {
-                    // 启动恢复：闭合上次异常退出遗留的 open session（幂等）。
-                    if let Err(e) = db.close_stale_sessions() {
-                        tracing::warn!(%e, "闭合遗留播放会话失败");
-                    }
-                    Arc::new(std::sync::Mutex::new(db))
+        let library = match hmp_storage::LibraryDb::open(
+            &hmp_storage::data_dir().join("library.sqlite3"),
+        ) {
+            Ok(mut db) => {
+                // 启动恢复：闭合上次异常退出遗留的 open session（幂等）。
+                if let Err(e) = db.close_stale_sessions() {
+                    tracing::warn!(%e, "failed to close stale playback sessions");
                 }
-                Err(e) => {
-                    tracing::warn!(%e, "媒体库打开失败，回退内存库（历史不持久）");
-                    Arc::new(std::sync::Mutex::new(
-                        hmp_storage::LibraryDb::open_in_memory().unwrap(),
-                    ))
-                }
-            };
+                Arc::new(std::sync::Mutex::new(db))
+            }
+            Err(e) => {
+                tracing::warn!(%e, "failed to open library; falling back to in-memory db (history not persisted)");
+                Arc::new(std::sync::Mutex::new(
+                    hmp_storage::LibraryDb::open_in_memory().unwrap(),
+                ))
+            }
+        };
         // 组合解析器：QQ（网络取流，需凭证）+ 本地（file://，无需凭证）。
         let local = Arc::new(LocalSourceResolver::new(library.clone()));
         let resolver: Arc<dyn SourceResolver> =

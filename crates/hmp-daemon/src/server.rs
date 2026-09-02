@@ -46,7 +46,7 @@ pub async fn serve(listener: UnixListener, handle: EngineHandle) {
                 });
             }
             Err(e) => {
-                tracing::error!(%e, "accept 失败");
+                tracing::error!(%e, "accept failed");
                 break;
             }
         }
@@ -222,7 +222,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 },
                 None => Response::Err {
                     code: IpcErrorCode::Internal,
-                    message: "媒体库不可用".into(),
+                    message: "library unavailable".into(),
                 },
             };
             write_frame(wr, &resp).await?;
@@ -348,7 +348,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 }
                 Some(Err(rusqlite::Error::InvalidQuery)) => Response::Err {
                     code: IpcErrorCode::Internal,
-                    message: "QQ 远端歌单只读（subscribed 仅可取消收藏；owned 不可重命名）".into(),
+                    message: "remote QQ playlists are read-only (subscribed: unlike only; owned: no rename)".into(),
                 },
                 Some(Err(e)) => Response::Err {
                     code: IpcErrorCode::Internal,
@@ -356,7 +356,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 },
                 None => Response::Err {
                     code: IpcErrorCode::Internal,
-                    message: "媒体库不可用".into(),
+                    message: "library unavailable".into(),
                 },
             };
             write_frame(wr, &resp).await?;
@@ -368,7 +368,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     wr,
                     &Response::Err {
                         code: IpcErrorCode::NotLoggedIn,
-                        message: "未登录，请先运行 hmp login".into(),
+                        message: "not logged in; run `hmp login` first".into(),
                     },
                 )
                 .await?;
@@ -381,7 +381,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 }
                 None => Response::Err {
                     code: IpcErrorCode::Internal,
-                    message: "同步 worker 不可用".into(),
+                    message: "sync worker unavailable".into(),
                 },
             };
             write_frame(wr, &resp).await?;
@@ -398,7 +398,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 },
                 None => Response::Err {
                     code: IpcErrorCode::Internal,
-                    message: "评论服务不可用".into(),
+                    message: "comment service unavailable".into(),
                 },
             };
             write_frame(wr, &resp).await?;
@@ -418,7 +418,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 },
                 None => Response::Err {
                     code: IpcErrorCode::Internal,
-                    message: "评论服务不可用".into(),
+                    message: "comment service unavailable".into(),
                 },
             };
             write_frame(wr, &resp).await?;
@@ -434,7 +434,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 },
                 None => Response::Err {
                     code: IpcErrorCode::Internal,
-                    message: "评论服务不可用".into(),
+                    message: "comment service unavailable".into(),
                 },
             };
             write_frame(wr, &resp).await?;
@@ -445,7 +445,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     wr,
                     &Response::Err {
                         code: IpcErrorCode::NotLoggedIn,
-                        message: "未登录，请先运行 hmp login".into(),
+                        message: "not logged in; run `hmp login` first".into(),
                     },
                 )
                 .await?;
@@ -455,7 +455,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 Ok(_) => Response::Ok,
                 Err(_) => Response::Err {
                     code: IpcErrorCode::Internal,
-                    message: "引擎已退出".into(),
+                    message: "engine has exited".into(),
                 },
             };
             write_frame(wr, &resp).await?;
@@ -486,7 +486,7 @@ async fn read_frame<R: AsyncRead + Unpin>(stream: &mut R) -> std::io::Result<Opt
     if len == 0 || len > MAX_FRAME - 4 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "非法帧长度",
+            "invalid frame length",
         ));
     }
     let mut payload = vec![0u8; len];

@@ -31,7 +31,7 @@ pub async fn add(id: &str) -> Result<(), Box<dyn std::error::Error>> {
         },
     )
     .await?;
-    println!("已收藏: {id}");
+    println!("Liked: {id}");
     Ok(())
 }
 
@@ -49,7 +49,7 @@ pub async fn remove(id: &str) -> Result<(), Box<dyn std::error::Error>> {
         },
     )
     .await?;
-    println!("已取消收藏: {id}");
+    println!("Unliked: {id}");
     Ok(())
 }
 
@@ -59,7 +59,10 @@ pub async fn list() -> Result<(), Box<dyn std::error::Error>> {
     let rows = db.list_favorites(100)?;
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
-        writeln!(stdout, "暂无收藏（hmp favorite add <track-id>）")?;
+        writeln!(
+            stdout,
+            "No favorites yet (try `hmp favorite add <track-id>`)"
+        )?;
     } else {
         for (i, r) in rows.iter().enumerate() {
             writeln!(stdout, "{:>2}. {}  {}", i + 1, r.title, r.source_key)?;

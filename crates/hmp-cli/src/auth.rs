@@ -7,22 +7,22 @@ use hmp_storage::credential::{BackendKind, Credential, store_from_env};
 /// 描述登录状况（纯函数，供测试）。
 pub fn format_auth(cred: Option<&Credential>, backend: BackendKind) -> String {
     let Some(cred) = cred else {
-        return "未登录，请先运行 `hmp login`".to_string();
+        return "Not logged in; run `hmp login` first.".to_string();
     };
     let expired = if cred.is_expired() {
-        "已过期"
+        "expired"
     } else {
-        "未过期"
+        "valid"
     };
     let backend_name = match backend {
-        BackendKind::SecretService => "系统密钥环 (SecretService)".to_string(),
+        BackendKind::SecretService => "system keyring (SecretService)".to_string(),
         BackendKind::File => {
             let path = hmp_storage::xdg::config_dir().join("credential.json");
-            format!("明文文件 {}（不安全）", path.display())
+            format!("plaintext file {} (insecure)", path.display())
         }
     };
     format!(
-        "登录: 已登录\n用户: {} (musicid: {})\n过期: {}\n后端: {}",
+        "Logged in: yes\nUser: {} (musicid: {})\nExpiry: {}\nBackend: {}",
         cred.uin, cred.music_id, expired, backend_name
     )
 }
@@ -53,17 +53,17 @@ mod tests {
     fn not_logged_in() {
         assert_eq!(
             format_auth(None, BackendKind::File),
-            "未登录，请先运行 `hmp login`"
+            "Not logged in; run `hmp login` first."
         );
     }
 
     #[test]
     fn logged_in_shows_user_and_expiry() {
         let s = format_auth(Some(&cred()), BackendKind::SecretService);
-        assert!(s.contains("已登录"));
+        assert!(s.contains("Logged in: yes"));
         assert!(s.contains("123456"));
-        assert!(s.contains("未过期")); // 无时间字段 → 视为未过期
-        assert!(s.contains("密钥环"));
+        assert!(s.contains("valid")); // 无时间字段 → 视为未过期
+        assert!(s.contains("keyring"));
     }
 
     #[test]
@@ -74,6 +74,6 @@ mod tests {
         )
         .unwrap();
         let s = format_auth(Some(&c), BackendKind::File);
-        assert!(s.contains("已过期"));
+        assert!(s.contains("expired"));
     }
 }

@@ -35,13 +35,13 @@ pub async fn create(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     match resp {
         hmp_core::Response::Created(id) => {
-            println!("已创建歌单 #{id}: {name}");
+            println!("Created playlist #{id}: {name}");
             Ok(())
         }
         hmp_core::Response::Err { code, message } => {
-            Err(format!("创建失败({code:?}): {message}").into())
+            Err(format!("create failed ({code:?}): {message}").into())
         }
-        _ => Err("创建响应异常".into()),
+        _ => Err("unexpected create response".into()),
     }
 }
 
@@ -58,7 +58,7 @@ pub async fn rename(id: i64, name: &str) -> Result<(), Box<dyn std::error::Error
         },
     )
     .await?;
-    println!("已重命名 #{id}: {name}");
+    println!("Renamed #{id}: {name}");
     Ok(())
 }
 
@@ -72,7 +72,7 @@ pub async fn delete(id: i64) -> Result<(), Box<dyn std::error::Error>> {
         },
     )
     .await?;
-    println!("已删除歌单 #{id}");
+    println!("Deleted playlist #{id}");
     Ok(())
 }
 
@@ -92,7 +92,7 @@ pub async fn add(id: i64, track: &str) -> Result<(), Box<dyn std::error::Error>>
         },
     )
     .await?;
-    println!("已加入歌单 #{id}: {track}");
+    println!("Added to playlist #{id}: {track}");
     Ok(())
 }
 
@@ -106,7 +106,7 @@ pub async fn remove_track(id: i64, position: i64) -> Result<(), Box<dyn std::err
         },
     )
     .await?;
-    println!("已从歌单 #{id} 移除序号 {position}");
+    println!("Removed position {position} from playlist #{id}");
     Ok(())
 }
 
@@ -121,7 +121,7 @@ pub async fn list(scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         Some("favorite") => Some("subscribed"),
         Some("all") | None => None,
         Some(other) => {
-            return Err(format!("未知 scope: {other}（all|local|owned|favorite）").into());
+            return Err(format!("unknown scope: {other} (all|local|owned|favorite)").into());
         }
     };
     let rows: Vec<_> = rows
@@ -132,7 +132,7 @@ pub async fn list(scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     if rows.is_empty() {
         writeln!(
             stdout,
-            "暂无歌单（hmp playlist create <名称> / hmp library sync）"
+            "No playlists yet (try `hmp playlist create <name>` or `hmp library sync`)"
         )?;
     } else {
         writeln!(stdout, "{:<5} {:<12} {:<12} NAME", "ID", "TYPE", "SYNC")?;
@@ -144,7 +144,7 @@ pub async fn list(scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
             };
             writeln!(
                 stdout,
-                "{:<5} {:<12} {:<12} {}  ({} 首)",
+                "{:<5} {:<12} {:<12} {}  ({} tracks)",
                 format!("#{}", p.id),
                 type_name,
                 p.sync_state,
@@ -163,7 +163,7 @@ pub async fn show(id: i64) -> Result<(), Box<dyn std::error::Error>> {
     let tracks = db.playlist_tracks(id)?;
     let mut stdout = std::io::stdout().lock();
     if tracks.is_empty() {
-        writeln!(stdout, "歌单 #{id} 为空")?;
+        writeln!(stdout, "Playlist #{id} is empty")?;
     } else {
         for t in &tracks {
             writeln!(stdout, "{:>3}. {}  {}", t.position, t.title, t.source_key)?;

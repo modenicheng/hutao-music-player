@@ -8,10 +8,10 @@ pub async fn run(keyword: &str) -> Result<(), Box<dyn std::error::Error>> {
     let result = client.quick_search(keyword).await?;
 
     if result.songs.is_empty() {
-        println!("没有找到与「{keyword}」相关的歌曲");
+        println!("No results for \"{keyword}\"");
         return Ok(());
     }
-    println!("搜索「{keyword}」共 {} 个结果:", result.songs.len());
+    println!("{} result(s) for \"{keyword}\":", result.songs.len());
     for (i, song) in result.songs.iter().enumerate() {
         println!(
             "{:>3}. {} - {}  [{}]",
@@ -22,6 +22,6 @@ pub async fn run(keyword: &str) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     println!();
-    println!("播放: hmp play <songmid>");
+    println!("Play: hmp play <songmid>");
     Ok(())
 }

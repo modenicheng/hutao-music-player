@@ -91,9 +91,9 @@ impl QualityPref {
                     .collect::<Vec<_>>()
                     .join("→");
                 if self.fallback {
-                    format!("自动：{chain}")
+                    format!("auto: {chain}")
                 } else {
-                    format!("自动（仅最高档：{chain}）")
+                    format!("auto (top tier only: {chain})")
                 }
             }
             QualityMode::Fixed(q) => {
@@ -105,9 +105,9 @@ impl QualityPref {
                         .map(|x| x.to_alias())
                         .collect::<Vec<_>>()
                         .join("/");
-                    format!("{}（回退 {rest}）", q.to_alias())
+                    format!("{} (fallback {rest})", q.to_alias())
                 } else {
-                    format!("{}（不回退）", q.to_alias())
+                    format!("{} (no fallback)", q.to_alias())
                 }
             }
         }

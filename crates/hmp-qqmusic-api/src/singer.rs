@@ -795,7 +795,7 @@ impl<'a> SingerApi<'a> {
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value::<SingerTypeListResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("singer list 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse singer list: {e}")))
     }
 
     /// 获取按索引分页的歌手列表（上游 `get_singer_list_index`）。
@@ -822,8 +822,9 @@ impl<'a> SingerApi<'a> {
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        serde_json::from_value::<SingerIndexPageResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("singer list index 解析失败: {e}")))
+        serde_json::from_value::<SingerIndexPageResponse>(data).map_err(|e| {
+            QqMusicError::InvalidResponse(format!("failed to parse singer list index: {e}"))
+        })
     }
 
     /// 获取歌手主页基本信息（上游 `get_info`，固定 Android 平台）。
@@ -836,8 +837,10 @@ impl<'a> SingerApi<'a> {
         .with_comm(android_comm());
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        let mut resp: HomepageHeaderResponse = serde_json::from_value(data.clone())
-            .map_err(|e| QqMusicError::InvalidResponse(format!("homepage header 解析失败: {e}")))?;
+        let mut resp: HomepageHeaderResponse =
+            serde_json::from_value(data.clone()).map_err(|e| {
+                QqMusicError::InvalidResponse(format!("failed to parse homepage header: {e}"))
+            })?;
         extract_homepage_info(&data, &mut resp);
         Ok(resp)
     }
@@ -865,8 +868,10 @@ impl<'a> SingerApi<'a> {
         .with_comm(android_comm());
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        let mut resp: HomepageTabDetailResponse = serde_json::from_value(data.clone())
-            .map_err(|e| QqMusicError::InvalidResponse(format!("homepage tab 解析失败: {e}")))?;
+        let mut resp: HomepageTabDetailResponse =
+            serde_json::from_value(data.clone()).map_err(|e| {
+                QqMusicError::InvalidResponse(format!("failed to parse homepage tab: {e}"))
+            })?;
         extract_tab_contents(&data, &mut resp);
         Ok(resp)
     }
@@ -899,7 +904,7 @@ impl<'a> SingerApi<'a> {
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value::<SingerDetailResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("singer desc 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse singer desc: {e}")))
     }
 
     /// 获取相似歌手列表（上游 `get_similar`）。
@@ -915,8 +920,9 @@ impl<'a> SingerApi<'a> {
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        serde_json::from_value::<SimilarSingerResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("similar singer 解析失败: {e}")))
+        serde_json::from_value::<SimilarSingerResponse>(data).map_err(|e| {
+            QqMusicError::InvalidResponse(format!("failed to parse similar singer: {e}"))
+        })
     }
 
     /// 获取歌手的歌曲列表（上游 `get_songs_list`）。
@@ -933,8 +939,10 @@ impl<'a> SingerApi<'a> {
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        let mut resp: SingerSongListResponse = serde_json::from_value(data.clone())
-            .map_err(|e| QqMusicError::InvalidResponse(format!("singer songs 解析失败: {e}")))?;
+        let mut resp: SingerSongListResponse =
+            serde_json::from_value(data.clone()).map_err(|e| {
+                QqMusicError::InvalidResponse(format!("failed to parse singer songs: {e}"))
+            })?;
         resp.song_list = extract_singer_songs(&data);
         Ok(resp)
     }
@@ -953,8 +961,9 @@ impl<'a> SingerApi<'a> {
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        serde_json::from_value::<SingerAlbumListResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("singer albums 解析失败: {e}")))
+        serde_json::from_value::<SingerAlbumListResponse>(data).map_err(|e| {
+            QqMusicError::InvalidResponse(format!("failed to parse singer albums: {e}"))
+        })
     }
 
     /// 获取歌手 MV 列表（上游 `get_mv_list`）。
@@ -972,7 +981,7 @@ impl<'a> SingerApi<'a> {
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value::<SingerMvListResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("singer mvs 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse singer mvs: {e}")))
     }
 }
 

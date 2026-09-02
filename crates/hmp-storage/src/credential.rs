@@ -191,8 +191,8 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Secret Service 错误 → 可操作的 `HmpError::Storage` 提示。
 fn secret_service_error(e: &keyring::Error) -> HmpError {
     HmpError::Storage(format!(
-        "系统密钥环不可用（{e}）。请安装并启动 gnome-keyring 或 kwallet，\
-         或使用 HMP_CREDENTIAL_BACKEND=file 回退到明文文件（不安全）"
+        "system keyring unavailable ({e}). Install and start gnome-keyring or kwallet, \
+         or set HMP_CREDENTIAL_BACKEND=file to fall back to a plaintext file (insecure)"
     ))
 }
 

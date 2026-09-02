@@ -54,7 +54,7 @@ impl QRCodeLoginEvents {
             65 | 402 => Ok(Self::Timeout),
             68 | 403 => Ok(Self::Refuse),
             other => Err(QqMusicError::InvalidResponse(format!(
-                "无法识别的二维码登录状态码: {other}"
+                "unrecognized QR login status code: {other}"
             ))),
         }
     }
@@ -151,26 +151,26 @@ impl<'a> LoginApi<'a> {
             1000 | 104401 | 104400 => Err(QqMusicError::LoginAuthExpired),
             20261 => Err(QqMusicError::Login {
                 code,
-                message: "登录参数错误".into(),
+                message: "invalid login parameters".into(),
             }),
             20271 => Err(QqMusicError::Login {
                 code,
-                message: "验证码错误".into(),
+                message: "captcha error".into(),
             }),
             20272 => Err(QqMusicError::Login {
                 code,
-                message: "账号绑定异常".into(),
+                message: "account binding error".into(),
             }),
             20274 => Err(QqMusicError::Login {
                 code,
-                message: "账号绑定缺失".into(),
+                message: "account binding missing".into(),
             }),
             20277 | 20278 | 20450 => Err(QqMusicError::LoginAccountRestricted),
             20279 => Err(QqMusicError::LoginDeviceLimit),
             104604 => Err(QqMusicError::LoginRateLimit),
             other => Err(QqMusicError::Login {
                 code: other,
-                message: format!("登录业务错误码 {other}"),
+                message: format!("login business error code {other}"),
             }),
         }
     }
@@ -295,19 +295,19 @@ impl<'a> LoginApi<'a> {
             }
             QqMusicError::LoginAuthExpired => QqMusicError::CredentialRefresh {
                 code: 1000,
-                message: "登录鉴权参数无效或已过期".into(),
+                message: "login auth parameters invalid or expired".into(),
             },
             QqMusicError::LoginDeviceLimit => QqMusicError::CredentialRefresh {
                 code: 20279,
-                message: "登录设备超限".into(),
+                message: "login device limit reached".into(),
             },
             QqMusicError::LoginAccountRestricted => QqMusicError::CredentialRefresh {
                 code: 20277,
-                message: "账号受限".into(),
+                message: "account restricted or banned".into(),
             },
             QqMusicError::LoginRateLimit => QqMusicError::CredentialRefresh {
                 code: 104604,
-                message: "操作过于频繁".into(),
+                message: "login rate limited".into(),
             },
             other => other,
         })?;
@@ -338,11 +338,11 @@ impl<'a> LoginApi<'a> {
     pub async fn get_qrcode(&self, login_type: QRLoginType) -> Result<QR, QqMusicError> {
         match login_type {
             QRLoginType::Qq => self.get_qq_qr().await,
-            QRLoginType::Wechat => {
-                Err(QqMusicError::InvalidResponse("微信扫码登录暂未移植".into()))
-            }
+            QRLoginType::Wechat => Err(QqMusicError::InvalidResponse(
+                "WeChat QR login not ported yet".into(),
+            )),
             QRLoginType::Mobile => Err(QqMusicError::InvalidResponse(
-                "手机客户端扫码登录暂未移植".into(),
+                "mobile client QR login not ported yet".into(),
             )),
         }
     }
@@ -351,11 +351,11 @@ impl<'a> LoginApi<'a> {
     pub async fn check_qrcode(&self, qrcode: &QR) -> Result<QRLoginResult, QqMusicError> {
         match qrcode.qr_type {
             QRLoginType::Qq => self.check_qq_qr(qrcode).await,
-            QRLoginType::Wechat => {
-                Err(QqMusicError::InvalidResponse("微信扫码登录暂未移植".into()))
-            }
+            QRLoginType::Wechat => Err(QqMusicError::InvalidResponse(
+                "WeChat QR login not ported yet".into(),
+            )),
             QRLoginType::Mobile => Err(QqMusicError::InvalidResponse(
-                "手机客户端扫码登录暂未移植".into(),
+                "mobile client QR login not ported yet".into(),
             )),
         }
     }
@@ -387,7 +387,7 @@ impl<'a> LoginApi<'a> {
             .await?;
 
         let qrsig = extract_cookie(&resp, "qrsig")
-            .ok_or_else(|| QqMusicError::InvalidResponse("获取 qrsig 失败".into()))?;
+            .ok_or_else(|| QqMusicError::InvalidResponse("failed to obtain qrsig".into()))?;
 
         let data = resp
             .bytes()
@@ -509,7 +509,7 @@ impl<'a> LoginApi<'a> {
             .iter()
             .find(|(k, _)| k == "p_skey")
             .map(|(_, v)| v.clone())
-            .ok_or_else(|| QqMusicError::InvalidResponse("获取 p_skey 失败".into()))?;
+            .ok_or_else(|| QqMusicError::InvalidResponse("failed to obtain p_skey".into()))?;
 
         // 2) oauth authorize → Location 中的 code
         let resp = self
@@ -546,7 +546,7 @@ impl<'a> LoginApi<'a> {
             .headers()
             .get(reqwest::header::LOCATION)
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| QqMusicError::InvalidResponse("获取 code 失败".into()))?
+            .ok_or_else(|| QqMusicError::InvalidResponse("failed to obtain code".into()))?
             .to_owned();
         let code = extract_code_from_location(&location)?;
 
@@ -593,14 +593,14 @@ impl<'a> LoginApi<'a> {
                 if cancel.is_cancelled() {
                     return Err(QqMusicError::Login {
                         code: -1,
-                        message: "登录已取消".into(),
+                        message: "login canceled".into(),
                     });
                 }
             }
             if Instant::now() >= deadline {
                 return Err(QqMusicError::Login {
                     code: -1,
-                    message: "登录二维码已超时".into(),
+                    message: "login QR code has timed out".into(),
                 });
             }
 
@@ -618,7 +618,7 @@ impl<'a> LoginApi<'a> {
                     if !sleep_before_deadline(deadline, backoff, cancel).await {
                         return Err(QqMusicError::Login {
                             code: -1,
-                            message: "登录二维码已超时".into(),
+                            message: "login QR code has timed out".into(),
                         });
                     }
                     error_retries += 1;
@@ -645,7 +645,7 @@ impl<'a> LoginApi<'a> {
                 {
                     return Err(QqMusicError::Login {
                         code: -1,
-                        message: "登录二维码已超时".into(),
+                        message: "login QR code has timed out".into(),
                     });
                 }
                 continue;
@@ -656,19 +656,19 @@ impl<'a> LoginApi<'a> {
                 QRCodeLoginEvents::Done => {
                     return item.credential.ok_or_else(|| QqMusicError::Login {
                         code: -1,
-                        message: "登录结果缺少凭证".into(),
+                        message: "login result is missing credentials".into(),
                     });
                 }
                 QRCodeLoginEvents::Refuse => {
                     return Err(QqMusicError::Login {
                         code: -1,
-                        message: "用户拒绝了登录请求".into(),
+                        message: "user rejected the login request".into(),
                     });
                 }
                 QRCodeLoginEvents::Timeout => {
                     return Err(QqMusicError::Login {
                         code: -1,
-                        message: "登录二维码已超时".into(),
+                        message: "login QR code has timed out".into(),
                     });
                 }
                 QRCodeLoginEvents::Scan | QRCodeLoginEvents::Conf => {
@@ -687,7 +687,7 @@ impl<'a> LoginApi<'a> {
                     {
                         return Err(QqMusicError::Login {
                             code: -1,
-                            message: "登录二维码已超时".into(),
+                            message: "login QR code has timed out".into(),
                         });
                     }
                 }
@@ -705,13 +705,17 @@ impl<'a> LoginApi<'a> {
 /// 返回 `(status_code, args)`。响应格式：
 /// `ptuiCB('0','0','https://graph.qq.com/oauth2.0/login_jump?...', '0', ...)`
 fn parse_ptui_cb(text: &str) -> Result<(i64, Vec<String>), QqMusicError> {
-    let start = text
-        .find("ptuiCB(")
-        .ok_or_else(|| QqMusicError::InvalidResponse("获取二维码状态失败: 无法解析响应".into()))?;
+    let start = text.find("ptuiCB(").ok_or_else(|| {
+        QqMusicError::InvalidResponse(
+            "failed to query QR login status: unparseable response".into(),
+        )
+    })?;
     let rest = &text[start + 7..];
-    let end = rest
-        .find(')')
-        .ok_or_else(|| QqMusicError::InvalidResponse("获取二维码状态失败: 无法解析响应".into()))?;
+    let end = rest.find(')').ok_or_else(|| {
+        QqMusicError::InvalidResponse(
+            "failed to query QR login status: unparseable response".into(),
+        )
+    })?;
     let args_str = &rest[..end];
 
     let mut args = Vec::new();
@@ -744,11 +748,13 @@ fn parse_ptui_cb(text: &str) -> Result<(i64, Vec<String>), QqMusicError> {
     }
 
     let code_str = args.first().ok_or_else(|| {
-        QqMusicError::InvalidResponse("获取二维码状态失败: 无法解析状态参数".into())
+        QqMusicError::InvalidResponse(
+            "failed to query QR login status: unparseable status params".into(),
+        )
     })?;
-    let code = code_str
-        .parse::<i64>()
-        .map_err(|_| QqMusicError::InvalidResponse("获取二维码状态失败: 无效的状态码".into()))?;
+    let code = code_str.parse::<i64>().map_err(|_| {
+        QqMusicError::InvalidResponse("failed to query QR login status: invalid status code".into())
+    })?;
     Ok((code, args))
 }
 
@@ -756,15 +762,19 @@ fn parse_ptui_cb(text: &str) -> Result<(i64, Vec<String>), QqMusicError> {
 fn parse_done_args(args: &[String]) -> Result<(String, String), QqMusicError> {
     if args.len() < 3 {
         return Err(QqMusicError::InvalidResponse(
-            "获取登录凭据失败: 缺少必要参数".into(),
+            "failed to obtain login credentials: missing required params".into(),
         ));
     }
     let url = &args[2];
     let sigx = extract_query_param(url, "ptsigx").ok_or_else(|| {
-        QqMusicError::InvalidResponse("获取登录凭据失败: 无法解析必要参数".into())
+        QqMusicError::InvalidResponse(
+            "failed to obtain login credentials: unparseable required params".into(),
+        )
     })?;
     let uin = extract_query_param(url, "uin").ok_or_else(|| {
-        QqMusicError::InvalidResponse("获取登录凭据失败: 无法解析必要参数".into())
+        QqMusicError::InvalidResponse(
+            "failed to obtain login credentials: unparseable required params".into(),
+        )
     })?;
     Ok((uin, sigx))
 }
@@ -790,7 +800,9 @@ fn extract_code_from_location(location: &str) -> Result<String, QqMusicError> {
             }
         }
     }
-    Err(QqMusicError::InvalidResponse("获取 code 失败".into()))
+    Err(QqMusicError::InvalidResponse(
+        "failed to obtain code".into(),
+    ))
 }
 
 /// 从响应 Set-Cookie 中提取指定 cookie 值。

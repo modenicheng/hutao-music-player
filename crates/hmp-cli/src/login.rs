@@ -25,7 +25,7 @@ fn print_qr(data: &[u8], path: &std::path::Path, out: &mut impl Write) -> std::i
             if !render.is_expected_size {
                 writeln!(
                     out,
-                    "警告：二维码图像尺寸为 {}×{}（预期 {}×{}），显示可能有误；如扫码失败请打开: {}",
+                    "warning: QR image size is {}x{} (expected {}x{}); display may be wrong. If scanning fails, open: {}",
                     render.size.0,
                     render.size.1,
                     qr_ascii::EXPECTED_QR_SIZE,
@@ -36,7 +36,11 @@ fn print_qr(data: &[u8], path: &std::path::Path, out: &mut impl Write) -> std::i
             Ok(true)
         }
         Err(e) => {
-            writeln!(out, "二维码渲染失败（{e}），请手动打开: {}", path.display())?;
+            writeln!(
+                out,
+                "QR render failed ({e}); please open manually: {}",
+                path.display()
+            )?;
             Ok(false)
         }
     }
@@ -53,7 +57,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         // 剩余墙钟时间为零 → 不再等待（final review Finding 10）。
         let Some(wait_timeout) = wait_timeout(&overall_deadline) else {
-            return Err("登录超时（10 分钟上限）".into());
+            return Err("login timed out (10 minute limit)".into());
         };
         let qr = login.get_qrcode(QRLoginType::Qq).await?;
         let qr_path = std::env::temp_dir().join("hmp-qr.png");
@@ -62,7 +66,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         out.flush()?;
         writeln!(
             out,
-            "请用 QQ 手机版扫码并确认登录……（二维码过期将自动刷新）"
+            "Scan the QR code with the QQ mobile app and confirm login... (expired codes refresh automatically)"
         )?;
         out.flush()?;
 
@@ -78,14 +82,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     BackendKind::SecretService => {
                         writeln!(
                             out,
-                            "登录成功! 用户: {} ({}), 凭证已保存到系统密钥环",
+                            "Login successful! User: {} ({}), credentials saved to the system keyring",
                             credential.uin, credential.music_id
                         )?;
                     }
                     BackendKind::File => {
                         writeln!(
                             out,
-                            "登录成功! 用户: {} ({}), 凭证已保存到 {}（明文，不安全）",
+                            "Login successful! User: {} ({}), credentials saved to {} (plaintext, insecure)",
                             credential.uin,
                             credential.music_id,
                             hmp_storage::xdg::config_dir()
@@ -99,7 +103,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) if should_refresh(&e, Instant::now(), overall_deadline) => {
                 // 二维码过期/超时 → 自动刷新（不重跑命令）
-                writeln!(out, "\n二维码已过期，自动刷新…")?;
+                writeln!(out, "\nQR code expired, refreshing...")?;
                 out.flush()?;
                 continue;
             }
@@ -122,11 +126,13 @@ fn wait_timeout(deadline: &Instant) -> Option<Duration> {
 /// final review Finding 10：用户拒绝/取消不刷新）。
 fn should_refresh(err: &hmp_qqmusic_api::QqMusicError, now: Instant, deadline: Instant) -> bool {
     use hmp_qqmusic_api::QqMusicError;
-    let is_timeout = matches!(
-        err,
-        QqMusicError::Login { code: -1, message } if message.contains("超时")
-    );
-    is_timeout && now < deadline
+    // QQ 服务端超时消息为中文（「二维码已超时」）；容错匹配英文小写形式，
+    // 防服务端文案切换语言后自动刷新失效。
+    let msg = match err {
+        QqMusicError::Login { code: -1, message } => message.to_lowercase(),
+        _ => return false,
+    };
+    (msg.contains("超时") || msg.contains("timeout") || msg.contains("timed out")) && now < deadline
 }
 
 #[cfg(test)]
@@ -152,13 +158,13 @@ mod tests {
         let mut out = Vec::new();
         print_qr(&png(111), path, &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
-        assert!(!s.contains("警告"));
+        assert!(!s.contains("warning"));
         // 99×99 → 警告 + 兑底路径
         let mut out = Vec::new();
         print_qr(&png(99), path, &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("警告"));
-        assert!(s.contains("99×99"));
+        assert!(s.contains("warning"));
+        assert!(s.contains("99x99"));
         assert!(s.contains("/tmp/hmp-qr.png"));
     }
 
@@ -166,7 +172,7 @@ mod tests {
     fn timeout_before_deadline_refreshes() {
         let err = hmp_qqmusic_api::QqMusicError::Login {
             code: -1,
-            message: "登录二维码已超时".into(),
+            message: "login QR code has timed out".into(),
         };
         assert!(should_refresh(
             &err,
@@ -180,7 +186,7 @@ mod tests {
     fn refusal_does_not_refresh() {
         let err = hmp_qqmusic_api::QqMusicError::Login {
             code: -1,
-            message: "用户拒绝了登录请求".into(),
+            message: "user rejected the login request".into(),
         };
         assert!(!should_refresh(
             &err,
@@ -194,7 +200,7 @@ mod tests {
     fn cancel_does_not_refresh() {
         let err = hmp_qqmusic_api::QqMusicError::Login {
             code: -1,
-            message: "登录已取消".into(),
+            message: "login canceled".into(),
         };
         assert!(!should_refresh(
             &err,
@@ -222,7 +228,7 @@ mod tests {
     fn timeout_after_deadline_stops() {
         let err = hmp_qqmusic_api::QqMusicError::Login {
             code: -1,
-            message: "登录二维码已超时".into(),
+            message: "login QR code has timed out".into(),
         };
         assert!(!should_refresh(
             &err,

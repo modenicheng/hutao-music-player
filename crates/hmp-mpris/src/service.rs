@@ -81,8 +81,8 @@ impl MprisRoot {
         match &self.quit_tx {
             Some(tx) => tx
                 .send(())
-                .map_err(|_| zbus::fdo::Error::Failed("退出转发通道关闭".into())),
-            None => Err(zbus::fdo::Error::NotSupported("退出不可用".into())),
+                .map_err(|_| zbus::fdo::Error::Failed("quit forwarding channel closed".into())),
+            None => Err(zbus::fdo::Error::NotSupported("quit unavailable".into())),
         }
     }
 
@@ -195,7 +195,9 @@ impl MprisPlayer {
             }
         }
         if !self.can_seek {
-            return Err(zbus::fdo::Error::NotSupported("当前曲目不支持跳转".into()));
+            return Err(zbus::fdo::Error::NotSupported(
+                "seeking is not supported for the current track".into(),
+            ));
         }
         if position_us < 0 {
             return Ok(());
@@ -220,10 +222,12 @@ impl MprisPlayer {
         match &self.open_uri_tx {
             Some(tx) => {
                 tx.send(uri.to_string())
-                    .map_err(|_| zbus::fdo::Error::Failed("转发通道关闭".into()))?;
+                    .map_err(|_| zbus::fdo::Error::Failed("forwarding channel closed".into()))?;
                 Ok(())
             }
-            None => Err(zbus::fdo::Error::NotSupported("URI 播放暂不支持".into())),
+            None => Err(zbus::fdo::Error::NotSupported(
+                "URI playback not supported".into(),
+            )),
         }
     }
 
@@ -282,7 +286,7 @@ impl MprisPlayer {
     fn set_rate(&mut self, rate: f64) -> zbus::fdo::Result<()> {
         if (rate - 1.0).abs() > f64::EPSILON {
             return Err(zbus::fdo::Error::NotSupported(
-                "仅支持 1.0x 播放速率".into(),
+                "only 1.0x playback rate is supported".into(),
             ));
         }
         self.rate = rate;
@@ -416,7 +420,7 @@ impl MprisService {
             .serve_at(
                 OBJECT_PATH,
                 MprisRoot {
-                    identity: "胡桃音乐播放器".into(),
+                    identity: "Hutao Music Player".into(),
                     quit_tx: quit_tx.clone(),
                 },
             )?

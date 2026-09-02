@@ -67,7 +67,7 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
     {
         use std::os::unix::io::AsRawFd;
         if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            eprintln!("已有后端在运行，退出");
+            eprintln!("daemon already running; exiting");
             return Ok(());
         }
     }
@@ -76,7 +76,7 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
     if path.exists() {
         // 尝试连接：能连说明有活 daemon，本实例退出；不能连则删残留
         if tokio::net::UnixStream::connect(&path).await.is_ok() {
-            eprintln!("已有后端在运行，退出");
+            eprintln!("daemon already running; exiting");
             return Ok(());
         }
         let _ = std::fs::remove_file(&path);
@@ -86,10 +86,10 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
     {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!(%e, "设置 socket 0600 失败");
+            tracing::warn!(%e, "failed to set socket permissions 0600");
         }
     }
-    tracing::info!(?path, "后端已就绪");
+    tracing::info!(?path, "daemon ready");
     // 优雅退出：SIGINT/SIGTERM → 只发 Request::Quit（引擎处理完 Quit 才退出
     // 并置位 terminated；不再有并行的 quit_tx，避免清理先于 driver.shutdown）。
     let handle = daemon.handle;
@@ -148,7 +148,7 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
     drop(mpris);
     #[cfg(windows)]
     drop(smtc);
-    tracing::info!("后端已退出");
+    tracing::info!("daemon exited");
     Ok(())
 }
 

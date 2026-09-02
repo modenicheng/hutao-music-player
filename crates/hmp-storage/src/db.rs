@@ -488,7 +488,7 @@ impl LibraryDb {
                 title: path
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("未知")
+                    .unwrap_or("(unknown title)")
                     .to_string(),
                 ..Default::default()
             },
@@ -686,7 +686,7 @@ impl LibraryDb {
                 .unwrap_or_else(|| {
                     path.file_stem()
                         .and_then(|s| s.to_str())
-                        .unwrap_or("未知")
+                        .unwrap_or("(unknown title)")
                         .to_string()
                 });
             let tid = self.upsert_track(&TrackRow {

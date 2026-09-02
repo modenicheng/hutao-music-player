@@ -11,7 +11,7 @@ use crate::client::{CliError, DaemonClient};
 pub fn format_status(st: &DaemonState) -> String {
     let mut s = String::new();
     let track = st.playback.current.as_ref();
-    let title = track.map(|t| t.title.as_str()).unwrap_or("（无）");
+    let title = track.map(|t| t.title.as_str()).unwrap_or("(none)");
     let artist = track
         .map(|t| {
             t.artists
@@ -21,32 +21,35 @@ pub fn format_status(st: &DaemonState) -> String {
                 .join(" / ")
         })
         .unwrap_or_default();
-    s.push_str(&format!("状态: {:?}\n", st.playback.status));
-    s.push_str(&format!("引擎: {:?}\n", st.phase));
-    s.push_str(&format!("曲目: {title} - {artist}\n"));
+    s.push_str(&format!("State: {:?}\n", st.playback.status));
+    s.push_str(&format!("Engine: {:?}\n", st.phase));
+    s.push_str(&format!("Track: {title} - {artist}\n"));
     match st.playback.duration {
         Some(d) => s.push_str(&format!(
-            "进度: {} / {}\n",
+            "Progress: {} / {}\n",
             fmt_duration(st.playback.position),
             fmt_duration(d)
         )),
-        None => s.push_str(&format!("进度: {}\n", fmt_duration(st.playback.position))),
+        None => s.push_str(&format!(
+            "Progress: {}\n",
+            fmt_duration(st.playback.position)
+        )),
     }
-    s.push_str(&format!("音量: {:.0}%\n", st.playback.volume * 100.0));
+    s.push_str(&format!("Volume: {:.0}%\n", st.playback.volume * 100.0));
     match st.playback.actual_quality.as_ref() {
-        Some(q) => s.push_str(&format!("音质: {}\n", q.to_alias())),
-        None => s.push_str("音质: （无）\n"),
+        Some(q) => s.push_str(&format!("Quality: {}\n", q.to_alias())),
+        None => s.push_str("Quality: (none)\n"),
     }
     // 打磨：当前曲 ReplayGain（无标签/QQ 曲目 → 无）。
     match st.replaygain_db {
-        Some(db) => s.push_str(&format!("增益: {:+.1} dB\n", db)),
-        None => s.push_str("增益: （无）\n"),
+        Some(db) => s.push_str(&format!("ReplayGain: {:+.1} dB\n", db)),
+        None => s.push_str("ReplayGain: (none)\n"),
     }
     s.push_str(&format!(
-        "循环: {:?}  随机: {}\n",
+        "Loop: {:?}  Shuffle: {}\n",
         st.playback.loop_mode, st.playback.shuffle
     ));
-    s.push_str(&format!("队列: {} 首\n", st.queue.len));
+    s.push_str(&format!("Queue: {} track(s)\n", st.queue.len));
     s
 }
 
@@ -66,7 +69,7 @@ pub async fn cmd_play(client: &mut DaemonClient, src: &str) -> Result<(), CliErr
     // 直到 seq 前进（引擎已处理本命令），才按最终状态判定成败。
     let seq0 = match send(client, Request::Status).await? {
         Response::Status(s) => s.seq,
-        _ => return Err(CliError::Protocol("Status 响应异常".into())),
+        _ => return Err(CliError::Protocol("unexpected Status response".into())),
     };
     let req = Request::Play(parse_source(src));
     let resp = send(client, req).await?;
@@ -77,7 +80,7 @@ pub async fn cmd_play(client: &mut DaemonClient, src: &str) -> Result<(), CliErr
             Ok(())
         }
         Response::Err { code, message } => Err(CliError::Response { code, message }),
-        _ => Err(CliError::Protocol("意外响应".into())),
+        _ => Err(CliError::Protocol("unexpected response".into())),
     }
 }
 
@@ -85,7 +88,7 @@ pub async fn cmd_play(client: &mut DaemonClient, src: &str) -> Result<(), CliErr
 pub async fn cmd_playnext(client: &mut DaemonClient, src: &str) -> Result<(), CliError> {
     let seq0 = match send(client, Request::Status).await? {
         Response::Status(s) => s.seq,
-        _ => return Err(CliError::Protocol("Status 响应异常".into())),
+        _ => return Err(CliError::Protocol("unexpected Status response".into())),
     };
     let req = Request::PlayNext(parse_source(src));
     let resp = send(client, req).await?;
@@ -96,14 +99,14 @@ pub async fn cmd_playnext(client: &mut DaemonClient, src: &str) -> Result<(), Cl
             Ok(())
         }
         Response::Err { code, message } => Err(CliError::Response { code, message }),
-        _ => Err(CliError::Protocol("意外响应".into())),
+        _ => Err(CliError::Protocol("unexpected response".into())),
     }
 }
 
 /// 打印「已开始播放: <标题>」。
 fn print_started(title: &str) {
     let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "已开始播放: {title}");
+    let _ = writeln!(out, "Now playing: {title}");
     let _ = out.flush();
 }
 
@@ -120,7 +123,7 @@ async fn await_playing(client: &mut DaemonClient, seq0: u64) -> Result<String, C
     loop {
         let st = match send(client, Request::Status).await? {
             Response::Status(s) => s,
-            _ => return Err(CliError::Protocol("Status 响应异常".into())),
+            _ => return Err(CliError::Protocol("unexpected Status response".into())),
         };
         match decide_await_step(
             seq0,
@@ -158,7 +161,7 @@ fn decide_await_step(
         if deadline_hit {
             return AwaitStep::Failure(CliError::Response {
                 code: IpcErrorCode::Internal,
-                message: "播放确认超时（15s）".into(),
+                message: "timed out waiting for playback confirmation (15s)".into(),
             });
         }
         return AwaitStep::KeepWaiting;
@@ -184,7 +187,7 @@ fn decide_await_step(
             // 播放器错误是确定性失败（即使无错误详情）。
             let info = st.last_error.clone().unwrap_or(hmp_core::ErrorInfo {
                 code: IpcErrorCode::Internal,
-                message: "播放失败（见后端日志）".into(),
+                message: "playback failed (see daemon log)".into(),
             });
             AwaitStep::Failure(CliError::Response {
                 code: info.code,
@@ -203,9 +206,10 @@ fn decide_await_step(
                 AwaitStep::Failure(CliError::Response {
                     code: IpcErrorCode::Internal,
                     message: if last_empty_without_error {
-                        "播放确认超时（15s）：后端仍空闲".into()
+                        "timed out waiting for playback confirmation (15s): daemon still idle"
+                            .into()
                     } else {
-                        "播放确认超时（15s）".into()
+                        "timed out waiting for playback confirmation (15s)".into()
                     },
                 })
             } else {
@@ -216,7 +220,7 @@ fn decide_await_step(
             if deadline_hit {
                 AwaitStep::Failure(CliError::Response {
                     code: IpcErrorCode::Internal,
-                    message: "播放确认超时（15s）".into(),
+                    message: "timed out waiting for playback confirmation (15s)".into(),
                 })
             } else {
                 AwaitStep::KeepWaiting
@@ -254,7 +258,7 @@ pub async fn cmd_status(client: &mut DaemonClient) -> Result<(), CliError> {
             out.flush()?;
             Ok(())
         }
-        _ => Err(CliError::Protocol("Status 响应异常".into())),
+        _ => Err(CliError::Protocol("unexpected Status response".into())),
     }
 }
 
@@ -264,7 +268,7 @@ pub async fn cmd_simple(client: &mut DaemonClient, req: Request) -> Result<(), C
     match resp {
         Response::Ok => Ok(()),
         Response::Err { code, message } => Err(CliError::Response { code, message }),
-        _ => Err(CliError::Protocol("意外响应".into())),
+        _ => Err(CliError::Protocol("unexpected response".into())),
     }
 }
 
@@ -287,7 +291,7 @@ pub async fn cmd_queue_list(
         )
         .await?;
         let Response::QueueList(page) = resp else {
-            return Err(CliError::Protocol("QueueList 响应异常".into()));
+            return Err(CliError::Protocol("unexpected QueueList response".into()));
         };
         if total_printed == 0 && page.total > 0 {
             writeln!(out, "   #  {:<20} {:<26} TITLE", "MID", "ARTIST")?;
@@ -439,7 +443,7 @@ mod tests {
         assert!(s.contains("稻香"));
         assert!(s.contains("Playing"));
         assert!(s.contains("00:30 / 05:00"));
-        assert!(s.contains("增益: +6.0 dB"));
+        assert!(s.contains("ReplayGain: +6.0 dB"));
     }
 
     #[test]
@@ -656,7 +660,7 @@ mod tests {
             true,
         );
         assert_eq!(
-            failure_code(&step).map(|(_, m)| m.contains("超时")),
+            failure_code(&step).map(|(_, m)| m.contains("timed out")),
             Some(true)
         );
     }

@@ -12,7 +12,7 @@ use hmp_storage::{Config, QualityMode, QualityPref};
 pub fn format_current() -> String {
     let c = Config::load();
     format!(
-        "音质策略: {}\n配置文件: {}",
+        "Quality policy: {}\nConfig file: {}",
         c.quality.describe(),
         Config::path().display()
     )
@@ -24,7 +24,7 @@ pub fn set(alias: &str, fallback: bool) -> Result<String, String> {
         QualityMode::Auto
     } else {
         let q = AudioQuality::from_alias(alias).ok_or_else(|| {
-            format!("未知音质 `{alias}`（auto|master|hires|atmos|flac|aac|320|128）")
+            format!("unknown quality `{alias}` (auto|master|hires|atmos|flac|aac|320|128)")
         })?;
         QualityMode::Fixed(q)
     };
@@ -32,9 +32,11 @@ pub fn set(alias: &str, fallback: bool) -> Result<String, String> {
     // 保留既有配置（如 [audio] sink）：只改 quality 字段，不整体重建（里程碑 G）。
     let mut config = Config::load();
     config.quality = pref;
-    config.save().map_err(|e| format!("写入配置失败: {e}"))?;
+    config
+        .save()
+        .map_err(|e| format!("failed to write config: {e}"))?;
     Ok(format!(
-        "已设置: {}\n生效链: {}",
+        "Set: {}\nEffective chain: {}",
         config.quality.describe(),
         config
             .quality
@@ -86,8 +88,8 @@ mod tests {
         isolated(|| {
             assert!(set("flac", true).unwrap().contains("flac"));
             assert!(set("320", true).unwrap().contains("320"));
-            assert!(set("auto", true).unwrap().contains("自动"));
-            assert!(set("master", false).unwrap().contains("不回退"));
+            assert!(set("auto", true).unwrap().contains("auto"));
+            assert!(set("master", false).unwrap().contains("no fallback"));
             assert!(set("bogus", true).is_err());
         });
     }

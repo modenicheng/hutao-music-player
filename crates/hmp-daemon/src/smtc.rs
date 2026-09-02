@@ -20,7 +20,7 @@ pub fn start_smtc(
     match hmp_smtc::SmtcService::start(player_command_tx, playback_rx, caps_rx) {
         Ok(service) => Some(service),
         Err(error) => {
-            tracing::warn!(%error, "Windows 媒体控制启动失败，跳过");
+            tracing::warn!(%error, "failed to start Windows media controls; skipping");
             None
         }
     }

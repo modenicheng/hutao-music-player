@@ -361,9 +361,9 @@ pub enum IpcErrorCode {
 /// 帧编解码错误。
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
-    #[error("帧长度 {0} 超过上限 {MAX_FRAME}")]
+    #[error("frame length {0} exceeds the limit of {MAX_FRAME}")]
     TooLarge(usize),
-    #[error("json 错误: {0}")]
+    #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 }
 
@@ -386,14 +386,17 @@ pub fn decode_frame<T: serde::de::DeserializeOwned>(frame: &[u8]) -> Result<T, F
         return Err(FrameError::Json(serde_json::Error::io(
             std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                "frame 短于 4 字节长度前缀",
+                "frame shorter than the 4-byte length prefix",
             ),
         )));
     }
     let len = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
     if len > MAX_FRAME || 4 + len != frame.len() {
         return Err(FrameError::Json(serde_json::Error::io(
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "帧长度前缀与内容不符"),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "frame length prefix does not match payload",
+            ),
         )));
     }
     serde_json::from_slice(&frame[4..]).map_err(FrameError::Json)

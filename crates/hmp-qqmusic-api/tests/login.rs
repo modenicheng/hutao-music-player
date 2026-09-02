@@ -389,7 +389,7 @@ async fn wait_qrcode_login_refuse_errors() {
         .unwrap_err();
     assert!(matches!(
         err,
-        QqMusicError::Login { message, .. } if message.contains("拒绝")
+        QqMusicError::Login { message, .. } if message.contains("rejected")
     ));
 }
 
@@ -433,6 +433,6 @@ async fn wait_qrcode_login_cancel() {
         .unwrap_err();
     assert!(matches!(
         err,
-        QqMusicError::Login { message, .. } if message.contains("取消")
+        QqMusicError::Login { message, .. } if message.contains("canceled")
     ));
 }

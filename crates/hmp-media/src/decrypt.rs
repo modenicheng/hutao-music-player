@@ -86,7 +86,7 @@ pub async fn prepare_playable_embedded_at(
         Ok(None) => {
             let _ = std::fs::remove_file(&tmp);
             return Err(MediaError::Unsupported(
-                "文件不含内嵌 ekey 尾部".to_string(),
+                "file has no embedded ekey tail".to_string(),
             ));
         }
         Err(error) => {
@@ -118,7 +118,7 @@ async fn finish_download(
     match result {
         Ok(actual_ext) => finish_success(cache_root, key, ext_guess, tmp, final_base, actual_ext),
         Err(DecryptError::MagicMismatch) if strip_len.is_some() => {
-            debug!("QMC2 解密后魔数不匹配，重试不剥离尾部");
+            debug!("QMC2 magic mismatch after decrypt; retrying without tail strip");
             let _ = std::fs::remove_file(&final_base);
             match decrypt_and_write(tmp, &final_base, ekey, None).await {
                 Ok(actual_ext) => {
@@ -156,7 +156,7 @@ fn finish_error(tmp: &Path, final_base: &Path, error: DecryptError) -> Result<St
     let _ = std::fs::remove_file(final_base);
     match error {
         DecryptError::MagicMismatch => Err(MediaError::Unsupported(format!(
-            "无法识别音频格式（前 8 字节: {head_hex}）"
+            "unrecognized audio format (first 8 bytes: {head_hex})"
         ))),
         error => Err(error.into_media_error()),
     }
@@ -171,7 +171,7 @@ fn finish_error(tmp: &Path, final_base: &Path, error: DecryptError) -> Result<St
 pub(crate) fn embedded_ekey_from_bytes(tail: &[u8], audio_len: usize) -> Result<String> {
     let total_len = audio_len + tail.len();
     let footer = detect_footer(total_len, &tail[tail.len().saturating_sub(0x40)..])
-        .ok_or_else(|| MediaError::Unsupported("文件不含内嵌 ekey 尾部".to_string()))?;
+        .ok_or_else(|| MediaError::Unsupported("file has no embedded ekey tail".to_string()))?;
     let key_bytes = match footer {
         Footer::QTag { .. } => tail[..tail.len() - 8]
             .split(|byte| *byte == b',')
@@ -185,7 +185,7 @@ pub(crate) fn embedded_ekey_from_bytes(tail: &[u8], audio_len: usize) -> Result<
         }
     }
     let key = parse_ekey_decoded(key_bytes)
-        .map_err(|_| MediaError::Unsupported("内嵌 ekey 无法解析".to_string()))?;
+        .map_err(|_| MediaError::Unsupported("embedded ekey unparseable".to_string()))?;
     Ok(hmp_qqmusic_api::algorithms::qmc2::generate_ekey(&key))
 }
 
@@ -223,7 +223,7 @@ fn file_uri(path: &Path) -> Result<String> {
     let abs = std::fs::canonicalize(path)?;
     url::Url::from_file_path(&abs)
         .map(|url| url.to_string())
-        .map_err(|_| MediaError::Cache(format!("无法生成文件 URI: {}", abs.display())))
+        .map_err(|_| MediaError::Cache(format!("failed to build file URI: {}", abs.display())))
 }
 
 /// 下载文件并检测尾部，返回 strip_len。
@@ -259,7 +259,7 @@ async fn download_to_file(
 ) -> Result<()> {
     let response = reqwest::get(url)
         .await
-        .map_err(|e| MediaError::Network(format!("下载请求失败: {e}")))?;
+        .map_err(|e| MediaError::Network(format!("download request failed: {e}")))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -275,7 +275,8 @@ async fn download_to_file(
 
     use futures_util::StreamExt;
     while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| MediaError::Network(format!("下载流错误: {e}")))?;
+        let chunk =
+            chunk_result.map_err(|e| MediaError::Network(format!("download stream error: {e}")))?;
 
         file.write_all(&chunk).await.map_err(MediaError::Io)?;
 
@@ -310,7 +311,7 @@ enum DecryptError {
 impl DecryptError {
     fn into_media_error(self) -> MediaError {
         match self {
-            DecryptError::MagicMismatch => MediaError::Unsupported("魔数不匹配".to_string()),
+            DecryptError::MagicMismatch => MediaError::Unsupported("magic mismatch".to_string()),
             DecryptError::Other(e) => e,
         }
     }
@@ -392,7 +393,7 @@ async fn decrypt_and_write(
         Some(ext) => Ok(ext),
         None => {
             warn!(
-                "QMC2 解密后魔数无法识别（前 8 字节: {}），total={total_len}, strip_len={strip_len:?}",
+                "QMC2 magic unrecognized after decrypt (first 8 bytes: {}), total={total_len}, strip_len={strip_len:?}",
                 hex_str(&head)
             );
             Err(DecryptError::MagicMismatch)
@@ -414,7 +415,7 @@ fn read_first_bytes(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
 fn read_first_8_hex(path: &Path) -> String {
     match read_first_bytes(path, 8) {
         Ok(b) => hex_str(&b),
-        Err(_) => "<无法读取>".to_string(),
+        Err(_) => "<unreadable>".to_string(),
     }
 }
 

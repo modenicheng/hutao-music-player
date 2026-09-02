@@ -37,7 +37,7 @@ impl LocalSourceResolver {
     fn path_of(id: &TrackId) -> Result<&str, EngineError> {
         id.0.strip_prefix("local:")
             .filter(|p| !p.is_empty())
-            .ok_or_else(|| EngineError::Internal(format!("非法本地曲目 id `{id}`")))
+            .ok_or_else(|| EngineError::Internal(format!("invalid local track id `{id}`")))
     }
 
     /// 本地 id 的路径规范化（相对路径/symlink → 绝对真实路径）。
@@ -105,7 +105,7 @@ impl LocalSourceResolver {
                     .and_then(|s| s.to_str())
                     .map(|s| s.to_string())
             })
-            .unwrap_or_else(|| "未知曲目".to_string());
+            .unwrap_or_else(|| "(unknown title)".to_string());
         let artist = meta.as_ref().and_then(|m| m.artist.clone());
         let album = meta.as_ref().and_then(|m| m.album.clone());
         let duration = meta.as_ref().and_then(|m| m.duration_ms);
@@ -115,17 +115,20 @@ impl LocalSourceResolver {
         let uri = url::Url::from_file_path(&path)
             .map(|u| u.to_string())
             .map_err(|_| {
-                EngineError::Internal(format!("路径无法编码为 file URI: {}", path.display()))
+                EngineError::Internal(format!(
+                    "path cannot be encoded as a file URI: {}",
+                    path.display()
+                ))
             })?;
         {
             let mut lib = self.library.lock().unwrap();
             lib.add_local_file(&path, meta.as_ref())
-                .map_err(|e| EngineError::Internal(format!("媒体库写入失败: {e}")))?;
+                .map_err(|e| EngineError::Internal(format!("library write failed: {e}")))?;
             if let Some(cover) = &cover {
                 if let Err(error) =
                     lib.set_track_cover(&format!("local:{}", path.display()), &cover.url)
                 {
-                    tracing::warn!(%error, path = %path.display(), "本地封面索引写入失败");
+                    tracing::warn!(%error, path = %path.display(), "failed to index local cover");
                 }
             }
         }
@@ -169,7 +172,7 @@ fn project_local_cover(
         .and_then(|bytes| match hmp_storage::scan::persist_cover(bytes) {
             Ok(url) => Some(CoverRef { url }),
             Err(error) => {
-                tracing::warn!(%error, path = %track_path.display(), "本地封面写入缓存失败");
+                tracing::warn!(%error, path = %track_path.display(), "failed to cache local cover");
                 None
             }
         })
@@ -208,7 +211,7 @@ impl SourceResolver for LocalSourceResolver {
                         .map_err(|e| EngineError::Internal(e.to_string()))?;
                     if rows.is_empty() {
                         return Err(EngineError::PlaylistNotFound(format!(
-                            "本地专辑为空: {album}"
+                            "local album is empty: {album}"
                         )));
                     }
                     let stubs = rows
@@ -237,7 +240,7 @@ impl SourceResolver for LocalSourceResolver {
                         .map_err(|e| EngineError::Internal(e.to_string()))?;
                     if rows.is_empty() {
                         return Err(EngineError::PlaylistNotFound(format!(
-                            "本地歌单为空或不存在: {id}"
+                            "local playlist is empty or missing: {id}"
                         )));
                     }
                     let stubs = rows
@@ -254,7 +257,9 @@ impl SourceResolver for LocalSourceResolver {
                 })
             }
             _ => Box::pin(async {
-                Err(EngineError::Internal("本地解析器仅支持 local 源".into()))
+                Err(EngineError::Internal(
+                    "local resolver only supports local sources".into(),
+                ))
             }),
         }
     }
@@ -276,12 +281,12 @@ impl SourceResolver for LocalSourceResolver {
             // URL 解码（空格/#/%/Unicode 安全，P1）。
             let Ok(url) = url::Url::parse(&uri) else {
                 return Err(EngineError::Internal(format!(
-                    "本地解析器不支持 URI `{uri}`"
+                    "local resolver does not support URI `{uri}`"
                 )));
             };
             let Ok(path) = url.to_file_path() else {
                 return Err(EngineError::Internal(format!(
-                    "本地解析器不支持 URI `{uri}`"
+                    "local resolver does not support URI `{uri}`"
                 )));
             };
             self.resolve_local(TrackId::new(format!("local:{}", path.display())))

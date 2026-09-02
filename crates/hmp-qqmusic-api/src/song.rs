@@ -226,7 +226,9 @@ impl<'a> SongApi<'a> {
     /// 批量获取歌曲信息（上游 `query_song`）。
     pub async fn query_song(&self, song_info: &[SongQueryInfo]) -> Result<Vec<Song>, QqMusicError> {
         if song_info.is_empty() {
-            return Err(QqMusicError::InvalidResponse("song_info 不能为空".into()));
+            return Err(QqMusicError::InvalidResponse(
+                "song_info must not be empty".into(),
+            ));
         }
 
         let mut ids = Vec::new();
@@ -238,7 +240,7 @@ impl<'a> SongApi<'a> {
                 (None, Some(mid)) => mids.push(mid),
                 _ => {
                     return Err(QqMusicError::InvalidResponse(
-                        "SongQueryInfo 必须提供 id 或 mid 且不能同时提供".into(),
+                        "SongQueryInfo requires exactly one of id or mid".into(),
                     ));
                 }
             }
@@ -285,7 +287,7 @@ impl<'a> SongApi<'a> {
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value::<GetSongDetailResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("song detail 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse song detail: {e}")))
     }
 
     /// 获取歌曲文件链接（上游 `get_song_urls`）。
@@ -335,7 +337,7 @@ impl<'a> SongApi<'a> {
         let data = self.client.musicu_request(&request, credential).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value::<GetSongUrlsResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("song urls 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse song urls: {e}")))
     }
 }
 

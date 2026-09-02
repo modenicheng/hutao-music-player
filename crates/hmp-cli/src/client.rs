@@ -10,16 +10,16 @@ use tokio::net::UnixStream;
 /// CLI 错误。
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
-    #[error("无法连接后端: {0}")]
+    #[error("cannot connect to daemon: {0}")]
     Connect(String),
-    #[error("后端响应错误: {code:?} {message}")]
+    #[error("daemon error: {code:?} {message}")]
     Response {
         code: hmp_core::IpcErrorCode,
         message: String,
     },
-    #[error("协议错误: {0}")]
+    #[error("protocol error: {0}")]
     Protocol(String),
-    #[error("io 错误: {0}")]
+    #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
 
@@ -61,7 +61,7 @@ impl DaemonClient {
         self.stream.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
         if len == 0 || len > hmp_core::ipc::MAX_FRAME - 4 {
-            return Err(CliError::Protocol("非法帧长度".into()));
+            return Err(CliError::Protocol("invalid frame length".into()));
         }
         let mut payload = vec![0u8; len];
         self.stream.read_exact(&mut payload).await?;
@@ -76,7 +76,7 @@ impl DaemonClient {
 /// `setsid` 脱离会话 + 丢弃 stdio（final review Finding 8，单一 detach 点）。
 fn spawn_daemon() -> Result<(), CliError> {
     hmp_daemon::serve::spawn_detached(&["serve", "--background"])
-        .map_err(|e| CliError::Connect(format!("拉起后端失败: {e}")))?;
+        .map_err(|e| CliError::Connect(format!("failed to spawn daemon: {e}")))?;
     Ok(())
 }
 
@@ -88,7 +88,7 @@ async fn wait_for_socket(path: &PathBuf, timeout: Duration) -> Result<(), CliErr
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(CliError::Connect("后端启动超时".into()));
+            return Err(CliError::Connect("daemon startup timed out".into()));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

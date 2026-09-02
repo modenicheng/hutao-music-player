@@ -86,8 +86,9 @@ impl<'a> UserApi<'a> {
         );
         let data = self.client.musicu_request(&request, credential).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        serde_json::from_value(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("created songlist 解析失败: {e}")))
+        serde_json::from_value(data).map_err(|e| {
+            QqMusicError::InvalidResponse(format!("failed to parse created songlist: {e}"))
+        })
     }
 
     /// 「我喜欢」歌曲（上游 `get_fav_song`，dirid=201；返回完整歌曲原始数据）。
@@ -115,7 +116,7 @@ impl<'a> UserApi<'a> {
         let data = self.client.musicu_request(&request, credential).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("fav song 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse fav song: {e}")))
     }
 
     /// 收藏的歌单列表（上游 `get_fav_songlist`）。
@@ -133,8 +134,9 @@ impl<'a> UserApi<'a> {
         );
         let data = self.client.musicu_request(&request, credential).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        serde_json::from_value(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("fav songlist 解析失败: {e}")))
+        serde_json::from_value(data).map_err(|e| {
+            QqMusicError::InvalidResponse(format!("failed to parse fav songlist: {e}"))
+        })
     }
 
     /// 收藏的专辑列表（上游 `get_fav_album`）。
@@ -153,7 +155,7 @@ impl<'a> UserApi<'a> {
         let data = self.client.musicu_request(&request, credential).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("fav album 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse fav album: {e}")))
     }
 
     /// 收藏歌单（上游 `fav_songlist`；已在收藏中也返回 true）。

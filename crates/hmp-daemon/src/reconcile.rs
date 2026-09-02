@@ -18,7 +18,7 @@ pub async fn reconcile_user_library(
 ) {
     let euin = credential.encrypt_uin.clone();
     if euin.is_empty() {
-        tracing::warn!("凭证缺少 encrypt_uin，跳过 reconcile");
+        tracing::warn!("credential missing encrypt_uin; skipping reconcile");
         return;
     }
     let api = UserApi::new(client);
@@ -41,7 +41,7 @@ async fn reconcile_fav_songs(
         let resp = match api.get_fav_song(euin, page, 100, Some(credential)).await {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(%e, "reconcile: 我喜欢拉取失败");
+                tracing::warn!(%e, "reconcile: failed to fetch liked songs");
                 return;
             }
         };
@@ -82,7 +82,7 @@ async fn reconcile_fav_songlists(
         {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(%e, "reconcile: 收藏歌单拉取失败");
+                tracing::warn!(%e, "reconcile: failed to fetch subscribed playlists");
                 return;
             }
         };
@@ -127,7 +127,7 @@ async fn reconcile_created_songlists(
     {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(%e, "reconcile: 自建歌单拉取失败");
+            tracing::warn!(%e, "reconcile: failed to fetch created playlists");
             return;
         }
     };
@@ -153,7 +153,7 @@ async fn reconcile_fav_albums(
         let resp = match api.get_fav_album(euin, page, 100, Some(credential)).await {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(%e, "reconcile: 收藏专辑拉取失败");
+                tracing::warn!(%e, "reconcile: failed to fetch liked albums");
                 return;
             }
         };

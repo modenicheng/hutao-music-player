@@ -117,13 +117,13 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// 音质展示标签。
 pub fn quality_label(q: &AudioQuality) -> String {
     match q {
-        AudioQuality::Master => "臻品母带".into(),
+        AudioQuality::Master => "Master".into(),
         AudioQuality::HiRes => "Hi-Res".into(),
-        AudioQuality::Atmos => "全景声".into(),
-        AudioQuality::Flac => "无损".into(),
+        AudioQuality::Atmos => "Atmos".into(),
+        AudioQuality::Flac => "Lossless".into(),
         AudioQuality::Aac => "AAC".into(),
         AudioQuality::Mp3_320 => "HQ 320k".into(),
-        AudioQuality::Mp3_128 => "标准 128k".into(),
+        AudioQuality::Mp3_128 => "128k".into(),
         AudioQuality::Unknown(s) => s.clone(),
     }
 }

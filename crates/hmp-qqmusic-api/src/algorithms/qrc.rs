@@ -19,8 +19,9 @@ pub fn qrc_decrypt(encrypted: &str) -> Result<String, QqMusicError> {
         return Ok(String::new());
     }
 
-    let encrypted_bytes = hex_decode(encrypted)
-        .map_err(|_| QqMusicError::InvalidResponse("QRC 解密失败: 无效的 hex 数据".into()))?;
+    let encrypted_bytes = hex_decode(encrypted).map_err(|_| {
+        QqMusicError::InvalidResponse("QRC decrypt failed: invalid hex data".into())
+    })?;
     let plain = decrypt_3des_ecb(&encrypted_bytes)?;
 
     // zlib 解压
@@ -28,10 +29,10 @@ pub fn qrc_decrypt(encrypted: &str) -> Result<String, QqMusicError> {
     let mut decompress = flate2::Decompress::new(true);
     decompress
         .decompress_vec(&plain, &mut out, flate2::FlushDecompress::Finish)
-        .map_err(|e| QqMusicError::InvalidResponse(format!("QRC 解密失败: {e}")))?;
+        .map_err(|e| QqMusicError::InvalidResponse(format!("QRC decrypt failed: {e}")))?;
 
     String::from_utf8(out)
-        .map_err(|_| QqMusicError::InvalidResponse("QRC 解密失败: 非 UTF-8 数据".into()))
+        .map_err(|_| QqMusicError::InvalidResponse("QRC decrypt failed: non-UTF-8 data".into()))
 }
 
 /// hex 字符串解码（大小写不敏感）。
@@ -62,7 +63,7 @@ fn hex_val(b: u8) -> Option<u8> {
 fn decrypt_3des_ecb(data: &[u8]) -> Result<Vec<u8>, QqMusicError> {
     if data.is_empty() || data.len() % 8 != 0 {
         return Err(QqMusicError::InvalidResponse(
-            "QRC 解密失败: 数据长度非 8 的倍数".into(),
+            "QRC decrypt failed: data length is not a multiple of 8".into(),
         ));
     }
 

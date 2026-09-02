@@ -281,7 +281,7 @@ impl<'a> RecommendApi<'a> {
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value::<RecommendFeedCardResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("home feed 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse home feed: {e}")))
     }
 
     /// 获取「猜你喜欢」推荐（上游 `get_guess_recommend`）。
@@ -302,8 +302,9 @@ impl<'a> RecommendApi<'a> {
             .musicu_request(&request, Some(credential))
             .await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        serde_json::from_value::<GuessRecommendResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("guess recommend 解析失败: {e}")))
+        serde_json::from_value::<GuessRecommendResponse>(data).map_err(|e| {
+            QqMusicError::InvalidResponse(format!("failed to parse guess recommend: {e}"))
+        })
     }
 
     /// 获取雷达推荐（上游 `get_radar_recommend`）。
@@ -319,7 +320,7 @@ impl<'a> RecommendApi<'a> {
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         let mut resp: RadarRecommendResponse = serde_json::from_value(data.clone())
-            .map_err(|e| QqMusicError::InvalidResponse(format!("radar 解析失败: {e}")))?;
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse radar: {e}")))?;
         resp.songs = extract_radar_songs(&data);
         Ok(resp)
     }
@@ -339,7 +340,7 @@ impl<'a> RecommendApi<'a> {
         let data = data.get("data").cloned().unwrap_or(json!({}));
         let mut resp: RecommendSonglistResponse =
             serde_json::from_value(data.clone()).map_err(|e| {
-                QqMusicError::InvalidResponse(format!("recommend songlist 解析失败: {e}"))
+                QqMusicError::InvalidResponse(format!("failed to parse recommend songlist: {e}"))
             })?;
         resp.songlists = extract_songlists(&data);
         Ok(resp)
@@ -360,7 +361,7 @@ impl<'a> RecommendApi<'a> {
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
         serde_json::from_value::<RecommendNewSongResponse>(data)
-            .map_err(|e| QqMusicError::InvalidResponse(format!("new song 解析失败: {e}")))
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse new song: {e}")))
     }
 }
 

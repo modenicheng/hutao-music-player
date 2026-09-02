@@ -180,14 +180,14 @@ impl SyncWorker {
                         }
                         .map(|_| ())
                     }
-                    None => return self.fail_relation(row, "无法解析 QQ numeric song id"),
+                    None => return self.fail_relation(row, "cannot parse QQ numeric song id"),
                 }
             }
             ("playlist", "subscribed") => {
                 let disstid: i64 = match key.parse() {
                     Ok(v) => v,
                     Err(_) => {
-                        return self.fail_relation(row, "歌单 id 非数字");
+                        return self.fail_relation(row, "playlist id is not numeric");
                     }
                 };
                 let api = hmp_qqmusic_api::UserApi::new(&self.client);
@@ -202,7 +202,7 @@ impl SyncWorker {
                 let album_id: i64 = match key.parse() {
                     Ok(v) => v,
                     Err(_) => {
-                        return self.fail_relation(row, "专辑 id 非数字");
+                        return self.fail_relation(row, "album id is not numeric");
                     }
                 };
                 let api = AlbumApi::new(&self.client);
@@ -238,7 +238,10 @@ impl SyncWorker {
                     Err(e) => Err(e.to_string()),
                 }
             }
-            Ok(resp) => Err(format!("QQ 创建歌单失败: ret_code={}", resp.ret_code)),
+            Ok(resp) => Err(format!(
+                "failed to create QQ playlist: ret_code={}",
+                resp.ret_code
+            )),
             Err(e) => Err(e.to_string()),
         };
         let Ok(mut lib) = self.library.lock() else {
@@ -294,7 +297,7 @@ impl SyncWorker {
                     let Ok(mut lib) = self.library.lock() else {
                         return;
                     };
-                    let _ = lib.mark_op_error(op.id, "无法解析 QQ numeric song id");
+                    let _ = lib.mark_op_error(op.id, "cannot parse QQ numeric song id");
                     return;
                 };
                 let api = SonglistApi::new(&self.client);
@@ -320,7 +323,10 @@ impl SyncWorker {
                         let _ = lib.mark_op_done(op.id);
                         return;
                     }
-                    Ok(resp) => Err(format!("QQ 删除歌单失败: ret_code={}", resp.ret_code)),
+                    Ok(resp) => Err(format!(
+                        "failed to delete QQ playlist: ret_code={}",
+                        resp.ret_code
+                    )),
                     Err(e) => Err(e.to_string()),
                 }
             }
