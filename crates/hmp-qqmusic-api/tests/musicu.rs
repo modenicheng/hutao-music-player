@@ -3,6 +3,7 @@
 //! 行为规范对应上游 `core/client.py::Client.execute`（CGI 分支）与
 //! `core/api_context.py::build_api_kwargs` / `prepare_http_kwargs`。
 
+use hmp_qqmusic_api::UserApi;
 use hmp_qqmusic_api::client::QqMusicClient;
 use hmp_qqmusic_api::config::ClientConfig;
 use hmp_qqmusic_api::credential::Credential;
@@ -235,4 +236,39 @@ async fn require_login_accepts_valid_credential() {
         .musicu_request(&req, Some(&credential))
         .await
         .expect("valid credential passes require_login");
+}
+
+/// 回归：`get_homepage` 必须携带 `NodeToken`（毫秒时间戳字符串）。
+///
+/// 上游缺省该参数时，真实服务端返回业务错误码 10000 且 `data` 为空
+/// （2026-08 实测：`hmp account profile` 报 `QQ Music API error 10000`）；
+/// 官方网页端（share/profile_v2）发送 `NodeToken: Date.now().toString()`。
+#[tokio::test]
+async fn user_homepage_request_includes_node_token() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/cgi-bin/musicu.fcg"))
+        .and(|req: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let req_0 = &body["req_0"];
+            req_0["module"] == json!("music.UnifiedHomepage.UnifiedHomepageSrv")
+                && req_0["method"] == json!("GetHomepageHeader")
+                && req_0["param"]["uin"] == json!("NKoqNeC5NKSA")
+                && req_0["param"]["IsQueryTabDetail"] == json!(1)
+                && req_0["param"]["NodeToken"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "req_0": {"code": 0, "data": {"Info": {"BaseInfo": {"Name": "程家麒"}}}}
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = client_for(&mock_server.uri());
+    let api = UserApi::new(&client);
+    let data = api.get_homepage("NKoqNeC5NKSA", None).await.unwrap();
+    assert_eq!(data["Info"]["BaseInfo"]["Name"], "程家麒");
 }

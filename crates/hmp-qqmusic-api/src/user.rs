@@ -52,6 +52,16 @@ pub struct UserFavAlbumResponse {
     pub hasmore: i64,
 }
 
+/// NodeToken（官方网页端 `Date.now().toString()`：当前毫秒时间戳字符串）。
+///
+/// 服务端要求该参数存在（值任意）；`get_homepage` 缺少它时返回业务错误码 10000。
+fn node_token() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_default()
+}
+
 /// 用户库 API。
 pub struct UserApi<'a> {
     client: &'a QqMusicClient,
@@ -196,6 +206,10 @@ impl<'a> UserApi<'a> {
     }
 
     /// 用户主页头部（上游 `get_homepage`；展示型——保留原始数据供 CLI 提取）。
+    ///
+    /// 与上游差异：额外携带 `NodeToken`（当前毫秒时间戳字符串）。
+    /// 上游请求缺省该参数时，服务端返回业务错误码 10000 且 `data` 为空；
+    /// 官方网页端（share/profile_v2）亦发送 `NodeToken: Date.now().toString()`。
     pub async fn get_homepage(
         &self,
         euin: &str,
@@ -204,7 +218,11 @@ impl<'a> UserApi<'a> {
         let request = CgiRequest::new(
             "music.UnifiedHomepage.UnifiedHomepageSrv",
             "GetHomepageHeader",
-            json!({ "uin": euin, "IsQueryTabDetail": 1 }),
+            json!({
+                "uin": euin,
+                "IsQueryTabDetail": 1,
+                "NodeToken": node_token(),
+            }),
         );
         let data = self.client.musicu_request(&request, credential).await?;
         Ok(data.get("data").cloned().unwrap_or(json!({})))

@@ -36,6 +36,7 @@
 | `qqmusic_api/modules/songlist.py` | `songlist.rs` | ✅ 已移植 | 歌单详情（免登录）+ 创建/删除/加歌/收藏（需登录） |
 | `qqmusic_api/modules/album.py` | `album.rs` | ✅ 已移植 | 专辑详情/歌曲/新碟（免登录）+ 收藏/取消收藏（需登录） |
 | `qqmusic_api/modules/singer.py` | `singer.rs` | ✅ 已移植 | 歌手列表/索引/主页(Android)/Tab/歌曲/专辑/MV/相似/简介 |
+| `qqmusic_api/modules/user.py` | `user.rs` | ✅ 已移植 | 主页头部/VIP/自建与收藏歌单/收藏专辑/我喜欢（凭证解耦；`get_homepage` 额外携带 `NodeToken`，见[已知差异]） |
 | `qqmusic_api/modules/top.py` | `top.rs` | ✅ 已移植 | 排行榜分类/详情 |
 | `qqmusic_api/modules/recommend.py` | `recommend.rs` | ✅ 已移植 | 首页 Feed/雷达/推荐歌单/新歌（免登录）；猜你喜欢（需登录） |
 | `qqmusic_api/algorithms/__init__.py` | `algorithms/qrc.rs` | ✅ 已移植 | qrc_decrypt（3DES + zlib） |
@@ -131,6 +132,17 @@
 - 歌手歌曲/专辑接口服务端可能忽略 `number` 参数（请求 5 返回 30）；
 - `GetRecommendFeed` 免登录返回的 `cover`/`creator` 全为 null（提取逻辑由合成测试覆盖）。
 
+### 用户库实测记录（2026-08-10）
+
+- `GetHomepageHeader`（用户主页）**必须携带 `NodeToken` 参数**（值任意，官方网页端传
+  `Date.now().toString()` 毫秒时间戳字符串）；缺省时服务端返回业务错误码 10000 且 `data` 为空壳。
+  上游 Python 库缺省该参数（属上游缺陷），Rust 移植已在 `get_homepage` 补上（见[已知差异]）；
+- 该 CGI 另存在按 IP 的滚动限流：短时间大量请求（约 20+ 次）后无论参数是否正确均返回 10000，
+  静置一段时间后恢复（2026-08-10 实测）；
+- 歌手主页（`SingerMid` 路径）不受 `NodeToken` 影响，免登录可用；
+- `get_vip_info`/`get_created_songlist`/`get_fav_song`/`get_fav_songlist`/`get_fav_album`/
+  `GetProfileReport`（音乐基因）均可用，`GetProfileReport` 可作主页昵称/头像的备用来源。
+
 ## 尚未移植
 
 - 登录（QQ 二维码 / 微信扫码 / 微信换取登录态）—— 阶段 B
@@ -176,6 +188,7 @@
 | Android 平台 | 完整支持（QIMEI/设备会话） | 不移植 | HMP 面向 Linux 桌面 |
 | 响应模型 | pydantic BaseModel | serde（DTO 起步允许 `serde_json::Value`） | 稳定后逐步强类型化 |
 | 布尔参数 | `bool_to_int` 自动转换 | 显式 int 转换 | 保持可读性 |
+| **`get_homepage` 参数** | `{"uin": euin, "IsQueryTabDetail": 1}` | **额外携带 `NodeToken`**（当前毫秒时间戳字符串） | 上游缺省该参数时服务端返回 10000 空壳（2026-08-10 实测）；官方网页端 share/profile_v2 亦发送 `NodeToken: Date.now().toString()` |
 | **凭证模型** | client 持有全局 `credential`，方法可选覆盖 | **无全局凭证状态** | 请求级传入；仅显式 `refresh_credential`；调用方管理多凭证 |
 
 ## 设计决策记录
@@ -202,3 +215,4 @@ cargo test --features live-tests -- --ignored
 | 日期 | commit | 变化 | Rust 侧影响 |
 | --- | --- | --- | --- |
 | 2026-08-06 | `108617f` | 基线（首次移植） | — |
+| 2026-08-10 | 上游未修复 | `GetHomepageHeader`（用户主页）服务端要求 `NodeToken` 参数，上游缺省 → 返回 10000 空壳 | `user::UserApi::get_homepage` 补 `NodeToken`（毫秒时间戳字符串）；新增回归测试 |

@@ -19,8 +19,20 @@ const QR_TIMEOUT: Duration = Duration::from_secs(120);
 /// 渲染二维码到 stdout（失败时打印兜底路径）。返回是否渲染成功。
 fn print_qr(data: &[u8], path: &std::path::Path, out: &mut impl Write) -> std::io::Result<bool> {
     match qr_ascii::render_qr(data, qr_ascii::terminal_width()) {
-        Ok(s) => {
-            writeln!(out, "{s}")?;
+        Ok(render) => {
+            writeln!(out, "{}", render.text)?;
+            // 每次扫码前校验尺寸：非标准 111×111 → 提示显示可能有误
+            if !render.is_expected_size {
+                writeln!(
+                    out,
+                    "警告：二维码图像尺寸为 {}×{}（预期 {}×{}），显示可能有误；如扫码失败请打开: {}",
+                    render.size.0,
+                    render.size.1,
+                    qr_ascii::EXPECTED_QR_SIZE,
+                    qr_ascii::EXPECTED_QR_SIZE,
+                    path.display()
+                )?;
+            }
             Ok(true)
         }
         Err(e) => {
@@ -120,6 +132,35 @@ fn should_refresh(err: &hmp_qqmusic_api::QqMusicError, now: Instant, deadline: I
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 标准 111×111 不提示；非标准尺寸提示显示可能有误并给出兑底路径。
+    #[test]
+    fn print_qr_warns_on_unexpected_size() {
+        let png = |size: u32| {
+            let mut img = image::RgbaImage::new(size, size);
+            for p in img.pixels_mut() {
+                *p = image::Rgba([255, 255, 255, 255]);
+            }
+            let mut buf = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .unwrap();
+            buf.into_inner()
+        };
+        let path = std::path::Path::new("/tmp/hmp-qr.png");
+        // 标准尺寸 → 无警告
+        let mut out = Vec::new();
+        print_qr(&png(111), path, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(!s.contains("警告"));
+        // 99×99 → 警告 + 兑底路径
+        let mut out = Vec::new();
+        print_qr(&png(99), path, &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("警告"));
+        assert!(s.contains("99×99"));
+        assert!(s.contains("/tmp/hmp-qr.png"));
+    }
 
     #[test]
     fn timeout_before_deadline_refreshes() {
