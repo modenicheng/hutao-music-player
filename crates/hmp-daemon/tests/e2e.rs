@@ -6,8 +6,8 @@
 //!    [`QqSourceResolver`] + wiremock QQ API（曲目详情 + 取流）+ 文件凭证
 //!    后端，验证「详情解析 → 加密音质全部失败 → 明文音质成功」的完整回退链
 //!    与 CDN URI 契约（无音频设备，完全离线）。
-//! 2. [`play_then_end_advances_queue_with_rodio`]：真实 [`RodioDriver`]
-//!    + 本地生成的 1s wav，验证「Play → Playing →
+//! 2. [`play_then_end_advances_queue_with_rodio`]：真实
+//!    [`RodioDriver`] + 本地生成的 1s wav，验证「Play → Playing →
 //!    真实 EOS → 自动续播下一首 → 队列播完」；队列裁决逻辑由引擎单测
 //!    （engine.rs）覆盖，本测试是真实音频输出冒烟。
 //!

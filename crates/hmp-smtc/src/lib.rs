@@ -18,9 +18,11 @@ mod tests {
     };
 
     use crate::model::{
-        CoverSource, ProjectedButton, ProjectedStatus, Projection, classify_cover_source,
-        map_button, map_repeat_request,
+        ProjectedButton, ProjectedStatus, Projection, map_button, map_repeat_request,
     };
+
+    #[cfg(windows)]
+    use crate::model::{CoverSource, classify_cover_source};
 
     fn sample_playing_state() -> PlaybackState {
         PlaybackState {
