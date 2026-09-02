@@ -41,7 +41,11 @@ pub fn persist_cover(cover: &[u8]) -> std::io::Result<String> {
     let name = format!("{:016x}.jpg", hasher.finish());
     let cpath = covers.join(&name);
     if !cpath.exists() {
-        std::fs::write(&cpath, cover)?;
+        // tmp + rename：并发写同一 hash（watcher 与播放解析同时命中新封面）
+        // 交错写会因 exists() 去重而永久缓存半张封面。
+        let tmp = covers.join(format!(".{name}.tmp"));
+        std::fs::write(&tmp, cover)?;
+        std::fs::rename(&tmp, &cpath)?;
     }
     Ok(format!("file://{}", cpath.display()))
 }

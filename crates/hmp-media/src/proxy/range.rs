@@ -140,9 +140,21 @@ mod tests {
         let total = 100;
 
         // 后缀式：合法，返回最后 N 字节
-        assert_eq!(parse_range("bytes=-50", 300), Ok(ByteRange { start: 250, end: 299 }));
-        assert_eq!(parse_range("bytes=-300", 300), Ok(ByteRange { start: 0, end: 299 }));
-        assert_eq!(parse_range("bytes=-301", 300), Err(RangeError::Unsatisfiable));
+        assert_eq!(
+            parse_range("bytes=-50", 300),
+            Ok(ByteRange {
+                start: 250,
+                end: 299
+            })
+        );
+        assert_eq!(
+            parse_range("bytes=-300", 300),
+            Ok(ByteRange { start: 0, end: 299 })
+        );
+        assert_eq!(
+            parse_range("bytes=-301", 300),
+            Err(RangeError::Unsatisfiable)
+        );
         assert_eq!(parse_range("bytes=-0", 300), Err(RangeError::Unsatisfiable));
 
         // 多区间

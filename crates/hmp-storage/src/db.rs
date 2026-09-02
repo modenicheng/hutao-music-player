@@ -279,6 +279,9 @@ impl LibraryDb {
         let mut conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // WAL 只允许并发读、写仍互斥；默认 busy_timeout=0 会让 CLI 写操作在
+        // daemon 持写锁瞬间直接报 "database is locked"。给跨进程竞争留等待窗口。
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&mut conn)?;
         Ok(Self { conn })
     }
@@ -287,6 +290,7 @@ impl LibraryDb {
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let mut conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&mut conn)?;
         Ok(Self { conn })
     }
@@ -500,10 +504,18 @@ impl LibraryDb {
         } else {
             meta.artists.clone()
         };
+        let title = if meta.title.trim().is_empty() {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("(unknown title)")
+                .to_string()
+        } else {
+            meta.title
+        };
         let id = self.upsert_track(&TrackRow {
             source: "local",
             source_key,
-            title: meta.title,
+            title,
             album: meta.album,
             artist: meta.artist,
             duration_ms: meta.duration_ms,
@@ -519,11 +531,13 @@ impl LibraryDb {
             r#"INSERT INTO local_files (track_id, path, file_size, mtime, format, bitrate, sample_rate)
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                ON CONFLICT(path) DO UPDATE SET
+                 track_id = excluded.track_id,
                  file_size = excluded.file_size,
                  mtime = excluded.mtime,
                  format = COALESCE(excluded.format, local_files.format),
                  bitrate = COALESCE(excluded.bitrate, local_files.bitrate),
-                 sample_rate = COALESCE(excluded.sample_rate, local_files.sample_rate)"#,
+                 sample_rate = COALESCE(excluded.sample_rate, local_files.sample_rate),
+                 missing = 0"#,
             params![
                 id,
                 path.display().to_string(),
@@ -651,30 +665,42 @@ impl LibraryDb {
                     )
                     .optional()?;
                 if row_mtime.flatten() == mtime_ns {
-                    self.conn.execute(
-                    "UPDATE local_files SET path = ?1, file_size = ?2, mtime = ?3, mtime_ns = ?4,
-                            fingerprint = ?5, last_seen_generation = ?6, missing = 0, scan_root_id = ?7
-                     WHERE track_id = ?8",
-                    params![
-                        path_str,
-                        size,
-                        mtime_ns.map(|n| n / 1_000_000_000),
-                        mtime_ns,
-                        fingerprint,
-                        generation,
-                        root_id,
-                        tid
-                    ],
-                )?;
-                    // 同步 tracks 身份：`local:<旧路径>` → `local:<新路径>`（播放/查询用）。
-                    self.conn.execute(
-                        "UPDATE tracks SET source_key = ?1 WHERE id = ?2",
-                        params![format!("local:{path_str}"), tid],
+                    // 新路径的 tracks 行已存在（两份内容相同的文件，如 `cp -p`
+                    // 或同一压缩包解出两份）：不做移动复用——直接走下方全新
+                    // 插入。否则 UPDATE tracks.source_key 会撞
+                    // UNIQUE(source, source_key) 中止整个扫描，且两份文件会
+                    // 来回「偷」同一行（各自扫描时互相改写路径）。
+                    let key_free: bool = self.conn.query_row(
+                        "SELECT NOT EXISTS(SELECT 1 FROM tracks WHERE source = 'local' AND source_key = ?1)",
+                        params![format!("local:{path_str}")],
+                        |r| r.get(0),
                     )?;
-                    if let Some(m) = meta {
-                        self.apply_local_meta(tid, m)?;
+                    if key_free {
+                        self.conn.execute(
+                        "UPDATE local_files SET path = ?1, file_size = ?2, mtime = ?3, mtime_ns = ?4,
+                                fingerprint = ?5, last_seen_generation = ?6, missing = 0, scan_root_id = ?7
+                         WHERE track_id = ?8",
+                        params![
+                            path_str,
+                            size,
+                            mtime_ns.map(|n| n / 1_000_000_000),
+                            mtime_ns,
+                            fingerprint,
+                            generation,
+                            root_id,
+                            tid
+                        ],
+                    )?;
+                        // 同步 tracks 身份：`local:<旧路径>` → `local:<新路径>`（播放/查询用）。
+                        self.conn.execute(
+                            "UPDATE tracks SET source_key = ?1 WHERE id = ?2",
+                            params![format!("local:{path_str}"), tid],
+                        )?;
+                        if let Some(m) = meta {
+                            self.apply_local_meta(tid, m)?;
+                        }
+                        return Ok(ScanOutcome::Updated);
                     }
-                    return Ok(ScanOutcome::Updated);
                 }
             }
 
@@ -683,6 +709,7 @@ impl LibraryDb {
             let title = meta_owned
                 .as_ref()
                 .map(|m| m.title.clone())
+                .filter(|t| !t.trim().is_empty()) // 无标签文件的空标题 → 文件名回退
                 .unwrap_or_else(|| {
                     path.file_stem()
                         .and_then(|s| s.to_str())
@@ -1893,6 +1920,14 @@ CREATE TABLE scan_roots (
 );
 "#;
 
+/// v4：扫描/播放热路径索引——find_by_fingerprint 在每次扫描/监听事件中
+/// 全表扫描 local_files（O(N²)）；playlist_tracks 缺索引使 list_playlists
+/// 的每行 COUNT(*) 退化为全扫。
+const MIGRATION_V4: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_local_files_fingerprint ON local_files(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist ON playlist_tracks(playlist_id);
+"#;
+
 /// 逐级迁移到最新 user_version。
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -1935,6 +1970,21 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         let result = (|| -> rusqlite::Result<()> {
             conn.execute_batch(MIGRATION_V3)?;
             conn.pragma_update(None, "user_version", 3)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+    }
+    if current < 4 {
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute_batch(MIGRATION_V4)?;
+            conn.pragma_update(None, "user_version", 4)?;
             Ok(())
         })();
         match result {
@@ -2012,7 +2062,7 @@ mod tests {
     #[test]
     fn migration_creates_v1() {
         let db = LibraryDb::open_in_memory().unwrap();
-        assert_eq!(db.version().unwrap(), 3); // v3：本地媒体库域迁移（里程碑 E）
+        assert_eq!(db.version().unwrap(), 4); // v4：扫描/歌单热路径索引
         let mut db = db;
         assert_eq!(db.track_id("qq", "mid123").unwrap(), None);
     }
@@ -2162,7 +2212,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            3
+            4
         );
         // favorites 表已删除；数据在 relations（track/liked，synced）。
         let count: i64 = conn
@@ -2631,7 +2681,7 @@ mod tests {
     #[test]
     fn migration_v3_adds_columns_and_tables() {
         let db = LibraryDb::open_in_memory().unwrap();
-        assert_eq!(db.version().unwrap(), 3);
+        assert_eq!(db.version().unwrap(), 4);
         let cols: Vec<String> = db
             .conn
             .prepare("PRAGMA table_info(local_files)")
@@ -2705,7 +2755,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
         db.conn
             .execute("UPDATE tracks SET genre='Rock' WHERE id=1", [])
             .unwrap();

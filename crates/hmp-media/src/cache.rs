@@ -68,7 +68,7 @@ pub fn sweep_stale_tmp(root: &Path) -> Result<(), std::io::Error> {
     };
     for entry in dir.flatten() {
         let path = entry.path();
-        if !path.extension().is_some_and(|e| e == "tmp") {
+        if path.extension().is_none_or(|e| e != "tmp") {
             continue;
         }
         let stale = entry
@@ -179,10 +179,7 @@ mod tests {
         assert_ne!(k1, k4, "不同 ekey 应不同");
 
         // 查询串不参与 key：guid/vkey 每次请求变化，path 稳定 → 命中同一缓存
-        let kq = cache_key(
-            "https://a/1.mflac?guid=abc&vkey=xyz",
-            "ekey1",
-        );
+        let kq = cache_key("https://a/1.mflac?guid=abc&vkey=xyz", "ekey1");
         assert_eq!(k1, kq, "同一 path 不同查询串应命中同一缓存");
 
         // 长度 == 16（hex 前缀）

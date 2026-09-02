@@ -307,7 +307,9 @@ fn local_quality(path: &std::path::Path, meta: Option<&hmp_storage::LocalMeta>) 
         Some("flac" | "wav" | "ape") => AudioQuality::Flac,
         Some("m4a" | "aac") => AudioQuality::Aac,
         Some("ogg" | "opus") => AudioQuality::Mp3_320,
-        Some("mp3") if bitrate.map(|b| b >= 300_000).unwrap_or(false) => AudioQuality::Mp3_320,
+        // lofty 的 audio_bitrate() 单位是 kbps（320 而非 320000）；
+        // 旧阈值 300_000 恒为假，所有 MP3 都被误标为 Mp3_128。
+        Some("mp3") if bitrate.map(|b| b >= 300).unwrap_or(false) => AudioQuality::Mp3_320,
         _ => AudioQuality::Mp3_128,
     }
 }

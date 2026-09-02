@@ -157,6 +157,18 @@ impl Config {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        // 现有文件解析失败时先备份再覆写：解析失败 → load() 回默认值，
+        // 不备份的话 save() 会用默认结构整体抹掉用户配置。
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            if toml::from_str::<Config>(&existing).is_err() {
+                let backup = path.with_extension("toml.bak");
+                let _ = std::fs::copy(&path, &backup);
+                tracing::warn!(
+                    "config.toml was unparseable; backed up to {} before rewrite",
+                    backup.display()
+                );
+            }
+        }
         let text = toml::to_string(self).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, text)?;

@@ -59,33 +59,47 @@ pub fn scan_dir(root: &Path, db: &mut LibraryDb) -> Result<ScanReport, Box<dyn s
     let mut visited = HashSet::new();
     collect_audio(&dir, &mut visited, &mut files)?;
     let mut report = ScanReport::default();
+    let mut failed = 0u32;
     for path in files {
-        let md = std::fs::metadata(&path)?;
-        let size = md.len();
-        let fp = file_fingerprint(&path, size)?;
-        let local_meta = read_meta(&path);
-        // 封面先落盘（新增/更新时；record_scan_file 前完成，cover_uri 经 set_track_cover）。
-        let cover_uri = match &local_meta {
-            Some(m) => m
-                .cover
-                .as_deref()
-                .map(|c| persist_cover(c).map(Some))
-                .transpose()?
-                .flatten(),
-            None => None,
-        };
-        let outcome = db.record_scan_file(root_id, generation, &path, local_meta.as_ref(), &fp)?;
-        if let Some(uri) = &cover_uri {
-            db.set_track_cover(&format!("local:{}", path.display()), uri)?;
-        }
+        // 单文件失败（扫描间隙被删/权限变化/损坏）只跳过并告警，不中止整轮：
+        // `?` 传播会跳过 finish_scan（missing 标记失效）且让整次扫描白跑。
+        let outcome = (|| -> Result<ScanOutcome, Box<dyn std::error::Error>> {
+            let md = std::fs::metadata(&path)?;
+            let size = md.len();
+            let fp = file_fingerprint(&path, size)?;
+            let local_meta = read_meta(&path);
+            // 封面先落盘（新增/更新时；record_scan_file 前完成，cover_uri 经 set_track_cover）。
+            let cover_uri = match &local_meta {
+                Some(m) => m
+                    .cover
+                    .as_deref()
+                    .map(|c| persist_cover(c).map(Some))
+                    .transpose()?
+                    .flatten(),
+                None => None,
+            };
+            let outcome =
+                db.record_scan_file(root_id, generation, &path, local_meta.as_ref(), &fp)?;
+            if let Some(uri) = &cover_uri {
+                db.set_track_cover(&format!("local:{}", path.display()), uri)?;
+            }
+            Ok(outcome)
+        })();
         match outcome {
-            ScanOutcome::Added => report.added += 1,
-            ScanOutcome::Updated => report.updated += 1,
-            ScanOutcome::Skipped => report.skipped += 1,
-            ScanOutcome::MissingReset => report.skipped += 1, // 复位不算更新
+            Ok(ScanOutcome::Added) => report.added += 1,
+            Ok(ScanOutcome::Updated) => report.updated += 1,
+            Ok(ScanOutcome::Skipped) => report.skipped += 1,
+            Ok(ScanOutcome::MissingReset) => report.skipped += 1, // 复位不算更新
+            Err(e) => {
+                failed += 1;
+                eprintln!("scan: skipping {}: {e}", path.display());
+            }
         }
     }
     report.missing = db.finish_scan(root_id, generation)?;
+    if failed > 0 {
+        eprintln!("scan: {failed} file(s) failed and were skipped");
+    }
     Ok(report)
 }
 

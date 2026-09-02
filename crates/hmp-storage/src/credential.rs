@@ -153,9 +153,16 @@ impl CredentialStore for FileStore {
         }
         let bytes = std::fs::read(&self.path)
             .map_err(|e| HmpError::Storage(format!("read credential file: {e}")))?;
-        let cred = serde_json::from_slice(&bytes)
-            .map_err(|e| HmpError::Storage(format!("deserialize credential: {e}")))?;
-        Ok(Some(cred))
+        match serde_json::from_slice(&bytes) {
+            Ok(cred) => Ok(Some(cred)),
+            Err(e) => {
+                // 截断/损坏（非原子写的历史文件、崩溃）≈ 未登录：所有调用方
+                // 都会 `.ok().flatten()` 吞掉错误降级为 None，不如显式报告 +
+                // 按 None 处理，`hmp auth` 才能提示重新登录而非神秘报错。
+                tracing::warn!("credential file is corrupt; treating as logged out: {e}");
+                Ok(None)
+            }
+        }
     }
 
     fn delete(&self) -> Result<(), HmpError> {
@@ -167,24 +174,33 @@ impl CredentialStore for FileStore {
     }
 }
 
-/// 写文件并设置 0600 权限（unix）。
+/// 原子写文件（tmp + rename）并设置 0600 权限。
+///
+/// 原地 truncate 写入在崩溃时会留下截断 JSON；tmp 文件以 0600 创建后
+/// rename，同时兜住「备份恢复的旧文件权限过宽」——rename 整体替换 inode，
+/// 新权限必然生效。
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(bytes)?;
-        Ok(())
+        let tmp = path.with_extension("json.tmp");
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(bytes)?;
+        }
+        std::fs::rename(&tmp, path)
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(path, bytes)
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)
     }
 }
 
