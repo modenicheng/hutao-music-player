@@ -41,10 +41,10 @@ hmp login
 
 ```bash
 hmp auth
-# 登录: 已登录
-# 用户: 939861972 (musicid: 939861972)
-# 过期: 未过期
-# 后端: 系统密钥环 (SecretService)
+# Logged in: yes
+# User: 939861972 (musicid: 939861972)
+# Expiry: valid
+# Backend: system keyring (SecretService)
 ```
 
 （本地凭证检查，不依赖 daemon；未登录时提示运行 `hmp login`。）
@@ -93,12 +93,24 @@ playerctl -p hmp ...  │        (127.0.0.1 本机)          │
 | `hmp stop` | 停止 |
 | `hmp seek <秒>` | 跳转进度 |
 | `hmp volume <0..1>` | 音量（如 `hmp volume 0.5`） |
-| `hmp loop <none\|list\|track>` | 循环模式：顺序播完停 / 列表循环 / 单曲循环 |
-| `hmp shuffle <on\|off>` | 随机播放 |
-| `hmp status` | 显示当前曲目/状态/进度/音量/音质/循环/队列 |
-| `hmp quality [auto\|master\|hires\|atmos\|flac\|aac\|320\|128] [--no-fallback]` | 查看/设置音质策略（见 §6） |
-| `hmp history [n]` | 最近播放（直读媒体库，默认 10 条） |
+| `hmp queue loop <none\|list\|track>` | 循环模式：顺序播完停 / 列表循环 / 单曲循环 |
+| `hmp queue shuffle <on\|off>` | 随机播放 |
+| `hmp status` | 显示当前曲目/状态/进度/音量/音质/ReplayGain/循环/队列 |
+| `hmp player quality [auto\|master\|hires\|atmos\|flac\|aac\|320\|128] [--no-fallback]` | 查看/设置音质策略（见 §6） |
+| `hmp library history [n]` | 最近播放（直读媒体库，默认 10 条） |
 | `hmp quit` | 优雅退出后端 |
+
+### 4.2.1 其余二级命令面（完整清单）
+
+| 命令组 | 说明 |
+|---|---|
+| `hmp player` | status/pause/resume/next/prev/stop/seek/volume/quality（与顶层短命令等价） |
+| `hmp queue` | list/show/add/play-next/remove/clear/shuffle/loop |
+| `hmp playlist` | list（--scope all\|local\|owned\|favorite）/show/create/rename/add/remove/delete |
+| `hmp library` | history/sync/sync-status/tracks（--search/--artist/--album/--liked）/albums/artists/scan |
+| `hmp favorite` | add/remove/list（本地先提交，QQ 由 daemon 异步同步） |
+| `hmp account` | profile（昵称等主页头部）/vip |
+| `hmp comment` | list（--sort hot\|new\|recommend）/post/reply/delete |
 
 ### 4.3 后端进程管理
 
@@ -112,19 +124,19 @@ playerctl -p hmp ...  │        (127.0.0.1 本机)          │
 - **播放模型**：队列是**规范顺序**（显示/快照）；播放沿**播放顺序**推进（`shuffle off` 时二者一致，`on` 时是随机排列）——上一首/下一首都沿播放顺序走。
 - **播完自动续播**：单曲结束（EOS）→ 自动播放队列下一首；
 - **循环**：`none` 播完队列最后一首即停（daemon 保持存活等新指令）；`list` 整体回绕；`track` 单曲重播（**只影响 EOS 续播**：`track` 模式下按“下一首”仍会跳歌，不被单曲循环卡住）；
-- **随机**：`shuffle on` 生成一次性随机播放顺序，周期内不重复，周期结束回绕；`shuffle off` 恢复规范顺序；
-- **上一首**：恒为播放顺序中的前一曲——随机模式下回到真正刚播过的那首；`list`/`track` 模式回绕；
+- **随机**：`shuffle on` 生成一次性随机播放顺序，周期内不重复；`none` 模式下随机周期结束即停（不隐含列表循环），`list` 模式回绕；`shuffle off` 恢复规范顺序（当前曲不变）；
+- **上一首**：进度 ≤ 3s → 播放顺序中的前一曲（随机模式下回到真正刚播过的那首；`list` 回绕）；进度 > 3s → 只回曲首，不换曲；
 - **队列播完**：状态 `Ended`，daemon 不退出，等待 `hmp play/...` 新指令；
 - **播放失败**：某音质不可用自动回退下一档；全部不可用 → `hmp play` 报错并给出最后错误（含 `last_error` 类型化错误码：`NotLoggedIn/TrackNotFound/PlaylistNotFound/QualityUnavailable/Internal`）。
 
 ## 6. 音质与 QMC2 解密
 
-- **音质策略**（持久化于 `~/.config/hmp/config.toml`，`hmp quality` 查看/设置）：
+- **音质策略**（持久化于 `~/.config/hmp/config.toml`，`hmp player quality` 查看/设置）：
   ```bash
-  hmp quality                 # 查看当前策略与生效链
-  hmp quality auto            # 自动：从最高档起逐级回退（默认）
-  hmp quality flac            # 固定 FLAC，失败回退 320/128
-  hmp quality 320 --no-fallback  # 只尝试 320k，不降级
+  hmp player quality                 # 查看当前策略与生效链
+  hmp player quality auto            # 自动：从最高档起逐级回退（默认）
+  hmp player quality flac            # 固定 FLAC，失败回退 320/128
+  hmp player quality 320 --no-fallback  # 只尝试 320k，不降级
   # 可用档位：auto | master | hires | atmos | flac | aac | 320 | 128
   ```
 - **回退链**：`auto` = `Master → HiRes → Atmos → Flac → Mp3_320 → Mp3_128`；固定档位从该档起降级。音质是 **source resolution policy**（resolver 按链取流），不是播放器参数。
@@ -140,7 +152,7 @@ playerctl -p hmp ...  │        (127.0.0.1 本机)          │
 ```bash
 hmp scan ~/Music            # 递归扫描入库（标签元数据 + 文件名回退，幂等）
 hmp play local:/home/user/Music/x.flac   # 播放本地文件（未登录也可）
-hmp history                 # 最近播放（会话粒度：开始/结束/收听时长/原因）
+hmp library history         # 最近播放（会话粒度：开始/结束/收听时长/原因）
 ```
 
 MPRIS `OpenUri`（`playerctl open file:///...`）经同一路径播放。
@@ -173,7 +185,7 @@ MPRIS `OpenUri`（`playerctl open file:///...`）经同一路径播放。
 ### 9.1 自动化测试（无需账号/网络）
 
 ```bash
-cargo test --workspace          # 全量：核心队列/IPC + daemon 引擎（fake 驱动）+ 真 socket 服务器 + CLI + 既有 250+ 测试
+cargo test --workspace          # 全量：核心队列/IPC + daemon 引擎（fake 驱动）+ 真 socket 服务器 + CLI + 既有 500+ 测试
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
@@ -182,7 +194,7 @@ cargo fmt --all -- --check
 - **hmp-core**：`QueueCore` 纯逻辑（循环回绕/prev/播放顺序洗牌/历史回退/插队整片/移除）、IPC 帧编解码（round-trip、长度上限、截断）；
 - **hmp-daemon 引擎**：FakeDriver/FakeResolver 注入——Play 替换队列、Next/Prev 导航、EOS 自动续播、List/Track 循环、移除当前曲立即接替、quit 终止、seq/last_error 发布；
 - **服务器**：真实 Unix socket + 协议客户端——Status/Queue/订阅推送（含空闲订阅者事件流）、畸形帧、未登录前置校验、多客户端；
-- **CLI**：状态格式化、播放源解析、二维码渲染（已知像素图断言）、登录刷新判定、`hmp quit` 进程级优雅退出、`hmp quality`/`hmp history` 格式化；
+- **CLI**：状态格式化、播放源解析、二维码渲染（已知像素图断言）、登录刷新判定、`hmp quit` 进程级优雅退出、`hmp player quality`/`hmp library history` 格式化；
 - **存储**：SQLite 媒体库（迁移 v1、upsert 幂等、播放会话 start→end 闭环、WAL 并发）、配置 round-trip、回退链生成；
 - **e2e（wiremock）**：QQ 详情/取流契约、音质回退链顺序（Auto 含 Atmos；固定 FLAC 只试 F0M0）。
 
@@ -203,13 +215,13 @@ hmp next / hmp prev / hmp pause / hmp resume
 # 4) 后台不中断：新开终端跑 hmp play 后关闭原终端 → 音乐继续
 # 5) 队列与循环
 hmp play playlist:<歌单id>   # 连续播放；播完队列（loop none）后 hmp status 应停在 Ended
-hmp loop list && hmp next   # 回绕
-hmp shuffle on && hmp next  # 随机
+hmp queue loop list && hmp next   # 回绕
+hmp queue shuffle on && hmp next  # 随机
 
 # 6) 音质验证：hmp play 后 hmp status 无报错即解密播放成功（日志可看音质档位）
 # 7) MPRIS
 playerctl -p hmp play-pause && playerctl -p hmp status
-# 8) 托盘：KDE 桌面可见图标，菜单五项可用；点「退出」后 hmp status 应报无法连接
+# 8) 托盘：KDE 桌面可见图标，菜单五项可用（Play/Pause、Previous、Next、Stop、Quit）；点 Quit 后 hmp status 应报无法连接
 # 9) 退出干净
 hmp quit && ls $XDG_RUNTIME_DIR/hmp.sock   # 应不存在
 

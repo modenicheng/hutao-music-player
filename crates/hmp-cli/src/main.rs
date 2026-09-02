@@ -24,6 +24,7 @@ mod playlist;
 mod quality;
 mod scan;
 mod search;
+mod timefmt;
 
 use hmp_core::{LoopMode, Request};
 

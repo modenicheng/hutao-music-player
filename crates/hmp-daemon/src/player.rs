@@ -231,7 +231,7 @@ impl SourceResolver for QqSourceResolver {
     }
 }
 
-/// 音质 → 文件类型（与 CLI play.rs 一致，复制）。
+/// 音质 → 文件类型（QQ 文件类型档案的唯一映射点）。
 ///
 /// `HiRes` 映射到 `SongFileType::MASTER`（AIM0）是**有意**的：上游无独立
 /// Hi-Res 文件类型，MASTER 即「臻品母带 = FLAC 24Bit/192kHz」档（qqmusic-api

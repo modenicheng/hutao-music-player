@@ -62,38 +62,9 @@ fn print_page(page: &CommentPage) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// unix 秒 → `YYYY-MM-DD HH:MM`。
+/// unix 秒 → `YYYY-MM-DD HH:MM`（QQ 评论时间为 UTC+8 固定偏移）。
 fn format_time(secs: i64) -> String {
-    let Some(dt) = chrono_lite(secs) else {
-        return secs.to_string();
-    };
-    dt
-}
-
-/// 无 chrono 依赖的本地时间格式化（UTC+8 固定偏移，够用即可）。
-fn chrono_lite(secs: i64) -> Option<String> {
-    let secs = secs + 8 * 3600; // UTC+8
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (h, m) = (rem / 3600, (rem % 3600) / 60);
-    // 1970-01-01 起的天数 → 年月日（民用历法）。
-    let (y, mth, d) = civil_from_days(days)?;
-    Some(format!("{y:04}-{mth:02}-{d:02} {h:02}:{m:02}"))
-}
-
-/// 天数 → (年, 月, 日)：Howard Hinnant 算法。
-fn civil_from_days(z: i64) -> Option<(i64, i64, i64)> {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    Some((y, m, d))
+    crate::timefmt::format_with_offset(secs, 8 * 3600).unwrap_or_else(|| secs.to_string())
 }
 
 /// 发表评论。
@@ -149,17 +120,6 @@ pub async fn delete(cm_id: &str) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn civil_date_conversion() {
-        // 1970-01-01
-        assert_eq!(civil_from_days(0), Some((1970, 1, 1)));
-        // 2026-08-05 / 2026-08-09（Unix 天）
-        assert_eq!(civil_from_days(20_670), Some((2026, 8, 5)));
-        assert_eq!(civil_from_days(20_674), Some((2026, 8, 9)));
-        // 闰年 2000-02-29（天 11016）
-        assert_eq!(civil_from_days(11_016), Some((2000, 2, 29)));
-    }
 
     #[test]
     fn format_time_utc8() {
