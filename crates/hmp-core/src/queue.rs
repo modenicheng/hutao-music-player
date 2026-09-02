@@ -104,7 +104,14 @@ impl QueueCore {
             has_current: false,
             loop_mode: LoopMode::None,
             shuffle: false,
-            rng: XorShift(0x9E37_79B9_7F4A_7C15),
+            // 时间播种：固定种子会让每次 daemon 重启对同一队列生成完全
+            // 相同的「随机」顺序；确定性测试应走 `set_seed`。
+            rng: XorShift(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64 | 1)
+                    .unwrap_or(0x9E37_79B9_7F4A_7C15),
+            ),
             revision: 0,
         }
     }
