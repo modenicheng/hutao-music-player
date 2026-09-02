@@ -1,7 +1,7 @@
 //! HTTP `Range: bytes=` 请求头解析。
 //!
-//! 仅支持单区间 `bytes=a-b` / `bytes=a-`；后缀式、多区间、非法格式
-//! 一律视为格式错误。
+//! 支持单区间 `bytes=a-b` / `bytes=a-` / 后缀式 `bytes=-N`；多区间、
+//! 非法格式一律视为格式错误。
 
 /// 闭区间 `[start, end]`（含两端）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,8 +25,8 @@ pub enum RangeError {
 ///
 /// - `bytes=a-b` → `ByteRange { start: a, end: b }`
 /// - `bytes=a-`  → `ByteRange { start: a, end: total - 1 }`
-/// - 后缀式 `bytes=-N`、多区间 `bytes=1-2,3-4`、非法字符 →
-///   `Err(RangeError::Malformed)`
+/// - 后缀式 `bytes=-N` → 最后 N 字节 `{ start: total - N, end: total - 1 }`
+/// - 多区间 `bytes=1-2,3-4`、非法字符 → `Err(RangeError::Malformed)`
 /// - `start > end` 或 `start >= total` → `Err(RangeError::Unsatisfiable)`
 ///
 /// # 注意
@@ -42,9 +42,17 @@ pub fn parse_range(header: &str, total: u64) -> Result<ByteRange, RangeError> {
         return Err(RangeError::Malformed);
     }
 
-    // 拒绝后缀式（以 '-' 开头）
-    if range_spec.starts_with('-') {
-        return Err(RangeError::Malformed);
+    // 后缀式 bytes=-N：最后 N 字节（RFC 7233 §2.1；mp4 demuxer 探测 moov
+    // 尾部时常用，必须支持）
+    if let Some(suffix) = range_spec.strip_prefix('-') {
+        let n: u64 = suffix.parse().map_err(|_| RangeError::Malformed)?;
+        if n == 0 || n > total {
+            return Err(RangeError::Unsatisfiable);
+        }
+        return Ok(ByteRange {
+            start: total - n,
+            end: total - 1,
+        });
     }
 
     // 按 '-' 拆分 start / end
@@ -131,8 +139,11 @@ mod tests {
     fn parse_range_malformed() {
         let total = 100;
 
-        // 后缀式
-        assert_eq!(parse_range("bytes=-50", total), Err(RangeError::Malformed));
+        // 后缀式：合法，返回最后 N 字节
+        assert_eq!(parse_range("bytes=-50", 300), Ok(ByteRange { start: 250, end: 299 }));
+        assert_eq!(parse_range("bytes=-300", 300), Ok(ByteRange { start: 0, end: 299 }));
+        assert_eq!(parse_range("bytes=-301", 300), Err(RangeError::Unsatisfiable));
+        assert_eq!(parse_range("bytes=-0", 300), Err(RangeError::Unsatisfiable));
 
         // 多区间
         assert_eq!(

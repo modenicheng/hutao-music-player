@@ -147,6 +147,10 @@ fn finish_success(
     } else {
         final_base
     };
+    // 写缓存后执行容量驱逐（含陈旧 .tmp 清扫）；失败仅告警，不阻断播放。
+    if let Err(e) = crate::cache::evict_if_needed(cache_root) {
+        warn!(%e, "cache eviction failed");
+    }
     file_uri(&final_path)
 }
 
@@ -257,7 +261,9 @@ async fn download_to_file(
     tmp: &Path,
     progress: Option<&tokio::sync::watch::Sender<Option<f64>>>,
 ) -> Result<()> {
-    let response = reqwest::get(url)
+    let response = crate::proxy::source::cdn_client()
+        .get(url)
+        .send()
         .await
         .map_err(|e| MediaError::Network(format!("download request failed: {e}")))?;
 
@@ -342,8 +348,21 @@ async fn decrypt_and_write(
 
     let total_len = std::fs::metadata(src)?.len() as usize;
 
+    // 原子写：先写 `<dst>.part`，校验通过后 rename 到最终路径。
+    // 直接写 dst 的话，崩溃/断电会留下「头 8 字节合法」的截断文件，
+    // 缓存命中检查（只看魔数）将永久命中坏文件。
+    let mut part_name = dst
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    part_name.push(".part");
+    let part = dst.with_file_name(part_name);
+
     let mut reader = tokio::fs::File::open(src).await?;
-    let mut writer = tokio::fs::File::create(dst).await?;
+    let mut writer = match tokio::fs::File::create(&part).await {
+        Ok(w) => w,
+        Err(e) => return Err(DecryptError::Other(MediaError::Io(e))),
+    };
 
     let mut offset: usize = 0;
     let mut written: usize = 0;
@@ -387,15 +406,19 @@ async fn decrypt_and_write(
     writer.flush().await?;
     drop(writer);
 
-    // 魔数校验
-    let head = read_first_bytes(dst, 8)?;
+    // 魔数校验（对 part 文件；通过后原子 rename 到最终路径）
+    let head = read_first_bytes(&part, 8)?;
     match extension_from_magic(&head) {
-        Some(ext) => Ok(ext),
+        Some(ext) => {
+            tokio::fs::rename(&part, dst).await?;
+            Ok(ext)
+        }
         None => {
             warn!(
                 "QMC2 magic unrecognized after decrypt (first 8 bytes: {}), total={total_len}, strip_len={strip_len:?}",
                 hex_str(&head)
             );
+            let _ = std::fs::remove_file(&part);
             Err(DecryptError::MagicMismatch)
         }
     }

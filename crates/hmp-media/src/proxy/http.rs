@@ -21,7 +21,7 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinSet;
-use tracing::debug;
+use tracing::{debug, error};
 
 use super::range::{ByteRange, clamp_end, parse_range};
 
@@ -65,6 +65,7 @@ async fn serve_with_timeout<S: Source + 'static>(
     const MAX_CONNECTIONS: usize = 8;
     let conn_sem = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut connections = JoinSet::new();
+    let mut consecutive_accept_errors = 0u32;
 
     loop {
         tokio::select! {
@@ -75,12 +76,13 @@ async fn serve_with_timeout<S: Source + 'static>(
             }
             Some(result) = connections.join_next(), if !connections.is_empty() => {
                 if let Err(e) = result {
-                    debug!(%e, "连接任务异常结束");
+                    debug!(%e, "connection task ended with error");
                 }
             }
             result = listener.accept() => {
                 match result {
                     Ok((mut stream, addr)) => {
+                        consecutive_accept_errors = 0;
                         let permit = match Arc::clone(&conn_sem).try_acquire_owned() {
                             Ok(permit) => permit,
                             Err(_) => {
@@ -97,9 +99,18 @@ async fn serve_with_timeout<S: Source + 'static>(
                         });
                     }
                     Err(e) => {
-                        debug!(%e, "accept 错误，退出循环");
-                        connections.shutdown().await;
-                        return;
+                        // 瞬时错误（ECONNABORTED、EMFILE 等）不应终止整个代理：
+                        // 退出后 listener 被 drop，MediaGuard 仍持有但无人在
+                        // accept —— 表现为「播放中所有取流请求 connection refused」。
+                        // 连续失败达到上限才放弃（视为 listener 本身损坏）。
+                        consecutive_accept_errors += 1;
+                        if consecutive_accept_errors >= 64 {
+                            error!(%e, "accept failed repeatedly; shutting down proxy");
+                            connections.shutdown().await;
+                            return;
+                        }
+                        debug!(%e, errors = consecutive_accept_errors, "accept error; retrying");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
             }
@@ -192,8 +203,10 @@ async fn handle_connection<S: Source + 'static>(
                 break; // 头部结束
             }
 
-            // 解析 "Key: Value"
-            if let Some((key, value)) = header_line.split_once(": ") {
+            // 解析 "Key: Value"（RFC 7230 允许冒号后无空格；老实现按 ": "
+            // 切分会静默丢弃 `Range:bytes=0-99` 这类合法请求头）
+            if let Some((key, value)) = header_line.split_once(':') {
+                let value = value.trim();
                 if key.eq_ignore_ascii_case("Connection") {
                     if value.eq_ignore_ascii_case("close") {
                         connection_close = true;

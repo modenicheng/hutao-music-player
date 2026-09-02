@@ -4,9 +4,14 @@ use sha1::{Digest, Sha1};
 use std::path::{Path, PathBuf};
 
 /// 根据 url 与 ekey 生成稳定的缓存键（SHA-1 前 16 位十六进制）。
+///
+/// URL 仅取 **path 部分**：QQ CDN 的 `purl` 查询串（`guid`/`vkey`）每次请求
+/// 都会变化，哈希完整 URL 会导致同一曲目永远无法命中缓存（每次播放新增一个
+/// 孤儿解密文件）。path + ekey 足以唯一确定解密产物。
 pub fn cache_key(url: &str, ekey: &str) -> String {
+    let stable = url.split(['?', '#']).next().unwrap_or(url);
     let mut hasher = Sha1::new();
-    hasher.update(url.as_bytes());
+    hasher.update(stable.as_bytes());
     hasher.update(b"|");
     hasher.update(ekey.as_bytes());
     let result = hasher.finalize();
@@ -17,6 +22,11 @@ pub fn cache_key(url: &str, ekey: &str) -> String {
 ///
 /// 返回 `None` 表示无法识别。
 pub fn extension_from_magic(head: &[u8]) -> Option<&'static str> {
+    // ISO-BMFF/MP4：首 4 字节是 box size，"ftyp" 位于 offset 4
+    // （防御性保留 offset 0 的直接匹配）。
+    if head.len() >= 8 && &head[4..8] == b"ftyp" {
+        return Some("m4a");
+    }
     match head {
         [b'f', b'L', b'a', b'C', ..] => Some("flac"),
         [b'O', b'g', b'g', b'S', ..] => Some("ogg"),
@@ -40,9 +50,38 @@ pub fn tmp_path(root: &Path, key: &str) -> PathBuf {
 /// 容量驱逐：若根目录内（不含 `*.tmp`）总大小超过上限则按 mtime 升序删除最旧文件直至达标。
 ///
 /// 上限由环境变量 `HMP_DECRYPT_CACHE_MIB` 控制（默认 2048 MiB）。
-/// 委托给 [`evict_if_needed_with_cap`]。
+/// 委托给 [`evict_if_needed_with_cap`]（并先清扫陈旧 `.tmp` 残留）。
 pub fn evict_if_needed(root: &Path) -> Result<(), std::io::Error> {
+    sweep_stale_tmp(root)?;
     evict_if_needed_with_cap(root, cache_cap_bytes())
+}
+
+/// 清扫陈旧 `.tmp` 残留（mtime 超过 1 天）。
+///
+/// `tmp_path` 以 pid 命名，历史进程的残留永远不会被同名覆盖；不清理则
+/// 无限累积（崩溃/取消可能留下半成品）。
+pub fn sweep_stale_tmp(root: &Path) -> Result<(), std::io::Error> {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+    let dir = match std::fs::read_dir(root) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+    for entry in dir.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|e| e == "tmp") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
 }
 
 /// 容量驱逐（可注入上限，供测试使用）。
@@ -139,6 +178,13 @@ mod tests {
         let k4 = cache_key("https://a/1.mflac", "ekey2");
         assert_ne!(k1, k4, "不同 ekey 应不同");
 
+        // 查询串不参与 key：guid/vkey 每次请求变化，path 稳定 → 命中同一缓存
+        let kq = cache_key(
+            "https://a/1.mflac?guid=abc&vkey=xyz",
+            "ekey1",
+        );
+        assert_eq!(k1, kq, "同一 path 不同查询串应命中同一缓存");
+
         // 长度 == 16（hex 前缀）
         assert_eq!(k1.len(), 16);
     }
@@ -150,6 +196,11 @@ mod tests {
         assert_eq!(extension_from_magic(b"OggS"), Some("ogg"));
         assert_eq!(extension_from_magic(b"ftyp"), Some("m4a"));
         assert_eq!(extension_from_magic(b"ftypisom"), Some("m4a"));
+        // 真实 ISO-BMFF/MP4：首 4 字节 box size，ftyp 在 offset 4
+        assert_eq!(
+            extension_from_magic(&[0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p']),
+            Some("m4a")
+        );
         assert_eq!(extension_from_magic(b"ID3"), Some("mp3"));
         assert_eq!(extension_from_magic(b"ID3\0"), Some("mp3"));
         assert_eq!(extension_from_magic(&[0xff, 0xfb]), Some("mp3"));

@@ -292,6 +292,17 @@ async fn fetch_and_decrypt_range(
 /// 最大尾部探测大小。
 const TAIL_PROBE: u64 = 0x40;
 
+/// CDN 请求客户端：reqwest 默认无任何超时，连接被防火墙黑洞时取流会
+/// 永久挂起（无错误、无回退），流式期间还会占死 Semaphore 许可饿死其余
+/// 区间请求。连接超时 + 读超时兜住这类故障。
+pub(crate) fn cdn_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("CDN client build is infallible")
+}
+
 /// 将 CDN URL 准备为流式代理。
 ///
 /// 流程：
@@ -306,7 +317,7 @@ pub async fn prepare_stream(
     progress: Option<&tokio::sync::watch::Sender<Option<f64>>>,
 ) -> Result<PreparedMedia, MediaError> {
     let ekey = ekey.filter(|e| !e.is_empty());
-    let client = reqwest::Client::new();
+    let client = cdn_client();
 
     // 1. 探测 CDN Range 支持
     let total_len = match probe_cdn(&client, url).await {
