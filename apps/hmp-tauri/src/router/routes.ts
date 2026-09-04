@@ -11,6 +11,25 @@ export const routes = [
   },
 
   {
+    path: "/discover",
+    name: "discover",
+    component: () => import("../views/DiscoverView.vue"),
+  },
+
+  {
+    path: "/top",
+    name: "top",
+    component: () => import("../views/TopView.vue"),
+  },
+
+  {
+    path: "/top/:id",
+    name: "top-detail",
+    component: () => import("../views/TopDetailView.vue"),
+    props: true,
+  },
+
+  {
     path: "/search",
     name: "search",
     component: () => import("../views/SearchView.vue"),

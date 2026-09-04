@@ -5,14 +5,17 @@ import HoverGroup from "../components/HoverGroup.vue";
 import HoverItem from "../components/HoverItem.vue";
 import Scroll from "../components/Scroll.vue";
 import { computed } from "vue";
+import { RouterLink } from "vue-router";
 import { cycleTheme, themeState } from "../lib/themeStore.ts";
 import accountIcon from "../assets/icons/account-circle-rounded.svg?raw";
 import addIcon from "../assets/icons/add-rounded.svg?raw";
 import downloadIcon from "../assets/icons/download-rounded.svg?raw";
 import expandIcon from "../assets/icons/expand-more-rounded.svg?raw";
+import exploreIcon from "../assets/icons/explore-rounded.svg?raw";
 import favoriteIcon from "../assets/icons/favorite-outline-rounded.svg?raw";
 import historyIcon from "../assets/icons/history-rounded.svg?raw";
 import homeIcon from "../assets/icons/home-rounded.svg?raw";
+import leaderboardIcon from "../assets/icons/leaderboard-rounded.svg?raw";
 import libraryIcon from "../assets/icons/library-music-rounded.svg?raw";
 import logoutIcon from "../assets/icons/logout-rounded.svg?raw";
 import playlistIcon from "../assets/icons/playlist-play-rounded.svg?raw";
@@ -74,6 +77,29 @@ const themeTitle = computed(
           <Button variant="ghost" class="sidebar-button nav-item">
             <AppIcon :src="homeIcon" />
             <span>首页</span>
+          </Button>
+        </HoverItem>
+        <!-- 发现/排行榜：Button 经 as 渲染成 RouterLink 的 <a>，既有 HoverItem/Button 结构与样式类保持不变 -->
+        <HoverItem>
+          <Button
+            :as="RouterLink"
+            to="/discover"
+            variant="ghost"
+            class="sidebar-button nav-item"
+          >
+            <AppIcon :src="exploreIcon" />
+            <span>发现</span>
+          </Button>
+        </HoverItem>
+        <HoverItem>
+          <Button
+            :as="RouterLink"
+            to="/top"
+            variant="ghost"
+            class="sidebar-button nav-item"
+          >
+            <AppIcon :src="leaderboardIcon" />
+            <span>排行榜</span>
           </Button>
         </HoverItem>
         <HoverItem>
