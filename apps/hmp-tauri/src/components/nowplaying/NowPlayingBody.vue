@@ -8,8 +8,6 @@ import {
   PlayerControlStatus,
   type PlayerController,
 } from "../../lib/player";
-import { extractPaletteFromUrl } from "../../lib/color/adapter.ts";
-import { themeState } from "../../lib/themeStore.ts";
 import { api, type Lyrics } from "../../lib/api/index.ts";
 import { findSong } from "../../lib/api/mock-data.ts";
 import playIcon from "../../assets/icons/play_arrow-rounded.svg?raw";
@@ -30,7 +28,6 @@ import commentIcon from "../../assets/icons/comment-rounded.svg?raw";
  */
 const props = defineProps<{ player: PlayerController }>();
 
-const theme = themeState();
 const shuffleOn = ref(false);
 const repeatOn = ref(false);
 const lyrics = ref<Lyrics | null>(null);
@@ -41,27 +38,7 @@ const songDetail = computed(() =>
   track.value ? findSong(track.value.mid) ?? null : null,
 );
 
-// —— 曲目层调色：封面变化 / 明暗主题切换时重取 ——
-watch(
-  () => [track.value?.coverUrl ?? null, theme.resolved] as const,
-  async ([coverUrl, resolved]) => {
-    const palette = coverUrl
-      ? await extractPaletteFromUrl(coverUrl, { mode: resolved })
-      : await extractPaletteFromUrl("", { mode: resolved });
-    const rootStyle = document.documentElement.style;
-    rootStyle.setProperty("--track-accent", palette.accent);
-    rootStyle.setProperty("--track-on-accent", palette.onAccent);
-    rootStyle.setProperty("--track-accent-soft", palette.accentSoft);
-    rootStyle.setProperty("--track-deep", palette.deep);
-    rootStyle.setProperty("--track-deep-fg", palette.deepFg);
-    rootStyle.setProperty("--track-grad-from", palette.gradFrom);
-    rootStyle.setProperty("--track-grad-to", palette.gradTo);
-    rootStyle.setProperty("--track-equalizer", palette.accent);
-  },
-  { immediate: true },
-);
-
-// —— 歌词随曲目加载 ——
+// —— 歌词随曲目加载（调色由 App 级 trackTheme 全局负责）——
 watch(
   () => track.value?.mid ?? null,
   async (mid) => {
