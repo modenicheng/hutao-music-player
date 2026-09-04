@@ -1,6 +1,9 @@
-import { reactive } from "vue";
+import { reactive, type InjectionKey } from "vue";
 
 const VOLUME_STORAGE_KEY = "hmp.player.volume";
+
+/** PlayerController 的 provide/inject 键：App 提供，路由页消费 */
+export const playerKey: InjectionKey<PlayerController> = Symbol("player");
 
 export interface PlayerStateSnapshot {
   status: string;
@@ -15,6 +18,16 @@ export interface PlayerStateSnapshot {
   error: string | null;
 }
 
+/** 播放队列里的一首曲（播放页/播放列表抽屉消费的最小元数据） */
+export interface QueueItem {
+  mid: string;
+  title: string;
+  artists: string[];
+  album: string | null;
+  coverUrl: string | null;
+  durationMs: number;
+}
+
 export interface PlayerBridge {
   getState(): Promise<PlayerStateSnapshot>;
   onStateChanged(
@@ -27,6 +40,16 @@ export interface PlayerBridge {
   previous(): Promise<void>;
   next(): Promise<void>;
   stop(): Promise<void>;
+  // —— 附加式扩展（DESIGN.md §4）：实现方可选择性提供 ——
+  getCurrentTrack?(): Promise<QueueItem | null>;
+  getQueue?(): Promise<QueueItem[]>;
+  playAt?(index: number): Promise<void>;
+  removeAt?(index: number): Promise<void>;
+  /** 用传入曲目替换当前队列并从 startIndex 播（对应未来 daemon 的 QueueAppend+Play） */
+  playTracks?(tracks: QueueItem[], startIndex: number): Promise<void>;
+  onQueueChanged?(
+    listener: (queue: QueueItem[]) => void,
+  ): Promise<() => void>;
 }
 
 interface PlayerStorage {
@@ -59,6 +82,10 @@ export class PlayerController {
     error: null as string | null,
     controlStatus: PlayerControlStatus.idle,
     overlayVisible: false,
+    queueVisible: false,
+    // 附加式扩展的镜像状态：桥未提供对应方法时保持为空
+    currentTrack: null as QueueItem | null,
+    queue: [] as QueueItem[],
   });
 
   private readonly bridge: PlayerBridge;
@@ -81,13 +108,23 @@ export class PlayerController {
       window.addEventListener("mousemove", this.handleMouseMove);
     }
     try {
-      this.unsubscribes = await Promise.all([
+      const subscriptions = [
         this.bridge.onStateChanged(this.applySnapshot),
         this.bridge.onError((message) => {
           this.state.error = message;
         }),
-      ]);
+      ] as Array<Promise<() => void>>;
+      if (this.bridge.onQueueChanged) {
+        subscriptions.push(this.bridge.onQueueChanged(this.applyQueue));
+      }
+      this.unsubscribes = await Promise.all(subscriptions);
       this.applySnapshot(await this.bridge.getState());
+      if (this.bridge.getCurrentTrack) {
+        this.state.currentTrack = await this.bridge.getCurrentTrack();
+      }
+      if (this.bridge.getQueue) {
+        this.state.queue = [...(await this.bridge.getQueue())];
+      }
     } catch (error) {
       this.setError(error);
     }
@@ -110,6 +147,33 @@ export class PlayerController {
   previous = () => this.run(() => this.bridge.previous());
   next = () => this.run(() => this.bridge.next());
   stop = () => this.run(() => this.bridge.stop());
+
+  playAt = (index: number) => {
+    if (!this.bridge.playAt) return;
+    this.run(() => this.bridge.playAt!(index));
+  };
+
+  removeAt = (index: number) => {
+    if (!this.bridge.removeAt) return;
+    this.run(() => this.bridge.removeAt!(index));
+  };
+
+  playTracks = (tracks: QueueItem[], startIndex: number) => {
+    if (!this.bridge.playTracks) return;
+    this.run(() => this.bridge.playTracks!(tracks, startIndex));
+  };
+
+  seek = (positionMs: number) => {
+    this.run(() => this.bridge.seek(Math.max(0, positionMs)));
+  };
+
+  private applyQueue = async (queue: QueueItem[]) => {
+    this.state.queue = [...queue];
+    // 队列事件同时承担"当前曲目变更"信号：重拉以确保播放页/播放条同步
+    if (this.bridge.getCurrentTrack) {
+      this.state.currentTrack = await this.bridge.getCurrentTrack();
+    }
+  };
 
   setVolume = (volume: number) => {
     const nextVolume = this.applyVolume(volume);
@@ -156,6 +220,24 @@ export class PlayerController {
 
   toggleOverlay = () => {
     this.state.overlayVisible = !this.state.overlayVisible;
+  };
+
+  /** 播放页刻度条/键盘统一入口：按 0..1 比例 seek */
+  seekToPercent = (percent: number) => {
+    const duration = this.state.durationMs;
+    if (duration === null || duration <= 0) return;
+    const clamped = Math.min(1, Math.max(0, percent));
+    this.state.positionMs = Math.round(duration * clamped);
+    this.state.progress = clamped;
+    this.run(() => this.bridge.seek(this.state.positionMs));
+  };
+
+  showQueue = () => {
+    this.state.queueVisible = true;
+  };
+
+  hideQueue = () => {
+    this.state.queueVisible = false;
   };
 
   private applySnapshot = (snapshot: PlayerStateSnapshot) => {

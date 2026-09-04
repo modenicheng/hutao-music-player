@@ -3,6 +3,7 @@ import { ref } from "vue";
 import Sidebar from "./Sidebar.vue";
 import PlayerBar from "./PlayerBar.vue";
 import PlayerOverlay from "./PlayerOverlay.vue";
+import QueueDrawer from "../components/QueueDrawer.vue";
 import type { PlayerController } from "../lib/player.ts";
 
 defineProps<{
@@ -24,14 +25,12 @@ const sidebarCollapsed = ref(false);
 
     <PlayerBar
       :player="player"
+      :on-open-queue="player.showQueue"
       class="player-bar"
-      @click="
-        () => {
-          // player.toggleOverlay();
-        }
-      "
     />
   </div>
+
+  <QueueDrawer :player="player" :open="player.state.queueVisible" @close="player.hideQueue" />
 
   <Transition name="slide-bottom">
     <PlayerOverlay v-if="player.state.overlayVisible" :player="player" />

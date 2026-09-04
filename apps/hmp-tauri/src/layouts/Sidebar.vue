@@ -4,6 +4,8 @@ import Button from "../components/Button.vue";
 import HoverGroup from "../components/HoverGroup.vue";
 import HoverItem from "../components/HoverItem.vue";
 import Scroll from "../components/Scroll.vue";
+import { computed } from "vue";
+import { cycleTheme, themeState } from "../lib/themeStore.ts";
 import accountIcon from "../assets/icons/account-circle-rounded.svg?raw";
 import addIcon from "../assets/icons/add-rounded.svg?raw";
 import downloadIcon from "../assets/icons/download-rounded.svg?raw";
@@ -16,9 +18,25 @@ import logoutIcon from "../assets/icons/logout-rounded.svg?raw";
 import playlistIcon from "../assets/icons/playlist-play-rounded.svg?raw";
 import queueIcon from "../assets/icons/queue-music-rounded.svg?raw";
 import settingsIcon from "../assets/icons/settings-rounded.svg?raw";
+import autoThemeIcon from "../assets/icons/brightness-auto-rounded.svg?raw";
+import lightThemeIcon from "../assets/icons/light-mode-rounded.svg?raw";
+import darkThemeIcon from "../assets/icons/dark-mode-rounded.svg?raw";
 
 defineProps<{ collapsed?: boolean }>();
 defineEmits<{ "update:collapsed": [value: boolean] }>();
+
+const theme = themeState();
+const themeIcon = computed(() =>
+  theme.mode === "dark"
+    ? darkThemeIcon
+    : theme.mode === "light"
+      ? lightThemeIcon
+      : autoThemeIcon,
+);
+const themeTitle = computed(
+  () =>
+    `主题（当前：${theme.mode === "auto" ? "跟随系统" : theme.mode === "light" ? "浅色" : "深色"}，点击切换）`,
+);
 
 // emit.call(true, "update:collapsed", true);
 </script>
@@ -163,8 +181,13 @@ defineEmits<{ "update:collapsed": [value: boolean] }>();
       <Button variant="ghost" size="icon" title="设置">
         <AppIcon :src="settingsIcon" />
       </Button>
-      <Button variant="ghost" size="icon" title="主题">
-        <span class="theme-mark"></span>
+      <Button
+        variant="ghost"
+        size="icon"
+        :title="themeTitle"
+        @click="cycleTheme"
+      >
+        <AppIcon :src="themeIcon" />
       </Button>
     </footer>
   </aside>
@@ -333,12 +356,5 @@ defineEmits<{ "update:collapsed": [value: boolean] }>();
   gap: 0.5rem;
   margin-top: auto;
   padding-top: 1rem;
-}
-
-.theme-mark {
-  width: 1.35rem;
-  height: 1.35rem;
-  border: 0.15rem solid currentColor;
-  border-radius: 50%;
 }
 </style>

@@ -213,6 +213,18 @@ h6 {
   --v-theme-on-background: 52, 40, 39;
   --v-theme-on-surface: 52, 40, 39;
 
+  /* ---------- 曲目层（动态，DESIGN.md §1.2）----------
+     默认回退到品牌 walnut；封面取色模块在运行时整族覆写。
+     组件只消费这些变量，不直接引用取色结果。 */
+  --track-accent: var(--accent);
+  --track-on-accent: #ffffff;
+  --track-accent-soft: rgba(179, 74, 58, 0.12);
+  --track-deep: #6b302a;
+  --track-deep-fg: #f7f0ea;
+  --track-grad-from: #f3e2de;
+  --track-grad-to: #faf9f8;
+  --track-equalizer: var(--accent);
+
 }
 
 /* ============================================
@@ -312,4 +324,14 @@ h6 {
   --v-theme-on-accent: 18, 16, 13;
   --v-theme-on-background: 242, 239, 236;
   --v-theme-on-surface: 242, 239, 236;
+
+  /* 曲目层暗色回退（取色模块按 mode 参数生成对应值） */
+  --track-accent: var(--accent);
+  --track-on-accent: #12100d;
+  --track-accent-soft: rgba(208, 100, 82, 0.2);
+  --track-deep: #2b1a17;
+  --track-deep-fg: #f7f0ea;
+  --track-grad-from: #241a19;
+  --track-grad-to: #181412;
+  --track-equalizer: var(--accent);
 }
