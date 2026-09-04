@@ -1,0 +1,3 @@
+# pnpm 11 构建脚本许可：esbuild 的 postinstall 用于平台二进制校验
+allowBuilds:
+  esbuild: true
