@@ -23,6 +23,7 @@ import libraryIcon from "../assets/icons/library-music-rounded.svg?raw";
 import logoutIcon from "../assets/icons/logout-rounded.svg?raw";
 import playlistIcon from "../assets/icons/playlist-play-rounded.svg?raw";
 import settingsIcon from "../assets/icons/settings-rounded.svg?raw";
+import shoppingBagIcon from "../assets/icons/shopping-bag-rounded.svg?raw";
 import autoThemeIcon from "../assets/icons/brightness-auto-rounded.svg?raw";
 import lightThemeIcon from "../assets/icons/light-mode-rounded.svg?raw";
 import darkThemeIcon from "../assets/icons/dark-mode-rounded.svg?raw";
@@ -89,24 +90,27 @@ interface NavItem {
   label: string;
   icon: string;
   to?: string;
+  /** 仅精确匹配该路由（有子路由的入口必须置位，防止整段常亮） */
+  exact?: boolean;
   /** 点击动作（无路由的项） */
   action?: () => void;
   disabled?: boolean;
 }
 
 const navItems: NavItem[] = [
-  { label: "首页", icon: homeIcon, to: "/home" },
+  { label: "首页", icon: homeIcon, to: "/home", exact: true },
   { label: "发现", icon: exploreIcon, to: "/discover" },
   { label: "排行榜", icon: leaderboardIcon, to: "/top" },
-  { label: "我喜欢", icon: favoriteIcon, to: "/library" },
+  { label: "我喜欢", icon: favoriteIcon, to: "/library", exact: true },
   { label: "最近播放", icon: historyIcon, to: "/library/recent" },
-  { label: "本地和下载", icon: downloadIcon, disabled: true },
-  { label: "已购音乐", icon: libraryIcon, disabled: true },
+  { label: "音乐库", icon: libraryIcon, to: "/library/local" },
+  { label: "下载", icon: downloadIcon, to: "/library/downloads" },
+  { label: "已购音乐", icon: shoppingBagIcon, to: "/library/purchased" },
 ];
 
 function isActive(item: NavItem) {
   if (!item.to) return false;
-  if (item.to === "/home") return route.path === "/home";
+  if (item.exact) return route.path === item.to;
   return route.path === item.to || route.path.startsWith(`${item.to}/`);
 }
 

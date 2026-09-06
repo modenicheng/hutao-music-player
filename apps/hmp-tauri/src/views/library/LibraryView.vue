@@ -12,7 +12,6 @@ import PageHeader from "../../components/PageHeader.vue";
 import SectionHeader from "../../components/SectionHeader.vue";
 import TrackTable from "../../components/TrackTable.vue";
 import favoriteIcon from "../../assets/icons/favorite-filled-rounded.svg?raw";
-import hardDriveIcon from "../../assets/icons/hard-drive-rounded.svg?raw";
 import playIcon from "../../assets/icons/play_arrow-rounded.svg?raw";
 
 // player 可能拿不到：播放入口与播放全部按钮兜底隐藏，页面照常渲染
@@ -72,7 +71,7 @@ function formatCount(value: number): string {
     <div v-else-if="failed" class="state-hint">加载失败</div>
 
     <template v-else>
-      <PageHeader title="音乐库">
+      <PageHeader title="我喜欢">
         <template #meta>
           <span>{{ liked.length }} 首喜欢的歌</span>
           <span aria-hidden="true">·</span>
@@ -133,16 +132,6 @@ function formatCount(value: number): string {
             :subtitle="`${formatCount(playlist.playCount)}次播放`"
             :to="`/playlist/${playlist.id}`"
           />
-        </div>
-      </section>
-
-      <!-- 本地音乐：后端未接线的诚实空态 -->
-      <section class="section" aria-label="本地音乐">
-        <SectionHeader title="本地音乐" />
-        <div class="local-empty">
-          <AppIcon :src="hardDriveIcon" class="local-icon" />
-          <p class="local-title">本地和下载尚未开通</p>
-          <p class="local-desc">桌面端索引本地音频后，这里会显示你的本地歌曲与下载内容。</p>
         </div>
       </section>
     </template>
@@ -234,36 +223,5 @@ function formatCount(value: number): string {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
   gap: var(--space-4);
-}
-
-/* —— 本地音乐空态 —— */
-.local-empty {
-  display: grid;
-  justify-items: center;
-  gap: var(--space-1);
-  padding: var(--space-8) var(--space-5);
-  text-align: center;
-  background: var(--surface-3);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-}
-
-.local-icon {
-  width: 2rem;
-  height: 2rem;
-  margin-bottom: var(--space-2);
-  color: var(--muted-foreground);
-}
-
-.local-title {
-  font-size: 0.95rem;
-  font-weight: 600;
-}
-
-.local-desc {
-  max-width: 26rem;
-  font-size: 0.82rem;
-  color: var(--muted-foreground);
-  line-height: 1.6;
 }
 </style>

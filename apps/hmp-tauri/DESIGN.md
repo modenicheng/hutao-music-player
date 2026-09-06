@@ -171,7 +171,10 @@ adapter.ts        DOM 适配：图片 URL / ImageBitmap → 像素数组（Offsc
 | 歌单 | `/playlist/:id` | SonglistApi | 封面 + 创建者 + 标签 + 播放全部 + TrackTable |
 | 搜索 | `/search` | quick_search | 大搜索框（自动聚焦）+ 三 tab（歌曲/专辑/歌手）+ 空态插画文案 |
 | 最近播放 | `/library/recent` | recent_plays | TrackTable（含相对时间列） |
-| 音乐库 | `/library` | api.library（liked/created/favorited） | 我喜欢 hero 卡（播放全部）→ 喜欢列表 → 最近播放预览（更多→最近播放页）→ 创建/收藏歌单网格 → 本地音乐空态 |
+| 我喜欢 | `/library` | api.library（liked/created/favorited） | 我喜欢 hero 卡（播放全部）→ 喜欢列表 → 最近播放预览（更多→最近播放页）→ 创建/收藏歌单网格 |
+| 音乐库 | `/library/local` | api.library.local | 页头（统计元信息 + 播放全部 + 扫描禁用）→ 监视文件夹（点击行过滤曲目表）→ 全部音乐 TrackTable |
+| 下载 | `/library/downloads` | api.library.downloads | 已下载 TrackTable → 落盘明细（存储位置 / 下载音质 → 设置页） |
+| 已购音乐 | `/library/purchased` | api.library.purchased | 已购单曲 TrackTable → 已购专辑 CoverCard 网格 |
 
 **本版全部跑 mock 数据**（`src/lib/api/`），接口形状即未来接线的契约（§4）；封面一律用**程序化 SVG data-URL**（按种子生成确定性的封面图，既可测取色又不依赖网络）。
 
@@ -203,6 +206,16 @@ adapter.ts        DOM 适配：图片 URL / ImageBitmap → 像素数组（Offsc
 - **歌单区宽窄双形态**：宽侧栏 = 分组折叠旧样式（分组标题行 + chevron + `grid-rows 0fr/1fr` 高度过渡 + 组内新建按钮）；窄边栏 = 两级滑动导航——一级为自建（播放列表图标）/收藏（**书签图标 `bookmark-rounded`**，避免与播放列表图标、"我喜欢"心形撞形）两个入口行，点分组整块左滑进二级：返回行 + 纯封面列表，**二级行与主导航行同规格**（同 `sidebar-button`、等高 2.5rem、图标 1.35rem、窄栏居中）——滑块几何与对齐和上方导航完全一致，返回键滑回。两级滑动的工程要点：激活 pane 回到文档流瞬时撑起容器高度（高度切换发生在动画之外），非激活 pane 绝对定位停视口外，两侧仅 translateX 过渡 + 容器 `overflow: hidden` 裁切——动画全程零高度重排；非激活 pane 挂 `inert` 防焦点落入隐藏区；`prefers-reduced-motion` 免动画；侧栏 hover-item wrapper 上 `display: flex` 消除块级 div 包 inline-flex 按钮的基线缝隙（否则 wrapper 比行高零点几~1px，滑块高度参差）。宽窄切换时两套 UI 以 150ms 交叉淡入淡出（离开侧绝对定位脱流防叠排）；侧栏所有行内文字（导航标签/分组名/歌单名）一律 `white-space: nowrap + ellipsis`——宽度过渡期间文字单行截断而非折行，杜绝行高剧烈变化（隐藏文字用 `span:last-child:not(.app-icon)`——纯图标行唯一 span 同时是 last-child，不能误杀）。
 - **文字链接交互统一**：所有纯文字链接/按钮（表格内歌手/专辑名、专辑页歌手、播放页歌手/专辑、"更多"、简介展开、Button link 变体）统一套 `.text-link` 全局工具类（index.css）——基色 muted，hover 颜色过渡提亮至 foreground，**不用下划线**；唯一例外「展开回复」保留自绘 1px 下划线（`background-size` 过渡：hover 从左向右展开、移出原路收回）。
 - **控制台跳转键纯图标化**：评论/列表去掉文字标签改纯图标，命中区与控制键同规格（2.25rem 方形，语义由 title/aria-label 承载）；换用 outlined 轻量图标（新增 `comment-outline-rounded` 空心气泡、`queue-music-outline-rounded` 2px 线风格——细杆 + 空心符头），消解实心气泡的视觉重感；PlayerBar 的队列按钮保持实心（与其旁实心音量图标同簇协调）。
+
+**v0.13 增补（2026-09-06，本地音乐独立成页 + 下载 / 已购落地）**：
+
+- **侧栏接线**：「本地和下载」「已购音乐」两项置灰结束——拆为**音乐库**（`library-music` 图标）/ **下载**（`download`）/ **已购音乐**（`shopping-bag`，原占位误用 library-music）三项；`isActive` 引入 `exact` 语义（`/home`、`/library` 仅精确匹配）——`/library` 收编 `/library/*` 子页后前缀匹配会让父项与子项同时常亮，一并修复。
+- **`/library` 改题「我喜欢」**：与侧栏标签同一词汇；原「本地音乐诚实空态」随页面独立完成使命，移除。
+- **音乐库 `/library/local`**（本地音乐独立成页）：契约 = `LocalTrack`（SongRef + sizeBytes/format/folder）+ `WatchedFolder` + `LocalLibrary`，走 `api.library.local`。结构 = PageHeader（N 首 · 总时长 · 占用 元信息；播放全部播的是**当前过滤结果**；「扫描本地音乐」诚实禁用 + title 说明）→ **监视文件夹**（HoverGroup 滑动高亮行——文件夹是可点行，与曲目表同款中性滑块；点击过滤下方曲目表，激活行 muted 常亮 + `aria-pressed`（与侧栏激活态同语言），再点一次或「显示全部」取消；表标题随过滤切换为「文件夹名 · N 首」）→ 全部音乐 TrackTable；≤42rem 文件夹元信息折行到路径下保路径完整。
+- **下载 `/library/downloads`**：契约 = `DownloadLibrary`（tracks + storagePath），走 `api.library.downloads`。已下载 TrackTable → **落盘明细**：一行一事的发丝线定义行（评论区同一套编辑部式语言）——存储位置；下载音质读 `qualityStore` **真实偏好**，「在设置中调整」text-link 指向 `/settings/playback`。
+- **已购音乐 `/library/purchased`**：契约 = `PurchasedMusic`（singles / albums，各附 purchasedAt + priceFen 分），走 `api.library.purchased`。页头 meta 聚合「单曲 N · 专辑 M · 合计 ¥X.XX」（`formatCny`）；已购单曲 TrackTable（购买日期不进行内列，归页头聚合）→ 已购专辑 CoverCard 网格（副标题「N 首 · 日期 购买」），点击进专辑详情。
+- **mock 纪律**：本地库与下载共用同一 `local:` 哈希余数（2/3 vs 1/3）互斥不重复；文件大小 = 音质档位码率（Hi-Res 2100–2400 / FLAC 850–1000 / MP3 320 kbps）× 时长推导；购买日期与价格全部 `hashSeed` 派生、按日期倒序；扫描 / 添加文件夹桌面端未接线，**禁用 + 说明**，不做假开关。
+- **新增 `lib/format.ts`**：`formatBytes` / `formatLongDuration` / `formatCny`（纯函数 + vitest 单测）；新增 `folder-rounded` 图标资产。
 
 ### 3.3 明确不做（本版）
 

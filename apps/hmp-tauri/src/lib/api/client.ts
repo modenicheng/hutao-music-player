@@ -9,9 +9,12 @@ import type {
   ArtistInfo,
   ArtistRef,
   CommentSection,
+  DownloadLibrary,
+  LocalLibrary,
   Lyrics,
   PlaylistDetail,
   PlaylistRef,
+  PurchasedMusic,
   RecommendFeed,
   SearchResults,
   SongRef,
@@ -27,12 +30,15 @@ import {
   commentSection,
   curatedAlbums,
   createdPlaylistRefs,
+  downloadLibrary,
   favoritedPlaylistRefs,
   findAlbum,
   findSong,
   likedSongs,
+  localLibrary,
   lyricsOf,
   playlistDetail,
+  purchasedMusic,
   recommendFeed,
   songPool,
   topCategories,
@@ -151,8 +157,8 @@ export const api = {
     },
   },
   library: {
-    // 账号体系未接线：三个方法均由本地 mock 派生，未来换成 daemon
-    // Favorite / 歌单收藏接口，调用方不需要改动。
+    // 账号体系未接线：各方法均由本地 mock 派生，未来换成 daemon
+    // Favorite / 歌单收藏 / 本地扫描 / 下载管理 / 订单接口，调用方不需要改动。
     async liked(): Promise<SongRef[]> {
       await simulateLatency("library.liked");
       return likedSongs();
@@ -164,6 +170,21 @@ export const api = {
     async favorited(): Promise<PlaylistRef[]> {
       await simulateLatency("library.favorited");
       return favoritedPlaylistRefs();
+    },
+    /** 本地音乐库（桌面端 daemon 索引） */
+    async local(): Promise<LocalLibrary> {
+      await simulateLatency("library.local");
+      return localLibrary();
+    },
+    /** 下载内容 */
+    async downloads(): Promise<DownloadLibrary> {
+      await simulateLatency("library.downloads");
+      return downloadLibrary();
+    },
+    /** 已购音乐 */
+    async purchased(): Promise<PurchasedMusic> {
+      await simulateLatency("library.purchased");
+      return purchasedMusic();
     },
   },
 };

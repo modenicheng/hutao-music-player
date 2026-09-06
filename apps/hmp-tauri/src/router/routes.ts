@@ -69,6 +69,24 @@ export const routes = [
   },
 
   {
+    path: "/library/local",
+    name: "local-library",
+    component: () => import("../views/library/MusicLibraryView.vue"),
+  },
+
+  {
+    path: "/library/downloads",
+    name: "downloads",
+    component: () => import("../views/library/DownloadsView.vue"),
+  },
+
+  {
+    path: "/library/purchased",
+    name: "purchased",
+    component: () => import("../views/library/PurchasedView.vue"),
+  },
+
+  {
     path: "/settings",
     name: "settings",
     component: () => import("../views/settings/SettingsView.vue"),

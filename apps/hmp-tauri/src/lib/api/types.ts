@@ -156,3 +156,63 @@ export interface SearchResults {
   albums: AlbumDetail[];
   artists: ArtistRef[];
 }
+
+// ——— 本地音乐 / 下载（落盘文件，桌面端 daemon 索引结果的契约形状）———
+
+/** 落盘音频文件：本地索引或下载得到的曲目，在 SongRef 之上附文件维度字段 */
+export interface LocalTrack extends SongRef {
+  /** 文件大小（字节） */
+  sizeBytes: number;
+  /** 编码格式，如 "FLAC" / "MP3" */
+  format: string;
+  /** 文件所在文件夹（本地索引为监视文件夹，下载为统一存储目录） */
+  folder: string;
+}
+
+/** 本地监视文件夹（桌面端扫描范围） */
+export interface WatchedFolder {
+  /** 文件夹路径，如 "~/Music/无损收藏" */
+  path: string;
+  trackCount: number;
+  sizeBytes: number;
+  /** 最近一次扫描时间，如 "2026-09-05 21:30" */
+  lastScanAt: string;
+}
+
+/** 本地音乐库 */
+export interface LocalLibrary {
+  tracks: LocalTrack[];
+  folders: WatchedFolder[];
+  /** 全库最近一次扫描时间 */
+  lastScanAt: string;
+}
+
+/** 下载内容（统一存储目录下的落盘文件） */
+export interface DownloadLibrary {
+  tracks: LocalTrack[];
+  /** 下载文件统一存储目录 */
+  storagePath: string;
+}
+
+// ——— 已购音乐（订单维度字段；金额一律分为单位）———
+
+export interface PurchasedSingle {
+  song: SongRef;
+  /** 购买日期，如 "2026-08-30" */
+  purchasedAt: string;
+  /** 实付金额（分） */
+  priceFen: number;
+}
+
+export interface PurchasedAlbum {
+  album: AlbumDetail;
+  purchasedAt: string;
+  priceFen: number;
+}
+
+export interface PurchasedMusic {
+  /** 已购单曲，按购买日期倒序 */
+  singles: PurchasedSingle[];
+  /** 已购专辑，按购买日期倒序 */
+  albums: PurchasedAlbum[];
+}

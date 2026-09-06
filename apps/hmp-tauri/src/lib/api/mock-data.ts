@@ -15,11 +15,15 @@ import type {
   Comment,
   CommentReply,
   CommentSection,
+  DownloadLibrary,
+  LocalLibrary,
+  LocalTrack,
   LyricLine,
   LyricWord,
   Lyrics,
   PlaylistDetail,
   PlaylistRef,
+  PurchasedMusic,
   RecommendFeed,
   SongRef,
   TopCategory,
@@ -1164,4 +1168,117 @@ export function createdPlaylistRefs(): PlaylistRef[] {
 /** 收藏的歌单：其余歌单视为收藏 */
 export function favoritedPlaylistRefs(): PlaylistRef[] {
   return PLAYLIST_SEEDS.filter((seed) => !["pl01", "pl02"].includes(seed.id)).map(playlistRefOf);
+}
+
+// ————————————————————————————————————————————————————————————
+// 落盘音乐（本地音乐库 / 下载）与已购音乐
+// 桌面端 daemon 未接线，文件维度字段由曲目确定性派生；
+// 接真实后端后这三个方法换成 daemon 本地扫描 / 下载管理 / 订单接口即可。
+// ————————————————————————————————————————————————————————————
+
+/** 本地监视文件夹（路径为虚构演示数据） */
+const WATCH_FOLDER_PATHS = ["~/Music/无损收藏", "~/Music/Live 现场", "~/Music/早期 Demo"];
+
+/** 各文件夹的最近扫描时间（固定"今天"之前，mock 期写死保证确定性） */
+const FOLDER_SCAN_TIMES = ["2026-09-05 21:30", "2026-08-30 14:12", "2026-08-11 09:45"];
+/** 全库最近一次扫描 = 各文件夹中最新的一次 */
+const LIBRARY_LAST_SCAN = "2026-09-05 21:30";
+/** 下载文件的统一存储目录 */
+const DOWNLOAD_STORAGE_PATH = "~/Music/胡桃音乐";
+
+/** 由音质文案推落盘格式与码率（kbps）：Hi-Res/FLAC → FLAC，其余按 320kbps MP3 */
+function formatAndBitrateOf(song: SongRef): { format: string; kbps: number } {
+  if (song.quality === QUALITY_HI_RES) {
+    // Hi-Res 96kHz/24bit 码率落 in 2100–2400 kbps
+    return { format: "FLAC", kbps: 2100 + (hashSeed(`bitrate:${song.mid}`) % 300) };
+  }
+  if (song.quality === QUALITY_FLAC) {
+    // 无损 44.1kHz/16bit 码率落 in 850–1000 kbps
+    return { format: "FLAC", kbps: 850 + (hashSeed(`bitrate:${song.mid}`) % 150) };
+  }
+  return { format: "MP3", kbps: 320 };
+}
+
+/** 文件大小 = 码率 × 时长，字节 */
+function sizeBytesOf(song: SongRef): number {
+  const { kbps } = formatAndBitrateOf(song);
+  return Math.round((kbps * 1000 * song.durationMs) / 8);
+}
+
+/** 把 SongRef 落成 LocalTrack：文件夹由 mid 哈希在监视文件夹中指派 */
+function toLocalTrack(song: SongRef, folder: string): LocalTrack {
+  return {
+    ...song,
+    sizeBytes: sizeBytesOf(song),
+    format: formatAndBitrateOf(song).format,
+    folder,
+  };
+}
+
+/**
+ * 本地音乐库：总池按 mid 哈希取三分之二（余数 0/1），指派到三个监视文件夹。
+ * 与下载内容按同一哈希的余数互斥（下载取余数 2），同一首不会两边重复。
+ */
+export function localLibrary(): LocalLibrary {
+  const tracks = songPool
+    .filter((song) => hashSeed(`local:${song.mid}`) % 3 !== 2)
+    .map((song) => {
+      const folder = WATCH_FOLDER_PATHS[hashSeed(`localfolder:${song.mid}`) % WATCH_FOLDER_PATHS.length];
+      return toLocalTrack(song, folder);
+    });
+
+  const folders = WATCH_FOLDER_PATHS.map((path, i) => {
+    const inFolder = tracks.filter((track) => track.folder === path);
+    return {
+      path,
+      trackCount: inFolder.length,
+      sizeBytes: inFolder.reduce((sum, track) => sum + track.sizeBytes, 0),
+      lastScanAt: FOLDER_SCAN_TIMES[i],
+    };
+  }).filter((folder) => folder.trackCount > 0);
+
+  return { tracks, folders, lastScanAt: LIBRARY_LAST_SCAN };
+}
+
+/** 下载内容：与本地库共用同一哈希、取余数 2（互斥），共用存储目录 */
+export function downloadLibrary(): DownloadLibrary {
+  const tracks = songPool
+    .filter((song) => hashSeed(`local:${song.mid}`) % 3 === 2)
+    .map((song) => toLocalTrack(song, DOWNLOAD_STORAGE_PATH));
+  return { tracks, storagePath: DOWNLOAD_STORAGE_PATH };
+}
+
+/** 购买日期：2026 年 1–8 月内按哈希取日（确定性，无 Date.now） */
+function purchasedDateOf(seed: string): string {
+  const hash = hashSeed(`bought:${seed}`);
+  const month = String(1 + (hash % 8)).padStart(2, "0");
+  const day = String(1 + (hashSeed(`boughtday:${seed}`) % 28)).padStart(2, "0");
+  return `2026-${month}-${day}`;
+}
+
+/** 单曲实付：¥2 / ¥3 两档（哈希取舍） */
+function singlePriceFen(songMid: string): number {
+  return hashSeed(`price:${songMid}`) % 3 === 0 ? 300 : 200;
+}
+
+/** 已购单曲：总池按 mid 哈希挑选、上限 9 首，按购买日期倒序 */
+export function purchasedMusic(): PurchasedMusic {
+  const singles = songPool
+    .filter((song) => hashSeed(`bought:${song.mid}`) % 7 === 3)
+    .slice(0, 9)
+    .map((song) => ({ song, purchasedAt: purchasedDateOf(song.mid), priceFen: singlePriceFen(song.mid) }))
+    .sort((a, b) => b.purchasedAt.localeCompare(a.purchasedAt));
+
+  const albums = curatedAlbums
+    .filter((album) => hashSeed(`bought:${album.mid}`) % 5 === 1)
+    .slice(0, 4)
+    .map((album) => ({
+      album,
+      purchasedAt: purchasedDateOf(`album:${album.mid}`),
+      // 专辑按曲目数计价：每首 ¥2，符合单曲定价的倍数直觉
+      priceFen: album.songs.length * 200,
+    }))
+    .sort((a, b) => b.purchasedAt.localeCompare(a.purchasedAt));
+
+  return { singles, albums };
 }
