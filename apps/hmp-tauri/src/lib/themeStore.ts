@@ -56,6 +56,13 @@ export function cycleTheme() {
   apply();
 }
 
+/** 直接指定主题模式（设置页用）；与循环切换共用同一份持久化 */
+export function setThemeMode(mode: ThemeMode) {
+  state.mode = mode;
+  localStorage.setItem(THEME_STORAGE_KEY, mode);
+  apply();
+}
+
 export function themeState() {
   return state;
 }
