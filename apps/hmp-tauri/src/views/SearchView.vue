@@ -242,17 +242,13 @@ const activeCount = computed(() => (results.value ? countOf(activeTab.value) : 0
 
 .search-tab.is-active {
   color: var(--foreground);
-  background: var(--track-accent-soft);
+  background: var(--muted);
 }
 
 .tab-badge {
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
-}
-
-.search-tab.is-active .tab-badge {
-  color: var(--track-accent);
 }
 
 .searching-hint {
@@ -285,7 +281,7 @@ const activeCount = computed(() => (results.value ? countOf(activeTab.value) : 0
 }
 
 .artist-card:hover {
-  background: var(--track-accent-soft);
+  background: var(--muted);
 }
 
 .artist-avatar {

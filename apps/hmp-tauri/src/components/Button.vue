@@ -91,8 +91,11 @@ withDefaults(
 
 .button-link {
   color: var(--primary);
-  text-decoration: underline;
-  text-underline-offset: 0.25rem;
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+
+.button-link:hover {
+  color: var(--primary-hover);
 }
 
 .button-destructive {

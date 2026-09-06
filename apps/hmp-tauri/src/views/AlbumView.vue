@@ -56,55 +56,57 @@ function formatCount(value: number): string {
     <div v-if="loading" class="state-hint">加载中…</div>
     <div v-else-if="failed" class="state-hint">加载失败</div>
 
-    <div v-else-if="detail" class="album-layout">
-      <img class="album-cover" :src="detail.picUrl" :alt="detail.name" />
+    <div v-else-if="detail" class="album-content">
+      <div class="album-head">
+        <img class="album-cover" :src="detail.picUrl" :alt="detail.name" />
 
-      <div class="album-body">
-        <PageHeader :title="detail.name">
-          <template #meta>
-            <RouterLink
-              class="meta-link"
-              :to="`/artist/${detail.artist.mid}`"
-            >{{ detail.artist.name }}</RouterLink>
-            <span aria-hidden="true">·</span>
-            <span>{{ detail.releaseDate }}</span>
-            <span aria-hidden="true">·</span>
-            <span>{{ detail.company }}</span>
-            <span aria-hidden="true">·</span>
-            <span>{{ detail.songs.length }}首</span>
-          </template>
-        </PageHeader>
+        <div class="album-info">
+          <PageHeader :title="detail.name">
+            <template #meta>
+              <RouterLink
+                class="meta-link text-link"
+                :to="`/artist/${detail.artist.mid}`"
+              >{{ detail.artist.name }}</RouterLink>
+              <span aria-hidden="true">·</span>
+              <span>{{ detail.releaseDate }}</span>
+              <span aria-hidden="true">·</span>
+              <span>{{ detail.company }}</span>
+              <span aria-hidden="true">·</span>
+              <span>{{ detail.songs.length }}首</span>
+            </template>
+          </PageHeader>
 
-        <p class="album-desc" :class="{ 'is-clamped': !descExpanded }">{{ detail.desc }}</p>
-        <button
-          v-if="detail.desc.length > DESC_FOLD_THRESHOLD"
-          class="desc-toggle"
-          @click="descExpanded = !descExpanded"
-        >
-          {{ descExpanded ? "收起" : "展开" }}
-        </button>
-
-        <div class="album-actions">
-          <Button
-            variant="outline"
-            size="sm"
-            :class="{ 'is-faved': faved }"
-            @click="faved = !faved"
+          <p class="album-desc" :class="{ 'is-clamped': !descExpanded }">{{ detail.desc }}</p>
+          <button
+            v-if="detail.desc.length > DESC_FOLD_THRESHOLD"
+            class="desc-toggle text-link"
+            @click="descExpanded = !descExpanded"
           >
-            {{ faved ? "已收藏" : "收藏专辑" }}
-          </Button>
-          <span class="fav-count">{{ formatCount(detail.favCount) }} 人收藏</span>
-        </div>
+            {{ descExpanded ? "收起" : "展开" }}
+          </button>
 
-        <!-- 专辑内曲目同属一张专辑，专辑列冗余，关掉让标题列更宽 -->
-        <TrackTable
-          class="album-songs"
-          :tracks="detail.songs"
-          :player="player"
-          :show-album="false"
-          show-header
-        />
+          <div class="album-actions">
+            <Button
+              variant="outline"
+              size="sm"
+              :class="{ 'is-faved': faved }"
+              @click="faved = !faved"
+            >
+              {{ faved ? "已收藏" : "收藏专辑" }}
+            </Button>
+            <span class="fav-count">{{ formatCount(detail.favCount) }} 人收藏</span>
+          </div>
+        </div>
       </div>
+
+      <!-- 专辑内曲目同属一张专辑，专辑列冗余，关掉让标题列更宽；表格通栏全宽 -->
+      <TrackTable
+        class="album-songs"
+        :tracks="detail.songs"
+        :player="player"
+        :show-album="false"
+        show-header
+      />
     </div>
   </div>
 </template>
@@ -120,33 +122,40 @@ function formatCount(value: number): string {
   color: var(--muted-foreground);
 }
 
-.album-layout {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-8);
+/* 两段式：头部（封面 | 信息）与曲目表分离，表格通栏占满内容列 */
+.album-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-5) var(--space-8);
+  align-items: center;
 }
 
 .album-cover {
-  width: clamp(11rem, 20vw, 15rem);
+  width: clamp(11rem, 18vw, 14rem);
   aspect-ratio: 1 / 1;
-  flex: 0 0 auto;
   object-fit: cover;
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
 }
 
-.album-body {
-  flex: 1;
+.album-info {
   min-width: 0;
 }
 
-.album-body :deep(.page-header) {
-  padding-top: 0;
+.album-info :deep(.page-header) {
+  padding: 0 0 var(--space-3);
 }
 
-.meta-link:hover {
-  color: var(--foreground);
-  text-decoration: underline;
+/* 窄窗（niri ⅓ 宽）：头部竖排，列表保持全宽 */
+@media (max-width: 48rem) {
+  .album-head {
+    grid-template-columns: 1fr;
+    gap: var(--space-4);
+  }
+
+  .album-cover {
+    width: clamp(10rem, 36vw, 13rem);
+  }
 }
 
 /* 简介折叠：clamp 两行，展开后完整显示 */
@@ -166,25 +175,19 @@ function formatCount(value: number): string {
 .desc-toggle {
   margin-top: var(--space-1);
   font-size: 0.82rem;
-  color: var(--muted-foreground);
-  transition: color var(--duration-fast) var(--ease-standard);
-}
-
-.desc-toggle:hover {
-  color: var(--foreground);
 }
 
 .album-actions {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  margin-top: var(--space-4);
+  margin-top: var(--space-3);
 }
 
-/* 已收藏态：用曲目层软色点一下，不引入新颜色 */
+/* 已收藏态：中性选中底，主题色不进信息区 */
 .album-actions .is-faved {
-  color: var(--track-accent);
-  background: var(--track-accent-soft);
+  color: var(--foreground);
+  background: var(--muted);
   border-color: transparent;
 }
 

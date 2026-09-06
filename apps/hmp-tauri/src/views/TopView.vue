@@ -112,7 +112,7 @@ onMounted(async () => {
   object-fit: cover;
 }
 
-/* 曲数角标：压在封面上，强调"这是能点进去听的榜单" */
+/* 曲数角标：压在封面上，强调"这是能点进去听的榜单"；中性玻璃底不与封面抢色 */
 .top-flag {
   position: absolute;
   left: 0.6rem;
@@ -120,7 +120,7 @@ onMounted(async () => {
   padding: 0.1rem 0.5rem;
   font-size: 0.72rem;
   color: var(--foreground);
-  background: var(--track-accent-soft);
+  background: color-mix(in srgb, var(--surface-3) 82%, transparent);
   backdrop-filter: blur(4px);
   border-radius: var(--radius-full);
   font-variant-numeric: tabular-nums;

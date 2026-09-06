@@ -11,7 +11,7 @@ defineProps<{
     <h2 class="section-title">{{ title }}</h2>
     <div class="section-actions">
       <slot name="actions"></slot>
-      <RouterLink v-if="moreTo" :to="moreTo" class="section-more">
+      <RouterLink v-if="moreTo" :to="moreTo" class="section-more text-link">
         更多
         <span class="more-arrow" aria-hidden="true"></span>
       </RouterLink>
@@ -44,12 +44,6 @@ defineProps<{
   align-items: center;
   gap: 0.15rem;
   font-size: 0.85rem;
-  color: var(--muted-foreground);
-  transition: color var(--duration-fast) var(--ease-standard);
-}
-
-.section-more:hover {
-  color: var(--foreground);
 }
 
 /* expand-more 旋转 -90° 指向右侧 */

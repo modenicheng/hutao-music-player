@@ -63,48 +63,50 @@ function formatCount(value: number): string {
     <div v-if="loading" class="state-hint">加载中…</div>
     <div v-else-if="failed" class="state-hint">加载失败</div>
 
-    <div v-else-if="detail" class="playlist-layout">
-      <img class="playlist-cover" :src="detail.coverUrl" :alt="detail.name" />
+    <div v-else-if="detail" class="playlist-content">
+      <div class="playlist-head">
+        <img class="playlist-cover" :src="detail.coverUrl" :alt="detail.name" />
 
-      <div class="playlist-body">
-        <PageHeader :title="detail.name">
-          <template #meta>
-            <span class="meta-creator">
-              <img class="creator-avatar" :src="detail.creator.avatarUrl" :alt="detail.creator.name" />
-              {{ detail.creator.name }}
-            </span>
-            <span aria-hidden="true">·</span>
-            <span
-              v-for="tag in detail.tags"
-              :key="tag"
-              class="tag-chip"
-            >{{ tag }}</span>
-            <span aria-hidden="true">·</span>
-            <span>{{ formatCount(detail.playCount) }}次播放</span>
-            <span aria-hidden="true">·</span>
-            <span>{{ detail.songs.length }}首</span>
-          </template>
-        </PageHeader>
+        <div class="playlist-info">
+          <PageHeader :title="detail.name">
+            <template #meta>
+              <span class="meta-creator">
+                <img class="creator-avatar" :src="detail.creator.avatarUrl" :alt="detail.creator.name" />
+                {{ detail.creator.name }}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span
+                v-for="tag in detail.tags"
+                :key="tag"
+                class="tag-chip"
+              >{{ tag }}</span>
+              <span aria-hidden="true">·</span>
+              <span>{{ formatCount(detail.playCount) }}次播放</span>
+              <span aria-hidden="true">·</span>
+              <span>{{ detail.songs.length }}首</span>
+            </template>
+          </PageHeader>
 
-        <p class="playlist-desc" :class="{ 'is-clamped': !descExpanded }">{{ detail.desc }}</p>
-        <button
-          v-if="detail.desc.length > DESC_FOLD_THRESHOLD"
-          class="desc-toggle"
-          @click="descExpanded = !descExpanded"
-        >
-          {{ descExpanded ? "收起" : "展开" }}
-        </button>
+          <p class="playlist-desc" :class="{ 'is-clamped': !descExpanded }">{{ detail.desc }}</p>
+          <button
+            v-if="detail.desc.length > DESC_FOLD_THRESHOLD"
+            class="desc-toggle text-link"
+            @click="descExpanded = !descExpanded"
+          >
+            {{ descExpanded ? "收起" : "展开" }}
+          </button>
 
-        <!-- 播放全部：整单替换队列并从头播；无 player 时隐藏入口 -->
-        <div class="playlist-actions">
-          <Button v-if="player" variant="default" size="sm" @click="playAll">
-            <AppIcon :src="playIcon" class="play-all-icon" />
-            播放全部
-          </Button>
+          <!-- 播放全部：整单替换队列并从头播；无 player 时隐藏入口 -->
+          <div class="playlist-actions">
+            <Button v-if="player" variant="default" size="sm" @click="playAll">
+              <AppIcon :src="playIcon" class="play-all-icon" />
+              播放全部
+            </Button>
+          </div>
         </div>
-
-        <TrackTable class="playlist-songs" :tracks="detail.songs" :player="player" show-header />
       </div>
+
+      <TrackTable class="playlist-songs" :tracks="detail.songs" :player="player" show-header />
     </div>
   </div>
 </template>
@@ -120,28 +122,40 @@ function formatCount(value: number): string {
   color: var(--muted-foreground);
 }
 
-.playlist-layout {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-8);
+/* 两段式（与专辑页同构）：头部（封面 | 信息）+ 通栏曲目表 */
+.playlist-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-5) var(--space-8);
+  align-items: center;
 }
 
 .playlist-cover {
-  width: clamp(11rem, 20vw, 15rem);
+  width: clamp(11rem, 18vw, 14rem);
   aspect-ratio: 1 / 1;
-  flex: 0 0 auto;
   object-fit: cover;
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
 }
 
-.playlist-body {
-  flex: 1;
+.playlist-info {
   min-width: 0;
 }
 
-.playlist-body :deep(.page-header) {
-  padding-top: 0;
+.playlist-info :deep(.page-header) {
+  padding: 0 0 var(--space-3);
+}
+
+/* 窄窗（niri ⅓ 宽）：头部竖排，列表保持全宽 */
+@media (max-width: 48rem) {
+  .playlist-head {
+    grid-template-columns: 1fr;
+    gap: var(--space-4);
+  }
+
+  .playlist-cover {
+    width: clamp(10rem, 36vw, 13rem);
+  }
 }
 
 .meta-creator {
@@ -157,12 +171,12 @@ function formatCount(value: number): string {
   object-fit: cover;
 }
 
-/* 标签 chips：与 TrackTable 音质徽章同族（accent-soft 底），视觉语言一致 */
+/* 标签 chips：中性元信息底，主题色不进信息区 */
 .tag-chip {
   padding: 0.05rem 0.5rem;
   font-size: 0.72rem;
-  color: var(--track-accent);
-  background: var(--track-accent-soft);
+  color: var(--muted-foreground);
+  background: var(--muted);
   border-radius: var(--radius-full);
   white-space: nowrap;
 }
@@ -183,18 +197,12 @@ function formatCount(value: number): string {
 .desc-toggle {
   margin-top: var(--space-1);
   font-size: 0.82rem;
-  color: var(--muted-foreground);
-  transition: color var(--duration-fast) var(--ease-standard);
-}
-
-.desc-toggle:hover {
-  color: var(--foreground);
 }
 
 .playlist-actions {
   display: flex;
   align-items: center;
-  margin-top: var(--space-4);
+  margin-top: var(--space-3);
 }
 
 .play-all-icon {

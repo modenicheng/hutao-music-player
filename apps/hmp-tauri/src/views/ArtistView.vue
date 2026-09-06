@@ -206,7 +206,7 @@ watch(() => props.id, load);
 }
 
 .similar-card:hover {
-  background: var(--track-accent-soft);
+  background: var(--muted);
 }
 
 .similar-avatar {
