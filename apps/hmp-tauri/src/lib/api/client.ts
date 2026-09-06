@@ -11,6 +11,7 @@ import type {
   CommentSection,
   Lyrics,
   PlaylistDetail,
+  PlaylistRef,
   RecommendFeed,
   SearchResults,
   SongRef,
@@ -25,8 +26,11 @@ import {
   artistSongs,
   commentSection,
   curatedAlbums,
+  createdPlaylistRefs,
+  favoritedPlaylistRefs,
   findAlbum,
   findSong,
+  likedSongs,
   lyricsOf,
   playlistDetail,
   recommendFeed,
@@ -144,6 +148,22 @@ export const api = {
     async get(mid: string): Promise<Lyrics> {
       await simulateLatency("lyrics.get", mid);
       return requireValue(lyricsOf(mid), `歌词 ${mid} not found`);
+    },
+  },
+  library: {
+    // 账号体系未接线：三个方法均由本地 mock 派生，未来换成 daemon
+    // Favorite / 歌单收藏接口，调用方不需要改动。
+    async liked(): Promise<SongRef[]> {
+      await simulateLatency("library.liked");
+      return likedSongs();
+    },
+    async created(): Promise<PlaylistRef[]> {
+      await simulateLatency("library.created");
+      return createdPlaylistRefs();
+    },
+    async favorited(): Promise<PlaylistRef[]> {
+      await simulateLatency("library.favorited");
+      return favoritedPlaylistRefs();
     },
   },
 };

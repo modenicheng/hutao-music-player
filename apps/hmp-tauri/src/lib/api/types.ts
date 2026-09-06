@@ -129,11 +129,20 @@ export interface CommentSection {
   latest: Comment[];
 }
 
+/** 逐字歌词的一个字/词：QQ 音乐 QRC 式时间戳 */
+export interface LyricWord {
+  text: string;
+  startMs: number;
+  endMs: number;
+}
+
 export interface LyricLine {
   timeMs: number;
   text: string;
   /** 翻译行，随原文行下挂展示 */
   trans?: string;
+  /** 逐字时间轴；缺省时该行退回逐行高亮 */
+  words?: LyricWord[];
 }
 
 export interface Lyrics {

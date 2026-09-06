@@ -16,6 +16,7 @@ import type {
   CommentReply,
   CommentSection,
   LyricLine,
+  LyricWord,
   Lyrics,
   PlaylistDetail,
   PlaylistRef,
@@ -196,7 +197,7 @@ const ALBUM_SEEDS: AlbumSeed[] = [
     company: "白日梦研究所",
     releaseDate: "2024-05-20",
     favCount: 128400,
-    desc: "白栖遥的第二张创作专辑。十首歌像十封未寄出的信，写海、写晚风、写站台，也写每个欲言又止的瞬间。整张专辑在海岸边的录音棚完成，你能在曲目间隙里听到真实的潮声。",
+    desc: "白栖遥的第二张创作专辑。四首歌像四封未寄出的信，写海、写晚风、写站台，也写每个欲言又止的瞬间。整张专辑在海岸边的录音棚完成，你能在曲目间隙里听到真实的潮声。",
     songs: [
       { mid: "so001", title: "潮汐来信", durationSec: 252, quality: QUALITY_FLAC },
       { mid: "so002", title: "玻璃海", durationSec: 238 },
@@ -1053,21 +1054,81 @@ const PLACEHOLDER_LINES = [
   "晚安，做个好梦",
 ];
 
+// —— 逐字时间轴工厂：mock 没有 QRC 源，按行内 token 确定性均摊行时长 ——
+// 切分规则：汉字逐字成 token；拉丁字母/数字连续段成词；标点跟随前段；空白并入前段。
+// 行末留 6% 呼吸间隙，让换行高亮不粘连。
+function tokenizeLine(text: string): string[] {
+  const tokens: string[] = [];
+  const isWordChar = (char: string) => /[\p{L}\p{N}']/u.test(char);
+  const isHan = (char: string) => /\p{Script=Han}/u.test(char);
+  for (const char of Array.from(text)) {
+    if (/\s/.test(char)) {
+      const last = tokens[tokens.length - 1];
+      if (last !== undefined && !last.endsWith(" ")) tokens[tokens.length - 1] = last + char;
+      continue;
+    }
+    const last = tokens[tokens.length - 1];
+    const lastChar = last === undefined ? "" : last[last.length - 1]!;
+    if (last !== undefined && isHan(char)) {
+      // 汉字逐字推进，扫色粒度到字
+      tokens.push(char);
+    } else if (last !== undefined && /[\p{P}\p{S}]/u.test(char)) {
+      // 标点/符号贴住前段，不单独高亮
+      tokens[tokens.length - 1] = last + char;
+    } else if (last !== undefined && isWordChar(char) && isWordChar(lastChar) && !isHan(lastChar)) {
+      tokens[tokens.length - 1] = last + char;
+    } else {
+      tokens.push(char);
+    }
+  }
+  return tokens;
+}
+
+function buildWords(text: string, startMs: number, endMs: number): LyricWord[] {
+  const tokens = tokenizeLine(text);
+  if (tokens.length === 0) return [];
+  const span = Math.max(0, endMs - startMs) * 0.94;
+  const weights = tokens.map((token) => token.trimEnd().length);
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const words: LyricWord[] = [];
+  let elapsed = 0;
+  tokens.forEach((token, index) => {
+    elapsed += weights[index]! / total;
+    const end = Math.round(startMs + span * elapsed);
+    words.push({
+      text: token,
+      startMs: words.length === 0 ? Math.round(startMs) : words[words.length - 1]!.endMs,
+      endMs: Math.max(end, (words.length === 0 ? Math.round(startMs) : words[words.length - 1]!.endMs) + 1),
+    });
+  });
+  return words;
+}
+
+/** 给一组歌词补逐字时间轴：行末 = 下一行起点（最后一行 +5s） */
+function withWordTimings(lines: LyricLine[]): LyricLine[] {
+  return lines.map((line, index) => ({
+    ...line,
+    words: buildWords(line.text, line.timeMs, lines[index + 1]?.timeMs ?? line.timeMs + 5_000),
+  }));
+}
+
 export function lyricsOf(songMid: string): Lyrics | undefined {
   const song = songByMid.get(songMid);
   if (!song) return undefined;
   const full = FULL_LYRICS[songMid];
-  if (full) return { mid: song.mid, title: song.title, lines: full };
+  if (full) return { mid: song.mid, title: song.title, lines: withWordTimings(full) };
   // 占位歌词 5–8 行，行数与起始时间都由 mid 确定
   const count = 5 + (hashSeed(`lyr:${songMid}`) % 4);
   const step = (song.durationMs - 16_000) / count;
   return {
     mid: song.mid,
     title: song.title,
-    lines: PLACEHOLDER_LINES.slice(0, count).map((text, index) => ({
-      timeMs: Math.round(9_000 + step * index),
-      text,
-    })),
+    lines: withWordTimings(
+      PLACEHOLDER_LINES.slice(0, count).map((text, index) => ({
+        timeMs: Math.round(9_000 + step * index),
+        text,
+      })),
+    ),
   };
 }
 
@@ -1081,4 +1142,26 @@ export function findSong(songMid: string): SongRef | undefined {
 
 export function findAlbum(albumMid: string): AlbumDetail | undefined {
   return albumDetailByMid.get(albumMid) ?? singleAlbumByMid.get(albumMid);
+}
+
+// ————————————————————————————————————————————————————————————
+// 音乐库（本地视角）：我喜欢 / 创建的歌单 / 收藏的歌单
+// 后端账号体系未接线，全部由总池与歌单种子确定性派生；
+// 接真实后端后这三个方法换成 daemon Favorite / 歌单收藏接口即可。
+// ————————————————————————————————————————————————————————————
+
+/** 我喜欢的歌：按 mid 哈希从总池挑出约三分之一，上限 18 首 */
+export function likedSongs(): SongRef[] {
+  const liked = songPool.filter((song) => hashSeed(`liked:${song.mid}`) % 3 === 0);
+  return (liked.length > 0 ? liked : songPool.slice(0, 6)).slice(0, 18);
+}
+
+/** 创建的歌单：种子表前两单视为"我"创建 */
+export function createdPlaylistRefs(): PlaylistRef[] {
+  return PLAYLIST_SEEDS.filter((seed) => ["pl01", "pl02"].includes(seed.id)).map(playlistRefOf);
+}
+
+/** 收藏的歌单：其余歌单视为收藏 */
+export function favoritedPlaylistRefs(): PlaylistRef[] {
+  return PLAYLIST_SEEDS.filter((seed) => !["pl01", "pl02"].includes(seed.id)).map(playlistRefOf);
 }
