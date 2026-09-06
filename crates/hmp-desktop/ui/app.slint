@@ -1,179 +1,157 @@
-import { Palette } from "std-widgets.slint";
+// 应用壳（MainLayout.vue + PlayerOverlay/QueueDrawer 挂载点）：
+// surface-1 底 + layout-gap 内距网格——侧栏（跨两行）/ 内容浮板 / 播放条；
+// 侧栏宽度过渡（slow S 曲线），≤52rem 自动收图标栏（手动切换优先）。
 import { Theme } from "theme.slint";
-import { SideBar } from "sidebar.slint";
-import { PlayerBar, UiPlayback } from "player-bar.slint";
-import { LoginDialog } from "login-dialog.slint";
+import { Scroll, HoverBus, EqClock, EqClockHost } from "primitives.slint";
+import { Sidebar } from "sidebar.slint";
+import { PlayerBar } from "player-bar.slint";
+import { QueueDrawer } from "queue-drawer.slint";
 import { LibraryPage } from "library-page.slint";
-import { RecommendPage, UiLibrary } from "recommend-page.slint";
-import { SearchPage, UiSong } from "search-page.slint";
-import { QueuePage, UiQueue } from "queue-page.slint";
-import { LyricsPage, UiLyric } from "lyrics-page.slint";
-import { SettingsPage, UiFeature } from "settings-page.slint";
+import { RecentPage } from "recent-page.slint";
+import { MusicLibraryPage } from "music-library-page.slint";
+import { DownloadsPage } from "downloads-page.slint";
+import { PurchasedPage } from "purchased-page.slint";
+import { Nav, Route } from "nav.slint";
+import { Player, Data, Quality } from "stores.slint";
+import { Theme } from "theme.slint";
+import { TrackRow, CoverCardData, FolderRow } from "data.slint";
 
-export { UiLibrary, UiPlayback, UiSong, UiQueue, UiLyric, UiFeature }
+// 供生成代码（Rust 侧）访问的 global 与数据结构（HoverBus/EqClock 供集成测试探针）
+export { Theme, Nav, Player, Quality, Data, Route, TrackRow, CoverCardData, FolderRow, HoverBus, EqClock }
 
 export component AppWindow inherits Window {
     title: "胡桃音乐";
-    preferred-width: 1100px;
-    preferred-height: 720px;
-    min-width: 820px;
-    min-height: 560px;
-    background: Theme.background;
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 683px;
+    min-height: 576px;
+    // 无边框：niri/winit 的 CSD 标题栏缺 CJK 字体（显示方框），平铺下也不需要
+    no-frame: true;
 
-    in-out property <string> current-page: "library";
-    in-out property <string> theme-mode <=> Theme.mode;
-    private property <ColorScheme> palette-color-scheme <=> Palette.color-scheme;
-    in-out property <[UiSong]> songs;
-    in-out property <[UiLibrary]> library-items;
-    in-out property <[UiLibrary]> recommend-items;
-    in-out property <[UiFeature]> feature-statuses;
-    in-out property <[UiQueue]> library-queue;
-    in-out property <[UiQueue]> queue;
-    in-out property <[UiLyric]> lyrics;
-    in-out property <string> lyrics-state: "idle";
-    in-out property <string> lyrics-request-mid;
-    in-out property <string> lyrics-error-text;
-    in-out property <string> search-text;
-    in-out property <bool> search-query-valid: false;
-    in-out property <bool> search-loading: false;
-    in-out property <bool> search-completed: false;
-    in-out property <string> search-error-text;
-    in property <UiPlayback> playback;
-    in property <string> current-track-id;
-    in property <bool> logged-in;
-    in property <string> user-name;
-    in-out property <bool> show-login;
-    in property <image> qr-image;
-    in property <string> login-status;
-    in property <image> cover-image;
+    // Equalizer 共享时钟驱动（0×0 不可见，见 primitives.slint）
+    EqClockHost { }
+    background: Theme.surface-1;
+    forward-focus: esc-scope;
 
-    callback navigate-requested(string);
-    callback queue-requested;
-    callback lyrics-requested;
-    callback theme-requested(string);
-    callback search-query-edited(string);
-    callback search-requested(string);
-    callback play-requested(int);
-    callback play-queue-requested(int);
-    callback play-pause;
-    callback next-requested;
-    callback prev-requested;
-    callback seek-requested(float);
-    callback volume-requested(float);
-    callback login-start;
-    callback login-cancel;
-    callback load-lyrics-requested;
-
-    init => { root.palette-color-scheme = ColorScheme.unknown; }
-    changed theme-mode => {
-        root.palette-color-scheme = root.theme-mode == "light" ? ColorScheme.light
-            : root.theme-mode == "dark" ? ColorScheme.dark
-            : ColorScheme.unknown;
+    in-out property <length> win-width <=> Theme.win-width;
+    init => {
+        Theme.win-width = self.width;
+    }
+    changed width => {
+        Theme.win-width = self.width;
     }
 
-    VerticalLayout {
-        spacing: 0;
+    // —— 侧栏收起状态机（MainLayout.vue：手动切换优先，跨断点回自动）———
+    property <int> manual-collapsed: -1; // -1=自动 0=展开 1=收起
+    property <bool> narrow: Theme.win-width <= 832px;
+    property <bool> sidebar-collapsed: manual-collapsed == -1 ? narrow : manual-collapsed == 1;
+    changed narrow => {
+        manual-collapsed = -1;
+    }
 
-        HorizontalLayout {
-            spacing: 0;
+    property <length> pad: Theme.layout-gap;
+    property <length> sidebar-w: sidebar-collapsed ? 64px : Theme.sidebar-width;
+    animate sidebar-w {
+        duration: Theme.duration-slow;
+        easing: cubic-bezier(0.2, 0, 0, 1);
+    }
 
-            SideBar {
-                current-page: root.current-page;
-                logged-in: root.logged-in;
-                user-name: root.user-name;
-                navigate-requested(page) => { root.navigate-requested(page); }
-                login-start => { root.show-login = true; root.login-start(); }
-            }
-
-            Rectangle { width: 1px; background: Theme.divider; }
-
-            Rectangle {
-                horizontal-stretch: 1;
-                vertical-stretch: 1;
-
-                if root.current-page == "library": LibraryPage {
-                    width: parent.width;
-                    height: parent.height;
-                    queue: root.library-queue;
-                    playback: root.playback;
-                    cover-image: root.cover-image;
-                    play-requested(idx) => { root.play-queue-requested(idx); }
-                    navigate-to-search => { root.navigate-requested("search"); }
-                }
-
-                if root.current-page == "recommend": RecommendPage {
-                    width: parent.width;
-                    height: parent.height;
-                    recommend-items: root.recommend-items;
-                }
-
-                if root.current-page == "search": SearchPage {
-                    width: parent.width;
-                    height: parent.height;
-                    songs: root.songs;
-                    search-text <=> root.search-text;
-                    loading: root.search-loading;
-                    completed: root.search-completed;
-                    error-text: root.search-error-text;
-                    query-valid: root.search-query-valid;
-                    query-edited(text) => { root.search-query-edited(text); }
-                    search-requested(text) => { root.search-requested(text); }
-                    retry-requested => { root.search-requested(root.search-text); }
-                    play-requested(idx) => { root.play-requested(idx); }
-                }
-
-                if root.current-page == "queue": QueuePage {
-                    width: parent.width;
-                    height: parent.height;
-                    queue: root.queue;
-                    play-requested(idx) => { root.play-queue-requested(idx); }
-                    navigate-to-search => { root.navigate-requested("search"); }
-                }
-
-                if root.current-page == "lyrics": LyricsPage {
-                    width: parent.width;
-                    height: parent.height;
-                    lyrics: root.lyrics;
-                    lyrics-state: root.lyrics-state;
-                    current-title: root.playback.title;
-                    current-artist: root.playback.artist;
-                    error-text: root.lyrics-error-text;
-                    load-lyrics-requested => { root.load-lyrics-requested(); }
-                }
-
-                if root.current-page == "settings": SettingsPage {
-                    width: parent.width;
-                    height: parent.height;
-                    feature-statuses: root.feature-statuses;
-                    theme-mode: root.theme-mode;
-                    theme-requested(mode) => { root.theme-requested(mode); }
-                }
-            }
-        }
-
-        PlayerBar {
-            playback: root.playback;
-            cover-image: root.cover-image;
-            play-pause => { root.play-pause(); }
-            next-requested => { root.next-requested(); }
-            prev-requested => { root.prev-requested(); }
-            seek-requested(value) => { root.seek-requested(value); }
-            volume-requested(value) => { root.volume-requested(value); }
-            queue-clicked => { root.queue-requested(); }
-            lyrics-clicked => { root.lyrics-requested(); }
+    // —— 侧栏（跨两行）———
+    Sidebar {
+        x: pad;
+        y: pad;
+        width: sidebar-w;
+        height: parent.height - pad * 2;
+        collapsed: sidebar-collapsed;
+        toggle-collapsed => {
+            manual-collapsed = sidebar-collapsed ? 0 : 1;
         }
     }
 
-    LoginDialog {
-        x: 0px;
-        y: 0px;
+    // —— 内容浮板（滚动交给内部 Scroll）———
+    content := Rectangle {
+        x: pad + sidebar-w + pad;
+        y: pad;
+        width: parent.width - self.x - pad;
+        height: parent.height - pad * 2 - Theme.player-bar-height - pad;
+        border-radius: Theme.radius-lg;
+        clip: true;
+        background: Theme.surface-2;
+
+        Scroll {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+
+            if Nav.route == Route.library: LibraryPage {
+                width: parent.width;
+            }
+
+            if Nav.route == Route.recent: RecentPage {
+                width: parent.width;
+            }
+
+            if Nav.route == Route.local: MusicLibraryPage {
+                width: parent.width;
+            }
+
+            if Nav.route == Route.downloads: DownloadsPage {
+                width: parent.width;
+            }
+
+            if Nav.route == Route.purchased: PurchasedPage {
+                width: parent.width;
+            }
+
+            // 未移植模块（M4/M5 落地）：诚实占位
+            if Nav.route != Route.library && Nav.route != Route.recent && Nav.route != Route.local
+                && Nav.route != Route.downloads && Nav.route != Route.purchased: Rectangle {
+                width: parent.width;
+                height: 240px;
+
+                Text {
+                    y: 96px;
+                    width: parent.width;
+                    text: "该模块移植中（模块清单见 crates/hmp-desktop/PORTING.md）";
+                    color: Theme.muted-foreground;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+
+    // —— 播放条 ———
+    PlayerBar {
+        x: content.x;
+        y: content.y + content.height + pad;
+        width: content.width;
+        height: Theme.player-bar-height;
+    }
+
+    // —— 播放列表抽屉（遮罩 + 右上浮板）———
+    QueueDrawer {
+        x: 0;
+        y: 0;
         width: parent.width;
         height: parent.height;
-        show-login: root.show-login;
-        qr-image: root.qr-image;
-        login-status: root.login-status;
-        login-start => { root.login-start(); }
-        login-cancel => { root.login-cancel(); }
-        close => { root.show-login = false; }
+    }
+
+    // —— ESC：先关播放页 overlay，再关队列抽屉 ———
+    esc-scope := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                if (Player.overlay_visible) {
+                    Player.hide-overlay();
+                    return accept;
+                }
+                if (Player.queue_visible) {
+                    Player.hide-queue();
+                    return accept;
+                }
+            }
+            return reject;
+        }
     }
 }

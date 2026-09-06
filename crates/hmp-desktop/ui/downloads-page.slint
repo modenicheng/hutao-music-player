@@ -1,0 +1,82 @@
+// 下载（DownloadsView.vue，v0.13）：已下载曲目表 → 落盘明细（一行一事的发丝线
+// 定义行：存储位置 / 下载音质（读真实偏好）+ 在设置中调整 text-link）。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { Button, ButtonVariant } from "primitives.slint";
+import { FactRow, PageHeader, SectionHeader } from "page-parts.slint";
+import { TrackTable } from "track-table.slint";
+import { Nav, Route } from "nav.slint";
+import { Data, Player, Quality } from "stores.slint";
+
+export component DownloadsPage inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-8;
+
+        PageHeader {
+            title: "下载音乐";
+            show-back: true;
+            back => {
+                Nav.navigate(Route.library, "");
+            }
+            meta-items: [
+                "\{Data.downloads-count} 首",
+                "占用 \{Data.downloads-size}",
+                "含无损 \{Data.downloads-lossless} 首",
+            ];
+
+            Button {
+                variant: ButtonVariant.default;
+                small: true;
+                icon: Icons.play_arrow;
+                icon-size: 17.6px;
+                text: "播放全部";
+                enabled: Data.downloads-count > 0;
+                height: 32px;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    Player.play-tracks(Data.downloads, 0);
+                }
+            }
+        }
+
+        // —— 已下载 ——
+        VerticalLayout {
+            spacing: Theme.space-3;
+
+            SectionHeader {
+                title: "已下载";
+            }
+            TrackTable {
+                tracks: Data.downloads;
+                show-header: true;
+            }
+        }
+
+        // —— 落盘明细：编辑部式定义行 ——
+        VerticalLayout {
+            spacing: Theme.space-3;
+
+            SectionHeader {
+                title: "落盘明细";
+            }
+            FactRow {
+                label: "存储位置";
+                value: Data.downloads-storage-path;
+            }
+            FactRow {
+                label: "下载音质";
+                value: Quality.tier-label(Quality.selected);
+                with-adjust-link: true;
+                adjust-link-clicked => {
+                    Nav.navigate(Route.settings-playback, "");
+                }
+            }
+        }
+    }
+}

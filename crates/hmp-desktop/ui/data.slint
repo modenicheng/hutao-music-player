@@ -1,0 +1,35 @@
+// UI 数据结构（契约对齐 apps/hmp-tauri/src/lib/api/types.ts，DESIGN.md §4）。
+// Slint struct 无嵌套数组：多人合唱的歌手串为展示文本，链接统一指向主歌手（PORTING.md 决策 5）。
+
+/** 曲目表/队列行（SongRef 摊平）。播放态经 Player.queue-current-mid 比对 mid */
+export struct TrackRow {
+    mid: string,
+    title: string,
+    /** 展示串："白栖遥 / 陈屿帆"（点击整体跳主歌手页，PORTING.md 决策 5） */
+    artists: string,
+    /** 主歌手 mid */
+    artist-mid: string,
+    album: string,
+    album-mid: string,
+    duration-ms: int,
+    /** 音质徽章文案，如 "FLAC · 44.1kHz"；无损以下为空 */
+    quality: string,
+    cover: image,
+}
+
+/** 封面卡（歌单/专辑/已购专辑网格） */
+export struct CoverCardData {
+    mid: string,
+    title: string,
+    /** 副标题，如 "12 首 · 2026-08-30 购买" */
+    subtitle: string,
+    cover: image,
+}
+
+/** 本地监视文件夹行（WatchedFolder） */
+export struct FolderRow {
+    path: string,
+    track-count: int,
+    size-text: string,
+    last-scan: string,
+}

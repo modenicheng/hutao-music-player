@@ -1,0 +1,198 @@
+// 曲目表（TrackTable.vue，DESIGN.md §3.0）：序号/标题+歌手/专辑/时长。
+// 整行点击 → 替换队列并从该行播放；当前行 equalizer + 标题 accent；
+// 行 hover 用 HoverGroup 滑动高亮（中性底）；播放图标经 indicator 槽随块
+// 纵向滑入序号位（不逐行 fade），EQ 优先级最高。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { AppIcon, Equalizer, HoverGroup, HoverItem, TextLink } from "primitives.slint";
+import { TrackRow } from "data.slint";
+import { Nav, Route } from "nav.slint";
+import { Player } from "stores.slint";
+
+export component TrackTable inherits Rectangle {
+    in property <[TrackRow]> tracks;
+    in property <bool> show-header: false;
+    in property <bool> show-album: true;
+
+    background: transparent;
+    horizontal-stretch: 1;
+
+    property <length> row-height: 39px;
+
+    // Vue 网格一次定列（2.5rem | 1.4fr | 0.8fr | 4rem，gap 16px，行内距 12px）：
+    // Slint 每行是独立布局，stretch 会按各行内容首选宽漂移，必须按根宽算定宽
+    property <length> grid-available: self.width - 24px - 40px - 64px - Theme.space-4 * 3;
+    property <length> title-w: root.show-album ? grid-available * 1.4 / 2.2 : grid-available;
+    property <length> album-w: grid-available * 0.8 / 2.2;
+
+    function format-duration(ms: int) -> string {
+        if (ms <= 0) {
+            return "0:00";
+        }
+        // 对齐 TS 版 Math.round(ms/1000) 秒
+        return Math.mod(Math.round(ms / 1000), 60) < 10
+            ? "\{Math.floor(Math.round(ms / 1000) / 60)}:0\{Math.mod(Math.round(ms / 1000), 60)}"
+            : "\{Math.floor(Math.round(ms / 1000) / 60)}:\{Math.mod(Math.round(ms / 1000), 60)}";
+    }
+
+    VerticalLayout {
+        spacing: 2px;
+
+        if show-header && tracks.length > 0: Rectangle {
+            height: root.row-height;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: Theme.space-4;
+
+                Text {
+                    width: 40px;
+                    text: "#";
+                    color: Theme.muted-foreground;
+                    font-size: 12.5px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    width: root.title-w;
+                    text: "标题";
+                    color: Theme.muted-foreground;
+                    font-size: 12.5px;
+                    vertical-alignment: center;
+                }
+                if root.show-album: Text {
+                    width: root.album-w;
+                    text: "专辑";
+                    color: Theme.muted-foreground;
+                    font-size: 12.5px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    width: 64px;
+                    text: "时长";
+                    color: Theme.muted-foreground;
+                    font-size: 12.5px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        HoverGroup {
+            highlight-color: Theme.neutral-200;
+            highlight-opacity: 0.6;
+            indicator-icon: Icons.play_arrow;
+            indicator-x: 12px;
+            indicator-width: 40px;
+            indicator-icon-size: 16px;
+            indicator-align-start: true;
+
+            VerticalLayout {
+                spacing: 2px;
+
+                for row[index] in tracks: hover-item := HoverItem {
+                    height: root.row-height;
+                    suppress-indicator: Player.queue-current-mid == row.mid;
+                    clicked => {
+                        Player.play-tracks(root.tracks, index);
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: Theme.space-4;
+
+                        // 序号位：当前行显示跳动条；hover 行让位给 indicator 的播放图标
+                        Rectangle {
+                            width: 40px;
+
+                            Equalizer {
+                                paused: !Player.playing;
+                                x: 0;
+                                y: (parent.height - self.height) / 2;
+                                visible: Player.queue-current-mid == row.mid;
+                            }
+                            Text {
+                                text: "\{index + 1}";
+                                color: Theme.muted-foreground;
+                                font-size: 13.6px;
+                                vertical-alignment: center;
+                                x: 0;
+                                width: parent.width;
+                                visible: Player.queue-current-mid != row.mid;
+                                opacity: hover-item.hovered ? 0 : 1;
+                                animate opacity {
+                                    duration: Theme.duration-fast;
+                                }
+                            }
+                        }
+
+                        // 标题 + 歌手（歌手整体一个链接 → 主歌手页）
+                        Rectangle {
+                            width: root.title-w;
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: LayoutAlignment.start;
+
+                                title-text := Text {
+                                    text: row.title;
+                                    color: Player.queue-current-mid == row.mid ? Theme.track-accent : Theme.foreground;
+                                    font-size: 15.2px;
+                                    font-weight: Player.queue-current-mid == row.mid ? 650 : 400;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: row.artists;
+                                    color: Theme.muted-foreground;
+                                    font-size: 12.8px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+
+                            // 歌手名 hover 提亮 + 跳转（覆盖在文本上）
+                            TouchArea {
+                                x: title-text.width + 6px;
+                                width: parent.width - self.x;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    Nav.navigate(Route.artist, row.artist-mid);
+                                }
+                            }
+                        }
+
+                        // 专辑（可点跳专辑页；窄窗由 show-album 收起）
+                        if root.show-album: TextLink {
+                            width: root.album-w;
+                            text: row.album;
+                            font-size: 13.4px;
+                            clicked => {
+                                Nav.navigate(Route.album, row.album-mid);
+                            }
+                        }
+
+                        Text {
+                            width: 64px;
+                            text: root.format-duration(row.duration-ms);
+                            color: Theme.muted-foreground;
+                            font-size: 13.4px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        if tracks.length == 0: Text {
+            height: 64px;
+            text: "这里还没有歌曲";
+            color: Theme.muted-foreground;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}

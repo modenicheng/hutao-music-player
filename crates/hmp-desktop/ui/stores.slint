@@ -1,0 +1,113 @@
+// 应用状态 globals（player.ts / qualityStore.ts 的 Slint 对应物）。
+// 状态属性由 Rust 权威写入；回调发命令给 Rust（模拟播放桥，M8 换真实后端）。
+import { TrackRow, CoverCardData, FolderRow } from "data.slint";
+
+export global Player {
+    // —— 播放状态快照（PlayerStateSnapshot）———
+    in-out property <bool> has-track: false;
+    in-out property <bool> playing: false;
+    /** 0..1，拖拽中由 UI 本地覆盖 */
+    in-out property <float> progress: 0.0;
+    in-out property <int> position-ms: 0;
+    in-out property <int> duration-ms: 0;
+    in-out property <float> volume: 1.0;
+    in-out property <bool> can-previous: false;
+    in-out property <bool> can-next: false;
+    in-out property <string> title: "";
+    in-out property <string> artists: "";
+    in-out property <image> cover;
+    in-out property <string> track-quality: "";
+    /** 曲目最高音质档（0=标准 1=高清 2=无损 3=Hi-Res），Rust 从 quality 文案推导 */
+    in-out property <int> track-max-tier: 0;
+
+    // —— UI 状态（overlay / 抽屉）———
+    in-out property <bool> overlay-visible: false;
+    in-out property <bool> queue-visible: false;
+
+    // —— 队列 ———
+    in-out property <[TrackRow]> queue;
+    in-out property <string> queue-current-mid: "";
+    /** 抽屉元信息（Rust 侧格式化）："13 首 · 58 分钟" */
+    in-out property <string> queue-meta: "";
+
+    // —— 命令 ———
+    callback toggle-play();
+    callback next();
+    callback previous();
+    /** 用传入曲目替换队列并从 startIndex 播（playTracks） */
+    callback play-tracks([TrackRow], int);
+    callback play-at(int);
+    callback remove-at(int);
+    callback clear-queue();
+    callback seek-percent(float);
+    callback set-volume(float);
+    /** 播放列表开关语义：开着时再点即收起 */
+    callback toggle-queue();
+    callback hide-queue();
+    callback show-overlay();
+    callback hide-overlay();
+}
+
+// 音质档位（qualityStore.ts）：mock 期固定四档
+export global Quality {
+    /** 用户偏好（0=标准 1=高清 2=无损 3=Hi-Res），默认无损 */
+    in-out property <int> selected: 2;
+    callback select(int);
+
+    public pure function effective(max-tier: int) -> int {
+        if (selected <= max-tier) {
+            return selected;
+        }
+        return max-tier;
+    }
+
+    public pure function tier-label(tier: int) -> string {
+        return tier == 0 ? "标准" : tier == 1 ? "高清" : tier == 2 ? "无损" : "Hi-Res";
+    }
+
+    public pure function tier-detail(tier: int) -> string {
+        return tier == 0 ? "128kbps MP3"
+            : tier == 1 ? "320kbps MP3"
+            : tier == 2 ? "FLAC · 44.1kHz"
+            : "FLAC · 96kHz/24bit";
+    }
+}
+
+// 页面数据模型（lib/api 的 mock 层对应物；Rust 装载，页面只读。
+// 统计/格式化字段在 Rust 侧算好，Slint 不做数字格式化）
+export global Data {
+    // —— 我喜欢页 ——
+    in-out property <[TrackRow]> liked;
+    in-out property <int> liked-count;
+    in-out property <int> playlist-count;
+    in-out property <[CoverCardData]> created-playlists;
+    in-out property <[CoverCardData]> favorited-playlists;
+    in-out property <[TrackRow]> recent-preview;
+    // —— 最近播放页 ——
+    in-out property <[TrackRow]> recent;
+    in-out property <int> recent-count;
+    in-out property <string> recent-latest;
+    in-out property <string> recent-earliest;
+    // —— 音乐库（本地）——
+    in-out property <[TrackRow]> local-tracks;
+    in-out property <[FolderRow]> folders;
+    in-out property <int> local-count;
+    in-out property <string> local-duration;
+    in-out property <string> local-size;
+    /** 当前过滤的文件夹行（-1 = 全部）；点击同一行再次过滤即取消 */
+    in-out property <int> selected-folder: -1;
+    in-out property <string> local-table-title: "全部音乐";
+    callback filter-folder(int);
+    // —— 下载页 ——
+    in-out property <[TrackRow]> downloads;
+    in-out property <int> downloads-count;
+    in-out property <string> downloads-size;
+    in-out property <int> downloads-lossless;
+    in-out property <string> downloads-storage-path;
+    // —— 已购页 ——
+    in-out property <[TrackRow]> purchased-singles;
+    in-out property <[CoverCardData]> purchased-albums;
+    in-out property <int> purchased-single-count;
+    in-out property <int> purchased-album-count;
+    in-out property <string> purchased-total;
+}

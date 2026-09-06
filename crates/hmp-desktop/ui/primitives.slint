@@ -1,231 +1,508 @@
+// 基元组件（对应 hmp-tauri/src/components 的 Button / AppIcon / Equalizer /
+// HoverGroup / Scroll 等，DESIGN.md §3.0 通用件）。
 import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
 
-export component IconButton inherits Rectangle {
-    in property <string> glyph;
-    in property <string> accessible-name;
-    in property <bool> emphasized: false;
+// ——— AppIcon：SVG 资产 + colorize 着色（currentColor 对应物）———
+export component AppIcon inherits Rectangle {
+    in property <image> source;
+    in property <color> icon-color: Theme.foreground;
+    /** 旋转角，用于 chevron 随展开态旋转等 */
+    in property <angle> rotation-angle: 0deg;
+    background: transparent;
+
+    Image {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        source: root.source;
+        colorize: root.icon-color;
+        transform-rotation: root.rotation-angle;
+        transform-origin: { x: self.width / 2, y: self.height / 2 };
+        animate transform-rotation {
+            duration: Theme.duration-normal;
+        }
+    }
+}
+
+// ——— Button（Button.vue：variant/size + 图标 + 文本）———
+export enum ButtonVariant {
+    default,
+    ghost,
+    outline,
+    link,
+}
+
+export component Button inherits Rectangle {
+    in property <ButtonVariant> variant: ButtonVariant.ghost;
+    in property <image> icon;
+    in property <string> text;
+    in property <length> icon-size: 20px;
+    in property <bool> small: false;
+    in property <bool> icon-only: false;
+    /** 当前页常亮（侧栏导航 active：中性底 + 前景色 + 600） */
+    in property <bool> current: false;
+    /** HoverGroup 已接管 hover 时抵消自身 hover 底（侧栏/曲目表） */
+    in property <bool> suppress-hover: false;
     in property <bool> enabled: true;
+    in property <string> tool-tip: "";
     callback clicked;
 
-    width: Theme.control-size;
-    height: Theme.control-size;
-    border-radius: root.width / 2;
-    background: !root.enabled ? transparent
-        : root.emphasized ? Theme.accent
-        : touch-area.has-hover ? Theme.surface-hover : transparent;
-    opacity: root.enabled ? 1 : 0.42;
+    min-height: small ? 32px : 40px;
+    border-radius: Theme.radius-md;
+    // Vue 基类 border: 1px solid transparent；outline 变体上 --border 描边
+    border-width: 1px;
+    border-color: variant == ButtonVariant.outline ? Theme.border : transparent;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
     accessible-role: button;
-    accessible-label: root.accessible-name;
-    accessible-enabled: root.enabled;
+    accessible-label: text == "" ? tool-tip : text;
+    accessible-enabled: enabled;
     accessible-action-default => {
-        if (root.enabled) {
+        if (enabled) {
+            clicked();
+        }
+    }
+
+    background: !enabled || suppress-hover ? transparent
+        : current ? Theme.muted
+        : touch.has-hover ? (variant == ButtonVariant.default ? Theme.primary-hover : Theme.surface-3)
+        : variant == ButtonVariant.default ? Theme.primary
+        : transparent;
+    opacity: enabled ? 1 : 0.5;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
             root.clicked();
         }
     }
 
-    Tooltip { text: @markdown("\{root.accessible-name}"); }
-
-    Text {
-        x: 0px;
-        y: 0px;
-        width: parent.width;
-        height: parent.height;
-        text: root.glyph;
-        color: root.emphasized ? Theme.accent-foreground : Theme.text-primary;
-        font-size: root.emphasized ? 18px : 16px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    if tool-tip != "": Tooltip {
+        text: @markdown("\{root.tool-tip}");
     }
-
-    touch-area := TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
-    }
-}
-
-export component CoverArt inherits Rectangle {
-    in property <image> source;
-    in property <length> size: 64px;
-    property <bool> has-source: root.source.width > 0 && root.source.height > 0;
-
-    width: root.size;
-    height: root.size;
-    border-radius: Theme.cover-radius;
-    clip: true;
-    background: Theme.surface;
-    accessible-role: image;
-    accessible-label: root.has-source ? "Album cover" : "Album cover placeholder";
-
-    Rectangle {
-        x: 0px;
-        y: 0px;
-        width: parent.width;
-        height: parent.height;
-        background: @linear-gradient(135deg, Theme.surface-hover 0%, Theme.surface 100%);
-        visible: !root.has-source;
-    }
-
-    Image {
-        x: 0px;
-        y: 0px;
-        width: parent.width;
-        height: parent.height;
-        source: root.source;
-        image-fit: cover;
-        visible: root.has-source;
-    }
-
-    Text {
-        text: "♪";
-        color: Theme.text-secondary;
-        font-size: root.size * 0.4;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        visible: !root.has-source;
-    }
-}
-
-export component DevelopmentBanner inherits Rectangle {
-    in property <string> text;
-
-    height: 36px;
-    border-radius: 6px;
-    background: Theme.banner-background;
-    accessible-role: groupbox;
-    accessible-label: root.text;
 
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
+        padding-left: icon-only ? 0 : 12px;
+        padding-right: icon-only ? 0 : 12px;
+        padding-top: small ? 4px : 8px;
+        padding-bottom: small ? 4px : 8px;
         spacing: 8px;
+        alignment: icon-only ? LayoutAlignment.center : LayoutAlignment.start;
 
-        Text {
-            text: "●";
-            color: Theme.accent;
-            font-size: 9px;
-            vertical-alignment: center;
+        if icon-width > 0: AppIcon {
+            source: root.icon;
+            icon-color: content-color;
+            width: root.icon-size;
+            height: root.icon-size;
         }
 
-        Text {
+        if text != "": Text {
             text: root.text;
-            color: Theme.text-primary;
-            font-size: 13px;
+            color: content-color;
+            font-size: small ? 13px : 14px;
+            font-weight: current ? 600 : 400;
             vertical-alignment: center;
             overflow: elide;
+            horizontal-stretch: 1;
+        }
+    }
+
+    property <color> content-color: variant == ButtonVariant.default ? Theme.primary-foreground
+        : current ? Theme.foreground
+        : variant == ButtonVariant.link ? Theme.primary
+        : Theme.muted-foreground;
+    property <length> icon-width: icon.width > 0 ? icon-size : 0px;
+}
+
+// ——— TextLink（.text-link 全局类：基色 muted，hover 提亮 foreground，禁下划线）———
+export component TextLink inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: 13px;
+    in property <TextHorizontalAlignment> alignment: TextHorizontalAlignment.left;
+    callback clicked;
+
+    height: font-size * 1.5;
+    accessible-role: button;
+    accessible-label: text;
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Text {
+        width: parent.width;
+        text: root.text;
+        color: ta.has-hover ? Theme.foreground : Theme.muted-foreground;
+        font-size: root.font-size;
+        horizontal-alignment: root.alignment;
+        vertical-alignment: center;
+        overflow: elide;
+        animate color {
+            duration: Theme.duration-fast;
         }
     }
 }
 
-export component EmptyState inherits Rectangle {
-    in property <string> title;
-    in property <string> detail;
-    in property <string> action-label;
-    callback action-clicked;
+// ——— EqClock：Equalizer 共享时钟 ———
+// 所有实例同相位（对齐 Vue 负 delay 的跨实例相位一致）。33ms ≈ 30fps 采样：
+// 900ms 摆动周期的视觉足够，且把持续重绘压力压到 debug 构建可承受
+// （debug 全场景重绘 ~30fps，16ms 采样只会空转重绘；release 实测 ~200fps）。
+// 暂停的 EQ 走 paused 三元分支、不注册对 t 的依赖——无动画时零重绘开销，
+// 因此时钟常跑即可，无需播放门控。
+// 驱动 Timer 挂在宿主组件上（Slint 的 global 不能有子元素），见 app.slint。
+export global EqClock {
+    in-out property <duration> t: 0ms;
+}
 
-    min-height: 220px;
+/** EqClock 驱动宿主：AppWindow 挂载一次即可 */
+export component EqClockHost inherits Rectangle {
     background: transparent;
-    accessible-role: groupbox;
-    accessible-label: root.title + ". " + root.detail;
+    width: 0px;
+    height: 0px;
 
-    VerticalLayout {
-        alignment: center;
-        spacing: 10px;
-
-        Text {
-            text: root.title;
-            color: Theme.text-primary;
-            font-size: 20px;
-            font-weight: 700;
-            horizontal-alignment: center;
+    Timer {
+        interval: 33ms;
+        triggered => {
+            EqClock.t += 33ms;
         }
+    }
+}
 
-        Text {
-            text: root.detail;
-            color: Theme.text-secondary;
-            font-size: 14px;
-            horizontal-alignment: center;
-            wrap: word-wrap;
+// ——— Equalizer：三根跳动条（正在播放指示，对齐 Vue eq-bounce）———
+// Slint 的属性动画只在绑定值变化时触发（恒定绑定永不启动），负 delay 也只是
+// 被当作"无延迟"（无错相效果），所以不走 animate：直接按 EqClock 的绝对时间
+// 用余弦公式求高度——挂载即处于稳态相位（Vue 负 delay 语义）、暂停即冻结
+// （暂停时刻定格，恢复无跳变）。绕底边缩放：柱条 y 锚定容器底边（对应
+// transform-origin: bottom + align-items: flex-end），容器裁齐绘制底边。
+export component Equalizer inherits Rectangle {
+    in property <bool> paused: false;
+    in property <color> bar-color: Theme.track-equalizer;
+
+    width: 13px;
+    height: 14px;
+    clip: true;
+
+    // 本地相位：暂停期间把 EqClock 的流逝量扣除，冻结在暂停瞬间
+    property <duration> offset: 0ms;
+    property <duration> frozen: 0ms;
+    property <duration> t: root.paused ? root.frozen : EqClock.t - root.offset;
+
+    changed paused => {
+        if (self.paused) {
+            root.frozen = EqClock.t - root.offset;
+        } else {
+            root.offset = EqClock.t - root.frozen;
         }
+    }
+
+    // scaleY 在 0.55↔1 往返（周期 900ms，三根柱各错相 1/3 周期）；
+    // 余弦近似 CSS ease-in-out 的对称半段
+    pure function bounce(i: int, ms: float) -> float {
+        return 0.775 - 0.225 * Math.cos(360deg * Math.mod(ms + 300 * i, 900) / 900);
+    }
+    property <float> t-ms: root.t / 1ms;
+
+    // 静态相位基准 60% / 100% / 45%（柱宽 3px，间距 2px）
+    Rectangle {
+        x: 0;
+        width: 3px;
+        height: parent.height;
 
         Rectangle {
-            width: 132px;
-            height: 36px;
-            border-radius: 6px;
-            background: action-touch.has-hover ? Theme.accent-muted : transparent;
-            border-width: 1px;
-            border-color: Theme.accent;
-            visible: root.action-label != "";
-            accessible-role: button;
-            accessible-label: root.action-label;
-            accessible-action-default => { root.action-clicked(); }
+            width: parent.width;
+            y: parent.height - self.height;
+            height: 8px * root.bounce(0, root.t-ms);
+            border-radius: 1px;
+            background: root.bar-color;
+        }
+    }
+    Rectangle {
+        x: 5px;
+        width: 3px;
+        height: parent.height;
 
-            Text {
-                text: root.action-label;
-                color: Theme.accent;
-                font-size: 13px;
-                font-weight: 600;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                overflow: elide;
-            }
+        Rectangle {
+            width: parent.width;
+            y: parent.height - self.height;
+            height: 14px * root.bounce(1, root.t-ms);
+            border-radius: 1px;
+            background: root.bar-color;
+        }
+    }
+    Rectangle {
+        x: 10px;
+        width: 3px;
+        height: parent.height;
 
-            action-touch := TouchArea {
-                clicked => { root.action-clicked(); }
-            }
+        Rectangle {
+            width: parent.width;
+            y: parent.height - self.height;
+            height: 6px * root.bounce(2, root.t-ms);
+            border-radius: 1px;
+            background: root.bar-color;
         }
     }
 }
 
-export component FeatureRow inherits Rectangle {
-    in property <string> name;
-    in property <string> status;
-    in property <string> detail;
+// ——— HoverGroup 滑动高亮（HoverGroup.vue 的 Slint 对应物）———
+// 组内 HoverItem hover 时把几何（窗口系 absolute-position）上报 HoverBus；
+// 组内唯一的块 + 可选 indicator 复制几何并随动滑动。
+// 归属判定：上报的行几何必须落在组边界内（窗口坐标）——无需 id，多组天然共存。
+//
+// 关键机制事实（读 i-slint-core-1.17 input.rs / input_items.rs 确证）：
+// TouchArea::input_event 对 Moved 事件返回 EventAccepted，会中止向更低兄弟的
+// 遍历——has-hover 实际由"命中的最顶层 TouchArea"独占，只沿其祖先链传播。
+// 因此 HoverItem 的 TouchArea 必须是行内容的**祖先**（包裹 @children）而非
+// 垫底的兄弟；同理组级不再放传感层，离开态由 HoverItem 的自校验退出清理。
+export global HoverBus {
+    in-out property <Point> item-pos;
+    in-out property <length> item-width: 0px;
+    in-out property <length> item-height: 0px;
+    /** 正在 hover 的行是播放行时压住 indicator（EQ 优先，DESIGN.md §3.0） */
+    in-out property <bool> suppress-indicator: false;
+    /** 指针仍在某个上报行上（行退出且无新行接管时置 false，收起所有滑块） */
+    in-out property <bool> active: false;
 
-    height: 58px;
-    background: row-touch.has-hover ? Theme.surface-hover : transparent;
-    accessible-role: list-item;
-    accessible-label: root.name + ", " + root.status + ". " + root.detail;
+    public function hover(pos: Point, w: length, h: length, suppress: bool) {
+        item-pos = pos;
+        item-width = w;
+        item-height = h;
+        suppress-indicator = suppress;
+        active = true;
+    }
 
-    row-touch := TouchArea { }
+    public function leave() {
+        active = false;
+    }
+}
 
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 16px;
+export component HoverGroup inherits Rectangle {
+    in property <color> highlight-color: Theme.neutral-300;
+    in property <float> highlight-opacity: 0.6;
+    /** indicator：随块滑动的悬浮指示（如曲目表序号位的播放图标） */
+    in property <image> indicator-icon;
+    in property <length> indicator-x: 0px;
+    in property <length> indicator-width: 40px;
+    in property <length> indicator-icon-size: 16px;
+    /** indicator 水平对齐：false=居中（默认），true=居左（曲目表贴序号位） */
+    in property <bool> indicator-align-start: false;
+    out property <bool> hovering: has-report;
 
-        VerticalLayout {
-            spacing: 2px;
+    public pure function has-indicator() -> bool {
+        return indicator-icon.width > 0;
+    }
 
-            Text {
-                text: root.name;
-                color: Theme.text-primary;
-                font-size: 14px;
-                font-weight: 600;
-                overflow: elide;
-            }
+    property <bool> has-report:
+        HoverBus.active
+        && HoverBus.item-width > 0px
+        && HoverBus.item-pos.x >= root.absolute-position.x
+        && HoverBus.item-pos.y >= root.absolute-position.y
+        && HoverBus.item-pos.x + HoverBus.item-width <= root.absolute-position.x + root.width
+        && HoverBus.item-pos.y + HoverBus.item-height <= root.absolute-position.y + root.height;
 
-            Text {
-                text: root.detail;
-                color: Theme.text-secondary;
-                font-size: 12px;
-                overflow: elide;
-            }
-        }
+    // 首次出现不滑动（块直接跳到位、只做淡入），离开过一次后 placed 语义生效
+    // （对齐 Vue 版 placed；避免块从 0,0 飞入）
+    property <bool> placed: false;
 
-        Text {
-            width: 150px;
-            text: root.status;
-            color: root.status == "已接入" ? Theme.accent : Theme.text-secondary;
-            font-size: 12px;
-            horizontal-alignment: right;
-            vertical-alignment: center;
-            overflow: elide;
+    changed has-report => {
+        if (!has-report) {
+            root.placed = true;
         }
     }
 
-    Rectangle {
-        y: parent.height - 1px;
-        height: 1px;
-        background: Theme.divider;
+    // 块垫在内容之下（对齐 Vue：内容绘制在 hover-block 之上）
+    block := Rectangle {
+        x: HoverBus.item-pos.x - root.absolute-position.x;
+        y: HoverBus.item-pos.y - root.absolute-position.y;
+        width: HoverBus.item-width;
+        height: HoverBus.item-height;
+        background: root.highlight-color;
+        opacity: root.hovering ? root.highlight-opacity : 0;
+        animate x {
+            duration: 140ms;
+            easing: cubic-bezier(0.22, 1, 0.36, 1);
+            enabled: root.placed;
+        }
+        animate y {
+            duration: 140ms;
+            easing: cubic-bezier(0.22, 1, 0.36, 1);
+            enabled: root.placed;
+        }
+        animate width {
+            duration: 180ms;
+            easing: cubic-bezier(0.22, 1, 0.36, 1);
+            enabled: root.placed;
+        }
+        animate height {
+            duration: 180ms;
+            easing: cubic-bezier(0.22, 1, 0.36, 1);
+            enabled: root.placed;
+        }
+        animate opacity {
+            duration: Theme.duration-normal;
+        }
+    }
+
+    @children
+
+    if root.has-indicator(): Rectangle {
+        x: root.indicator-x;
+        y: block.y;
+        width: root.indicator-width;
+        height: block.height;
+        opacity: root.hovering && !HoverBus.suppress-indicator ? 1 : 0;
+        animate opacity {
+            duration: Theme.duration-normal;
+        }
+
+        AppIcon {
+            source: root.indicator-icon;
+            icon-color: Theme.foreground;
+            width: root.indicator-icon-size;
+            height: root.indicator-icon-size;
+            x: root.indicator-align-start ? 0 : (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+}
+
+/** hover-item：行级 hover 传感 + 上报几何（HoverItem.vue）
+    TouchArea 包住 @children 作祖先：hover 沿最顶层命中的祖先链传播到位；
+    行内更深的按钮仍各自拿 grab，互不抢行 hover。整行点击由 clicked 回调
+    提供（命中按钮时按钮优先，不会触发行点击）。 */
+export component HoverItem inherits Rectangle {
+    in property <bool> suppress-indicator: false;
+    callback clicked;
+    out property <bool> hovered: item-touch.has-hover;
+    background: transparent;
+
+    // 退出自校验的坐标快照：只有总线里仍是自己上次上报的几何时才收起，
+    // 否则相邻行滑动时旧行的 Exit（晚于新行的 report 派发）会误清总线
+    property <Point> reported-pos;
+    property <length> reported-w: 0px;
+    property <length> reported-h: 0px;
+
+    // TouchArea 不在布局中时默认 100% 填满父元素（builtins.slint）；
+    // 内容必须挂在 TouchArea **之内**（祖先关系），否则行内按钮会以
+    // 最顶层命中截断遍历，行级 hover 收不到
+    item-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+
+        changed has-hover => {
+            if (self.has-hover) {
+                HoverBus.hover(root.absolute-position, root.width, root.height, root.suppress-indicator);
+                root.reported-pos = root.absolute-position;
+                root.reported-w = root.width;
+                root.reported-h = root.height;
+            } else if (HoverBus.active
+                && HoverBus.item-pos == root.reported-pos
+                && HoverBus.item-width == root.reported-w
+                && HoverBus.item-height == root.reported-h) {
+                HoverBus.leave();
+            }
+        }
+
+        VerticalLayout {
+            @children
+        }
+    }
+}
+
+// ——— Scroll：Flickable + 自绘覆盖滚动条（Scroll.vue）———
+// thumb 滚动/悬停/拖拽时亮起，停止交互 900ms 后淡出；hide-scrollbar 时不渲染 thumb。
+// 内容放 @children（纵排），viewport 高度取内容 preferred-height。
+export component Scroll inherits Rectangle {
+    in property <bool> hide-scrollbar: false;
+    /** 用户主动滚动（拖拽 thumb / 内容拖拽）——播放页歌词跟随暂停用 */
+    callback user-scroll();
+    out property <length> view-height: flick.height;
+
+    clip: true;
+    background: transparent;
+
+    flick := Flickable {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        // 纵向滚动：视口宽固定为自身宽（默认绑定取内容最小宽会成环）
+        viewport-width: self.width;
+        viewport-height: content.preferred-height;
+
+        content := VerticalLayout {
+            @children
+        }
+    }
+
+    /** 观察滚动位置（changed 只能挂自身属性，走别名） */
+    property <length> scroll-offset <=> flick.viewport-y;
+    property <bool> thumb-active: false;
+    property <length> scrollable: max(flick.viewport-height - flick.height, 0px);
+    property <length> thumb-h: scrollable <= 0px ? flick.height
+        : min(flick.height, max(flick.height * flick.height / flick.viewport-height, 24px));
+    property <length> thumb-y: scrollable <= 0px ? 0px
+        : (-flick.viewport-y) * (flick.height - thumb-h) / scrollable;
+
+    function wake() {
+        thumb-active = true;
+        hide-timer.restart();
+    }
+
+    hide-timer := Timer {
+        interval: 900ms;
+        running: false;
+        triggered => {
+            thumb-active = false;
+        }
+    }
+
+    changed scroll-offset => {
+        wake();
+    }
+
+    if !hide-scrollbar && scrollable > 0px: Rectangle {
+        x: parent.width - self.width;
+        y: thumb-y;
+        width: 6px;
+        height: thumb-h;
+        border-radius: 3px;
+        background: Theme.neutral-600;
+        opacity: thumb-touch.has-hover ? 0.85 : thumb-active ? 0.7 : 0;
+        animate opacity {
+            duration: Theme.duration-fast;
+        }
+
+        thumb-touch := TouchArea {
+            property <length> drag-start-mouse: 0px;
+            property <length> drag-start-thumb: 0px;
+
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    drag-start-mouse = self.mouse-y;
+                    drag-start-thumb = root.thumb-y;
+                    root.user-scroll();
+                    root.wake();
+                }
+            }
+            moved => {
+                if (root.scrollable > 0px && flick.height > root.thumb-h) {
+                    flick.viewport-y = -clamp(
+                            drag-start-thumb + self.mouse-y - drag-start-mouse,
+                            0px,
+                            flick.height - root.thumb-h,
+                        ) * root.scrollable / (flick.height - root.thumb-h);
+                }
+                root.wake();
+            }
+        }
     }
 }

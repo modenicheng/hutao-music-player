@@ -1,0 +1,262 @@
+// 播放列表抽屉（QueueDrawer.vue，DESIGN.md v0.7/v0.8 主界面态）：
+// 全屏遮罩压暗（点击关闭）+ 右上浮板（radius-lg 全圆角 + 全边框），
+// 底边停在 PlayerBar 上方（layout-gap×2 + player-bar-height）。
+// themed 态（播放页 overlay 内的专辑色抽屉）随 M6 落地。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { AppIcon, Button, Equalizer, HoverGroup, HoverItem, Scroll } from "primitives.slint";
+import { Player } from "stores.slint";
+
+export component QueueDrawer inherits Rectangle {
+    background: transparent;
+    clip: false;
+
+    function format-duration(ms: int) -> string {
+        if (ms <= 0) {
+            return "0:00";
+        }
+        // 对齐 TS 版 Math.round(ms/1000) 秒
+        return Math.mod(Math.round(ms / 1000), 60) < 10
+            ? "\{Math.floor(Math.round(ms / 1000) / 60)}:0\{Math.mod(Math.round(ms / 1000), 60)}"
+            : "\{Math.floor(Math.round(ms / 1000) / 60)}:\{Math.mod(Math.round(ms / 1000), 60)}";
+    }
+
+    // —— 全屏遮罩（dark 下压暗加重 0.2→0.45），常驻挂载以便淡出，仅可见时可点 ——
+    Rectangle {
+        background: Theme.scrim;
+        opacity: Player.queue-visible ? 1 : 0;
+        animate opacity {
+            duration: Theme.duration-normal;
+            easing: cubic-bezier(0.2, 0, 0, 1);
+        }
+
+        scrim-touch := TouchArea {
+            enabled: Player.queue-visible;
+            clicked => {
+                Player.hide-queue();
+            }
+        }
+    }
+
+    // —— 右上浮板：底边停在 PlayerBar 上方 ——
+    panel := Rectangle {
+        x: parent.width - self.width - Theme.layout-gap;
+        y: Theme.layout-gap;
+        width: min(380px, parent.width - Theme.layout-gap * 2);
+        height: parent.height - Theme.layout-gap * 3 - Theme.player-bar-height;
+        border-radius: Theme.radius-lg;
+        background: Theme.surface-2;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 32px;
+        drop-shadow-color: #241F1B.transparentize(0.78);
+        drop-shadow-offset-y: 8px;
+        opacity: Player.queue-visible ? 1 : 0;
+        animate opacity {
+            duration: Theme.duration-normal;
+            easing: cubic-bezier(0.2, 0, 0, 1);
+        }
+
+        VerticalLayout {
+            // Vue 面板自带内距：头部上方留白
+            padding-top: 12px;
+
+            // —— 头部：标题 + 元信息 + 清空 + 关闭 ——
+            HorizontalLayout {
+                height: 56px;
+                padding-left: Theme.space-4;
+                padding-right: Theme.space-3;
+                spacing: Theme.space-2;
+
+                Rectangle {
+                    horizontal-stretch: 1;
+
+                    VerticalLayout {
+                        alignment: LayoutAlignment.center;
+                        spacing: 1px;
+
+                        Text {
+                            text: "播放列表";
+                            color: Theme.foreground;
+                            font-size: 15.2px;
+                            font-weight: 650;
+                        }
+                        Text {
+                            text: Player.queue-meta;
+                            color: Theme.muted-foreground;
+                            font-size: 12px;
+                            visible: Player.queue.length > 0;
+                        }
+                    }
+                }
+
+                Button {
+                    text: "清空";
+                    small: true;
+                    tool-tip: "清空播放列表";
+                    visible: Player.queue.length > 0;
+                    height: 32px;
+                    clicked => {
+                        Player.clear-queue();
+                    }
+                }
+                Button {
+                    icon: Icons.close;
+                    icon-only: true;
+                    icon-size: 18px;
+                    tool-tip: "关闭";
+                    width: 32px;
+                    height: 32px;
+                    clicked => {
+                        Player.hide-queue();
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Theme.hairline;
+            }
+
+            // —— 行列表 ——
+            Scroll {
+                vertical-stretch: 1;
+
+                HoverGroup {
+                    highlight-color: Theme.neutral-200;
+                    highlight-opacity: 0.6;
+
+                    VerticalLayout {
+                        padding-bottom: Theme.space-6;
+
+                        for row[index] in Player.queue: drawer-item := HoverItem {
+                            height: 49px;
+                            suppress-indicator: Player.queue-current-mid == row.mid;
+                            clicked => {
+                                Player.play-at(index);
+                            }
+
+                            HorizontalLayout {
+                                padding-left: Theme.space-4;
+                                padding-right: 17px;
+                                spacing: Theme.space-3;
+
+                                // 序号 / 跳动条（1.6rem）
+                                Rectangle {
+                                    width: 25.6px;
+
+                                    Equalizer {
+                                        paused: !Player.playing;
+                                        x: 0;
+                                        y: (parent.height - self.height) / 2;
+                                        visible: Player.queue-current-mid == row.mid;
+                                    }
+                                    Text {
+                                        text: "\{index + 1}";
+                                        color: Theme.muted-foreground;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                        visible: Player.queue-current-mid != row.mid;
+                                    }
+                                }
+
+                                // 封面缩略（2.25rem，radius-sm）
+                                Rectangle {
+                                    width: 36px;
+                                    height: 36px;
+                                    border-radius: Theme.radius-sm;
+                                    clip: true;
+                                    background: Theme.muted;
+
+                                    Image {
+                                        x: 0;
+                                        y: 0;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        source: row.cover;
+                                        image-fit: ImageFit.cover;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: LayoutAlignment.center;
+                                    spacing: 1px;
+
+                                    Text {
+                                        text: row.title;
+                                        color: Player.queue-current-mid == row.mid ? Theme.track-accent : Theme.foreground;
+                                        font-size: 14.4px;
+                                        font-weight: Player.queue-current-mid == row.mid ? 650 : 400;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: row.artists;
+                                        color: Theme.muted-foreground;
+                                        font-size: 12px;
+                                        overflow: elide;
+                                    }
+                                }
+
+                                Text {
+                                    width: 44px;
+                                    text: format-duration(row.duration-ms);
+                                    color: Theme.muted-foreground;
+                                    font-size: 13px;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                    visible: !drawer-item.hovered;
+                                    animate opacity {
+                                        duration: Theme.duration-fast;
+                                    }
+                                }
+
+                                // 移除：hover 行时时长淡出、原位浮现（网易云式行尾交互）
+                                Rectangle {
+                                    width: 28px;
+                                    height: 28px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: Theme.radius-full;
+                                    background: remove-touch.has-hover ? Theme.neutral-200 : transparent;
+                                    opacity: drawer-item.hovered ? 1 : 0;
+                                    animate opacity {
+                                        duration: Theme.duration-fast;
+                                    }
+
+                                    remove-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            Player.remove-at(index);
+                                        }
+                                    }
+                                    AppIcon {
+                                        source: Icons.close;
+                                        icon-color: Theme.muted-foreground;
+                                        width: 15px;
+                                        height: 15px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                }
+                            }
+                        }
+
+                        // —— 空态 ——
+                        if Player.queue.length == 0: Rectangle {
+                            height: 160px;
+
+                            Text {
+                                text: "播放列表是空的";
+                                color: Theme.muted-foreground;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                                width: parent.width;
+                                y: 64px;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

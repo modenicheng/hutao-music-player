@@ -1,0 +1,150 @@
+// 音乐库（MusicLibraryView.vue，v0.13）：页头（统计 + 播放全部 + 扫描诚实禁用）
+// → 监视文件夹（点击行过滤曲目表，激活行常亮，再点取消）→ 全部音乐曲目表。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { AppIcon, Button, ButtonVariant, HoverGroup, HoverItem, TextLink } from "primitives.slint";
+import { PageHeader, SectionHeader } from "page-parts.slint";
+import { TrackTable } from "track-table.slint";
+import { Nav, Route } from "nav.slint";
+import { Data, Player } from "stores.slint";
+
+export component MusicLibraryPage inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-8;
+
+        PageHeader {
+            title: "音乐库";
+            show-back: true;
+            back => {
+                Nav.navigate(Route.library, "");
+            }
+            meta-items: [
+                "\{Data.local-count} 首",
+                Data.local-duration,
+                "占用 \{Data.local-size}",
+            ];
+
+            Button {
+                variant: ButtonVariant.default;
+                small: true;
+                icon: Icons.play_arrow;
+                icon-size: 17.6px;
+                text: "播放全部";
+                enabled: Data.local-tracks.length > 0;
+                height: 32px;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    // 播放的是当前过滤结果
+                    Player.play-tracks(Data.local-tracks, 0);
+                }
+            }
+            Button {
+                variant: ButtonVariant.outline;
+                small: true;
+                text: "扫描本地音乐";
+                enabled: false;
+                tool-tip: "桌面端接入本地索引后可用";
+                height: 32px;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+
+        // —— 监视文件夹：点击行过滤下方曲目表（与曲目表同款中性滑块）———
+        VerticalLayout {
+            spacing: Theme.space-3;
+
+            SectionHeader {
+                title: "监视文件夹";
+
+                Button {
+                    variant: ButtonVariant.ghost;
+                    small: true;
+                    text: "添加文件夹";
+                    enabled: false;
+                    tool-tip: "桌面端接入本地索引后可用";
+                    height: 32px;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+
+            HoverGroup {
+                highlight-color: Theme.neutral-200;
+                highlight-opacity: 0.6;
+
+                VerticalLayout {
+                    spacing: 2px;
+
+                    for folder[index] in Data.folders: folder-item := HoverItem {
+                        height: 40px;
+                        clicked => {
+                            Data.filter-folder(index);
+                        }
+
+                        // 激活（过滤中）行常亮：中性底 + 前景色，与侧栏激活态同语言
+                        background: Data.selected-folder == index ? Theme.muted : transparent;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: Theme.space-4;
+
+                            AppIcon {
+                                source: Icons.folder;
+                                icon-color: Data.selected-folder == index ? Theme.foreground : Theme.muted-foreground;
+                                width: 20px;
+                                height: 20px;
+                                y: (parent.height - self.height) / 2;
+                            }
+
+                            Text {
+                                text: folder.path;
+                                color: Theme.foreground;
+                                font-size: 14.7px;
+                                font-weight: Data.selected-folder == index ? 600 : 400;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+
+                            Text {
+                                text: "\{folder.track_count} 首 · \{folder.size_text} · \{folder.last_scan} 扫描";
+                                color: Theme.muted-foreground;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // —— 曲目表：随文件夹过滤切换标题与内容 ———
+        VerticalLayout {
+            spacing: Theme.space-3;
+
+            SectionHeader {
+                title: Data.local-table-title;
+
+                if Data.selected-folder >= 0: TextLink {
+                    text: "显示全部";
+                    font-size: 13.6px;
+                    height: 20px;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        Data.filter-folder(-1);
+                    }
+                }
+            }
+            TrackTable {
+                tracks: Data.local-tracks;
+                show-header: true;
+            }
+        }
+    }
+}

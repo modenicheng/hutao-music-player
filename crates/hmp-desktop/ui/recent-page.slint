@@ -1,0 +1,36 @@
+// 最近播放（RecentView.vue）：页头（相对时间聚合进元信息）+ 曲目表。
+import { Theme } from "theme.slint";
+import { PageHeader } from "page-parts.slint";
+import { TrackTable } from "track-table.slint";
+import { Nav, Route } from "nav.slint";
+import { Data } from "stores.slint";
+
+export component RecentPage inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-4;
+
+        PageHeader {
+            title: "最近播放";
+            show-back: true;
+            back => {
+                Nav.navigate(Route.library, "");
+            }
+            meta-items: [
+                "共 \{Data.recent-count} 首",
+                "最近一次播放于\{Data.recent-latest}",
+                "最早记录\{Data.recent-earliest}",
+            ];
+        }
+
+        TrackTable {
+            tracks: Data.recent;
+            show-header: true;
+        }
+    }
+}

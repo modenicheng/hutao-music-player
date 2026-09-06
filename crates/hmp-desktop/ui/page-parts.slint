@@ -1,0 +1,316 @@
+// 页面通用件（PageHeader / SectionHeader / CoverCard / FactRow，DESIGN.md §3.0）。
+// @children 分别承载页头动作区（播放全部/扫描）与节头动作区（添加文件夹等）。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { AppIcon, TextLink } from "primitives.slint";
+
+// —— 内容页页头：返回 + 大标题 + 元信息行 + 右侧动作区 ——
+export component PageHeader inherits Rectangle {
+    in property <string> title;
+    in property <bool> show-back: false;
+    /** 元信息条目，如 ["45 首", "3 个歌单"]（渲染时以 · 分隔） */
+    in property <[string]> meta-items;
+
+    callback back;
+
+    height: meta-items.length > 0 ? 84px : 64px;
+    background: transparent;
+    horizontal-stretch: 1;
+
+    HorizontalLayout {
+        spacing: Theme.space-4;
+
+        if show-back: Rectangle {
+            width: 36px;
+            border-radius: Theme.radius-full;
+            background: back-touch.has-hover ? Theme.muted : transparent;
+            animate background {
+                duration: Theme.duration-fast;
+            }
+
+            back-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.back();
+                }
+            }
+            AppIcon {
+                source: Icons.arrow_back;
+                icon-color: Theme.foreground;
+                width: 20px;
+                height: 20px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+
+            VerticalLayout {
+                alignment: LayoutAlignment.center;
+                spacing: 5px;
+
+                Text {
+                    text: root.title;
+                    color: Theme.foreground;
+                    font-size: min(max(Theme.win-width * 0.03, 26px), 35px);
+                    font-weight: 650;
+                    overflow: elide;
+                }
+
+                if meta-items.length > 0: HorizontalLayout {
+                    spacing: Theme.space-2;
+                    alignment: LayoutAlignment.start;
+
+                    for item[index] in meta-items: HorizontalLayout {
+                        spacing: Theme.space-2;
+                        alignment: LayoutAlignment.start;
+
+                        if index > 0: Text {
+                            text: "·";
+                            color: Theme.muted-foreground;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: item;
+                            color: Theme.muted-foreground;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            alignment: LayoutAlignment.end;
+
+            @children
+        }
+    }
+}
+
+// —— 区块标题：标题撑满把动作/更多推到右缘（Vue space-between）——
+export component SectionHeader inherits Rectangle {
+    in property <string> title;
+    /** 非空则渲染"更多"链接（值仅作语义标记，跳转由 more-clicked 发出） */
+    in property <string> more-to: "";
+    callback more-clicked();
+
+    height: 28px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: Theme.space-3;
+
+        Text {
+            text: root.title;
+            color: Theme.foreground;
+            font-size: 18.4px;
+            font-weight: 650;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        @children
+
+        if more-to != "": Rectangle {
+            width: more-row.preferred-width;
+            height: 20px;
+
+            more-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.more-clicked();
+                }
+            }
+
+            more-row := HorizontalLayout {
+                spacing: 2px;
+                alignment: LayoutAlignment.start;
+
+                Text {
+                    text: "更多";
+                    color: more-touch.has-hover ? Theme.foreground : Theme.muted-foreground;
+                    font-size: 13.6px;
+                    vertical-alignment: center;
+                    animate color {
+                        duration: Theme.duration-fast;
+                    }
+                }
+                // expand-more 旋转 -90° 指向右（同 Vue .more-arrow）
+                AppIcon {
+                    source: Icons.expand_more;
+                    icon-color: more-touch.has-hover ? Theme.foreground : Theme.muted-foreground;
+                    width: 12px;
+                    height: 12px;
+                    rotation-angle: -90deg;
+                    animate icon-color {
+                        duration: Theme.duration-fast;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// —— 封面卡：圆角 + hover 上浮 + 播放浮层（CoverCard.vue）——
+// 宽度由页面的 auto-fill 网格算好传入（Vue repeat(auto-fill, minmax(9rem,1fr))）
+export component CoverCard inherits Rectangle {
+    in property <image> cover;
+    in property <string> title;
+    in property <string> subtitle;
+    /** 页头/网格动作（页面外置）——保留占位以兼容旧调用 */
+    callback clicked;
+
+    border-radius: Theme.radius-lg;
+    background: transparent;
+
+    card-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    VerticalLayout {
+        padding-bottom: Theme.space-3;
+        spacing: Theme.space-2;
+
+        Rectangle {
+            // layout 内不能直接设 y：外包定高容器承载 hover 上浮
+            height: self.width + 4px;
+
+            Rectangle {
+                y: card-touch.has-hover ? -2px : 0px;
+                width: parent.width;
+                height: parent.width;
+                border-radius: Theme.radius-lg;
+                clip: true;
+                background: Theme.muted;
+                drop-shadow-blur: card-touch.has-hover ? 12px : 2px;
+                drop-shadow-color: #241F1B.transparentize(card-touch.has-hover ? 0.72 : 0.88);
+                drop-shadow-offset-y: card-touch.has-hover ? 6px : 1px;
+                animate y {
+                    duration: Theme.duration-normal;
+                }
+                animate drop-shadow-blur {
+                    duration: Theme.duration-normal;
+                }
+                animate drop-shadow-color {
+                    duration: Theme.duration-normal;
+                }
+
+                Image {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.cover;
+                    image-fit: ImageFit.cover;
+                }
+
+                // 播放浮层按钮：hover 卡片时浮现（2.5rem，右下 0.6rem）
+                Rectangle {
+                    width: 40px;
+                    height: 40px;
+                    border-radius: Theme.radius-full;
+                    background: Theme.primary;
+                    opacity: card-touch.has-hover && play-touch.has-hover ? 1 : card-touch.has-hover ? 0.96 : 0;
+                    animate opacity {
+                        duration: Theme.duration-fast;
+                    }
+                    x: parent.width - self.width - 9.6px;
+                    y: parent.height - self.height - 9.6px;
+
+                    play-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.clicked();
+                        }
+                    }
+                    AppIcon {
+                        source: Icons.play_arrow;
+                        icon-color: Theme.primary-foreground;
+                        width: 22.4px;
+                        height: 22.4px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: root.title;
+            color: Theme.foreground;
+            font-size: 14px;
+            font-weight: 550;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+
+        Text {
+            text: root.subtitle;
+            color: Theme.muted-foreground;
+            font-size: 12.5px;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+    }
+}
+
+// —— 落盘明细定义行（发丝线分隔、一行一事，DownloadsView 落盘明细）——
+export component FactRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    /** 非空则在值后附"在设置中调整"text-link */
+    in property <bool> with-adjust-link: false;
+    callback adjust-link-clicked;
+
+    height: 44px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: Theme.space-4;
+
+        Text {
+            width: 96px;
+            text: root.label;
+            color: Theme.muted-foreground;
+            font-size: 13.6px;
+            vertical-alignment: center;
+        }
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            spacing: Theme.space-2;
+            alignment: LayoutAlignment.start;
+
+            Text {
+                text: root.value;
+                color: Theme.foreground;
+                font-size: 14px;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 0;
+            }
+            if with-adjust-link: TextLink {
+                text: "在设置中调整";
+                font-size: 13.6px;
+                vertical-stretch: 1;
+                clicked => {
+                    root.adjust-link-clicked();
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.hairline;
+    }
+}

@@ -1,344 +1,291 @@
-//! UI 桥接：Slint 回调 ↔ 应用命令 / 事件。
+//! UI 桥接：mock 数据装载为 Slint 模型 + 导航/主题/音质/过滤回调绑定。
+//! （旧版对接 AppCore 的桥随旧 UI 契约废弃，M8 数据接线时重写回来。）
 
-use slint::{ComponentHandle, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
+use std::sync::{Arc, Mutex};
 
-use crate::app::{AppCommand, AppEvent, ThemeMode, UiLyricData, UiPage, UiQueueData, UiSongData};
+use slint::{ComponentHandle, Global, ModelRc, SharedString, Weak};
 
-/// 绑定 UI 回调 → 应用命令通道。
-pub fn bind_callbacks(
-    ui: &crate::AppWindow,
-    cmd_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
-) {
-    let weak = ui.as_weak();
-    ui.on_search_query_edited(move |text| {
-        if let Some(ui) = weak.upgrade() {
-            ui.set_search_query_valid(!text.trim().is_empty());
-        }
-    });
+use crate::covers::cover_image;
+use crate::format::{format_bytes, format_cny, format_count_wan, format_long_duration};
+use crate::mock;
+use crate::prefs::Prefs;
+use crate::{
+    AppWindow, CoverCardData, Data, FolderRow, Nav, Quality, Theme, TrackRow,
+};
 
-    let weak = ui.as_weak();
-    let tx = cmd_tx.clone();
-    ui.on_search_requested(move |text| {
-        let query = text.trim();
-        if query.is_empty() {
-            return;
-        }
-        let Some(ui) = weak.upgrade() else {
-            return;
-        };
-        ui.set_search_loading(true);
-        ui.set_search_completed(false);
-        ui.set_search_error_text("".into());
-        let _ = tx.send(AppCommand::Search(query.to_owned()));
-    });
-    let weak = ui.as_weak();
-    let tx = cmd_tx.clone();
-    ui.on_play_requested(move |idx| {
-        let Some(ui) = weak.upgrade() else {
-            return;
-        };
-        let Some(index) = valid_model_index(idx, ui.get_songs().row_count()) else {
-            return;
-        };
-        let _ = tx.send(AppCommand::PlayIndex(index));
-    });
-    let weak = ui.as_weak();
-    let tx = cmd_tx.clone();
-    ui.on_play_queue_requested(move |idx| {
-        let Some(ui) = weak.upgrade() else {
-            return;
-        };
-        let Some(index) = valid_model_index(idx, ui.get_queue().row_count()) else {
-            return;
-        };
-        let _ = tx.send(AppCommand::PlayQueueIndex(index));
-    });
-    let tx = cmd_tx.clone();
-    ui.on_play_pause(move || {
-        let _ = tx.send(AppCommand::TogglePlay);
-    });
-    let tx = cmd_tx.clone();
-    ui.on_next_requested(move || {
-        let _ = tx.send(AppCommand::Next);
-    });
-    let tx = cmd_tx.clone();
-    ui.on_prev_requested(move || {
-        let _ = tx.send(AppCommand::Previous);
-    });
-    let tx = cmd_tx.clone();
-    ui.on_seek_requested(move |v| {
-        let _ = tx.send(AppCommand::Seek(v));
-    });
-    let tx = cmd_tx.clone();
-    ui.on_volume_requested(move |v| {
-        let _ = tx.send(AppCommand::SetVolume(v));
-    });
-    let tx = cmd_tx.clone();
-    ui.on_login_start(move || {
-        let _ = tx.send(AppCommand::LoginStart);
-    });
-    let tx = cmd_tx.clone();
-    ui.on_login_cancel(move || {
-        let _ = tx.send(AppCommand::LoginCancel);
-    });
-    let weak = ui.as_weak();
-    let tx = cmd_tx.clone();
-    ui.on_load_lyrics_requested(move || {
-        let Some(ui) = weak.upgrade() else {
-            return;
-        };
-        if ui.get_current_track_id().trim().is_empty() {
-            return;
-        }
-        let _ = tx.send(AppCommand::ReloadLyrics);
-    });
+const RECENT_PREVIEW_SIZE: usize = 5;
+const RECENT_PAGE_SIZE: usize = 12;
+const NAV_HISTORY_CAP: usize = 50;
+
+fn model<T: 'static + Clone>(items: Vec<T>) -> ModelRc<T> {
+    ModelRc::new(VecModel::from(items))
 }
 
-pub(crate) fn valid_model_index(index: i32, row_count: usize) -> Option<usize> {
-    let index = usize::try_from(index).ok()?;
-    (index < row_count).then_some(index)
-}
+use slint::VecModel;
 
-/// 绑定仅影响本地 UI 状态的回调。
-pub fn bind_ui_state_callbacks(ui: &crate::AppWindow) {
-    let weak = ui.as_weak();
-    ui.on_navigate_requested(move |value| {
-        let Some(page) = UiPage::parse(value.as_str()) else {
-            return;
-        };
-        if let Some(ui) = weak.upgrade() {
-            ui.set_current_page(page.as_str().into());
-        }
-    });
-
-    let weak = ui.as_weak();
-    ui.on_theme_requested(move |value| {
-        let Some(mode) = ThemeMode::parse(value.as_str()) else {
-            return;
-        };
-        if let Some(ui) = weak.upgrade() {
-            ui.set_theme_mode(mode.as_str().into());
-        }
-    });
-}
-
-/// 把搜索结果映射为 Slint 结构。
-pub fn to_ui_song(s: UiSongData) -> crate::UiSong {
-    crate::UiSong {
-        title: s.title.into(),
-        artist: s.artist.into(),
-        duration: s.duration.into(),
+fn cover_card(mid: &str, title: &str, subtitle: String, cover_seed: &str) -> CoverCardData {
+    CoverCardData {
+        mid: mid.into(),
+        title: title.into(),
+        subtitle: subtitle.into(),
+        cover: cover_image(cover_seed),
     }
 }
 
-/// 搜索结果 → Slint 模型。
-pub fn songs_model(songs: Vec<UiSongData>) -> ModelRc<crate::UiSong> {
-    let model: VecModel<crate::UiSong> =
-        VecModel::from(songs.into_iter().map(to_ui_song).collect::<Vec<_>>());
-    ModelRc::new(model)
+fn playlist_card(playlist: &mock::PlaylistRef) -> CoverCardData {
+    cover_card(
+        &playlist.id,
+        &playlist.name,
+        format!("{}次播放", format_count_wan(playlist.play_count)),
+        &format!("playlist:{}", playlist.id),
+    )
 }
 
-pub fn queue_model(items: Vec<UiQueueData>) -> ModelRc<crate::UiQueue> {
-    ModelRc::new(VecModel::from(
-        items
-            .into_iter()
-            .map(|item| crate::UiQueue {
-                track_id: item.track_id.into(),
-                title: item.title.into(),
-                artist: item.artist.into(),
-                duration: item.duration.into(),
-                is_current: item.is_current,
-                is_playing: item.is_playing,
+fn track_row_of(track: &mock::LocalTrack) -> TrackRow {
+    mock::to_track_row(&track.song)
+}
+
+/// "2026-09-05 21:30" → "09-05 21:30"（年份归页头层级）
+fn short_scan_time(iso: &str) -> &str {
+    iso.get(5..).unwrap_or(iso)
+}
+
+fn path_basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// 把 mock 数据装载进 Data global（mock-first：页面只读模型与统计字段）
+pub fn load_data(ui: &AppWindow) {
+    let data = Data::get(ui);
+    let pool = mock::song_pool();
+    let albums = mock::curated_albums();
+
+    let liked = mock::liked_songs(&pool);
+    let recent_preview: Vec<mock::SongRef> = pool.iter().take(RECENT_PREVIEW_SIZE).cloned().collect();
+    let recent = mock::recent_records(&pool, RECENT_PAGE_SIZE);
+    let local = mock::local_library(&pool);
+    let downloads = mock::download_library(&pool);
+    let purchased = mock::purchased_music(&pool, &albums);
+    let created = mock::created_playlist_refs();
+    let favorited = mock::favorited_playlist_refs();
+
+    data.set_liked(model(mock::track_rows(&liked)));
+    data.set_liked_count(liked.len() as i32);
+    data.set_playlist_count((created.len() + favorited.len()) as i32);
+    data.set_created_playlists(model(created.iter().map(playlist_card).collect::<Vec<_>>()));
+    data.set_favorited_playlists(model(favorited.iter().map(playlist_card).collect::<Vec<_>>()));
+    data.set_recent_preview(model(mock::track_rows(&recent_preview)));
+
+    let recent_songs: Vec<mock::SongRef> = recent.iter().map(|record| record.song.clone()).collect();
+    data.set_recent(model(mock::track_rows(&recent_songs)));
+    data.set_recent_count(recent.len() as i32);
+    data.set_recent_latest(
+        recent
+            .first()
+            .map(|record| record.label.clone())
+            .unwrap_or_else(|| "今天".into())
+            .into(),
+    );
+    data.set_recent_earliest(
+        recent
+            .last()
+            .map(|record| record.label.clone())
+            .unwrap_or_else(|| "今天".into())
+            .into(),
+    );
+
+    let local_total_size: u64 = local.tracks.iter().map(|track| track.size_bytes).sum();
+    let local_total_duration: u64 = local.tracks.iter().map(|track| track.song.duration_ms).sum();
+    let all_local_rows: Vec<TrackRow> = local.tracks.iter().map(track_row_of).collect();
+    data.set_local_tracks(model(all_local_rows.clone()));
+    data.set_local_count(local.tracks.len() as i32);
+    data.set_local_duration(format_long_duration(local_total_duration).into());
+    data.set_local_size(format_bytes(local_total_size).into());
+    data.set_folders(model(
+        local
+            .folders
+            .iter()
+            .map(|folder| FolderRow {
+                path: folder.path.clone().into(),
+                track_count: folder.track_count as i32,
+                size_text: format_bytes(folder.size_bytes).into(),
+                last_scan: short_scan_time(&folder.last_scan_at).into(),
             })
-            .collect::<Vec<_>>(),
-    ))
-}
-
-fn to_ui_lyric(line: UiLyricData, active: bool) -> crate::UiLyric {
-    crate::UiLyric {
-        time: line.time.into(),
-        timestamp_ms: line.timestamp_ms as f32,
-        text: line.text.into(),
-        translation: line.translation.into(),
-        is_active: active,
-    }
-}
-
-pub fn lyrics_model(lines: Vec<UiLyricData>, position_ms: f32) -> ModelRc<crate::UiLyric> {
-    let active_index = lines
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, line)| line.timestamp_ms as f32 <= position_ms)
-        .map(|(index, _)| index);
-    ModelRc::new(VecModel::from(
-        lines
-            .into_iter()
-            .enumerate()
-            .map(|(index, line)| to_ui_lyric(line, Some(index) == active_index))
-            .collect::<Vec<_>>(),
-    ))
-}
-
-pub fn update_lyrics_active_line(model: &ModelRc<crate::UiLyric>, position_ms: f32) {
-    let active_index = (0..model.row_count()).rev().find_map(|index| {
-        model
-            .row_data(index)
-            .filter(|line| line.timestamp_ms <= position_ms)
-            .map(|_| index)
-    });
-    for index in 0..model.row_count() {
-        let Some(mut line) = model.row_data(index) else {
-            continue;
-        };
-        line.is_active = Some(index) == active_index;
-        model.set_row_data(index, line);
-    }
-}
-
-pub fn lyrics_model_at_position(
-    model: &ModelRc<crate::UiLyric>,
-    position_ms: f32,
-) -> ModelRc<crate::UiLyric> {
-    let updated = ModelRc::new(VecModel::from(
-        (0..model.row_count())
-            .filter_map(|index| model.row_data(index))
             .collect::<Vec<_>>(),
     ));
-    update_lyrics_active_line(&updated, position_ms);
-    updated
-}
 
-pub(crate) fn lyric_mid_matches(request_mid: &str, event_mid: &str) -> bool {
-    !request_mid.trim().is_empty() && !event_mid.trim().is_empty() && request_mid == event_mid
-}
-
-/// Library/recommendation data -> Slint model.
-pub fn library_model(items: Vec<crate::demo::UiLibraryData>) -> ModelRc<crate::UiLibrary> {
-    let model = VecModel::from(
-        items
-            .into_iter()
-            .map(|item| crate::UiLibrary {
-                kind: item.kind.into(),
-                title: item.title.into(),
-                subtitle: item.subtitle.into(),
-                status: item.status.into(),
-                cover: item.cover,
-            })
-            .collect::<Vec<_>>(),
-    );
-    ModelRc::new(model)
-}
-
-/// Feature status data -> Slint model.
-pub fn feature_model(items: Vec<crate::UiFeatureData>) -> ModelRc<crate::UiFeature> {
-    let model = VecModel::from(
-        items
-            .into_iter()
-            .map(|item| crate::UiFeature {
-                name: item.name.into(),
-                status: item.status.into(),
-                detail: item.detail.into(),
-            })
-            .collect::<Vec<_>>(),
-    );
-    ModelRc::new(model)
-}
-
-/// PNG 字节 → Slint Image（RGBA）。
-pub fn decode_png(png: &[u8]) -> Result<slint::Image, Box<dyn std::error::Error>> {
-    let img = image::load_from_memory(png)?.to_rgba8();
-    let (w, h) = img.dimensions();
-    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(img.as_raw(), w, h);
-    Ok(slint::Image::from_rgba8(buffer))
-}
-
-/// 从后台任务把应用事件调度到 Slint 事件循环线程。
-pub async fn handle_event(ui: &slint::Weak<crate::AppWindow>, evt: AppEvent) -> bool {
-    let (applied_tx, applied_rx) = tokio::sync::oneshot::channel();
-    if slint::invoke_from_event_loop({
-        let ui = ui.clone();
-        move || {
-            let applied = ui.upgrade().is_some();
-            if let Some(ui) = ui.upgrade() {
-                apply_event(&ui, evt);
-            }
-            let _ = applied_tx.send(applied);
-        }
-    })
-    .is_err()
+    // ——— 监视文件夹过滤：点击行过滤曲目表，再点/显示全部取消 ———
+    // TrackRow 不带 folder 字段（派生关系留在 Rust 侧），这里并行持有分组归属。
+    let rows_by_folder: Vec<(String, TrackRow)> = local
+        .tracks
+        .iter()
+        .map(|track| (track.folder.clone(), track_row_of(track)))
+        .collect();
+    let folder_paths: Vec<String> = local.folders.iter().map(|f| f.path.clone()).collect();
+    let folder_titles: Vec<String> = local
+        .folders
+        .iter()
+        .map(|f| format!("{} · {} 首", path_basename(&f.path), f.track_count))
+        .collect();
     {
-        return false;
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        data.on_filter_folder(move |index| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let data = Data::get(&ui);
+            let selected = if index == data.get_selected_folder() { -1 } else { index };
+            data.set_selected_folder(selected);
+
+            let (rows, title): (Vec<TrackRow>, SharedString) = if selected < 0 {
+                (all_local_rows.clone(), "全部音乐".into())
+            } else if let Some(path) = folder_paths.get(selected as usize) {
+                let filtered = rows_by_folder
+                    .iter()
+                    .filter(|(folder, _)| folder == path)
+                    .map(|(_, row)| row.clone())
+                    .collect();
+                (filtered, folder_titles[selected as usize].clone().into())
+            } else {
+                (all_local_rows.clone(), "全部音乐".into())
+            };
+            data.set_local_tracks(model(rows));
+            data.set_local_table_title(title);
+        });
     }
-    applied_rx.await.unwrap_or(false)
+
+    let downloads_size: u64 = downloads.tracks.iter().map(|track| track.size_bytes).sum();
+    let lossless = downloads
+        .tracks
+        .iter()
+        .filter(|track| track.format == "FLAC")
+        .count();
+    data.set_downloads(model(downloads.tracks.iter().map(track_row_of).collect::<Vec<_>>()));
+    data.set_downloads_count(downloads.tracks.len() as i32);
+    data.set_downloads_size(format_bytes(downloads_size).into());
+    data.set_downloads_lossless(lossless as i32);
+    data.set_downloads_storage_path(downloads.storage_path.clone().into());
+
+    let purchased_songs: Vec<mock::SongRef> = purchased
+        .singles
+        .iter()
+        .map(|single| single.song.clone())
+        .collect();
+    data.set_purchased_singles(model(mock::track_rows(&purchased_songs)));
+    let total_fen: u64 = purchased
+        .singles
+        .iter()
+        .map(|single| single.price_fen)
+        .chain(purchased.albums.iter().map(|album| album.price_fen))
+        .sum();
+    data.set_purchased_single_count(purchased.singles.len() as i32);
+    data.set_purchased_album_count(purchased.albums.len() as i32);
+    data.set_purchased_total(format_cny(total_fen).into());
+    data.set_purchased_albums(model(
+        purchased
+            .albums
+            .iter()
+            .map(|entry| {
+                cover_card(
+                    &entry.album.mid,
+                    &entry.album.name,
+                    format!("{} 首 · {} 购买", entry.album.songs.len(), entry.purchased_at),
+                    &format!("album:{}", entry.album.mid),
+                )
+            })
+            .collect::<Vec<_>>(),
+    ));
 }
 
-/// 在 Slint 事件循环线程应用一个事件。
-pub(crate) fn apply_event(ui: &crate::AppWindow, evt: AppEvent) {
-    let position_ms = ui.get_playback().position.max(0.0) * 1000.0;
-    match evt {
-        AppEvent::SearchDone(songs) => {
-            ui.set_songs(songs_model(songs));
-            ui.set_search_loading(false);
-            ui.set_search_completed(true);
-            ui.set_search_error_text("".into());
-        }
-        AppEvent::SearchFailed(message) => {
-            ui.set_search_loading(false);
-            ui.set_search_completed(true);
-            ui.set_search_error_text(message.into());
-        }
-        AppEvent::QueueUpdated(items) => {
-            ui.set_library_queue(queue_model(items.clone()));
-            ui.set_queue(queue_model(items));
-        }
-        AppEvent::LyricsLoading(mid) => {
-            if mid.trim().is_empty() {
+/// 导航 / 主题 / 音质回调绑定（历史栈 + 偏好持久化）
+pub fn bind(ui: &AppWindow, prefs: Arc<Mutex<Prefs>>) {
+    // ——— 导航历史栈 ———
+    let nav = Nav::get(ui);
+    let history: Arc<Mutex<Vec<(crate::Route, SharedString)>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let history = Arc::clone(&history);
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        nav.on_navigate(move |route, param| {
+            let Some(ui) = ui_weak.upgrade() else {
                 return;
-            }
-            ui.set_lyrics_request_mid(mid.into());
-            ui.set_lyrics_state("loading".into());
-            ui.set_lyrics_error_text("".into());
-            ui.set_lyrics(lyrics_model(Vec::new(), 0.0));
-        }
-        AppEvent::LyricsLoaded { mid, lines } => {
-            if !lyric_mid_matches(ui.get_lyrics_request_mid().as_str(), &mid) {
-                return;
-            }
-            ui.set_lyrics(lyrics_model(lines, position_ms));
-            ui.set_lyrics_error_text("".into());
-            ui.set_lyrics_state(
-                if ui.get_lyrics().row_count() == 0 {
-                    "empty"
-                } else {
-                    "ready"
+            };
+            let nav = Nav::get(&ui);
+            let current = (nav.get_route(), nav.get_param());
+            {
+                let mut stack = history.lock().expect("nav history");
+                // 同页重复导航不入栈；栈满丢最旧
+                if stack.last() != Some(&current) && Some(&current) != stack.first() {
+                    if stack.len() >= NAV_HISTORY_CAP {
+                        stack.remove(0);
+                    }
+                    stack.push(current);
                 }
-                .into(),
-            );
-        }
-        AppEvent::LyricsFailed { mid, message } => {
-            if !lyric_mid_matches(ui.get_lyrics_request_mid().as_str(), &mid) {
+            }
+            nav.set_route(route);
+            nav.set_param(param);
+            nav.set_can_go_back(!history.lock().expect("nav history").is_empty());
+        });
+    }
+    {
+        let history = Arc::clone(&history);
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        nav.on_back(move || {
+            let Some(ui) = ui_weak.upgrade() else {
                 return;
+            };
+            let nav = Nav::get(&ui);
+            let previous = history.lock().expect("nav history").pop();
+            if let Some((route, param)) = previous {
+                nav.set_route(route);
+                nav.set_param(param);
             }
-            ui.set_lyrics_state("error".into());
-            ui.set_lyrics_error_text(message.into());
-        }
-        AppEvent::LoginQr(png) => match decode_png(&png) {
-            Ok(img) => {
-                ui.set_qr_image(img);
-                ui.set_show_login(true);
-            }
-            Err(e) => {
-                ui.set_login_status(format!("二维码解码失败: {e}").into());
-            }
-        },
-        AppEvent::LoginStatus(msg) => {
-            ui.set_login_status(msg.into());
-        }
-        AppEvent::LoginDone(name) => {
-            ui.set_logged_in(true);
-            ui.set_user_name(name.into());
-            ui.set_show_login(false);
-        }
+            nav.set_can_go_back(!history.lock().expect("nav history").is_empty());
+        });
+    }
+
+    // ——— 主题循环（跟随系统 → 浅色 → 深色 → …）———
+    {
+        let prefs = Arc::clone(&prefs);
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        Theme::get(ui).on_cycle_mode(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let theme = Theme::get(&ui);
+            let next = (theme.get_mode() + 1) % 3;
+            theme.set_mode(next);
+            prefs.lock().expect("prefs").theme_mode = next;
+            crate::prefs::store(&prefs.lock().expect("prefs").clone());
+        });
+    }
+
+    // ——— 音质偏好 ———
+    {
+        let prefs = Arc::clone(&prefs);
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        Quality::get(ui).on_select(move |tier| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            Quality::get(&ui).set_selected(tier);
+            prefs.lock().expect("prefs").quality = tier;
+            crate::prefs::store(&prefs.lock().expect("prefs").clone());
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_scan_time_strips_year() {
+        assert_eq!(short_scan_time("2026-09-05 21:30"), "09-05 21:30");
+    }
+
+    #[test]
+    fn basename() {
+        assert_eq!(path_basename("~/Music/无损收藏"), "无损收藏");
+        assert_eq!(path_basename("~/Music/胡桃音乐"), "胡桃音乐");
     }
 }

@@ -1,24 +1,120 @@
+// 设计 token（移植自 apps/hmp-tauri/src/styles/index.css，DESIGN.md §1）。
+// 亮暗两套值以三元绑定切换；mode 由 Rust 持久化层写入（0=跟随系统 1=浅色 2=深色），
+// 系统偏好用 std-widgets Palette.color-scheme 作代理。
 import { Palette } from "std-widgets.slint";
 
 export global Theme {
-    // AppWindow resolves Palette.color-scheme before these public brushes are used.
-    in property <string> mode: "system";
+    in-out property <int> mode: 0;
+    out property <bool> dark: mode == 2 || (mode == 0 && Palette.color-scheme == ColorScheme.dark);
+    /** 主题循环（跟随系统 → 浅色 → 深色 → …），Rust 侧持久化 */
+    callback cycle-mode();
 
-    out property <brush> background: Palette.background;
-    out property <brush> sidebar: Palette.background;
-    out property <brush> surface: Palette.alternate-background;
-    out property <brush> surface-hover: Palette.border;
-    out property <brush> text-primary: Palette.foreground;
-    out property <brush> text-secondary: Palette.foreground.transparentize(0.38);
-    out property <brush> divider: Palette.border;
-    out property <brush> accent: #ff2d55;
-    out property <brush> accent-foreground: Palette.accent-foreground;
-    out property <brush> accent-muted: #ff2d55.transparentize(0.82);
-    out property <brush> banner-background: #ff2d55.transparentize(0.9);
+    // 窗口宽度（AppWindow 双向绑定），驱动 sidebar-width 的 clamp(14rem, 17vw, 18rem)
+    in-out property <length> win-width: 1280px;
+    out property <length> sidebar-width: min(max(win-width * 0.17, 224px), 288px);
 
-    out property <length> sidebar-width: 230px;
-    out property <length> player-height: 92px;
-    out property <length> content-padding: 36px;
-    out property <length> control-size: 44px;
-    out property <length> cover-radius: 10px;
+    // ——— 品牌层：胡桃木色阶 ———
+    out property <color> walnut-50: dark ? #2A1918 : #F7EFED;
+    out property <color> walnut-100: dark ? #3D2523 : #EADBD7;
+    out property <color> walnut-200: dark ? #56302D : #D6B7B0;
+    out property <color> walnut-300: dark ? #713F39 : #C18F84;
+    out property <color> walnut-400: dark ? #A26155 : #AA695C;
+    out property <color> walnut-500: dark ? #C88C80 : #934A3B;
+    out property <color> walnut-600: dark ? #D9A69B : #7F3B31;
+    out property <color> walnut-700: dark ? #E8C2B9 : #6B302A;
+    out property <color> walnut-800: dark ? #F0D6D0 : #54231F;
+    out property <color> walnut-900: dark ? #F6E7E3 : #3B1816;
+    out property <color> walnut-950: dark ? #FCF4F2 : #24100F;
+
+    // ——— 语义色 ———
+    out property <color> primary: walnut-500;
+    out property <color> primary-foreground: dark ? #12100D : #FFFFFF;
+    out property <color> primary-hover: walnut-400;
+    out property <color> primary-active: walnut-600;
+    out property <color> accent: dark ? #D06452 : #B34A3A;
+    out property <color> accent-foreground: dark ? #12100D : #FFFFFF;
+
+    // ——— 中性色 ———
+    out property <color> neutral-50: dark ? #131312 : #F8F7F6;
+    out property <color> neutral-100: dark ? #1D1D1B : #F0EEED;
+    out property <color> neutral-200: dark ? #343230 : #E4E1E0;
+    out property <color> neutral-300: dark ? #4B4A46 : #D2CECD;
+    out property <color> neutral-400: dark ? #6E6C67 : #B6AEAC;
+    out property <color> neutral-500: dark ? #8B8884 : #958986;
+    out property <color> neutral-600: dark ? #ABA8A3 : #756764;
+    out property <color> neutral-700: dark ? #C9C7C3 : #574947;
+    out property <color> neutral-800: dark ? #E1E0DD : #403332;
+    out property <color> neutral-900: dark ? #F1F0EE : #342827;
+    out property <color> neutral-950: dark ? #F9F9F8 : #241817;
+
+    // ——— 页面与表面 ———
+    out property <color> background: dark ? neutral-100 : #D9D6D5;
+    out property <color> foreground: dark ? neutral-950 : neutral-900;
+    out property <color> surface-1: dark ? #1D1D1B : #ECEAE9;
+    out property <color> surface-2: dark ? #2A2927 : #FAF9F8;
+    out property <color> surface-3: dark ? #3A3835 : #FFFFFF;
+    out property <color> border: dark ? #4B4A46 : #D2CECD;
+    out property <color> border-strong: dark ? #676460 : #B6AEAC;
+    out property <color> ring: walnut-400;
+    out property <color> muted: dark ? #262523 : #E4E1E0;
+    out property <color> muted-foreground: neutral-500;
+    out property <color> track: dark ? #4B4A46 : #D2CECD;
+
+    // 派生
+    out property <brush> hairline: foreground.transparentize(0.93);
+    out property <brush> hairline-soft: foreground.transparentize(0.955);
+    out property <brush> scrim: dark ? #000000.transparentize(0.55) : #000000.transparentize(0.8);
+
+    // ——— 曲目层（动态，DESIGN.md §1.2）———
+    // 默认回退到品牌 walnut；播放页取色模块（M6）运行时整族覆写。
+    // 组件只消费这些属性，不直接引用取色结果。
+    in-out property <color> track-accent: accent;
+    in-out property <color> track-on-accent: dark ? #12100D : #FFFFFF;
+    in-out property <brush> track-accent-soft: dark ? accent.transparentize(0.8) : accent.transparentize(0.88);
+    in-out property <color> track-deep: dark ? #2B1A17 : #6B302A;
+    in-out property <color> track-deep-fg: #F7F0EA;
+    in-out property <color> track-grad-from: dark ? #241A19 : #F3E2DE;
+    in-out property <color> track-grad-to: dark ? #181412 : #FAF9F8;
+    in-out property <color> track-equalizer: accent;
+    in-out property <color> track-on-ambient: dark ? #FAF9F8 : #342827;
+    // 点亮态喜欢（v0.12）
+    out property <color> like-red: #E5484D;
+
+    // ——— 间距（rem = 16px）———
+    out property <length> space-1: 4px;
+    out property <length> space-2: 8px;
+    out property <length> space-3: 12px;
+    out property <length> space-4: 16px;
+    out property <length> space-5: 20px;
+    out property <length> space-6: 24px;
+    out property <length> space-8: 32px;
+    out property <length> space-10: 40px;
+    out property <length> space-12: 48px;
+
+    // ——— 圆角 / 阴影 ———
+    out property <length> radius-sm: 4px;
+    out property <length> radius-md: 8px;
+    out property <length> radius-lg: 12px;
+    out property <length> radius-full: 999px;
+
+    // ——— 尺寸 ———
+    out property <length> control-height-sm: 32px;
+    out property <length> control-height-md: 40px;
+    out property <length> control-height-lg: 48px;
+    out property <length> top-bar-height: 80px;
+    out property <length> player-bar-height: 96px;
+    out property <length> np-console-clearance: 120px;
+    out property <length> layout-gap: 8px;
+
+    // ——— 动效 ———
+    out property <duration> duration-fast: 120ms;
+    out property <duration> duration-normal: 240ms;
+    out property <duration> duration-slow: 320ms;
+
+    /** 封面卡网格列宽（Vue repeat(auto-fill, minmax(9rem,1fr)) 的对应物）：
+        列数 = floor((容器宽+gap)/160px) 至少 1，列宽均分剩余空间 */
+    public pure function grid-card-width(container: length) -> length {
+        return (container - (Math.max(1, Math.floor((container + 16px) / 160px)) - 1) * 16px)
+            / Math.max(1, Math.floor((container + 16px) / 160px));
+    }
 }

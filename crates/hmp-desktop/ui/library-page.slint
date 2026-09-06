@@ -1,158 +1,169 @@
-import { ScrollView } from "std-widgets.slint";
-import { CoverArt, DevelopmentBanner, EmptyState } from "primitives.slint";
+// 我喜欢（LibraryView.vue，v0.6/v0.13）：页头元信息 → 我喜欢 hero 卡（中性表面卡
+// + 心形渐变封面，播放全部）→ 喜欢列表 → 最近播放预览 → 创建/收藏歌单网格。
 import { Theme } from "theme.slint";
-import { UiPlayback } from "player-bar.slint";
-import { UiQueue } from "queue-page.slint";
+import { Icons } from "icons.slint";
+import { AppIcon, Button, ButtonVariant } from "primitives.slint";
+import { CoverCard, PageHeader, SectionHeader } from "page-parts.slint";
+import { TrackTable } from "track-table.slint";
+import { Nav, Route } from "nav.slint";
+import { Data, Player } from "stores.slint";
 
 export component LibraryPage inherits Rectangle {
-    in property <[UiQueue]> queue;
-    in property <UiPlayback> playback;
-    in property <image> cover-image;
-    callback play-requested(int);
-    callback navigate-to-search;
+    background: transparent;
 
-    background: Theme.background;
+    VerticalLayout {
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-4;
 
-    ScrollView {
-        width: parent.width;
-        height: parent.height;
-        viewport-width: self.visible-width;
-        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+        PageHeader {
+            title: "我喜欢";
+            meta-items: [
+                "\{Data.liked-count} 首喜欢的歌",
+                "\{Data.playlist-count} 个歌单",
+            ];
+        }
 
-        VerticalLayout {
-            width: parent.width;
-            padding-left: Theme.content-padding;
-            padding-right: Theme.content-padding;
-            padding-top: 28px;
-            padding-bottom: 22px;
-            spacing: 16px;
+        // —— 我喜欢 hero 卡 ——
+        Rectangle {
+            border-radius: Theme.radius-lg;
+            background: Theme.surface-3;
+            drop-shadow-blur: 2px;
+            drop-shadow-color: #241F1B.transparentize(0.92);
+            drop-shadow-offset-y: 1px;
 
-            Text {
-                text: "资料库";
-                color: Theme.text-primary;
-                font-size: 28px;
-                font-weight: 700;
-            }
+            HorizontalLayout {
+                padding-left: Theme.space-5;
+                padding-right: Theme.space-5;
+                padding-top: Theme.space-4;
+                padding-bottom: Theme.space-4;
+                spacing: Theme.space-4;
 
-            DevelopmentBanner {
-                text: "开发中 · 收藏与资料库云端同步尚未接入";
-            }
+                // 与侧栏"喜欢的收藏"封面同一渐变，保持身份一致
+                Rectangle {
+                    width: 72px;
+                    height: 72px;
+                    border-radius: Theme.radius-md;
+                    background: @linear-gradient(135deg, #7660a4, #ef9d9d);
+                    drop-shadow-blur: 2px;
+                    drop-shadow-color: #241F1B.transparentize(0.92);
+                    drop-shadow-offset-y: 1px;
 
-            Rectangle {
-                height: 92px;
-                background: Theme.surface;
-                border-radius: 6px;
-                accessible-role: groupbox;
-                accessible-label: root.playback.title != "" ? "正在播放 " + root.playback.title : "当前没有播放歌曲";
-
-                HorizontalLayout {
-                    padding: 14px;
-                    spacing: 14px;
-
-                    CoverArt { source: root.cover-image; size: 64px; }
-
-                    VerticalLayout {
-                        spacing: 4px;
-                        alignment: center;
-                        Text {
-                            text: root.playback.title != "" ? root.playback.title : "当前没有播放歌曲";
-                            color: Theme.text-primary;
-                            font-size: 16px;
-                            font-weight: 700;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: root.playback.artist != "" ? root.playback.artist : "从搜索页查找歌曲并开始播放";
-                            color: Theme.text-secondary;
-                            font-size: 13px;
-                            overflow: elide;
-                        }
+                    AppIcon {
+                        source: Icons.favorite_filled;
+                        icon-color: Theme.surface-3;
+                        width: 25.6px;
+                        height: 25.6px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
+                }
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: LayoutAlignment.center;
+                    spacing: 2px;
 
                     Text {
-                        width: 92px;
-                        text: root.playback.status == "playing" ? "正在播放" : root.playback.status == "paused" ? "已暂停" : "未播放";
-                        color: root.playback.status == "playing" ? Theme.accent : Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
+                        text: "我喜欢";
+                        color: Theme.muted-foreground;
+                        font-size: 12.5px;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: "私藏的心动瞬间";
+                        color: Theme.foreground;
+                        font-size: 18.4px;
+                        font-weight: 650;
+                    }
+                    Text {
+                        text: "\{Data.liked-count} 首";
+                        color: Theme.muted-foreground;
+                        font-size: 13px;
+                    }
+                }
+
+                if Data.liked-count > 0: Button {
+                    variant: ButtonVariant.default;
+                    small: true;
+                    icon: Icons.play_arrow;
+                    icon-size: 17.6px;
+                    text: "播放全部";
+                    height: 32px;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        Player.play-tracks(Data.liked, 0);
                     }
                 }
             }
+        }
 
-            Text {
-                text: "当前队列";
-                color: Theme.text-primary;
-                font-size: 18px;
-                font-weight: 700;
+        // —— 喜欢列表 ——
+        TrackTable {
+            tracks: Data.liked;
+            show-header: true;
+        }
+
+        // —— 最近播放预览（整页入口在最近播放页）——
+        VerticalLayout {
+            spacing: Theme.space-4;
+
+            SectionHeader {
+                title: "最近播放";
+                more-to: "recent";
+                more-clicked => {
+                    Nav.navigate(Route.recent, "");
+                }
             }
+            TrackTable {
+                tracks: Data.recent-preview;
+                show-header: true;
+            }
+        }
 
-            VerticalLayout {
-                visible: root.queue.length > 0;
-                spacing: 0px;
+        // —— 创建的歌单 ——
+        VerticalLayout {
+            spacing: Theme.space-4;
 
-                for item[index] in root.queue : Rectangle {
-                    height: 56px;
-                    background: item.is-current ? Theme.accent-muted : row-touch.has-hover ? Theme.surface-hover : transparent;
-                    accessible-role: list-item;
-                    accessible-label: item.title + ", " + item.artist;
+            SectionHeader {
+                title: "创建的歌单";
+            }
+            playlist-grid := HorizontalLayout {
+                spacing: Theme.space-4;
 
-                    row-touch := TouchArea {
-                        clicked => { root.play-requested(index); }
-                    }
-
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 12px;
-                        spacing: 14px;
-                        Text {
-                            width: 72px;
-                            text: item.is-playing ? "正在播放" : item.is-current ? "当前" : "队列";
-                            color: item.is-playing ? Theme.accent : Theme.text-secondary;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: item.title;
-                            color: Theme.text-primary;
-                            font-size: 14px;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: item.artist;
-                            color: Theme.text-secondary;
-                            font-size: 13px;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                        Text {
-                            width: 48px;
-                            text: item.duration;
-                            color: Theme.text-secondary;
-                            font-size: 12px;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    Rectangle {
-                        y: parent.height - 1px;
-                        height: 1px;
-                        background: Theme.divider;
+                for card in Data.created-playlists: CoverCard {
+                    width: Theme.grid-card-width(playlist-grid.width);
+                    cover: card.cover;
+                    title: card.title;
+                    subtitle: card.subtitle;
+                    clicked => {
+                        Nav.navigate(Route.playlist, card.mid);
                     }
                 }
             }
+        }
 
-            EmptyState {
-                visible: root.queue.length == 0;
-                title: "资料库还是空的";
-                detail: "开始搜索并播放歌曲后，真实队列会显示在这里。";
-                action-label: "前往搜索";
-                action-clicked => { root.navigate-to-search(); }
+        // —— 收藏的歌单 ——
+        VerticalLayout {
+            spacing: Theme.space-4;
+
+            SectionHeader {
+                title: "收藏的歌单";
+            }
+            fav-grid := HorizontalLayout {
+                spacing: Theme.space-4;
+
+                for card in Data.favorited-playlists: CoverCard {
+                    width: Theme.grid-card-width(fav-grid.width);
+                    cover: card.cover;
+                    title: card.title;
+                    subtitle: card.subtitle;
+                    clicked => {
+                        Nav.navigate(Route.playlist, card.mid);
+                    }
+                }
             }
         }
     }

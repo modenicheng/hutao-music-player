@@ -1,0 +1,120 @@
+// 竖向音量（VolumeControl.vue，DESIGN.md v0.2/v0.11）：
+// 静息只有图标；点击向上展开细长窄条（宽 44px，数值 + 4px 细轨，高 160px）。
+// 图标点击 = 静音切换（volume_up / volume_off 资产切换）；拖拽为直接指针跟随。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { AppIcon } from "primitives.slint";
+import { Player } from "stores.slint";
+
+export component VolumeControl inherits Rectangle {
+    width: 36px;
+    height: 36px;
+    border-radius: Theme.radius-full;
+    background: icon-touch.has-hover ? Theme.muted : transparent;
+    animate background {
+        duration: Theme.duration-fast;
+    }
+
+    // 静音记忆：非零音量时记录，静音后恢复（init 快照 + 点击时更新，避免自引用绑定环）
+    property <float> last-volume: 1.0;
+    property <bool> muted: Player.volume <= 0.01;
+    init => {
+        last-volume = Player.volume > 0.01 ? Player.volume : 1.0;
+    }
+
+    icon-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            if (muted) {
+                Player.set-volume(last-volume > 0.01 ? last-volume : 1.0);
+            } else {
+                last-volume = Player.volume;
+                Player.set-volume(0.0);
+            }
+        }
+    }
+
+    AppIcon {
+        source: muted ? Icons.volume_off : Icons.volume_up;
+        icon-color: Theme.foreground;
+        width: 21px;
+        height: 21px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+
+    volume-pop := PopupWindow {
+        x: (parent.width - self.width) / 2;
+        y: -self.height - 10px;
+        width: 44px;
+        height: 208px;
+
+        Rectangle {
+            border-radius: Theme.radius-lg;
+            background: Theme.surface-3;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #241F1B.transparentize(0.82);
+            drop-shadow-offset-y: 4px;
+
+            VerticalLayout {
+                padding-top: 10px;
+                padding-bottom: 12px;
+                spacing: 6px;
+
+                Text {
+                    height: 16px;
+                    text: "\{Math.round(Player.volume * 100)}";
+                    color: Theme.foreground;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
+
+                // 细轨：4px 竖轨 + 12px thumb，整列命中放宽拖拽
+                Rectangle {
+                    horizontal-stretch: 1;
+
+                    Rectangle {
+                        width: 4px;
+                        x: (parent.width - self.width) / 2;
+                        y: 0;
+                        height: parent.height;
+                        border-radius: 2px;
+                        background: Theme.track;
+
+                        Rectangle {
+                            x: 0;
+                            y: (1 - Player.volume) * parent.height;
+                            width: parent.width;
+                            height: parent.height - self.y;
+                            border-radius: 2px;
+                            background: Theme.track-accent;
+                        }
+                    }
+
+                    // thumb 纯视觉；拖拽命中区为整列
+                    Rectangle {
+                        width: 12px;
+                        height: 12px;
+                        border-radius: Theme.radius-full;
+                        background: Theme.surface-3;
+                        border-width: 2px;
+                        border-color: Theme.track-accent;
+                        x: (parent.width - self.width) / 2;
+                        y: clamp((1 - Player.volume) * parent.height - self.height / 2, 0px, parent.height - self.height);
+                    }
+
+                    TouchArea {
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down) {
+                                Player.set-volume(1.0 - clamp(self.mouse-y / self.height, 0.0, 1.0));
+                            }
+                        }
+                        moved => {
+                            Player.set-volume(1.0 - clamp(self.mouse-y / self.height, 0.0, 1.0));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

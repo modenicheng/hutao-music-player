@@ -1,0 +1,37 @@
+// 导航（vue-router 的 Slint 对应物）。
+// Rust 侧持有历史栈并回写 route/param；can-go-back 由 Rust 维护。
+
+export enum Route {
+    home,
+    discover,
+    top,
+    top-detail,
+    search,
+    playlist,
+    album,
+    artist,
+    library,
+    recent,
+    local,
+    downloads,
+    purchased,
+    settings,
+    settings-general,
+    settings-playback,
+    settings-account,
+}
+
+export global Nav {
+    // 默认落在我喜欢页（home 属 M4 内容页，未移植前先落到已完成的库页）
+    in-out property <Route> route: Route.library;
+    /** 详情页参数：专辑/歌单/歌手 mid 或榜单 id */
+    in-out property <string> param: "";
+    in-out property <bool> can-go-back: false;
+
+    callback navigate(Route, string);
+    callback back();
+
+    public function go(r: Route, p: string) {
+        navigate(r, p);
+    }
+}

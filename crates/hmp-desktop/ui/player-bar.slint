@@ -1,94 +1,294 @@
-import { Slider } from "std-widgets.slint";
+// 播放条（PlayerBar.vue 完整重写）：长进度条横贯全宽（静息 4px/hover 6px，
+// 点击/拖拽实时 seek）；状态卡 = 左簇（封面+歌名 → 音质徽章贴随信息排）/
+// 居中控制排（上一曲·主播放键·下一曲）/ 右簇（音量 + 播放列表）。
+// 布局用绝对定位三簇 + 文本 preferred-width 测量，避免 stretch 拉扯。
 import { Theme } from "theme.slint";
-import { CoverArt, IconButton } from "primitives.slint";
-
-export struct UiPlayback {
-    title: string,
-    artist: string,
-    status: string,
-    position: float,
-    duration: float,
-    volume: float,
-    position-text: string,
-    duration-text: string,
-}
+import { Icons } from "icons.slint";
+import { AppIcon } from "primitives.slint";
+import { QualityBadge } from "quality-badge.slint";
+import { VolumeControl } from "volume-control.slint";
+import { Player } from "stores.slint";
 
 export component PlayerBar inherits Rectangle {
-    in property <UiPlayback> playback;
-    in property <image> cover-image;
-    callback play-pause;
-    callback next-requested;
-    callback prev-requested;
-    callback seek-requested(float);
-    callback volume-requested(float);
-    callback queue-clicked;
-    callback lyrics-clicked;
+    background: transparent;
 
-    height: Theme.player-height;
-    background: Theme.surface;
-    Rectangle { height: 1px; background: Theme.divider; }
+    // 布局常量（对齐 PlayerBar.vue：2.25rem 控制键 / 2.6rem 主键 / 2.75rem 封面）
+    property <length> ctl: 36px;
+    property <length> play-ctl: 41.6px;
+    property <length> cover-size: 44px;
+    property <length> np-cap: 288px; // now-playing max-width 18rem
+    property <length> np-text-w: Player.has-track
+        ? min(Math.max(title.preferred-width, artists.preferred-width), np-cap - cover-size - Theme.space-3)
+        : 64px;
+    // Vue 弹性布局：track-tools / side-controls 两侧 flex:1 等宽 → 控制排中心
+    // = 卡片中心 + 左簇(now-playing)宽的一半 + 一个 gap 补偿（非纯居中）
+    property <length> left-w: cover-size + Theme.space-3 + np-text-w;
 
-    HorizontalLayout {
-        padding-left: 18px;
-        padding-right: 18px;
-        padding-top: 12px;
-        padding-bottom: 12px;
-        spacing: 14px;
+    VerticalLayout {
+        spacing: Theme.space-2;
 
-        HorizontalLayout {
-            width: 280px;
-            spacing: 12px;
-            CoverArt { source: root.cover-image; size: 64px; }
-            VerticalLayout {
-                spacing: 4px;
-                Text {
-                    text: root.playback.title != "" ? root.playback.title : "未在播放";
-                    color: Theme.text-primary;
-                    font-size: 15px;
-                    font-weight: 600;
-                    overflow: elide;
-                    vertical-alignment: center;
+        // —— 长进度条 ———
+        Rectangle {
+            height: 6px;
+
+            Rectangle {
+                width: parent.width;
+                height: progress-touch.has-hover || progress-touch.pressed ? 6px : 4px;
+                y: (parent.height - self.height) / 2;
+                border-radius: self.height / 2;
+                background: Theme.track;
+                animate height {
+                    duration: Theme.duration-fast;
                 }
-                Text {
-                    text: root.playback.artist != "" ? root.playback.artist : "—";
-                    color: Theme.text-secondary;
-                    font-size: 13px;
-                    overflow: elide;
-                    vertical-alignment: center;
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width * clamp(Player.progress, 0.0, 1.0);
+                    height: parent.height;
+                    border-radius: parent.border-radius;
+                    background: Theme.track-accent;
+                }
+            }
+
+            progress-touch := TouchArea {
+                y: -4px;
+                height: parent.height + 8px;
+                mouse-cursor: pointer;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        Player.seek-percent(clamp(self.mouse-x / parent.width, 0.0, 1.0));
+                    }
+                }
+                moved => {
+                    if (self.pressed) {
+                        Player.seek-percent(clamp(self.mouse-x / parent.width, 0.0, 1.0));
+                    }
                 }
             }
         }
 
-        VerticalLayout {
-            spacing: 5px;
-            HorizontalLayout {
-                alignment: center;
-                spacing: 6px;
-                IconButton { glyph: "⏮"; accessible-name: "上一首"; clicked => { root.prev-requested(); } }
-                IconButton { glyph: root.playback.status == "playing" ? "❚❚" : "▶"; accessible-name: "播放或暂停"; emphasized: true; clicked => { root.play-pause(); } }
-                IconButton { glyph: "⏭"; accessible-name: "下一首"; clicked => { root.next-requested(); } }
-                IconButton { glyph: "≡"; accessible-name: "播放队列"; clicked => { root.queue-clicked(); } }
-                IconButton { glyph: "¶"; accessible-name: "歌词"; clicked => { root.lyrics-clicked(); } }
-            }
-            HorizontalLayout {
-                spacing: 10px;
-                Text { text: root.playback.position-text; color: Theme.text-secondary; font-size: 12px; vertical-alignment: center; }
-                Slider {
-                    minimum: 0;
-                    maximum: root.playback.duration > 0 ? root.playback.duration : 1;
-                    value: root.playback.position;
-                    enabled: root.playback.duration > 0;
-                    changed(v) => { root.seek-requested(v); }
-                }
-                Text { text: root.playback.duration-text; color: Theme.text-secondary; font-size: 12px; vertical-alignment: center; }
-            }
-        }
+        // —— 状态卡 ———
+        Rectangle {
+            vertical-stretch: 1;
+            border-radius: Theme.radius-lg;
+            background: Theme.surface-2;
 
-        HorizontalLayout {
-            width: 160px;
-            spacing: 10px;
-            Text { text: "🔊"; color: Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
-            Slider { minimum: 0; maximum: 1; value: root.playback.volume; changed(v) => { root.volume-requested(v); } }
+            // 布局常量挂卡片层，兄弟簇可互引
+            property <length> cluster-w: 36px + Theme.space-2 + 41.6px + Theme.space-2 + 36px;
+            property <length> right-w: 36px + (Player.queue.length > 0 ? Theme.space-3 + 36px : 0px);
+
+            // ── 左簇：封面 + 歌名/歌手（可点开播放页）──
+            Rectangle {
+                x: Theme.space-4;
+                y: 0;
+                width: 44px + Theme.space-3 + root.np-text-w;
+                height: parent.height;
+
+                Rectangle {
+                    x: 0;
+                    y: (parent.height - 44px) / 2;
+                    width: 44px;
+                    height: 44px;
+                    border-radius: Theme.radius-md;
+                    clip: true;
+                    background: Theme.muted;
+                    drop-shadow-blur: 2px;
+                    drop-shadow-color: #241F1B.transparentize(0.92);
+                    drop-shadow-offset-y: 1px;
+
+                    Image {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        source: Player.cover;
+                        image-fit: ImageFit.cover;
+                        visible: Player.has-track;
+                    }
+                }
+
+                Rectangle {
+                    x: 44px + Theme.space-3;
+                    y: (parent.height - 40px) / 2;
+                    width: root.np-text-w;
+                    height: 40px;
+
+                    title := Text {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: 20px;
+                        text: Player.has-track ? Player.title : "未在播放";
+                        color: Theme.foreground;
+                        font-size: 14.7px;
+                        font-weight: 550;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    artists := Text {
+                        x: 0;
+                        y: 20px;
+                        width: parent.width;
+                        height: 20px;
+                        text: Player.has-track ? Player.artists : "";
+                        color: Theme.muted-foreground;
+                        font-size: 12.5px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                now-touch := TouchArea {
+                    enabled: Player.has-track;
+                    mouse-cursor: pointer;
+                    clicked => {
+                        Player.show-overlay();
+                    }
+                }
+            }
+
+            // ── 音质徽章：贴随曲目信息（Vue flex-1 左对齐语言）──
+            QualityBadge {
+                x: Theme.space-4 + 44px + Theme.space-3 + root.np-text-w + Theme.space-4;
+                y: (parent.height - self.height) / 2;
+            }
+
+            // ── 居中控制排：上一曲 / 主播放键 / 下一曲（Vue 弹性光学居中）──
+            Rectangle {
+                x: (parent.width + root.left-w) / 2 + Theme.space-4 / 2 - parent.cluster-w / 2;
+                y: (parent.height - 41.6px) / 2;
+                width: parent.cluster-w;
+                height: 41.6px;
+
+                // 上一曲
+                Rectangle {
+                    x: 0;
+                    y: (parent.height - 36px) / 2;
+                    width: 36px;
+                    height: 36px;
+                    border-radius: Theme.radius-full;
+                    background: prev-touch.has-hover && Player.can-previous ? Theme.muted : transparent;
+                    opacity: Player.can-previous ? 1 : 0.35;
+                    animate background {
+                        duration: Theme.duration-fast;
+                    }
+
+                    prev-touch := TouchArea {
+                        enabled: Player.can-previous;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            Player.previous();
+                        }
+                    }
+                    AppIcon {
+                        source: Icons.skip_previous;
+                        icon-color: Theme.foreground;
+                        width: 20.8px;
+                        height: 20.8px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+
+                // 主播放键：accent 填充圆（层级靠填充而非尺寸差，v0.12）
+                Rectangle {
+                    x: 36px + Theme.space-2;
+                    y: 0;
+                    width: 41.6px;
+                    height: 41.6px;
+                    border-radius: Theme.radius-full;
+                    background: play-touch.has-hover ? Theme.primary-hover : Theme.primary;
+                    animate background {
+                        duration: Theme.duration-fast;
+                    }
+
+                    play-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            Player.toggle-play();
+                        }
+                    }
+                    AppIcon {
+                        source: Player.playing ? Icons.pause : Icons.play_arrow;
+                        icon-color: Theme.primary-foreground;
+                        width: 24.8px;
+                        height: 24.8px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+
+                // 下一曲
+                Rectangle {
+                    x: 36px + Theme.space-2 + 41.6px + Theme.space-2;
+                    y: (parent.height - 36px) / 2;
+                    width: 36px;
+                    height: 36px;
+                    border-radius: Theme.radius-full;
+                    background: next-touch.has-hover && Player.can-next ? Theme.muted : transparent;
+                    opacity: Player.can-next ? 1 : 0.35;
+                    animate background {
+                        duration: Theme.duration-fast;
+                    }
+
+                    next-touch := TouchArea {
+                        enabled: Player.can-next;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            Player.next();
+                        }
+                    }
+                    AppIcon {
+                        source: Icons.skip_next;
+                        icon-color: Theme.foreground;
+                        width: 20.8px;
+                        height: 20.8px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+            }
+
+            // ── 右簇：音量 + 播放列表（实心，队列空时隐藏）──
+            HorizontalLayout {
+                x: parent.width - parent.right-w - Theme.space-4;
+                y: (parent.height - 36px) / 2;
+                width: parent.right-w;
+                height: 36px;
+                spacing: Theme.space-3;
+                alignment: LayoutAlignment.end;
+
+                VolumeControl {
+                    width: 36px;
+                    height: 36px;
+                }
+
+                if Player.queue.length > 0: Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    border-radius: Theme.radius-full;
+                    background: queue-touch.has-hover ? Theme.muted : transparent;
+                    animate background {
+                        duration: Theme.duration-fast;
+                    }
+
+                    queue-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            Player.toggle-queue();
+                        }
+                    }
+                    AppIcon {
+                        source: Icons.queue_music;
+                        icon-color: Theme.foreground;
+                        width: 20.8px;
+                        height: 20.8px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+            }
         }
     }
 }
