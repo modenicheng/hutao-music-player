@@ -5,6 +5,7 @@
 import { binarySplit } from "./binary-split";
 import { refine } from "./kmeans";
 import {
+  contrastRatio,
   deepFromAccent,
   mix,
   pickOnAccent,
@@ -37,6 +38,8 @@ export interface TrackPalette {
   gradFrom: string;
   /** 播放页环境渐变终点（hex） */
   gradTo: string;
+  /** 环境层顶部浮动元素（收起键等）的墨色：按 gradFrom 对比度自动取深/浅 */
+  onAmbient: string;
   /** 是否为回退调色板（无输入 / 无彩色封面） */
   isFallback: boolean;
 }
@@ -60,6 +63,9 @@ const GRAD_FROM: Record<ColorMode, { anchor: string; ratio: number }> = {
   dark: { anchor: "#1F1B17", ratio: 0.75 },
 };
 const SOFT_ALPHA: Record<ColorMode, number> = { light: 0.12, dark: 0.2 };
+// 环境层墨色两极：暖黑与亮色主题 foreground 同源，暖白与渐变终点同源
+const AMBIENT_INK_DARK = "#342827";
+const AMBIENT_INK_LIGHT = "#FAF9F8";
 // alpha 低于该阈值的像素视为透明（画布留白），不参与取色
 const MIN_PIXEL_ALPHA = 16;
 
@@ -106,14 +112,21 @@ const buildPalette = (accentHex: string, mode: ColorMode, isFallback: boolean): 
   const grad = GRAD_FROM[mode];
   const gradFrom = mix(accentOklab, hexToOklab(grad.anchor), grad.ratio);
   const accent = oklabToOklch(accentOklab.l, accentOklab.a, accentOklab.b);
+  const gradFromHex = oklabToHex(gradFrom.l, gradFrom.a, gradFrom.b);
   return {
     accent: accentHex,
     onAccent: pickOnAccent(accentHex),
     accentSoft: `rgba(${soft.r}, ${soft.g}, ${soft.b}, ${SOFT_ALPHA[mode]})`,
     deep: deepFromAccent(accent, mode),
     deepFg: DEEP_FOREGROUND,
-    gradFrom: oklabToHex(gradFrom.l, gradFrom.a, gradFrom.b),
+    gradFrom: gradFromHex,
     gradTo: GRAD_TO[mode],
+    // 环境层顶部明暗随专辑走：谁与背景对比度更高用谁
+    onAmbient:
+      contrastRatio(gradFromHex, AMBIENT_INK_LIGHT) >=
+      contrastRatio(gradFromHex, AMBIENT_INK_DARK)
+        ? AMBIENT_INK_LIGHT
+        : AMBIENT_INK_DARK,
     isFallback,
   };
 };

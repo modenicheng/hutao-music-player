@@ -69,12 +69,6 @@ export const routes = [
   },
 
   {
-    path: "/now-playing",
-    name: "now-playing",
-    component: () => import("../views/NowPlayingView.vue"),
-  },
-
-  {
     path: "/settings",
     name: "settings",
     component: () => import("../views/settings/SettingsView.vue"),

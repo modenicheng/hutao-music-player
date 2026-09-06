@@ -14,7 +14,12 @@ const player = new PlayerController(
 
 provide(playerKey, player);
 
-// 曲目层调色全局生效（任何页面的 --track-* 消费方都跟随当前曲目）
+// dev 测试钩子：QA 脚本灌长队列 / 驱动播放器用，不进生产产物
+if (import.meta.env.DEV) {
+  (window as unknown as Record<string, unknown>).__hmpPlayer = player;
+}
+
+// 曲目层调色 App 级预热；动态变量只注入播放页 overlay（其余界面用品牌回退色）
 const stopTrackTheme = applyTrackTheme(player);
 
 onMounted(player.mount);
