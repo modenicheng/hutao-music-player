@@ -292,7 +292,8 @@ function scrollToComments() {
   min-height: 30rem;
   max-width: 68rem;
   margin: 0 auto;
-  padding: var(--space-8) var(--space-6) var(--space-6);
+  /* 侧距加大：左列离窗口边框更远，窄窗下不贴边 */
+  padding: var(--space-8) var(--space-10) var(--space-6);
 }
 
 .np-stage-left {
@@ -300,7 +301,7 @@ function scrollToComments() {
   flex-direction: column;
   justify-content: center;
   flex: 0 0 auto;
-  width: min(40vh, 44%, 24rem);
+  width: min(36vh, 40%, 21rem);
 }
 
 .np-cover {
