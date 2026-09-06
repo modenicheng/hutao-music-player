@@ -8,9 +8,16 @@ const props = withDefaults(
     width?: number | string;
     height?: number | string;
     direction?: ScrollDirection;
+    /** 父级定高（滚动区填满父级）时开启：视口成为 size 查询容器，槽内可用 100cqh；
+     *  内容撑高的用法（父级高度不定）不能开，containment 会把视口塌成 0 */
+    fill?: boolean;
+    /** 完全不渲染自定义滚动条（歌词列等沉浸式滚动区），原生滚动条本就隐藏 */
+    hideScrollbar?: boolean;
   }>(),
-  { width: "100%", height: "100%", direction: "all" },
+  { width: "100%", height: "100%", direction: "all", fill: false },
 );
+
+const emit = defineEmits<{ "user-scroll": [] }>();
 
 type Axis = "x" | "y";
 type Size = { width: number; height: number };
@@ -32,6 +39,8 @@ class ScrollBar {
   private innerResizeObserver: ResizeObserver;
   private dragging: boolean;
   private draggingAxis: Axis | null;
+  /** 滚动条自动隐藏计时器 */
+  private hideTimer: ReturnType<typeof setTimeout> | null = null;
   private dragStart: { x: number; y: number } & ScrollOffset = {
     x: 0,
     y: 0,
@@ -64,6 +73,9 @@ class ScrollBar {
     this.content.addEventListener("scroll", this.handleScroll);
     this.thumb.x.addEventListener("mousedown", this.handleDraggingX);
     this.thumb.y.addEventListener("mousedown", this.handleDraggingY);
+    // 悬停到滑块上（即使已淡出仍可命中）即刻亮起，方便抓取
+    this.thumb.x.addEventListener("mouseenter", this.showThumbs);
+    this.thumb.y.addEventListener("mouseenter", this.showThumbs);
     window.addEventListener("mousemove", this.handleMouseMove);
     window.addEventListener("mouseup", this.handleMouseUp);
   }
@@ -72,13 +84,30 @@ class ScrollBar {
     this.content.removeEventListener("scroll", this.handleScroll);
     this.thumb.x.removeEventListener("mousedown", this.handleDraggingX);
     this.thumb.y.removeEventListener("mousedown", this.handleDraggingY);
+    this.thumb.x.removeEventListener("mouseenter", this.showThumbs);
+    this.thumb.y.removeEventListener("mouseenter", this.showThumbs);
     window.removeEventListener("mousemove", this.handleMouseMove);
     window.removeEventListener("mouseup", this.handleMouseUp);
+    if (this.hideTimer !== null) clearTimeout(this.hideTimer);
+    this.hideTimer = null;
     this.resizeObserver.disconnect();
     this.innerResizeObserver.disconnect();
   }
 
+  /** 滚动条自动隐藏：滚动/滑块悬停/拖拽时亮起，停止交互 ~900ms 后淡出 */
+  private showThumbs = () => {
+    this.thumb.x.classList.add("is-active");
+    this.thumb.y.classList.add("is-active");
+    if (this.hideTimer !== null) clearTimeout(this.hideTimer);
+    this.hideTimer = setTimeout(() => {
+      this.hideTimer = null;
+      this.thumb.x.classList.remove("is-active");
+      this.thumb.y.classList.remove("is-active");
+    }, 900);
+  };
+
   private handleScroll = () => {
+    this.showThumbs();
     this.syncMetrics();
     this.updateThumbPos();
   };
@@ -177,9 +206,11 @@ class ScrollBar {
     const entry = entries[0];
     if (!entry) return;
 
+    // scrollHeight/clientHeight 是取整值，contentRect 是分数值——
+    // 不取整会出现"差 0.3px 幻影可滚"（滚动条常驻、thumb 铺满全高）
     this.viewport = {
-      width: entry.contentRect.width,
-      height: entry.contentRect.height,
+      width: Math.round(entry.contentRect.width),
+      height: Math.round(entry.contentRect.height),
     };
     this.syncMetrics();
     this.updateThumbSize();
@@ -211,6 +242,7 @@ class ScrollBar {
 
   private startDragging(axis: Axis, ev: MouseEvent) {
     ev.preventDefault();
+    emit("user-scroll");
     this.draggingAxis = axis;
     this.dragging = true;
     this.dragStart = {
@@ -288,6 +320,9 @@ onMounted(() => {
 onUnmounted(() => {
   scrollBar.value?.clean();
 });
+
+/** 内部真正滚动的视口元素：外部做程序化滚动（如歌词跟随）时需要拿到它 */
+defineExpose({ viewport: contentRef });
 </script>
 <template>
   <div
@@ -298,17 +333,23 @@ onUnmounted(() => {
         typeof props.height === 'number' ? `${props.height}px` : props.height,
     }"
   >
-    <div class="thumb thumb-y" ref="thumbYRef"></div>
-    <div class="thumb thumb-x" ref="thumbXRef"></div>
+    <!-- 隐藏滚动条时不渲染 thumb：ref 缺位让 ScrollBar 整体不构建，零开销 -->
+    <div v-if="!props.hideScrollbar" class="thumb thumb-y" ref="thumbYRef"></div>
+    <div v-if="!props.hideScrollbar" class="thumb thumb-x" ref="thumbXRef"></div>
     <div
       class="content"
+      :class="{ 'is-fill': props.fill }"
       :style="{
         overflowX: props.direction === 'vertical' ? 'hidden' : undefined,
         overflowY: props.direction === 'horizontal' ? 'hidden' : undefined,
       }"
       ref="contentRef"
     >
-      <div ref="innerRef" class="inner">
+      <div
+        ref="innerRef"
+        class="inner"
+        :class="{ 'is-horizontal': props.direction === 'horizontal' }"
+      >
         <slot />
       </div>
     </div>
@@ -323,20 +364,25 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.container:hover {
-  .thumb {
-    opacity: 0.7;
-    transition: opacity var(--duration-fast);
-  }
-}
-
+/* 滚动条自动隐藏：is-active 由 JS 在滚动/滑块悬停/拖拽时挂上，
+   闲置 900ms 后摘除，滑块以淡出收尾 */
 .thumb {
   position: absolute;
   background-color: var(--neutral-600);
   opacity: 0;
   border-radius: var(--radius-full);
-  transition: opacity var(--duration-fast) 1s;
+  transition: opacity var(--duration-fast) 0.6s;
   z-index: 1;
+}
+
+.thumb.is-active {
+  opacity: 0.7;
+  transition: opacity var(--duration-fast);
+}
+
+.thumb:hover {
+  opacity: 0.85;
+  transition: opacity var(--duration-fast);
 }
 
 .thumb-y {
@@ -357,8 +403,26 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   overflow: auto;
+  scrollbar-width: none;
+}
+.content.is-fill {
+  /* size 查询容器：槽内内容用 100cqh 拿视口高度（如播放页占满首屏的 Hero），
+     不依赖中间层高度链 */
+  container-type: size;
 }
 .content::-webkit-scrollbar {
   display: none;
+}
+
+/* .inner 必须随内容增长（不能定高/定宽），否则内容变化不会触发
+   ResizeObserver，滚动条尺寸会停留在挂载时的旧值 */
+.inner {
+  min-height: 100%;
+}
+
+/* 横滚时宽度跟着内容走，纵向交给 overflow hidden */
+.inner.is-horizontal {
+  width: max-content;
+  min-width: 100%;
 }
 </style>

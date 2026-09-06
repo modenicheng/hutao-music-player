@@ -4,6 +4,9 @@ import AppIcon from "../AppIcon.vue";
 import RulerProgress from "../RulerProgress.vue";
 import LyricsPane from "./LyricsPane.vue";
 import CommentsSection from "./CommentsSection.vue";
+import VolumeControl from "../VolumeControl.vue";
+import QualityBadge from "../QualityBadge.vue";
+import Scroll from "../Scroll.vue";
 import {
   PlayerControlStatus,
   type PlayerController,
@@ -16,15 +19,15 @@ import skipNextIcon from "../../assets/icons/skip-next-rounded.svg?raw";
 import skipPreviousIcon from "../../assets/icons/skip-previous-rounded.svg?raw";
 import shuffleIcon from "../../assets/icons/shuffle-rounded.svg?raw";
 import repeatIcon from "../../assets/icons/repeat-rounded.svg?raw";
-import volumeIcon from "../../assets/icons/volume-up-rounded.svg?raw";
-import queueIcon from "../../assets/icons/queue-music-rounded.svg?raw";
+import queueIcon from "../../assets/icons/queue-music-outline-rounded.svg?raw";
 import favoriteIcon from "../../assets/icons/favorite-outline-rounded.svg?raw";
-import commentIcon from "../../assets/icons/comment-rounded.svg?raw";
+import favoriteFilledIcon from "../../assets/icons/favorite-filled-rounded.svg?raw";
+import commentIcon from "../../assets/icons/comment-outline-rounded.svg?raw";
 
 /**
- * 播放页主体（DESIGN.md §3.1）：环境层 + Hero + 刻度进度条 +
- * 控制排，向下滚动进入歌词区与网易云式评论区。
- * 全屏 overlay（PlayerOverlay）与路由页（NowPlayingView）共用本组件。
+ * 播放页主体：环境层 + 首屏舞台（封面，信息随其下 | 右侧整列歌词），
+ * 上滑进入网易云式评论区；底部控制台（刻度进度条 + 控制排）常驻不随内容滚走。
+ * 由全屏播放层（PlayerOverlay）独占使用。
  */
 const props = defineProps<{ player: PlayerController }>();
 
@@ -36,6 +39,13 @@ const npRoot = ref<HTMLElement | null>(null);
 const track = computed(() => props.player.state.currentTrack);
 const songDetail = computed(() =>
   track.value ? findSong(track.value.mid) ?? null : null,
+);
+
+// 喜欢态：mock（数据层未就绪），仅视觉演示——换曲即回落未点亮
+const liked = ref(false);
+watch(
+  () => track.value?.mid ?? null,
+  () => (liked.value = false),
 );
 
 // —— 歌词随曲目加载（调色由 App 级 trackTheme 全局负责）——
@@ -52,12 +62,6 @@ watch(
   },
   { immediate: true },
 );
-
-function scrollToLyrics() {
-  npRoot.value
-    ?.querySelector<HTMLElement>("#lyrics-anchor")
-    ?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
 
 function scrollToComments() {
   npRoot.value
@@ -79,61 +83,101 @@ function scrollToComments() {
       <div class="ambient-tint"></div>
     </div>
 
-    <div class="np-scroll">
-      <template v-if="track">
-        <!-- Hero -->
-        <section class="np-hero">
-          <img
-            v-if="track.coverUrl"
-            class="np-cover"
-            :src="track.coverUrl"
-            :alt="`《${track.title}》专辑封面`"
-          />
-          <div class="np-meta">
-            <h1 class="np-title">{{ track.title }}</h1>
-            <p class="np-artists">
-              <template v-for="(artist, i) in track.artists" :key="artist">
-                <span v-if="i > 0" class="artist-sep">/</span>
-                <span class="np-artist">{{ artist }}</span>
-              </template>
-            </p>
-            <p v-if="songDetail" class="np-album">
-              <RouterLink :to="`/album/${songDetail.album.mid}`" class="np-album-link">
-                {{ songDetail.album.name }}
-              </RouterLink>
-              <span
-                v-if="songDetail.quality"
-                class="np-quality"
-              >{{ songDetail.quality }}</span>
-            </p>
-            <div class="np-actions">
-              <button class="np-action np-action-like" title="喜欢">
-                <AppIcon :src="favoriteIcon" class="np-action-icon" />
-                <span>喜欢</span>
-              </button>
-              <button class="np-action" title="收藏到歌单">
-                <span>收藏</span>
-              </button>
-              <button class="np-action" title="下载">
-                <span>下载</span>
-              </button>
+    <div class="np-shell">
+      <Scroll direction="vertical" class="np-scroll" fill>
+        <template v-if="track">
+          <!-- 首屏舞台：封面（信息随其下）| 右侧整列歌词；恰好一屏，上滑进评论 -->
+          <section class="np-stage">
+            <div class="np-stage-left">
+              <img
+                v-if="track.coverUrl"
+                class="np-cover"
+                :src="track.coverUrl"
+                :alt="`《${track.title}》专辑封面`"
+              />
+              <div class="np-meta">
+                <div class="np-title-row">
+                  <h1 class="np-title">{{ track.title }}</h1>
+                  <button
+                    class="np-like"
+                    :class="{ 'is-liked': liked }"
+                    :title="liked ? '取消喜欢' : '喜欢'"
+                    :aria-label="liked ? '取消喜欢' : '喜欢'"
+                    :aria-pressed="liked"
+                    @click="liked = !liked"
+                  >
+                    <AppIcon
+                      class="np-like-icon"
+                      :src="liked ? favoriteFilledIcon : favoriteIcon"
+                    />
+                  </button>
+                </div>
+                <p class="np-artists">
+                  <!-- 歌手链接需要 mid：songDetail 未就绪时退化为纯文本 -->
+                  <template v-if="songDetail">
+                    <template v-for="(artist, i) in songDetail.artists" :key="artist.mid">
+                      <span v-if="i > 0" class="artist-sep">/</span>
+                      <RouterLink :to="`/artist/${artist.mid}`" class="np-artist text-link">{{ artist.name }}</RouterLink>
+                    </template>
+                  </template>
+                  <template v-else>
+                    <template v-for="(artist, i) in track.artists" :key="artist">
+                      <span v-if="i > 0" class="artist-sep">/</span>
+                      <span>{{ artist }}</span>
+                    </template>
+                  </template>
+                </p>
+                <p v-if="songDetail" class="np-album">
+                  <RouterLink :to="`/album/${songDetail.album.mid}`" class="np-album-link text-link">
+                    {{ songDetail.album.name }}
+                  </RouterLink>
+                </p>
+              </div>
             </div>
-          </div>
-        </section>
 
-        <!-- 刻度进度条（签名组件） -->
-        <section class="np-ruler">
+            <div class="np-stage-right">
+              <div id="lyrics-anchor" class="np-lyrics">
+                <LyricsPane
+                  class="np-lyrics-pane"
+                  :lyrics="lyrics"
+                  :position-ms="player.state.positionMs"
+                  :playing="player.state.playing"
+                  @seek="(timeMs) => player.seek(timeMs)"
+                />
+              </div>
+            </div>
+          </section>
+
+          <!-- 评论区（继续上滑，网易云式） -->
+          <section id="comments-anchor" class="np-comments">
+            <CommentsSection :mid="track.mid" />
+          </section>
+        </template>
+
+        <div v-else class="np-empty">
+          <p class="np-empty-title">还没有播放中的歌曲</p>
+          <p class="np-empty-hint">从发现、搜索或歌单里挑一首开始吧</p>
+        </div>
+      </Scroll>
+
+      <!-- 底部控制台：常驻，不随内容滚动 -->
+      <footer class="np-console">
+        <div class="np-ruler">
           <RulerProgress
             :progress="player.state.progress"
             :duration-ms="player.state.durationMs"
             :disabled="player.state.controlStatus === PlayerControlStatus.dragging"
             @seek="(percent) => player.seekToPercent(percent)"
           />
-        </section>
+        </div>
 
-        <!-- 控制排 -->
-        <section class="np-controls">
-          <div class="np-side np-side-left">
+        <div class="np-console-row">
+          <div class="np-console-side np-console-left">
+            <QualityBadge :track-quality="songDetail?.quality" align="up" />
+            <VolumeControl :player="player" />
+          </div>
+
+          <div class="np-main-controls">
             <button
               class="mode-button"
               :class="{ 'is-on': shuffleOn }"
@@ -142,9 +186,6 @@ function scrollToComments() {
             >
               <AppIcon :src="shuffleIcon" />
             </button>
-          </div>
-
-          <div class="np-main-controls">
             <button class="control-button" title="上一曲" @click="player.previous">
               <AppIcon :src="skipPreviousIcon" />
             </button>
@@ -158,9 +199,6 @@ function scrollToComments() {
             <button class="control-button" title="下一曲" @click="player.next">
               <AppIcon :src="skipNextIcon" />
             </button>
-          </div>
-
-          <div class="np-side np-side-right">
             <button
               class="mode-button"
               :class="{ 'is-on': repeatOn }"
@@ -170,56 +208,28 @@ function scrollToComments() {
               <AppIcon :src="repeatIcon" />
             </button>
           </div>
-        </section>
 
-        <section class="np-sub-controls">
-          <div class="volume-group">
-            <AppIcon :src="volumeIcon" class="volume-icon" />
-            <input
-              class="volume"
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              aria-label="音量"
-              :value="player.state.volume"
-              @input="player.setVolume(($event.target as HTMLInputElement).valueAsNumber)"
-            />
-          </div>
-          <div class="jump-group">
-            <button class="jump-button" title="跳到歌词" @click="scrollToLyrics">
-              歌词
-            </button>
-            <button class="jump-button" title="跳到评论" @click="scrollToComments">
+          <div class="np-console-side np-console-right">
+            <!-- 纯图标跳转键：outlined 轻量风格，语义由 title/aria-label 承载 -->
+            <button
+              class="jump-button"
+              title="跳到评论"
+              aria-label="跳到评论"
+              @click="scrollToComments"
+            >
               <AppIcon :src="commentIcon" class="jump-icon" />
-              评论
             </button>
-            <button class="jump-button" title="播放列表" @click="player.showQueue">
+            <button
+              class="jump-button"
+              title="播放列表"
+              aria-label="播放列表"
+              @click="player.toggleQueue"
+            >
               <AppIcon :src="queueIcon" class="jump-icon" />
-              列表
             </button>
           </div>
-        </section>
-
-        <!-- 歌词区 -->
-        <section id="lyrics-anchor" class="np-lyrics">
-          <LyricsPane
-            :lyrics="lyrics"
-            :position-ms="player.state.positionMs"
-            @seek="(timeMs) => player.seek(timeMs)"
-          />
-        </section>
-
-        <!-- 评论区（网易云式，向下滚动可见） -->
-        <section id="comments-anchor" class="np-comments">
-          <CommentsSection :mid="track.mid" />
-        </section>
-      </template>
-
-      <div v-else class="np-empty">
-        <p class="np-empty-title">还没有播放中的歌曲</p>
-        <p class="np-empty-hint">从发现、搜索或歌单里挑一首开始吧</p>
-      </div>
+        </div>
+      </footer>
     </div>
   </div>
 </template>
@@ -257,28 +267,45 @@ function scrollToComments() {
   background: linear-gradient(180deg, transparent 40%, var(--track-grad-to) 100%);
 }
 
-.np-scroll {
+.np-shell {
   position: relative;
   z-index: 1;
+  display: flex;
+  flex-direction: column;
   height: 100%;
-  overflow-y: auto;
-  scrollbar-width: thin;
+  min-height: 0;
 }
 
-/* —— Hero —— */
-.np-hero {
+.np-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+/* —— 首屏舞台：封面（信息随其下）| 右侧整列歌词；100cqh 取 Scroll 视口高度 ——
+   必须定高：歌词列内容很长，flex 行高会取其内容高度把舞台撑爆；
+   定高后右列在确定高度内自滚，min-height 兜底极矮窗口 */
+.np-stage {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: var(--space-8);
-  max-width: 60rem;
+  height: 100cqh;
+  min-height: 30rem;
+  max-width: 68rem;
   margin: 0 auto;
-  padding: var(--space-10) var(--space-6) var(--space-6);
+  padding: var(--space-8) var(--space-6) var(--space-6);
+}
+
+.np-stage-left {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: min(40vh, 44%, 24rem);
 }
 
 .np-cover {
-  width: min(34vh, 320px);
+  width: 100%;
   aspect-ratio: 1 / 1;
-  flex: 0 0 auto;
   object-fit: cover;
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
@@ -286,16 +313,59 @@ function scrollToComments() {
 
 .np-meta {
   min-width: 0;
+  margin-top: var(--space-5);
+}
+
+.np-title-row {
+  /* 标题字号上提为变量：喜欢图标按比例放大，与标题字形视觉对齐 */
+  --title-size: clamp(1.8rem, 4vw, 2.6rem);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .np-title {
-  font-size: clamp(1.8rem, 4vw, 2.6rem);
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: var(--title-size);
   font-weight: 700;
   line-height: 1.25;
   overflow: hidden;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+
+/* 裸图标：无底无框，hover 只变色；负右距让图形贴齐列右缘 */
+.np-like {
+  --like-red: #e5484d;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 2.5rem;
+  height: 2.5rem;
+  margin-right: -0.5rem;
+  color: var(--foreground);
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+
+.np-like-icon {
+  width: calc(var(--title-size) * 0.8);
+  height: calc(var(--title-size) * 0.8);
+}
+
+.np-like:hover {
+  color: var(--track-accent);
+}
+
+/* 点亮：红色实心，hover 加深 */
+.np-like.is-liked,
+.np-like.is-liked:hover {
+  color: var(--like-red);
+}
+
+.np-like.is-liked:hover {
+  color: #d13a3f;
 }
 
 .np-artists {
@@ -319,106 +389,99 @@ function scrollToComments() {
   color: var(--muted-foreground);
 }
 
-.np-album-link:hover {
-  color: var(--foreground);
-  text-decoration: underline;
-}
-
-.np-quality {
-  padding: 0.05rem 0.5rem;
-  font-size: 0.72rem;
-  color: var(--track-accent);
-  background: var(--track-accent-soft);
-  border-radius: var(--radius-full);
-  white-space: nowrap;
-}
-
-.np-actions {
+/* —— 歌词列：随舞台拉满一屏高度，内部自滚 —— */
+.np-stage-right {
   display: flex;
-  gap: var(--space-2);
-  margin-top: var(--space-5);
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
 }
 
-.np-action {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.4rem 1rem;
-  font-size: 0.88rem;
-  color: var(--foreground);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-full);
-  transition:
-    background-color var(--duration-fast) var(--ease-standard),
-    border-color var(--duration-fast) var(--ease-standard);
-}
-
-.np-action-icon {
-  width: 1rem;
-  height: 1rem;
-}
-
-.np-action-like:hover {
-  color: var(--track-accent);
-}
-
-/* —— 刻度进度条 —— */
-.np-ruler {
-  max-width: 60rem;
-  margin: 0 auto;
-  padding: var(--space-4) var(--space-6) 0;
-}
-
-/* —— 控制排 —— */
-.np-controls {
+.np-lyrics {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  max-width: 60rem;
-  margin: 0 auto;
-  padding: var(--space-4) var(--space-6);
-}
-
-.np-side {
+  flex-direction: column;
   flex: 1;
-  display: flex;
+  min-height: 0;
 }
 
-.np-side-right {
+.np-lyrics-pane {
+  flex: 1;
+  min-height: 0;
+}
+
+.np-comments {
+  /* 评论区接在歌词之后，继续上滑自然抵达；落在渐变端色上，可读性优先。
+     环境层固定在视口而本节随内容滚动，实心底会与之撞出移动的硬接缝，
+     顶端用透明→端色过渡带让阅读面从舞台氛围里浮现 */
+  background: linear-gradient(180deg, transparent, var(--track-grad-to) 7rem);
+}
+
+/* —— 底部控制台 —— */
+.np-console {
+  flex: 0 0 auto;
+  padding: var(--space-2) var(--space-6) var(--space-3);
+  background: color-mix(in srgb, var(--track-grad-to) 72%, transparent);
+  backdrop-filter: blur(18px) saturate(1.1);
+  border-top: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+.np-ruler {
+  max-width: 72rem;
+  margin: 0 auto;
+}
+
+.np-console-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  max-width: 72rem;
+  margin: 0 auto;
+  padding-top: var(--space-2);
+}
+
+.np-console-side {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+}
+
+.np-console-right {
   justify-content: flex-end;
 }
 
 .np-main-controls {
   display: flex;
   align-items: center;
-  gap: var(--space-5);
+  gap: var(--space-4);
 }
 
 .control-button {
   display: grid;
   place-items: center;
-  width: 2.75rem;
-  height: 2.75rem;
+  width: 2.5rem;
+  height: 2.5rem;
   color: var(--foreground);
   border-radius: var(--radius-full);
   transition: background-color var(--duration-fast) var(--ease-standard);
 }
 
 .control-button .app-icon {
-  width: 1.5rem;
-  height: 1.5rem;
+  width: 1.4rem;
+  height: 1.4rem;
 }
 
 .control-button:hover {
   background: var(--track-accent-soft);
 }
 
-/* 主播放键：64px 圆，曲目层强调色 */
+/* 主播放键：48px 圆，曲目层强调色——仍最大但不过分高出邻键 */
 .play-button {
   display: grid;
   place-items: center;
-  width: 4rem;
-  height: 4rem;
+  width: 3rem;
+  height: 3rem;
   color: var(--track-on-accent);
   background: var(--track-accent);
   border-radius: var(--radius-full);
@@ -430,8 +493,8 @@ function scrollToComments() {
 }
 
 .play-button .app-icon {
-  width: 1.75rem;
-  height: 1.75rem;
+  width: 1.5rem;
+  height: 1.5rem;
 }
 
 .play-button:hover {
@@ -456,8 +519,8 @@ function scrollToComments() {
 }
 
 .mode-button .app-icon {
-  width: 1.2rem;
-  height: 1.2rem;
+  width: 1.15rem;
+  height: 1.15rem;
 }
 
 .mode-button:hover {
@@ -469,69 +532,25 @@ function scrollToComments() {
   color: var(--track-accent);
 }
 
-/* —— 次级控制 —— */
-.np-sub-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  max-width: 60rem;
-  margin: 0 auto;
-  padding: 0 var(--space-6) var(--space-2);
-}
-
-.volume-group {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--muted-foreground);
-}
-
-.volume-icon {
-  width: 1.1rem;
-  height: 1.1rem;
-}
-
-.volume {
-  width: 8rem;
-}
-
-.jump-group {
-  display: flex;
-  gap: var(--space-2);
-}
-
+/* 纯图标跳转键：与控制键同规格的方形命中区 */
 .jump-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.35rem 0.85rem;
-  font-size: 0.84rem;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 2.25rem;
+  height: 2.25rem;
   color: var(--foreground);
   border-radius: var(--radius-full);
   transition: background-color var(--duration-fast) var(--ease-standard);
 }
 
 .jump-icon {
-  width: 1rem;
-  height: 1rem;
+  width: 1.3rem;
+  height: 1.3rem;
 }
 
 .jump-button:hover {
   background: var(--track-accent-soft);
-}
-
-/* —— 歌词 / 评论 —— */
-.np-lyrics {
-  height: 72vh;
-  margin-top: var(--space-4);
-}
-
-.np-comments {
-  /* 评论区接在歌词之后，向下滚动自然抵达 */
-  padding-top: var(--space-6);
-  /* 让评论区落在中性底上，可读性优先 */
-  background: var(--track-grad-to);
 }
 
 .np-empty {
@@ -549,15 +568,37 @@ function scrollToComments() {
   color: var(--muted-foreground);
 }
 
+/* 窄窗兜底：舞台竖排（封面+信息居中、歌词接其下），控制排允许换行 */
 @media (max-width: 48rem) {
-  .np-hero {
+  .np-stage {
     flex-direction: column;
-    text-align: center;
+    align-items: center;
   }
 
-  .np-album,
-  .np-actions {
+  .np-stage-left {
+    width: min(34vh, 72vw, 20rem);
+  }
+
+  .np-stage-right {
+    width: 100%;
+    /* 弹性填满舞台剩余高度：定高会把居中基准沉到控制台底下 */
+    flex: 1 1 0;
+    min-height: 12rem;
+  }
+
+  .np-console-row {
+    flex-wrap: wrap;
+  }
+
+  .np-console-side {
+    flex-basis: 100%;
     justify-content: center;
+    order: 2;
+  }
+
+  .np-main-controls {
+    order: 1;
+    margin: 0 auto;
   }
 }
 </style>
