@@ -61,6 +61,18 @@ a {
   text-decoration: none;
 }
 
+/* 纯文字链接/纯 text 按钮统一交互：hover 颜色高亮过渡，不用下划线。
+   下划线仅限「展开回复」类例外（自绘从左向右展开动画，见 CommentsSection）。
+   基色 muted，hover 提亮 foreground；基色不是 muted 的文字按钮不套此类 */
+.text-link {
+  color: var(--muted-foreground);
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+
+.text-link:hover {
+  color: var(--foreground);
+}
+
 ul,
 ol {
   list-style: none;
@@ -188,6 +200,8 @@ h6 {
   --sidebar-width: clamp(14rem, 17vw, 18rem);
   --top-bar-height: 5rem;
   --player-bar-height: 6rem;
+  /* 播放页底部控制台的净空高度：队列抽屉 themed 态停靠在它上方 */
+  --np-console-clearance: 7.5rem;
   --layout-gap: var(--space-2);
 
   /* ---------- 动效与层级 ---------- */
@@ -277,40 +291,41 @@ h6 {
   --destructive: var(--error);
   --destructive-foreground: #FFFFFF;
 
-  /* 中性色 (深色反转) */
-  --neutral-50: #12100D;
-  --neutral-100: #1F1B17;
-  --neutral-200: #36302A;
-  --neutral-300: #4F483E;
-  --neutral-400: #756A5E;
-  --neutral-500: #92877A;
-  --neutral-600: #B0A69B;
-  --neutral-700: #CDC5BC;
-  --neutral-800: #E3DED8;
-  --neutral-900: #F2EFEC;
-  --neutral-950: #FAF8F7;
+  /* 中性色 (深色反转) — 主界面背景走中性暗灰，只保留一丝暖度；
+     品牌 walnut 不再铺底，只留给按钮/强调等小面积元素 */
+  --neutral-50: #131312;
+  --neutral-100: #1D1D1B;
+  --neutral-200: #343230;
+  --neutral-300: #4B4A46;
+  --neutral-400: #6E6C67;
+  --neutral-500: #8B8884;
+  --neutral-600: #ABA8A3;
+  --neutral-700: #C9C7C3;
+  --neutral-800: #E1E0DD;
+  --neutral-900: #F1F0EE;
+  --neutral-950: #F9F9F8;
 
   /* 页面与表面 */
-  --background: var(--walnut-50);
-  --foreground: var(--walnut-950);
+  --background: var(--neutral-100);
+  --foreground: var(--neutral-950);
 
-  --surface-1: #1F1B17;
-  --surface-2: #302321;
-  --surface-3: #44302D;
+  --surface-1: #1D1D1B;
+  --surface-2: #2A2927;
+  --surface-3: #3A3835;
   --card: var(--surface-2);
-  --card-foreground: var(--walnut-950);
+  --card-foreground: var(--neutral-950);
 
   --popover: var(--surface-3);
-  --popover-foreground: var(--walnut-950);
+  --popover-foreground: var(--neutral-950);
 
-  --border: #5C4541;
-  --border-strong: #80605A;
-  --input: #44302D;
+  --border: #4B4A46;
+  --border-strong: #676460;
+  --input: #3A3835;
   --ring: var(--walnut-400);
 
-  --muted: #2A1D1B;
+  --muted: #262523;
   --muted-foreground: var(--neutral-500);
-  --track: #5C4541;
+  --track: #4B4A46;
 
   --primary-hover: var(--walnut-400);
   --primary-active: var(--walnut-600);
@@ -323,13 +338,13 @@ h6 {
   --v-theme-warning: 212, 168, 48;
   --v-theme-error: 224, 96, 96;
   --v-theme-info: 90, 154, 191;
-  --v-theme-background: 42, 25, 24;
-  --v-theme-surface: 48, 35, 33;
+  --v-theme-background: 29, 29, 27;
+  --v-theme-surface: 42, 41, 39;
   --v-theme-on-primary: 18, 16, 13;
   --v-theme-on-secondary: 255, 255, 255;
   --v-theme-on-accent: 18, 16, 13;
-  --v-theme-on-background: 242, 239, 236;
-  --v-theme-on-surface: 242, 239, 236;
+  --v-theme-on-background: 241, 240, 238;
+  --v-theme-on-surface: 241, 240, 238;
 
   /* 曲目层暗色回退（取色模块按 mode 参数生成对应值） */
   --track-accent: var(--accent);

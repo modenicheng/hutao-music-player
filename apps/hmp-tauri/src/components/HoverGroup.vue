@@ -32,9 +32,17 @@ const props = withDefaults(
  *   —— `scale` 只在飞行中非 1，到位后回到 `1 1`，因此静止时圆角仍精确贴合。
  * - 性能：单块 + 事件委托（无逐 item 监听），无 mousemove 逐帧计算；
  *   位置/形变均为合成层，尺寸只在尺寸变化时触发一次小重排。
+ * - 附加层（indicator 具名插槽）：可选的悬浮指示（如曲目表序号位的播放图标）。
+ *   块的几何经容器上的 `--hover-x/y/w/h` 变量下发，指示层以同曲线 translate
+ *   跟随滑动——只位移、不继承黏滞形变；显隐由 `.is-hovering` 驱动，
+ *   首次定位与块一致：几何直接跳到位、只做淡入。
  */
 const containerRef = ref<HTMLElement>();
 const blockRef = ref<HTMLElement>();
+/** indicator 插槽层（可选）：随块滑动的悬浮指示 */
+const indicatorRef = ref<HTMLElement>();
+/** 块当前是否停在某 item 上（驱动 indicator 显隐） */
+const hovering = ref(false);
 
 /** 当前被包裹的目标元素 */
 let current: HTMLElement | null = null;
@@ -60,15 +68,29 @@ function placeBlock(item: HTMLElement, first = false) {
   const x = r.left - c.left - container.clientLeft;
   const y = r.top - c.top - container.clientTop;
 
+  const indicator = indicatorRef.value;
   if (first) {
     // 首次出现：先关掉过渡把几何“跳”到位，随后只做淡入，避免从角落飞入。
     block.style.transition = "none";
+    if (indicator) indicator.style.transition = "none";
+  }
+
+  // indicator 与块消费同一份几何；变量改动经各层自己的 translate 过渡同帧滑动。
+  if (indicator) {
+    container.style.setProperty("--hover-x", `${x}px`);
+    container.style.setProperty("--hover-y", `${y}px`);
+    container.style.setProperty("--hover-w", `${r.width}px`);
+    container.style.setProperty("--hover-h", `${r.height}px`);
+  }
+
+  if (first) {
     block.style.width = `${r.width}px`;
     block.style.height = `${r.height}px`;
     block.style.translate = `${x}px ${y}px`;
     block.style.borderRadius = getComputedStyle(item).borderRadius;
-    void block.offsetWidth; // 强制重排，让上面的几何立即生效
+    void container.offsetWidth; // 强制重排，让上面的几何（含 indicator 变量）立即生效
     block.style.transition = "";
+    if (indicator) indicator.style.transition = "";
   }
 
   block.style.width = `${r.width}px`;
@@ -124,6 +146,7 @@ function showBlock(item: HTMLElement) {
   current = item;
   placeBlock(item, !placed);
   placed = true;
+  hovering.value = true;
 
   // 首次显示只做原位淡入；仅在 item 之间移动时触发形变。
   if (wasPlaced) {
@@ -133,6 +156,7 @@ function showBlock(item: HTMLElement) {
 
 function hideBlock() {
   current = null;
+  hovering.value = false;
   stretchAnim?.cancel();
   stretchAnim = null;
   if (blockRef.value) blockRef.value.style.opacity = "0";
@@ -179,7 +203,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="hover-group" ref="containerRef">
+  <div class="hover-group" ref="containerRef" :class="{ 'is-hovering': hovering }">
     <div
       class="hover-block"
       ref="blockRef"
@@ -187,6 +211,9 @@ onBeforeUnmount(() => {
       :style="{ '--hover-bg': props.highlightColor }"
     ></div>
     <slot />
+    <div v-if="$slots.indicator" ref="indicatorRef" class="hover-indicator" aria-hidden="true">
+      <slot name="indicator" />
+    </div>
   </div>
 </template>
 
@@ -214,11 +241,34 @@ onBeforeUnmount(() => {
   scale: 1 1;
   will-change: translate, scale, opacity;
   transition:
-    opacity var(--duration-fast) var(--ease-exit),
+    /* 显隐淡入淡出给足时长，避免出现/离开时接近硬切 */
+    opacity var(--duration-normal) var(--ease-standard),
     /* 位置短促快出，紧跟指针；形变由 scale 动画负责黏滞 */
     translate 140ms cubic-bezier(0.22, 1, 0.36, 1),
     width 180ms cubic-bezier(0.22, 1, 0.36, 1),
     height 180ms cubic-bezier(0.22, 1, 0.36, 1),
     border-radius 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* indicator：随块滑动的悬浮指示层，几何由 --hover-* 变量下发；
+   只位移不参与黏滞形变，横向定位（left/width）交给消费方 */
+.hover-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  pointer-events: none;
+  height: var(--hover-h, 0);
+  translate: 0 var(--hover-y, 0);
+  opacity: 0;
+  will-change: translate, opacity;
+  transition:
+    opacity var(--duration-normal) var(--ease-standard),
+    translate 140ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.hover-group.is-hovering .hover-indicator {
+  opacity: 1;
 }
 </style>

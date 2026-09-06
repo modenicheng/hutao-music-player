@@ -50,6 +50,8 @@ export interface PlayerBridge {
   onQueueChanged?(
     listener: (queue: QueueItem[]) => void,
   ): Promise<() => void>;
+  /** 清空队列；桥未提供时控制器逐首 removeAt 兜底 */
+  clear?(): Promise<void>;
 }
 
 interface PlayerStorage {
@@ -163,6 +165,19 @@ export class PlayerController {
     this.run(() => this.bridge.playTracks!(tracks, startIndex));
   };
 
+  clearQueue = async () => {
+    if (this.bridge.clear) {
+      this.run(() => this.bridge.clear!());
+      return;
+    }
+    if (!this.bridge.removeAt) return;
+    this.run(async () => {
+      while (this.state.queue.length > 0) {
+        await this.bridge.removeAt!(0);
+      }
+    });
+  };
+
   seek = (positionMs: number) => {
     this.run(() => this.bridge.seek(Math.max(0, positionMs)));
   };
@@ -238,6 +253,11 @@ export class PlayerController {
 
   hideQueue = () => {
     this.state.queueVisible = false;
+  };
+
+  /** 播放列表按钮统一开关语义：开着时再点即收起 */
+  toggleQueue = () => {
+    this.state.queueVisible = !this.state.queueVisible;
   };
 
   private applySnapshot = (snapshot: PlayerStateSnapshot) => {

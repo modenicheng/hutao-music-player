@@ -26,8 +26,9 @@ function buildQueue(): QueueItem[] {
   });
   const rest = songPool.filter((song) => song.mid !== withFullLyrics?.mid);
   const picked: SongRef[] = withFullLyrics ? [withFullLyrics] : [];
-  // 之后每隔 23 首取一首，曲风/封面足够多样
-  for (let i = 0; picked.length < 8 && i < rest.length; i += 23) {
+  // 均匀取样 8 首：步长按池子大小折算，曲风/封面足够多样
+  const step = Math.max(1, Math.floor(rest.length / 8));
+  for (let i = 0; picked.length < 8 && i < rest.length; i += step) {
     picked.push(rest[i]);
   }
   return picked.map(songToQueueItem);
@@ -127,6 +128,16 @@ export class BrowserPlayerBridge implements PlayerBridge {
     this.queue = [...tracks];
     this.currentIndex = Math.min(Math.max(0, startIndex), tracks.length - 1);
     this.startCurrent();
+  }
+
+  async clear() {
+    this.queue = [];
+    this.currentIndex = 0;
+    this.playing = false;
+    this.positionMs = 0;
+    this.syncTicker();
+    this.emitState();
+    this.emitQueue();
   }
 
   async onQueueChanged(listener: (queue: QueueItem[]) => void) {
