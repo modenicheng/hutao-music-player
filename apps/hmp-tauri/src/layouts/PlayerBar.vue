@@ -1,6 +1,10 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { PlayerControlStatus, type PlayerController } from "../lib/player";
 import AppIcon from "../components/AppIcon.vue";
+import VolumeControl from "../components/VolumeControl.vue";
+import QualityBadge from "../components/QualityBadge.vue";
+import { findSong } from "../lib/api/mock-data.ts";
 import playIcon from "../assets/icons/play_arrow-rounded.svg?raw";
 import pauseIcon from "../assets/icons/pause-rounded.svg?raw";
 import skipNextIcon from "../assets/icons/skip-next-rounded.svg?raw";
@@ -9,13 +13,16 @@ import queueIcon from "../assets/icons/queue-music-rounded.svg?raw";
 
 const props = defineProps<{
   player: PlayerController;
-  /** 打开播放列表抽屉（桥支持队列时显示按钮） */
-  onOpenQueue?: () => void;
+  /** 开/关播放列表抽屉（桥支持队列时显示按钮） */
+  onToggleQueue?: () => void;
 }>();
 
-function artistsText() {
-  return props.player.state.artists.join(" / ");
-}
+const artistsText = computed(() => props.player.state.artists.join(" / "));
+const trackQuality = computed(() =>
+  props.player.state.currentTrack
+    ? findSong(props.player.state.currentTrack.mid)?.quality
+    : undefined,
+);
 </script>
 
 <template>
@@ -55,8 +62,13 @@ function artistsText() {
         <div v-else class="now-cover now-cover-empty" aria-hidden="true"></div>
         <div class="now-copy">
           <span class="now-title">{{ player.state.title ?? "未在播放" }}</span>
-          <span v-if="artistsText()" class="now-artists">{{ artistsText() }}</span>
+          <span v-if="artistsText" class="now-artists">{{ artistsText }}</span>
         </div>
+      </div>
+
+      <!-- 音质徽章随曲目信息；音量在右侧工具区（v0.12），别挤挨封面和歌名 -->
+      <div class="track-tools">
+        <QualityBadge :track-quality="trackQuality" align="up" />
       </div>
 
       <div class="controls">
@@ -82,21 +94,12 @@ function artistsText() {
       </div>
 
       <div class="side-controls">
-        <input
-          class="volume"
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          aria-label="音量"
-          :value="player.state.volume"
-          @input="player.setVolume(($event.target as HTMLInputElement).valueAsNumber)"
-        />
+        <VolumeControl :player="player" />
         <button
-          v-if="onOpenQueue && player.state.queue.length > 0"
+          v-if="onToggleQueue && player.state.queue.length > 0"
           class="control-button"
           title="播放列表"
-          @click="onOpenQueue"
+          @click="onToggleQueue"
         >
           <AppIcon :src="queueIcon" />
         </button>
@@ -155,10 +158,20 @@ function artistsText() {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  flex: 0 1 auto;
   min-width: 0;
-  flex: 1;
+  max-width: 18rem;
   cursor: pointer;
   border-radius: var(--radius-md);
+}
+
+/* 音质徽章占位：内容贴左，弹性撑满中缝，保持控制键居中 */
+.track-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .now-cover {
@@ -247,11 +260,7 @@ function artistsText() {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: var(--space-2);
+  gap: var(--space-3);
   flex: 1;
-}
-
-.volume {
-  width: 8rem;
 }
 </style>
