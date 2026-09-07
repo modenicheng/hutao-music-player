@@ -406,7 +406,10 @@ pub const PLAYLIST_SEEDS: &[PlaylistSeed] = &[
         creator: "代码写不完",
         tags: &["学习", "电子", "专注"],
         play_count: 1_284_567,
-        song_mids: &["so005", "so006", "so007", "so022", "so023", "so024", "so031", "so032", "so033", "so043", "so044", "so040", "so015"],
+        song_mids: &[
+            "so005", "so006", "so007", "so022", "so023", "so024", "so031", "so032", "so033",
+            "so043", "so044", "so040", "so015",
+        ],
         desc: "写给所有凌晨还亮着的屏幕。电子、国风电子和轻音混着来，人声不多，够安静也够带感。改完最后一个 bug 之前，别关掉它。",
     },
     PlaylistSeed {
@@ -415,7 +418,10 @@ pub const PLAYLIST_SEEDS: &[PlaylistSeed] = &[
         creator: "拾荒的诗人",
         tags: &["民谣", "旅行", "治愈"],
         play_count: 862_104,
-        song_mids: &["so008", "so009", "so010", "so011", "so025", "so026", "so027", "so035", "so036", "so043", "so045", "so001", "so018", "so004"],
+        song_mids: &[
+            "so008", "so009", "so010", "so011", "so025", "so026", "so027", "so035", "so036",
+            "so043", "so045", "so001", "so018", "so004",
+        ],
         desc: "从绿皮火车到高铁，站台一直是民谣的故乡。这些歌唱的都是离开与抵达——愿你也有一个值得回去的小城。",
     },
     PlaylistSeed {
@@ -424,7 +430,10 @@ pub const PLAYLIST_SEEDS: &[PlaylistSeed] = &[
         creator: "Momo不在家",
         tags: &["ACG", "动漫", "电子"],
         play_count: 2_140_882,
-        song_mids: &["so037", "so038", "so039", "so031", "so033", "so005", "so007", "so022", "so024", "so001", "so040", "so042", "so044"],
+        song_mids: &[
+            "so037", "so038", "so039", "so031", "so033", "so005", "so007", "so022", "so024",
+            "so001", "so040", "so042", "so044",
+        ],
         desc: "为动画《兰汀物语》整季整理的原声向歌单，从片头曲一路听到插曲。二次元浓度超标预警，次元壁脆弱者请系好安全带。",
     },
     PlaylistSeed {
@@ -433,7 +442,10 @@ pub const PLAYLIST_SEEDS: &[PlaylistSeed] = &[
         creator: "风住过的街道",
         tags: &["轻音", "钢琴", "睡前"],
         play_count: 654_310,
-        song_mids: &["so015", "so016", "so017", "so019", "so020", "so021", "so043", "so044", "so045", "so026", "so011", "so042"],
+        song_mids: &[
+            "so015", "so016", "so017", "so019", "so020", "so021", "so043", "so044", "so045",
+            "so026", "so011", "so042",
+        ],
         desc: "雨声是最好的编曲，钢琴是最慢的述说。睡前音量食用更佳，愿你好梦。",
     },
 ];
@@ -532,7 +544,10 @@ pub fn curated_albums() -> Vec<AlbumDetail> {
 
 /// 总歌曲池：榜单 / 推荐 / 搜索 / 库都从这里取，保证引用一致
 pub fn song_pool() -> Vec<SongRef> {
-    curated_albums().into_iter().flat_map(|album| album.songs).collect()
+    curated_albums()
+        .into_iter()
+        .flat_map(|album| album.songs)
+        .collect()
 }
 
 pub fn find_song<'a>(pool: &'a [SongRef], song_mid: &str) -> Option<&'a SongRef> {
@@ -559,7 +574,11 @@ pub fn liked_songs(pool: &[SongRef]) -> Vec<SongRef> {
         .filter(|song| hash_seed(&format!("liked:{}", song.mid)) % 3 == 0)
         .cloned()
         .collect();
-    let source = if liked.is_empty() { &pool[..pool.len().min(6)] } else { &liked[..] };
+    let source = if liked.is_empty() {
+        &pool[..pool.len().min(6)]
+    } else {
+        &liked[..]
+    };
     source.iter().take(18).cloned().collect()
 }
 
@@ -595,7 +614,8 @@ pub fn favorited_playlist_refs() -> Vec<PlaylistRef> {
 // ————————————————————————————————————————————————————————————
 
 /// 本地监视文件夹（路径为虚构演示数据）
-pub const WATCH_FOLDER_PATHS: &[&str] = &["~/Music/无损收藏", "~/Music/Live 现场", "~/Music/早期 Demo"];
+pub const WATCH_FOLDER_PATHS: &[&str] =
+    &["~/Music/无损收藏", "~/Music/Live 现场", "~/Music/早期 Demo"];
 /// 各文件夹的最近扫描时间（固定"今天"之前，mock 期写死保证确定性）
 const FOLDER_SCAN_TIMES: &[&str] = &["2026-09-05 21:30", "2026-08-30 14:12", "2026-08-11 09:45"];
 /// 全库最近一次扫描 = 各文件夹中最新的一次
@@ -635,8 +655,14 @@ pub struct DownloadLibrary {
 /// 由音质文案推落盘格式与码率（kbps）：Hi-Res/FLAC → FLAC，其余按 320kbps MP3
 fn bitrate_of(song: &SongRef) -> (&'static str, u32) {
     match song.quality.as_deref() {
-        Some(QUALITY_HI_RES) => ("FLAC", 2100 + (hash_seed(&format!("bitrate:{}", song.mid)) % 300)),
-        Some(QUALITY_FLAC) => ("FLAC", 850 + (hash_seed(&format!("bitrate:{}", song.mid)) % 150)),
+        Some(QUALITY_HI_RES) => (
+            "FLAC",
+            2100 + (hash_seed(&format!("bitrate:{}", song.mid)) % 300),
+        ),
+        Some(QUALITY_FLAC) => (
+            "FLAC",
+            850 + (hash_seed(&format!("bitrate:{}", song.mid)) % 150),
+        ),
         _ => ("MP3", 320),
     }
 }
@@ -666,7 +692,8 @@ pub fn local_library(pool: &[SongRef]) -> LocalLibrary {
         .iter()
         .filter(|song| hash_seed(&format!("local:{}", song.mid)) % 3 != 2)
         .map(|song| {
-            let folder = WATCH_FOLDER_PATHS[(hash_seed(&format!("localfolder:{}", song.mid)) % 3) as usize];
+            let folder =
+                WATCH_FOLDER_PATHS[(hash_seed(&format!("localfolder:{}", song.mid)) % 3) as usize];
             to_local_track(song, folder)
         })
         .collect();
@@ -675,7 +702,10 @@ pub fn local_library(pool: &[SongRef]) -> LocalLibrary {
         .iter()
         .enumerate()
         .map(|(i, path)| {
-            let in_folder: Vec<&LocalTrack> = tracks.iter().filter(|track| &track.folder == path).collect();
+            let in_folder: Vec<&LocalTrack> = tracks
+                .iter()
+                .filter(|track| &track.folder == path)
+                .collect();
             WatchedFolder {
                 path: (*path).into(),
                 track_count: in_folder.len(),
@@ -823,9 +853,13 @@ pub fn to_track_row(song: &SongRef) -> TrackRow {
     let main_artist = song.artists.first();
     TrackRow {
         mid: song.mid.clone().into(),
+        source: 0,
         title: song.title.clone().into(),
         artists: artists_text(song).into(),
-        artist_mid: main_artist.map(|a| a.mid.clone()).unwrap_or_default().into(),
+        artist_mid: main_artist
+            .map(|a| a.mid.clone())
+            .unwrap_or_default()
+            .into(),
         album: song.album.name.clone().into(),
         album_mid: song.album.mid.clone().into(),
         duration_ms: song.duration_ms as i32,
@@ -865,9 +899,11 @@ mod tests {
         assert_eq!(liked.len(), expected.len());
         assert_eq!(liked[0].mid, expected[0].mid);
         // 全部条目都满足 liked 谓词（哈希余数 0）
-        assert!(liked
-            .iter()
-            .all(|song| hash_seed(&format!("liked:{}", song.mid)) % 3 == 0));
+        assert!(
+            liked
+                .iter()
+                .all(|song| hash_seed(&format!("liked:{}", song.mid)) % 3 == 0)
+        );
     }
 
     #[test]

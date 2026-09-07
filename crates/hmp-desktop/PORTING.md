@@ -33,17 +33,39 @@
 - [ ] **M5 设置**：总览三分类卡 + 常规（主题三选真实生效）/ 播放（音质四档+默认音量）/ 账号（只读+禁用纪律）
 - [ ] **M6 播放页**：全屏 overlay（slide-bottom）、RulerProgress 刻度条、控制台、OKLab 取色（TrackPalette 覆写）、歌词（弹簧跟随+景深+逐字扫色+无滚动条）、评论区（编辑部式重排）、队列抽屉 themed 态
 - [ ] **M7 收尾**：ESC/键盘语义、焦点可达、reduced-motion 免动画、窄窗（⅓ 宽 683px）断点核对
-- [ ] **M8 数据接线**：mock → AppCore/daemon/qqmusic-api（bridge.rs 重写回来，搜索/真实播放/本地扫描）；MPRIS 重挂
+- [~] **M8 数据接线**：mock → daemon IPC（2026-09-07 完成首轮：播放/队列/收藏歌单/最近/本地库/侧栏歌单真数据，详见下方 M8 接线记录）；内容页（M4）与歌词（M6）等待后端补接口（docs/AUDIT.md §8）
 
 ## 已定工程决策
 
 1. **mock-first**：与 Vue 版同纪律 —— 接口形状即契约（types.ts），mock 数据确定性（同一 FNV-1a 种子），诚实空态/禁用。真实数据接线是 M8。
 2. **app.rs（AppCore）暂不动**：真实后端编排原样保留（编译不引用，无 dead_code 警告），M8 重接；`demo.rs`/旧 `bridge.rs`/旧 `bridge_tests.rs` 随旧 UI 契约删除。
-3. **模拟播放桥在 Rust**：`slint::Timer` 250ms 快照推进 position，队列/seek/音量/自动下一曲全实现 —— 对应 Vue 的 BrowserPlayerBridge。
+3. **模拟播放桥在 Rust**：`slint::Timer` 250ms 快照推进 position，队列/seek/音量/自动下一曲全实现 —— 对应 Vue 的 BrowserPlayerBridge。**（M8 已由 daemon IPC 真桥替换，见下方接线记录；player_host.rs → player_bridge.rs。）**
 4. **封面用 resvg 运行时栅格化**（slint 同款依赖，256px 缓存 `HashMap<seed, Image>`），保证与 Vue 版同一套确定性封面。
 5. **TrackTable 歌手列简化**：歌手串整体一个链接（→ 主歌手页）；多人合唱逐人分链留到 M4 歌手页落地时评估（Slint struct 无嵌套数组，逐人分链需拆模型）。
 6. **横向滚动**（direction=all）暂缺，内容页封面横排用到时补。
 7. 旧 UI 的字符串页面标识（`current-page: "library"`）废弃，新 Nav 用枚举 + param（专辑/歌单/榜单 mid）。
+
+## M8 接线记录（2026-09-07，首轮）
+
+**架构**：沿 docs/PROJECT.md §8.6 解耦设计 —— 桌面 UI 是 daemon 的又一个适配器。
+`src/backend.rs`：Unix socket 客户端（长度前缀 JSON 帧，`hmp_core::ipc`），连接失败仿 CLI `connect_or_spawn` 拉起 `hmp serve --background`（`spawn_detached_exe` 定位 current_exe 同目录/PATH 上的 hmp 二进制；flock 单实例仍归 daemon）；彻底失败 → 离线诚实降级（全空态，命令 no-op，daemon 退出不自动复活——`hmp quit` 语义优先）。订阅长连接收 `Event::StateChanged`，快照经 `invoke_from_event_loop` 回 UI 线程（推送 ~10Hz）。队列重建只认 `QueueSummary.revision`。媒体库读 = 直读 `library.sqlite3`（`src/library_view.rs`，CLI 同契约）。
+
+**真数据**：我喜欢 / 最近播放（真实时间戳文案）/ 音乐库（扫描根分组统计）/ 歌单（relation 分流，副标题 "N 首"）/ 侧栏歌单区（Data.sidebar-*，色对按 id 哈希确定性装饰）/ 播放条与队列（DaemonState → Player 单向映射，命令 → Request）。
+
+**仍 mock**：下载/已购两页（后端无此域，AUDIT §8.5）。
+
+**已知偏差（M8 新增）**：
+- 音质文案由 `actual_quality` 映射，无采样率（"FLAC" 而非 "FLAC · 44.1kHz"，诚实）；
+- 最近播放时间戳为 UTC（桌面无 chrono/本地时区源，与 CLI `history` 口径一致，见 library_view::format_stamp）；
+- 本地曲目键归一化（`canonical_local_key`，hmp-storage v5 迁移合并幽灵行）修复了收藏/歌单写路径与扫描器键格式分裂导致的"我喜欢显示裸键、0:00"问题；
+- QQ 曲目封面 http → 程序化占位（UI 禁 HTTP，封面代理缺口 AUDIT §8.4）；本地曲目 `file://` 封面走真图；
+- 队列点歌 = `Play(该曲 id)`，整队被该单曲替换（无 PlayAt IPC，AUDIT §8.8）；
+- 队列行 QQ 曲目时长 0:00（`track_meta_batch` 无时长投影，AUDIT §8.11）；
+- 客户端音质偏好暂不生效（与 daemon config.toml 两处存储，AUDIT §8.7）；音量以 daemon 推送为准（含 RG 补偿语义，AUDIT §8.12）；
+- 歌手/专辑 mid 真数据行为空串（媒体库不存远端 mid），点击跳空参详情页（M4 落地时收敛）；
+- 库页是启动静态快照（无 LibraryChanged 事件，AUDIT §8.9）。
+
+**后端缺口全集**：docs/AUDIT.md §8（12 条 + 汇总表）。
 
 ## 已知偏差（相对 Vue 版）
 
@@ -66,7 +88,12 @@
 - **舍入对齐**：TS `Math.round` 在 slint 侧用 `Math.round`、Rust 侧用 `f64::round`；别顺手写成 floor/div_ceil（时长"2 小时 5/6 分钟"、"m:ss" 都栽过）。
 - 视觉 QA 基建：`examples/shot.rs`（`cargo run --release -p hmp-desktop --example shot -- <route> [--theme dark] [--playing] [--queue] [--hover X,Y] [--bus-hover X,Y,W,H]`，playing 走 `invoke_play_tracks` 让 PlayerHost 接管快照）+ `/tmp/hmp-qa2/dshot.sh`（niri 按 PID 找窗口 → focus-workspace/focus-window → `screenshot-window`，焦点校验+尺寸校验+重试）；Vue 对照用 `/tmp/hmp-qa/vshot2.mjs`（1420，视口 1018×1228 dpr=1.25，走真实主题循环切暗色）。winit 下 `dispatch_event(PointerMoved)` 不驱动 hover（testing backend 才行），hover 视觉用 `--bus-hover` 或真实指针。
 
-## 构建
+## 构建与启动（M8 起）
 
-`cargo build -p hmp-desktop`；测试 `cargo test -p hmp-desktop`（format/mock/nav 纯逻辑单测）。
-视觉验收：niri 下直接 `cargo run -p hmp-desktop --bin hmp-desktop`（逻辑目标 1024×1152 半宽 / 2048×1152 全宽）。
+- 构建：`cargo build --release`（桌面启动会自动拉起 daemon，需要 `hmp` 二进制在 PATH 或与桌面二进制同目录）。
+- 测试：`cargo test -p hmp-desktop`（mock/nav/format 纯逻辑单测 + backend/library_view 投影单测）。
+- 启动：`cargo run --release -p hmp-desktop --bin hmp-desktop`（niri 下逻辑目标 1024×1152 半宽 / 2048×1152 全宽）。
+  - 启动即连接 daemon socket（`$XDG_RUNTIME_DIR/hmp.sock`），连不上自动 `hmp serve --background`（CLI 同款）；失败降级离线（全空态、命令无效）。
+  - 库页数据 = 启动时直读 `$XDG_DATA_HOME/hmp/library.sqlite3` 的静态快照：先 `hmp scan ~/Music` 入库本地曲目，QQ 侧 `hmp login` + `hmp library sync`。
+  - 播放/收藏/歌单写全走 daemon（与 CLI/MPRIS 同一状态源）；`hmp quit` 后 UI 呈离线空态，不自动复活后端。
+- 视觉 QA：`cargo run --release -p hmp-desktop --example shot -- <route> [--theme dark] [--queue] [--playing]`（真实应用宿主，route 如 library/recent/local/downloads/purchased）+ `/tmp/hmp-qa2/dshot2.sh <name> <args…>`（niri 截图；daemon 需已在跑，播放态用 `hmp play` 预置）。

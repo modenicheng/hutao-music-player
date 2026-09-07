@@ -15,11 +15,7 @@ pub fn format_bytes(bytes: u64) -> String {
 /// 与 TS 版 trimOne 对齐：一位小数，".0" 去尾
 fn decimals(value: f64) -> usize {
     let fixed = format!("{value:.1}");
-    if fixed.ends_with(".0") {
-        0
-    } else {
-        1
-    }
+    if fixed.ends_with(".0") { 0 } else { 1 }
 }
 
 /// 毫秒 → 长时长：一小时内 "46 分钟"，跨小时 "3 小时 42 分钟"（分钟数 round，对齐 TS）

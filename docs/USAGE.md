@@ -169,6 +169,19 @@ MPRIS `OpenUri`（`playerctl open file:///...`）经同一路径播放。
   `CanGoNext`/`CanGoPrevious` 按队列位置与循环模式实时上报；`xesam:url` 为本地解密代理 URI。
 - **托盘**：KDE 等桌面显示图标，菜单 = 播放/暂停、上一首、下一首、停止、退出（GNOME 需 AppIndicator 扩展；无桌面会话时自动跳过，不影响播放）。
 
+### 桌面 UI（Slint，M8 起接真实后端）
+
+```bash
+cargo build --release
+cargo run --release -p hmp-desktop --bin hmp-desktop
+```
+
+- 启动时自动连接常驻 daemon（`$XDG_RUNTIME_DIR/hmp.sock`）；未运行则自动拉起 `hmp serve --background`——与 `hmp play`/CLI 遥控共用同一后端、同一播放状态源（MPRIS/托盘同源生效）。
+- 库页（我喜欢/最近播放/音乐库/歌单）在启动时直读媒体库（`$XDG_DATA_HOME/hmp/library.sqlite3`）：先 `hmp scan ~/Music` 入库本地曲目；QQ 侧登录后 `hmp library sync` 同步歌单/收藏。
+- 播放条/队列与 CLI 同源：CLI 换歌桌面即时可见，反之亦然；`hmp quit` 后界面保持打开但呈离线空态，不会自动拉活后端。
+- 空数据是诚实状态：未扫描/未同步时对应页面为空，音乐库页"扫描本地音乐"按钮在桌面端禁用（走 `hmp scan`）。
+- 已知边界（docs/AUDIT.md §8）：内容页（首页/搜索/歌单详情）与歌词页尚未移植；QQ 曲目封面为程序化占位（封面代理待后端落地）。
+
 ## 8. 故障排查
 
 | 现象 | 处理 |

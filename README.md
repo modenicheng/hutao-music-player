@@ -17,7 +17,7 @@ hutao-music-player/
 │   ├── hmp-storage/        # 凭证存储
 │   ├── hmp-mpris/          # MPRIS D-Bus 服务
 │   ├── hmp-daemon/         # 后台播放后端（socket 服务器 + 播放引擎 + tray/MPRIS 适配）
-│   ├── hmp-desktop/        # Slint 桌面端（接入中）
+│   ├── hmp-desktop/        # Slint 桌面端（daemon 前端：库页/播放已接真实后端）
 │   └── hmp-cli/            # CLI（登录/搜索/遥控子命令，二进制名 `hmp`）
 ├── docs/
 │   ├── PROJECT.md          # 项目总纲
@@ -41,6 +41,9 @@ hmp library history          # 最近播放
 hmp status                   # 状态
 hmp pause / next / seek 60   # 遥控
 hmp quit                     # 退出后端
+
+# 桌面 UI（Slint，连接/自动拉起同一 daemon，与 CLI 同一播放状态源）
+cargo run --release -p hmp-desktop --bin hmp-desktop
 ```
 
 完整使用文档（命令参考、队列语义、音质与解密、MPRIS/托盘、故障排查、测试指南）见 **[docs/USAGE.md](docs/USAGE.md)**。

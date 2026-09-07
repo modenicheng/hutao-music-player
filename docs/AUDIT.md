@@ -145,3 +145,155 @@
   ftyp offset-4、cache key 查询串稳定性等测试）。
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`：0 错误。
 - `cargo fmt --all -- --check`：干净。
+
+## 8. M8 后端缺口记录（Slint 桌面端接入真实后端；2026-09-07 复核，全部只记录不动手）
+
+> 背景：hmp-desktop 正从 mock-first（页面数据全部来自 mock.rs、播放由 PlayerHost 模拟，
+> `crates/hmp-desktop/src/main.rs:1-3`）转向接真实后端（hmp-daemon，Unix socket IPC）。
+> 解耦原则：UI 只发意图、daemon 单一状态源、UI 不做 HTTP/不碰凭证。
+> 以下每条均先读代码证实/证伪再记录；"不缺"的如实说明机制。
+
+1. **IPC 无媒体库读请求（读库 = 客户端直读 sqlite）——契约已成立，非临时方案**。
+   `Request` 枚举（crates/hmp-core/src/ipc.rs:111-183）只有播放/队列/收藏写/歌单写/
+   评论/LibrarySync/Status/Subscribe 等，没有任何媒体库查询；连 `QueueList` 的注释都
+   写明"元数据投影在客户端侧经媒体库批量查询"（ipc.rs:127-133）。CLI 是现行事实契约：
+   `open_library()` 直连 `library.sqlite3`（crates/hmp-cli/src/library.rs:18-22，模块
+   文档"直读本地 DB + daemon reconcile 触发"）。边界评估：schema 耦合是编译期共享
+   hmp-storage crate（同仓同版本，无跨仓漂移）；跨进程 WAL 并发已有 busy_timeout=5s
+   （crates/hmp-storage/src/db.rs:282-284，本轮审计已修）。同仓的 Slint 桌面可沿用
+   直读（crates/hmp-desktop/Cargo.toml:20 已依赖 hmp-storage），代价是 UI 侧要自管
+   "读库放后台线程、变更后重查"的纪律——刷新时机依赖第 9 条的变更事件。
+   建议：维持直读契约并写进 PORTING 文档，不为读路径新增 IPC。
+
+2. **IPC 无搜索与内容详情接口——成立，M4 内容页无数据源**。
+   桌面导航已含 home/discover/top/top-detail/search/playlist/album/artist 页
+   （crates/hmp-desktop/ui/nav.slint:4-22），全部只有 mock 数据。daemon 只消费
+   SongApi/SonglistApi/AlbumApi/CommentApi 与 reconcile 用的 UserApi
+   （crates/hmp-daemon/src/player.rs:16、sync.rs:193、reconcile.rs:10）；搜索/榜单/
+   歌手/推荐模块无任何 daemon 消费（§5 表所列休眠能力）。现行旁路：`hmp search`
+   直连 QqMusicClient（crates/hmp-cli/src/search.rs:7-8）、`hmp account` 直连 UserApi
+   （crates/hmp-cli/src/account.rs:8、41）——绕过 daemon，多客户端各自出网、凭证读取
+   分散（桌面技术上也能直连，Cargo.toml:19 已依赖 hmp-qqmusic-api，但违反解耦原则）。
+   建议：IPC 增加一组读请求（Search / 内容详情），由 daemon 持凭证统一出网并享受其
+   内存缓存（评论已有同类先例，ipc.rs:156-158）；这是 M8 最大的一块新协议面，需
+   产品决策排期。
+
+3. **IPC 无歌词读取——成立**。`Request` 无歌词变体；QQ 歌词 API（lyric.rs）目前唯一
+   消费者是桌面老 AppCore 的进程内直连（crates/hmp-desktop/src/app.rs:20-23、
+   796-821 `LyricApi::get_lyric`），而 AppCore 已随旧 UI 契约废弃
+   （crates/hmp-desktop/src/bridge.rs:2；PORTING.md:41"app.rs 暂不动，M8 重接"）；
+   CLI 无 `hmp lyrics`（§5 表已列为休眠能力）。M6 歌词页接线时无 IPC 可用。实现细节：
+   QQ 歌词请求需要 `song_type`（app.rs:809），daemon 的 `ResolvedTrack` 未透出该字段
+   （crates/hmp-daemon/src/player.rs:93-104）——走 daemon 取词则 daemon 内部需自行补齐
+   （resolve 时本就拿到了 detail.track，player.rs:260-268）。建议：新增
+   `Request::LyricGet { mid }` 由 daemon 出网；UI 侧 lyrics.rs 的 LRC 解析可复用。
+
+4. **封面链路：本地不缺，QQ 曲目缺本地产物——部分成立**。
+   - 本地曲目机制完整：嵌入封面提取后持久化为 `<data_dir>/covers/<hash>.jpg` 并以
+     `file://` URI 进 tracks 行（crates/hmp-storage/src/scan.rs:34-51；
+     crates/hmp-daemon/src/local.rs:167-176；回归测试 local.rs:429-441），UI 可直接
+     消费，不缺。
+   - QQ 曲目无任何本地产物：resolve 时构造远程 `https://y.gtimg.cn/...{pmid}.jpg`
+     直接放进 `Track.cover`（crates/hmp-daemon/src/player.rs:288-293）；MPRIS 的
+     `mpris:artUrl` 原样透传该 https URL（crates/hmp-mpris/src/metadata.rs:66-71），
+     **没有**"下载到本地缓存再给 file://"——MPRIS 能显示是因为客户端自己拉网。
+     daemon 全仓无 QQ 封面下载/缓存代码；桌面现状封面是确定性 SVG 占位生成
+     （crates/hmp-desktop/src/covers.rs:1-8、183-197）。UI 禁 HTTP 原则下 QQ 封面
+     到不了 UI。建议：daemon 复用 persist_cover 的目录契约
+     （`<data_dir>/covers/<hash>.jpg`，scan.rs:4）下载 QQ 封面，把 file:// URI 随
+     状态/详情下发；MPRIS 顺带改用 file://。
+
+5. **下载库/已购库无后端域——成立**。storage 建表只有 tracks/local_files/favorites/
+   playlists/playlist_tracks/play_events/track_artists/scan_roots/relations/
+   playlist_ops（crates/hmp-storage/src/db.rs:223-261、1909、1916、2005、2018），
+   daemon 无相关接口；downloads/purchased 目前只是 Vue 移植来的 mock 概念
+   （crates/hmp-desktop/src/mock.rs:697、747；ui/downloads-page.slint、
+   ui/purchased-page.slint）。若要落地，最小域需要：
+   ① `download_tasks`（track_id/目标音质/状态/本地路径/进度）与 `purchases`
+   （购买记录映射）两表；
+   ② 下载执行器：复用 resolve 的取流+解密链，落盘为可离线播放的本地文件并登记
+   tracks/local_files（注意 §4.4 的 FK 地雷：subscribed 歌单曲目缓存前置清理）；
+   ③ 已购记录只能靠同步——hmp-qqmusic-api 目前没有"已购列表"API 模块，需先确认
+   上游接口存在与否。建议：M8 先诚实空态，不动后端；列入 §5 功能扩展候选。
+
+6. **登录态/账号信息无 IPC 读——成立**。`Request` 无账号状态查询；daemon 的
+   `has_credential()` 仅供内部前置校验（crates/hmp-daemon/src/player.rs:191-197），
+   未暴露。现行旁路：CLI `hmp account profile/vip` 直读凭证文件 + 直连 UserApi
+   （crates/hmp-cli/src/account.rs:7-18、41）；老 AppCore 是桌面进程内直读 keyring
+   （app.rs:433-441、496-506）——正是"UI 不碰凭证"原则要杜绝的形态。UI 只能从
+   写/播放操作的 `IpcErrorCode::NotLoggedIn` 失败间接推断登录态
+   （ipc.rs:347-348；crates/hmp-daemon/src/server.rs:364-370、447），无法驱动设置页
+   账号面板/未登录引导（settings-account 路由已存在，nav.slint:21）。建议：新增
+   `Request::AccountStatus`（is_logged_in + 昵称/uin + vip 摘要，daemon 读凭证 +
+   UserApi）；登录流程本身（QR 轮询写凭证）是否搬进 daemon 是独立决策。
+
+7. **音质偏好无 IPC 写，两处存储不收敛——成立**。UI 音质选择写桌面本地
+   `~/.config/hmp/desktop-ui.json`（crates/hmp-desktop/src/prefs.rs:12-13、40-46；
+   bridge.rs:262-274；0=标准…3=Hi-Res 四档枚举）；daemon 每次解析曲目时读
+   `hmp_storage::Config::load().quality.chain()`（crates/hmp-daemon/src/player.rs:
+   299-301）——即 config.toml 的 `[quality]`（CLI `hmp quality` 直写该文件，
+   crates/hmp-cli/src/quality.rs:22-49；语义是 auto/fixed+回退链）。两处互不感知：
+   UI 选"无损"，daemon 照旧按 config.toml 档位解析。巧合是 daemon 逐曲重读 config，
+   理论上 UI 直接写 config.toml 即生效，但这违反"UI 只发意图"且与 CLI 写路径竞态。
+   建议：IPC 增加 `Request::SetQualityPreference`（复用 QualityPref 语义），由
+   daemon 落 config.toml；桌面 prefs 的 quality 降级为纯展示态或删除。
+
+8. **队列"跳到第 N 首播放"无命令面——成立（底层能力已在）**。`Request`
+   （ipc.rs:111-183）与 `PlayerCommand`（crates/hmp-core/src/player.rs:161-185）均无
+   PlayAt/跳转变体；但 QueueCore 已有 `set_current(index)`（crates/hmp-core/src/
+   queue.rs:275，含 clamp）+ 引擎 `load_and_play`（crates/hmp-daemon/src/engine.rs:
+   795），`set_current` 目前只在 PlayNext 插入路径内部使用（engine.rs:683）。老
+   AppCore 的 `PlayQueueIndex`（app.rs:161-163、690-697）证明该语义确有 UI 需求；
+   UI 队列抽屉点歌目前只能绕道（整单重放或用 QueueRemove 曲解语义）。建议：加
+   `Request::QueuePlayAt(usize)`，引擎侧复用 QueueRemove 当前曲的事务式装载模式
+   （engine.rs:357-399：先装载成功再提交，失败回滚）。
+
+9. **媒体库变更无推送事件——成立**。`Event` 仅 `StateChanged(DaemonState)`
+   （ipc.rs:209-213），`publish()` 只由播放状态 watch、队列命令、引擎事件驱动
+   （engine.rs:326-468、474-495）；本地监听（crates/hmp-daemon/src/watcher.rs）与
+   QQ reconcile（sync.rs）全程不接触 state_tx（两文件 grep 无 publish/state_tx）。
+   桌面库页是启动时一次性静态装载（bridge.rs:58-198；main.rs:22），扫描/同步完成后
+   UI 永不更新。建议：Event 增加轻量 `LibraryChanged`（或 StateChanged 附带库代际），
+   watcher 批处理落库后与 reconcile 完成处各触发一次；UI 收到后重查 sqlite
+   （依赖第 1 条的直读契约）。
+
+10. **daemon 生命周期与桌面共存——已解决（本轮同步重构）**。
+    `spawn_detached` 原固定用 `std::env::current_exe()` 以 setsid 拉起"自己"，
+    桌面二进制不是 hmp：直接复用会把 hmp-desktop 自身再 spawn 一遍。
+    M8 接线轮已把 detach 点参数化：`spawn_detached_exe(exe, args)`
+    （crates/hmp-daemon/src/serve.rs，`spawn_detached` 变 current_exe 薄包装），
+    桌面 `connect_or_spawn` 定位 hmp 二进制（current_exe 同目录 → PATH）后
+    `hmp serve --background` 拉起；flock 单实例与 socket 就绪轮询
+    （client.rs:84-95）原样复用。hmp-desktop 已依赖 hmp-daemon crate。
+
+11. **`track_meta_batch` 投影过窄，QQ 队列行缺时长/封面——成立**。
+    队列元数据投影依赖的 `track_meta_batch`（crates/hmp-storage/src/db.rs，
+    CLI/桌面共用）只回标题/歌手/专辑；daemon 侧 `cache_stubs` 落库的
+    duration_ms/cover_uri 列没有读出口。表现为：队列抽屉里 CLI 搜来播的 QQ
+    曲目时长显示 0:00、封面只能程序化占位（crates/hmp-desktop/src/backend.rs
+    队列投影回退路径）。建议：`track_meta_batch` 扩列返回 duration/cover_uri，
+    桌面/CLI 投影同步受益。
+
+12. **音量语义：状态里的 volume 含 ReplayGain 补偿——成立**。
+    引擎 SetVolume 把用户音量乘以 RG 因子后下发的即 `PlaybackState.volume`
+    （engine.rs `set_volume(user × rg_factor)`；`DaemonState.replaygain_db`
+    是原始标签值）。开 RG 的本地曲目下，UI 音量滑杆读到/回设的是补偿后值，
+    与用户设定有静默偏差。建议：PlaybackState 增加 `user_volume` 原值
+    （或 RG 因子），UI/MPRIS 展示与回设都用原值。
+
+### 汇总
+
+| # | 缺口 | 影响 | 建议最小解法 | 优先级 |
+|---|---|---|---|---|
+| 1 | IPC 无媒体库读（客户端直读 sqlite） | 非缺口：CLI 事实契约，schema/WAL 边界已可控 | 维持直读并文档化；刷新触发靠 #9 | —（契约确认） |
+| 2 | IPC 无搜索/内容详情 | M4 内容页无数据源；CLI 旁路直连、请求分散 | 新增 Search/ContentDetail 读请求，daemon 出网 | 高 |
+| 3 | IPC 无歌词读取 | M6 歌词页无数据源（仅废弃 AppCore 直连过） | 新增 LyricGet；daemon 内补 song_type | 中 |
+| 4 | QQ 封面无本地产物 | UI 无法显示 QQ 封面（MPRIS 靠客户端自行拉网） | daemon 下载进 covers/ 目录，下发 file:// | 中 |
+| 5 | 下载库/已购库无后端域 | downloads/purchased 页只能是 mock/空态 | M8 诚实空态；域设计列入 §5 候选 | 低 |
+| 6 | 登录态/账号无 IPC 读 | 账号面板/未登录引导无数据，只能从错误码猜 | 新增 AccountStatus 读请求 | 中 |
+| 7 | 音质偏好两处存储不收敛 | UI 选择对播放不生效，体验不一致 | 新增 SetQualityPreference，daemon 落 config.toml | 中 |
+| 8 | 队列无 PlayAt | 队列点歌语义缺失 | QueuePlayAt(usize)，复用事务式装载 | 中 |
+| 9 | 库变更无推送事件 | 库页静态快照永不更新 | Event 增 LibraryChanged，watcher/reconcile 触发 | 中 |
+| 10 | spawn_detached 绑定 current_exe | 桌面无法拉起 daemon（会把自身再 spawn） | exe 路径参数化（spawn_detached_exe） | 已解决（本轮重构） |
+| 11 | track_meta_batch 缺 duration/cover 投影 | 队列行 QQ 曲目 0:00、程序化封面 | 扩列读出口 | 低 |
+| 12 | 状态 volume 含 RG 补偿 | UI 音量滑杆与用户设定静默偏差 | 发布 user_volume 原值 | 低 |

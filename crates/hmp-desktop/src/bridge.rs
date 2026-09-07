@@ -1,20 +1,21 @@
-//! UI 桥接：mock 数据装载为 Slint 模型 + 导航/主题/音质/过滤回调绑定。
-//! （旧版对接 AppCore 的桥随旧 UI 契约废弃，M8 数据接线时重写回来。）
+//! UI 桥接：媒体库快照装载为 Slint 模型 + 导航/主题/音质/过滤回调绑定。
+//! （旧版对接 AppCore 的桥随旧 UI 契约废弃，M8 数据接线时重写回来；
+//! 页面数据源 = [`library_view`] 直读 library.sqlite3，播放/命令桥另行接线。）
 
 use std::sync::{Arc, Mutex};
 
 use slint::{ComponentHandle, Global, ModelRc, SharedString, Weak};
 
 use crate::covers::cover_image;
-use crate::format::{format_bytes, format_cny, format_count_wan, format_long_duration};
+use crate::format::{format_bytes, format_cny};
+use crate::library_view::{self, PlaylistEntry, SongRow};
 use crate::mock;
 use crate::prefs::Prefs;
 use crate::{
-    AppWindow, CoverCardData, Data, FolderRow, Nav, Quality, Theme, TrackRow,
+    AppWindow, CoverCardData, Data, FolderRow, Nav, PlaylistCover, Quality, Theme, TrackRow,
 };
 
 const RECENT_PREVIEW_SIZE: usize = 5;
-const RECENT_PAGE_SIZE: usize = 12;
 const NAV_HISTORY_CAP: usize = 50;
 
 fn model<T: 'static + Clone>(items: Vec<T>) -> ModelRc<T> {
@@ -32,97 +33,124 @@ fn cover_card(mid: &str, title: &str, subtitle: String, cover_seed: &str) -> Cov
     }
 }
 
-fn playlist_card(playlist: &mock::PlaylistRef) -> CoverCardData {
+/// 歌单卡（副标题来自媒体库投影的 "N 首"——媒体库无播放计数，不伪造"X次播放"）
+fn playlist_card(entry: &PlaylistEntry) -> CoverCardData {
     cover_card(
-        &playlist.id,
-        &playlist.name,
-        format!("{}次播放", format_count_wan(playlist.play_count)),
-        &format!("playlist:{}", playlist.id),
+        &entry.id,
+        &entry.name,
+        entry.subtitle.clone(),
+        &format!("playlist:{}", entry.id),
     )
 }
 
-fn track_row_of(track: &mock::LocalTrack) -> TrackRow {
-    mock::to_track_row(&track.song)
-}
-
-/// "2026-09-05 21:30" → "09-05 21:30"（年份归页头层级）
-fn short_scan_time(iso: &str) -> &str {
-    iso.get(5..).unwrap_or(iso)
+/// 侧栏歌单渐变：媒体库无配色数据，色对是 UI 层的确定性装饰——
+/// 8 组手选低饱和对，按歌单 id 的 FNV-1a 哈希选取（与封面同一确定性地基）。
+fn sidebar_cover(entry: &PlaylistEntry) -> PlaylistCover {
+    const PAIRS: [(u8, u8, u8, u8, u8, u8); 8] = [
+        (0xe4, 0x4b, 0x32, 0xf3, 0xb3, 0x2f),
+        (0x1e, 0x38, 0x5f, 0xd4, 0x9b, 0x60),
+        (0x76, 0x60, 0xa4, 0xef, 0x9d, 0x9d),
+        (0x2f, 0x6b, 0x4f, 0xa8, 0xd0, 0x8d),
+        (0x3a, 0x5a, 0x7c, 0x9f, 0xc2, 0xd9),
+        (0xb0, 0x7d, 0x2b, 0xe8, 0xd0, 0x8d),
+        (0x4a, 0x4a, 0x66, 0xb3, 0xb3, 0xd9),
+        (0x8c, 0x3b, 0x58, 0xe8, 0xa0, 0xb0),
+    ];
+    let hash = crate::covers::hash_seed(&format!("playlist:{}", entry.id)) as usize;
+    let (r1, g1, b1, r2, g2, b2) = PAIRS[hash % PAIRS.len()];
+    PlaylistCover {
+        name: entry.name.clone().into(),
+        c1: slint::Color::from_rgb_u8(r1, g1, b1),
+        c2: slint::Color::from_rgb_u8(r2, g2, b2),
+    }
 }
 
 fn path_basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// 把 mock 数据装载进 Data global（mock-first：页面只读模型与统计字段）
+/// 把媒体库快照（直读 library.sqlite3，离线降级为空）装载进 Data global：
+/// 五个库页真数据；下载/已购两页后端无对应域，保留 mock 喂数据。
 pub fn load_data(ui: &AppWindow) {
     let data = Data::get(ui);
-    let pool = mock::song_pool();
-    let albums = mock::curated_albums();
+    let snap = library_view::load_snapshot();
 
-    let liked = mock::liked_songs(&pool);
-    let recent_preview: Vec<mock::SongRef> = pool.iter().take(RECENT_PREVIEW_SIZE).cloned().collect();
-    let recent = mock::recent_records(&pool, RECENT_PAGE_SIZE);
-    let local = mock::local_library(&pool);
-    let downloads = mock::download_library(&pool);
-    let purchased = mock::purchased_music(&pool, &albums);
-    let created = mock::created_playlist_refs();
-    let favorited = mock::favorited_playlist_refs();
+    // ——— 我喜欢 ———
+    data.set_liked(model(
+        snap.liked
+            .iter()
+            .map(SongRow::to_track_row)
+            .collect::<Vec<_>>(),
+    ));
+    data.set_liked_count(snap.liked.len() as i32);
 
-    data.set_liked(model(mock::track_rows(&liked)));
-    data.set_liked_count(liked.len() as i32);
-    data.set_playlist_count((created.len() + favorited.len()) as i32);
-    data.set_created_playlists(model(created.iter().map(playlist_card).collect::<Vec<_>>()));
-    data.set_favorited_playlists(model(favorited.iter().map(playlist_card).collect::<Vec<_>>()));
-    data.set_recent_preview(model(mock::track_rows(&recent_preview)));
+    // ——— 歌单（relation 分流：local/owned → 自建，subscribed → 收藏）———
+    let created_cards: Vec<CoverCardData> = snap.created.iter().map(playlist_card).collect();
+    let favorited_cards: Vec<CoverCardData> = snap.favorited.iter().map(playlist_card).collect();
+    data.set_playlist_count((created_cards.len() + favorited_cards.len()) as i32);
+    data.set_created_playlists(model(created_cards));
+    data.set_favorited_playlists(model(favorited_cards));
+    // 侧栏歌单区（宽侧栏分组/窄边栏二级共用）
+    data.set_sidebar_created(model(
+        snap.created.iter().map(sidebar_cover).collect::<Vec<_>>(),
+    ));
+    data.set_sidebar_favorited(model(
+        snap.favorited.iter().map(sidebar_cover).collect::<Vec<_>>(),
+    ));
 
-    let recent_songs: Vec<mock::SongRef> = recent.iter().map(|record| record.song.clone()).collect();
-    data.set_recent(model(mock::track_rows(&recent_songs)));
-    data.set_recent_count(recent.len() as i32);
-    data.set_recent_latest(
-        recent
-            .first()
-            .map(|record| record.label.clone())
-            .unwrap_or_else(|| "今天".into())
-            .into(),
-    );
-    data.set_recent_earliest(
-        recent
-            .last()
-            .map(|record| record.label.clone())
-            .unwrap_or_else(|| "今天".into())
-            .into(),
-    );
+    // ——— 最近播放（预览 = 我喜欢页前 5；latest/earliest 已按真实时间戳格式化）———
+    data.set_recent_preview(model(
+        snap.recent
+            .iter()
+            .take(RECENT_PREVIEW_SIZE)
+            .map(SongRow::to_track_row)
+            .collect::<Vec<_>>(),
+    ));
+    data.set_recent(model(
+        snap.recent
+            .iter()
+            .map(SongRow::to_track_row)
+            .collect::<Vec<_>>(),
+    ));
+    data.set_recent_count(snap.recent.len() as i32);
+    data.set_recent_latest(snap.recent_latest.clone().into());
+    data.set_recent_earliest(snap.recent_earliest.clone().into());
 
-    let local_total_size: u64 = local.tracks.iter().map(|track| track.size_bytes).sum();
-    let local_total_duration: u64 = local.tracks.iter().map(|track| track.song.duration_ms).sum();
-    let all_local_rows: Vec<TrackRow> = local.tracks.iter().map(track_row_of).collect();
+    // ——— 音乐库（本地）：曲目表 + 扫描根聚合统计 ———
+    let all_local_rows: Vec<TrackRow> = snap
+        .local_tracks
+        .iter()
+        .map(SongRow::to_track_row)
+        .collect();
     data.set_local_tracks(model(all_local_rows.clone()));
-    data.set_local_count(local.tracks.len() as i32);
-    data.set_local_duration(format_long_duration(local_total_duration).into());
-    data.set_local_size(format_bytes(local_total_size).into());
+    data.set_local_count(snap.local_tracks.len() as i32);
+    data.set_local_duration(snap.local_duration_text.clone().into());
+    data.set_local_size(snap.local_size_text.clone().into());
     data.set_folders(model(
-        local
-            .folders
+        snap.folders
             .iter()
             .map(|folder| FolderRow {
                 path: folder.path.clone().into(),
-                track_count: folder.track_count as i32,
+                track_count: folder.track_count,
                 size_text: format_bytes(folder.size_bytes).into(),
-                last_scan: short_scan_time(&folder.last_scan_at).into(),
+                last_scan: folder.last_scan.clone().into(),
             })
             .collect::<Vec<_>>(),
     ));
 
     // ——— 监视文件夹过滤：点击行过滤曲目表，再点/显示全部取消 ———
-    // TrackRow 不带 folder 字段（派生关系留在 Rust 侧），这里并行持有分组归属。
-    let rows_by_folder: Vec<(String, TrackRow)> = local
-        .tracks
+    // TrackRow 不带 folder 字段（派生关系留在 Rust 侧）；分组来自真实扫描根
+    // 前缀匹配（嵌套根取最长优先），与文件夹行的聚合口径一致。
+    let rows_by_folder: Vec<(String, TrackRow)> = snap
+        .local_tracks
         .iter()
-        .map(|track| (track.folder.clone(), track_row_of(track)))
+        .filter_map(|row| {
+            let folder = row.folder.clone()?;
+            Some((folder, row.to_track_row()))
+        })
         .collect();
-    let folder_paths: Vec<String> = local.folders.iter().map(|f| f.path.clone()).collect();
-    let folder_titles: Vec<String> = local
+    let folder_paths: Vec<String> = snap.folders.iter().map(|f| f.path.clone()).collect();
+    let folder_titles: Vec<String> = snap
         .folders
         .iter()
         .map(|f| format!("{} · {} 首", path_basename(&f.path), f.track_count))
@@ -134,7 +162,11 @@ pub fn load_data(ui: &AppWindow) {
                 return;
             };
             let data = Data::get(&ui);
-            let selected = if index == data.get_selected_folder() { -1 } else { index };
+            let selected = if index == data.get_selected_folder() {
+                -1
+            } else {
+                index
+            };
             data.set_selected_folder(selected);
 
             let (rows, title): (Vec<TrackRow>, SharedString) = if selected < 0 {
@@ -154,13 +186,25 @@ pub fn load_data(ui: &AppWindow) {
         });
     }
 
+    // ——— 下载/已购两页：后端无下载/已购域，暂 mock（缺口见 docs/AUDIT.md M8 记录）———
+    let pool = mock::song_pool();
+    let albums = mock::curated_albums();
+    let downloads = mock::download_library(&pool);
+    let purchased = mock::purchased_music(&pool, &albums);
+
     let downloads_size: u64 = downloads.tracks.iter().map(|track| track.size_bytes).sum();
     let lossless = downloads
         .tracks
         .iter()
         .filter(|track| track.format == "FLAC")
         .count();
-    data.set_downloads(model(downloads.tracks.iter().map(track_row_of).collect::<Vec<_>>()));
+    data.set_downloads(model(
+        downloads
+            .tracks
+            .iter()
+            .map(|track| mock::to_track_row(&track.song))
+            .collect::<Vec<_>>(),
+    ));
     data.set_downloads_count(downloads.tracks.len() as i32);
     data.set_downloads_size(format_bytes(downloads_size).into());
     data.set_downloads_lossless(lossless as i32);
@@ -189,7 +233,11 @@ pub fn load_data(ui: &AppWindow) {
                 cover_card(
                     &entry.album.mid,
                     &entry.album.name,
-                    format!("{} 首 · {} 购买", entry.album.songs.len(), entry.purchased_at),
+                    format!(
+                        "{} 首 · {} 购买",
+                        entry.album.songs.len(),
+                        entry.purchased_at
+                    ),
                     &format!("album:{}", entry.album.mid),
                 )
             })
@@ -279,13 +327,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn short_scan_time_strips_year() {
-        assert_eq!(short_scan_time("2026-09-05 21:30"), "09-05 21:30");
-    }
-
-    #[test]
     fn basename() {
         assert_eq!(path_basename("~/Music/无损收藏"), "无损收藏");
         assert_eq!(path_basename("~/Music/胡桃音乐"), "胡桃音乐");
+    }
+
+    #[test]
+    fn sidebar_cover_is_deterministic() {
+        let entry = PlaylistEntry {
+            id: "3".into(),
+            name: "深夜循环".into(),
+            subtitle: "12 首".into(),
+        };
+        let a = sidebar_cover(&entry);
+        let b = sidebar_cover(&entry);
+        assert_eq!(a.c1, b.c1);
+        assert_eq!(a.c2, b.c2);
+        assert_eq!(a.name, "深夜循环");
     }
 }

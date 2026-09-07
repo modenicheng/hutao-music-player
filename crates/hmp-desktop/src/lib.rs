@@ -3,12 +3,14 @@
 slint::include_modules!();
 
 pub mod app;
+pub mod backend;
 pub mod bridge;
 pub mod covers;
 pub mod format;
+pub mod library_view;
 pub mod lyrics;
 pub mod mock;
-pub mod player_host;
+pub mod player_bridge;
 pub mod prefs;
 
 pub use app::{

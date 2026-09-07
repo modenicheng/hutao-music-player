@@ -5,7 +5,7 @@
 //! （sticky watch）→ 停服务器 → 清理 socket 后退出。
 //! 单实例由 flock 锁文件保证（final review Finding 6）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::daemon::{Daemon, DaemonConfig};
 use crate::server;
@@ -23,13 +23,19 @@ pub async fn run_background() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 以 `setsid`（util-linux 外部命令）脱离会话启动本可执行文件。
-///
-/// 单一 detach 点：auto-spawn（CLI）与 `serve --background` 都经此脱离
-/// 控制终端/进程组；stdio 置空避免后端输出干扰调用方终端。
 pub fn spawn_detached(args: &[&str]) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
+    spawn_detached_exe(&exe, args)
+}
+
+/// 以 `setsid` 脱离会话启动指定可执行文件（单一 detach 点）。
+///
+/// CLI 以 current_exe（即 `hmp` 自身）调用；桌面端进程是 hmp-desktop，
+/// 解析出 `hmp` 二进制路径后也经此拉起后端。stdio 置空避免后端输出
+/// 干扰调用方终端。
+pub fn spawn_detached_exe(exe: &Path, args: &[&str]) -> std::io::Result<()> {
     std::process::Command::new("setsid")
-        .arg(&exe)
+        .arg(exe)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -159,5 +165,16 @@ mod tests {
     #[test]
     fn background_args_are_backend_neutral() {
         assert_eq!(background_args(), vec!["serve"]);
+    }
+
+    /// spawn_detached_exe 是纯 detach 点：对任意可执行文件路径都能发起
+    /// setsid 启动（子进程立即退出；本函数只验证 spawn 不报错）。
+    #[test]
+    fn spawn_detached_exe_spawns_external_binary() {
+        let exe = Path::new("/bin/true");
+        if !exe.exists() {
+            return; // 环境无 /bin/true 时跳过（setsid 语义已在生产路径覆盖）
+        }
+        spawn_detached_exe(exe, &[]).expect("setsid 启动外部二进制应成功");
     }
 }

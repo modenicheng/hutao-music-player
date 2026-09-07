@@ -6,9 +6,9 @@
 //! --hover 用 Window::dispatch_event 合成 PointerMoved（触发真实 has-hover）；
 //! --bus-hover 直接写 HoverBus（只验证滑块几何，不依赖指针遍历）。
 
-use slint::{ComponentHandle, Global, Model};
+use slint::{ComponentHandle, Global};
 
-use hmp_desktop::{bridge, player_host, prefs};
+use hmp_desktop::{backend, bridge, player_bridge, prefs};
 
 fn parse_route(s: &str) -> Option<hmp_desktop::Route> {
     use hmp_desktop::Route;
@@ -79,6 +79,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     let prefs = std::sync::Arc::new(std::sync::Mutex::new(prefs::load()));
+    let runtime = std::sync::Arc::new(backend::BackendRuntime::new().expect("tokio runtime"));
     let ui = hmp_desktop::AppWindow::new()?;
 
     if let Some(mode) = theme {
@@ -87,7 +88,11 @@ fn main() -> Result<(), slint::PlatformError> {
 
     bridge::load_data(&ui);
     bridge::bind(&ui, std::sync::Arc::clone(&prefs));
-    let _player_host = player_host::PlayerHost::bind(&ui, std::sync::Arc::clone(&prefs));
+    player_bridge::bind(
+        &ui,
+        std::sync::Arc::clone(&runtime),
+        std::sync::Arc::clone(&prefs),
+    );
 
     {
         let nav = hmp_desktop::Nav::get(&ui);
@@ -95,7 +100,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     if playing {
-        // 走回调让 PlayerHost 接管（直接写 global 不会更新 host 内部快照）
+        // 走回调让播放桥下发 Play 请求（直接写 global 不会同步 daemon 状态）
         let player = hmp_desktop::Player::get(&ui);
         let liked = hmp_desktop::Data::get(&ui).get_liked();
         player.invoke_play_tracks(liked, 0);

@@ -3,7 +3,10 @@
 
 /** 曲目表/队列行（SongRef 摊平）。播放态经 Player.queue-current-mid 比对 mid */
 export struct TrackRow {
+    /** 源键：QQ 曲目 = songmid；本地曲目 = `local:<路径>`（PlayRequest 映射用） */
     mid: string,
+    /** 源：0=QQ，1=本地（`hmp_core::PlayRequest` 分流） */
+    source: int,
     title: string,
     /** 展示串："白栖遥 / 陈屿帆"（点击整体跳主歌手页，PORTING.md 决策 5） */
     artists: string,
@@ -32,4 +35,11 @@ export struct FolderRow {
     track-count: int,
     size-text: string,
     last-scan: string,
+}
+
+/** 侧栏歌单条目（名称 + 确定性渐变取色，Rust 侧派生） */
+export struct PlaylistCover {
+    name: string,
+    c1: color,
+    c2: color,
 }

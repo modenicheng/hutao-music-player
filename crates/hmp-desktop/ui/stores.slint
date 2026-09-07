@@ -1,6 +1,6 @@
 // 应用状态 globals（player.ts / qualityStore.ts 的 Slint 对应物）。
 // 状态属性由 Rust 权威写入；回调发命令给 Rust（模拟播放桥，M8 换真实后端）。
-import { TrackRow, CoverCardData, FolderRow } from "data.slint";
+import { TrackRow, CoverCardData, FolderRow, PlaylistCover } from "data.slint";
 
 export global Player {
     // —— 播放状态快照（PlayerStateSnapshot）———
@@ -82,6 +82,9 @@ export global Data {
     in-out property <int> playlist-count;
     in-out property <[CoverCardData]> created-playlists;
     in-out property <[CoverCardData]> favorited-playlists;
+    // —— 侧栏歌单区（宽侧栏分组/窄边栏二级共用同一份真歌单）———
+    in-out property <[PlaylistCover]> sidebar-created;
+    in-out property <[PlaylistCover]> sidebar-favorited;
     in-out property <[TrackRow]> recent-preview;
     // —— 最近播放页 ——
     in-out property <[TrackRow]> recent;

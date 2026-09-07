@@ -2521,6 +2521,7 @@ name = "hmp-desktop"
 version = "0.1.0"
 dependencies = [
  "hmp-core",
+ "hmp-daemon",
  "hmp-media",
  "hmp-mpris",
  "hmp-player",

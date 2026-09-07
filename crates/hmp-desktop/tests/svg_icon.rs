@@ -4,13 +4,23 @@ fn raster(path: &str) {
     let data = std::fs::read(path).unwrap();
     let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default()).unwrap();
     let mut pixmap = resvg::tiny_skia::Pixmap::new(24, 24).unwrap();
-    resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
     println!("== {path}");
     for y in 0..24 {
         let mut line = String::new();
         for x in 0..24 {
             let a = pixmap.data()[(y * 24 + x) * 4 + 3];
-            line.push(if a > 128 { '#' } else if a > 40 { '.' } else { ' ' });
+            line.push(if a > 128 {
+                '#'
+            } else if a > 40 {
+                '.'
+            } else {
+                ' '
+            });
         }
         println!("{line}");
     }
@@ -19,7 +29,11 @@ fn raster(path: &str) {
 #[test]
 fn dump_icons() {
     let base = format!("{}/ui/assets/icons/", env!("CARGO_MANIFEST_DIR"));
-    for name in ["close-rounded.svg", "home-rounded.svg", "expand-more-rounded.svg"] {
+    for name in [
+        "close-rounded.svg",
+        "home-rounded.svg",
+        "expand-more-rounded.svg",
+    ] {
         raster(&format!("{base}{name}"));
     }
 }

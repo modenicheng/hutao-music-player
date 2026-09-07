@@ -156,7 +156,11 @@ fn svg_to_image(svg: &str) -> Image {
     let tree = resvg::usvg::Tree::from_str(svg, &opt).expect("mock svg parses");
     let mut pixmap = resvg::tiny_skia::Pixmap::new(RENDER_SIZE, RENDER_SIZE).expect("pixmap");
     let scale = RENDER_SIZE as f32 / tree.size().width();
-    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
 
     let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(RENDER_SIZE, RENDER_SIZE);
     let src = pixmap.data();

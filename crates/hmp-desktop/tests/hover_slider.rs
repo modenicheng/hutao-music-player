@@ -56,6 +56,32 @@ fn hover_slider_chain_reports_and_clears() {
     ui.window().set_size(slint::PhysicalSize::new(1280, 800));
     hmp_desktop::bridge::load_data(&ui);
 
+    // 侧栏歌单区已接真数据（Data.sidebar-*）：测试环境无库为空 → 手动播种，
+    // 让歌单行 hover 链路的结构覆盖与媒体库数据来源解耦。
+    {
+        let data = hmp_desktop::Data::get(&ui);
+        let color = slint::Color::from_rgb_u8(0x1e, 0x38, 0x5f);
+        data.set_sidebar_created(slint::ModelRc::new(slint::VecModel::from(vec![
+            hmp_desktop::PlaylistCover {
+                name: "测试歌单甲".into(),
+                c1: color,
+                c2: color,
+            },
+            hmp_desktop::PlaylistCover {
+                name: "测试歌单乙".into(),
+                c1: color,
+                c2: color,
+            },
+        ])));
+        data.set_sidebar_favorited(slint::ModelRc::new(slint::VecModel::from(vec![
+            hmp_desktop::PlaylistCover {
+                name: "收藏歌单".into(),
+                c1: color,
+                c2: color,
+            },
+        ])));
+    }
+
     let nav_route = Arc::new(Mutex::new(hmp_desktop::Route::Library));
     {
         let nav_route = Arc::clone(&nav_route);

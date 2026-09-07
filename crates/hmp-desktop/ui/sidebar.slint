@@ -5,12 +5,8 @@ import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, Button, HoverGroup, HoverItem, Scroll } from "primitives.slint";
 import { Nav, Route } from "nav.slint";
-
-export struct PlaylistCover {
-    name: string,
-    c1: color,
-    c2: color,
-}
+import { PlaylistCover } from "data.slint";
+import { Data } from "stores.slint";
 
 export component Sidebar inherits Rectangle {
     /** 窄窗图标栏形态（MainLayout 计算：手动切换优先，跨断点回自动） */
@@ -20,7 +16,7 @@ export component Sidebar inherits Rectangle {
     background: transparent;
     clip: true;
 
-    // —— 我的歌单 mock（与 Vue 版同一份）———
+    // —— 我的歌单（真歌单经 Data 装载；色对为 Rust 侧确定性装饰）———
     // 宽侧栏分组折叠状态
     property <bool> created-open: true;
     property <bool> favorited-open: true;
@@ -403,23 +399,11 @@ export component Sidebar inherits Rectangle {
     }
 
     public pure function slider-covers() -> [PlaylistCover] {
-        if (last-group == 0) {
-            return [
-                {name: "军训结营仪式 备选", c1: #e44b32, c2: #f3b32f},
-                {name: "深夜循环", c1: #1e385f, c2: #d49b60},
-            ];
-        }
-        return [{name: "喜欢的收藏", c1: #7660a4, c2: #ef9d9d}];
+        return last-group == 0 ? Data.sidebar-created : Data.sidebar-favorited;
     }
 
     public pure function playlists-of(group: int) -> [PlaylistCover] {
-        if (group == 0) {
-            return [
-                {name: "军训结营仪式 备选", c1: #e44b32, c2: #f3b32f},
-                {name: "深夜循环", c1: #1e385f, c2: #d49b60},
-            ];
-        }
-        return [{name: "喜欢的收藏", c1: #7660a4, c2: #ef9d9d}];
+        return group == 0 ? Data.sidebar-created : Data.sidebar-favorited;
     }
 }
 

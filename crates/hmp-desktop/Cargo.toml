@@ -12,6 +12,7 @@ slint-build = "1.17"
 
 [dependencies]
 hmp-core = { path = "../hmp-core" }
+hmp-daemon = { path = "../hmp-daemon" }
 hmp-media = { path = "../hmp-media" }
 hmp-mpris = { path = "../hmp-mpris" }
 hmp-player = { path = "../hmp-player" }
@@ -24,7 +25,7 @@ serde_json = { workspace = true }
 # resvg 供 covers.rs 运行时栅格化程序化封面
 slint = "1.17"
 resvg = "0.47"
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
