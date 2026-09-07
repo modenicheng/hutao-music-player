@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hmp_core::{HmpError, LoadRequest, PlaybackState, PlaybackStatus, PlayerCommand, PlayerEvent};
-use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
+use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source, StreamError};
 use stream_download::storage::temp::TempStorageProvider;
 use stream_download::{Settings, StreamDownload};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -15,6 +15,45 @@ use crate::source::{MediaLocation, parse_uri};
 enum LoadCommand {
     Load(Box<LoadRequest>),
     Shutdown,
+}
+
+/// Open the platform default output stream (safe variant).
+///
+/// Deliberately does NOT use [`OutputStreamBuilder::open_default_stream()`]:
+/// on failure that helper falls back to enumerating and opening EVERY output
+/// device (rodio 0.21 `stream.rs`), and cpal's ALSA enumerator really opens
+/// `plughw:N` passthrough PCMs per card (`cpal-0.16 host/alsa/enumerate.rs`,
+/// USB DACs usually being card 0). Opening a passthrough PCM takes the
+/// hardware exclusively behind the system audio server's back, which starves
+/// PipeWire/PulseAudio and makes the device fail/disappear from system audio
+/// controls (2026-09-07 DAWN PRO2 incident). We only ever open the platform
+/// default output; if that fails we refuse to play rather than grab hardware.
+fn open_default_output() -> Result<OutputStream, StreamError> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+
+    let device = rodio::cpal::default_host()
+        .default_output_device()
+        .ok_or(StreamError::NoDevice)?;
+    if cfg!(target_os = "linux") {
+        // The cpal ALSA host names its default device "default"; that PCM is
+        // routed through the system audio server. Any passthrough/card PCM
+        // must never be used as our output.
+        let name = device.name().map_err(|_| StreamError::NoDevice)?;
+        if !is_routed_default_pcm(&name) {
+            tracing::error!(%name, "refusing non-default pcm as audio output");
+            return Err(StreamError::NoDevice);
+        }
+    }
+    OutputStreamBuilder::from_device(device)?.open_stream()
+}
+
+/// Pure output-device policy: does this PCM name route through the system
+/// audio server as the platform default? Only the ALSA `"default"` PCM is
+/// accepted; direct hardware PCMs (`hw:*`, `plughw:*`, `front:*`,
+/// `surround*:*`) and other server plugin names are refused so the player can
+/// never grab exclusive hardware behind PipeWire/PulseAudio.
+fn is_routed_default_pcm(name: &str) -> bool {
+    name == "default"
 }
 
 /// Audio output plus the channels used by all application adapters.
@@ -30,8 +69,11 @@ pub struct PlayerCore {
 impl PlayerCore {
     /// Open the platform default output device.
     pub fn new() -> Result<Self, HmpError> {
-        let output = OutputStreamBuilder::open_default_stream()
-            .map_err(|error| HmpError::Playback(format!("open default audio output: {error}")))?;
+        let output = open_default_output().map_err(|error| {
+            HmpError::Playback(format!(
+                "open default audio output: {error} (no system audio server reachable?)"
+            ))
+        })?;
         let sink = Sink::connect_new(output.mixer());
         Ok(Self::from_sink(sink, Some(output)))
     }
@@ -274,4 +316,35 @@ async fn drive(
         }
     }
     sink.stop();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_routed_default_pcm;
+
+    /// 输出设备安全策略：只允许经系统音频服务器路由的 "default" PCM。
+    /// 回归守护：防止再次引入"枚举/直通设备 fallback"而独占硬件
+    /// （2026-09-07 DAWN PRO2 被抢事件）。
+    #[test]
+    fn output_policy_accepts_only_routed_default_pcm() {
+        assert!(is_routed_default_pcm("default"));
+    }
+
+    #[test]
+    fn output_policy_refuses_hardware_passthrough_and_plugins() {
+        for name in [
+            "hw:0",
+            "plughw:0",
+            "plughw:2",
+            "front:0",
+            "front:CARD=PRO2,DEV=0",
+            "surround51:0",
+            "pipewire",
+            "pulse",
+            "jack",
+            "",
+        ] {
+            assert!(!is_routed_default_pcm(name), "{name} must be refused");
+        }
+    }
 }
