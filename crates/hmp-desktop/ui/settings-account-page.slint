@@ -68,6 +68,7 @@ export component SettingsAccountPage inherits Rectangle {
 
                     Text {
                         text: Data.account-state == 0 ? "读取账号状态中…"
+                            : Data.account-state == 2 ? "守护进程不可达"
                             : Data.account-logged-in ? Data.account-nickname
                             : "未登录";
                         color: Theme.foreground;
@@ -76,6 +77,7 @@ export component SettingsAccountPage inherits Rectangle {
                     }
                     Text {
                         text: Data.account-state == 0 ? "正在向守护进程查询"
+                            : Data.account-state == 2 ? "启动 hmp 守护进程后重进此页"
                             : Data.account-logged-in ? "QQ 音乐 · 已登录"
                             : "登录后可同步云端歌单与收藏";
                         color: Theme.muted-foreground;
@@ -114,7 +116,7 @@ export component SettingsAccountPage inherits Rectangle {
             }
             FactRow {
                 label: "数据来源";
-                value: "守护进程 AccountStatus 接口";
+                value: Data.account-state == 2 ? "守护进程不可达" : "守护进程 AccountStatus 接口";
             }
         }
 

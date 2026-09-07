@@ -563,10 +563,21 @@ pub fn bind(
     }
 
     // ——— 账号状态（daemon AccountStatus IPC；设置页账号面板）———
+    // daemon 冷启动（连接失败）时重试：首次连接由订阅循环 connect_or_spawn
+    // 拉起 daemon 需 ~1-3s，这里的小重试覆盖该窗口；彻底离线 → 专属失败态
+    // （区别于"未登录"，不误导用户去重新登录）。
     {
         let ui_weak: Weak<AppWindow> = ui.as_weak();
         runtime.spawn(async move {
-            let result = crate::backend::request(hmp_core::Request::AccountStatus).await;
+            let mut result = Err(crate::backend::BackendError::NoBackendBinary);
+            for _ in 0..4 {
+                result = crate::backend::request(hmp_core::Request::AccountStatus).await;
+                if matches!(result, Ok(hmp_core::Response::AccountStatus(_))) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            }
+            let online = matches!(result, Ok(hmp_core::Response::AccountStatus(_)));
             let apply = move || {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
@@ -578,7 +589,7 @@ pub fn bind(
                     data.set_account_uin(info.uin.clone().into());
                     data.set_account_vip(info.vip_summary.clone().into());
                 }
-                data.set_account_state(1);
+                data.set_account_state(if online { 1 } else { 2 });
             };
             let _ = slint::invoke_from_event_loop(apply);
         });

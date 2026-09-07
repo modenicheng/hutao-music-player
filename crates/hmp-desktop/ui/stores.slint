@@ -144,7 +144,7 @@ export global Data {
     in-out property <int> search-count: 0;
     callback search(string);
     // —— 账号（设置页；daemon AccountStatus IPC）———
-    /** 0=读取中 1=已读 */
+    /** 0=读取中 1=已读 2=离线失败（daemon 不可达，区别于未登录） */
     in-out property <int> account-state: 0;
     in-out property <bool> account-logged-in: false;
     in-out property <string> account-nickname: "";
