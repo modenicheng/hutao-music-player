@@ -19,7 +19,7 @@ fn row() -> TrackRow {
 #[test]
 fn migration_creates_v1() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 4); // v4：扫描/歌单热路径索引
+    assert_eq!(db.version().unwrap(), 5); // v5：本地意图幽灵行合并
     let mut db = db;
     assert_eq!(db.track_id("qq", "mid123").unwrap(), None);
 }
@@ -169,7 +169,7 @@ fn migration_v2_migrates_favorites_into_relations() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        5
     );
     // favorites 表已删除；数据在 relations（track/liked，synced）。
     let count: i64 = conn
@@ -638,7 +638,7 @@ fn mark_pending_with_delete_op_rolls_back_on_op_failure() {
 #[test]
 fn migration_v3_adds_columns_and_tables() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 4);
+    assert_eq!(db.version().unwrap(), 5);
     let cols: Vec<String> = db
         .conn
         .prepare("PRAGMA table_info(local_files)")
@@ -712,7 +712,7 @@ fn migration_v2_to_v3_upgrades_in_place() {
         .conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 4);
+    assert_eq!(v, 5);
     db.conn
         .execute("UPDATE tracks SET genre='Rock' WHERE id=1", [])
         .unwrap();
@@ -962,4 +962,181 @@ fn local_playlist_stubs_lists_ordered_tracks() {
     assert_eq!(rows[1].source_key, "local:/a.mp3");
     // 不存在 → 空列表。
     assert!(db.local_playlist_stubs(999).unwrap().is_empty());
+}
+
+/// 回归（M8 桌面接线发现的幽灵行 bug）：收藏/歌单写路径给非 canonical
+/// `local:<path>`（symlink/旧挂载点）时，必须归一到与扫描器同一键，
+/// 否则同一文件在 tracks 里两行、列表富化失联。
+#[test]
+fn local_intent_writes_normalize_to_canonical_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.wav");
+    std::fs::write(&real, b"x").unwrap();
+    let alias_dir = dir.path().join("alias");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.path(), &alias_dir).unwrap();
+    #[cfg(not(unix))]
+    let _ = alias_dir;
+    #[cfg(unix)]
+    {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let meta = crate::local::LocalMeta {
+            title: "真实标题".into(),
+            ..Default::default()
+        };
+        let tid = db.add_local_file(&real, Some(&meta)).unwrap();
+        let alias_key = format!("local:{}", alias_dir.join("real.wav").display());
+        assert_ne!(alias_key, format!("local:{}", real.display()));
+
+        db.add_favorite("local", &alias_key, &alias_key).unwrap();
+        // 单行：意图 upsert 落在扫描行上，不产生幽灵
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE source = 'local'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "意图写必须与扫描行合并");
+        // relation 记在规范键上，且标题未被键名踩掉
+        assert_eq!(
+            db.relation_desired("track", "local", &alias_key, "liked")
+                .unwrap(),
+            Some(true)
+        );
+        let title: String = db
+            .conn
+            .query_row(
+                "SELECT title FROM tracks WHERE id = ?1",
+                params![tid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "真实标题");
+    }
+}
+
+/// 意图方以键代标题时不得踩掉已有元数据（COALESCE 语义的标题特例）。
+#[test]
+fn upsert_intent_title_does_not_stomp_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("song.wav");
+    std::fs::write(&path, b"x").unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let meta = crate::local::LocalMeta {
+        title: "真标题".into(),
+        ..Default::default()
+    };
+    db.add_local_file(&path, Some(&meta)).unwrap();
+    let key = format!("local:{}", path.display());
+    db.upsert_track(&TrackRow {
+        source: "local",
+        source_key: key.clone(),
+        title: key.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    let title: String = db
+        .conn
+        .query_row(
+            "SELECT title FROM tracks WHERE source='local' AND source_key=?1",
+            params![key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(title, "真标题");
+}
+
+/// v5 迁移：既有库里的幽灵行（非 canonical 键 + 无 local_files）合并进
+/// 扫描行，relations/歌单链接跟随重指向，幽灵行删除。幂等。
+#[test]
+fn merge_ghost_local_tracks_remaps_relations_and_playlists() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("song.wav");
+    std::fs::write(&real, b"x").unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let meta = crate::local::LocalMeta {
+        title: "真标题".into(),
+        ..Default::default()
+    };
+    let tid = db.add_local_file(&real, Some(&meta)).unwrap();
+    let canon_key = format!("local:{}", real.display());
+
+    // 直接造 pre-fix 形态的幽灵（API 现已归一化，只能 raw SQL 造）
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.path(), dir.path().join("alias")).unwrap();
+    let ghost_key = format!(
+        "local:{}",
+        dir.path().join("alias").join("song.wav").display()
+    );
+    db.conn
+        .execute(
+            "INSERT INTO tracks (source, source_key, title) VALUES ('local', ?1, ?1)",
+            params![ghost_key],
+        )
+        .unwrap();
+    let gid: i64 = db
+        .conn
+        .query_row(
+            "SELECT id FROM tracks WHERE source='local' AND source_key=?1",
+            params![ghost_key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO relations (entity_type, provider, entity_key, relation, \
+             desired_state, sync_state, updated_at) \
+             VALUES ('track','local',?1,'liked',1,'synced',0)",
+            params![ghost_key],
+        )
+        .unwrap();
+    db.create_playlist("深夜循环").unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at) \
+             VALUES (1, ?1, 0, 0)",
+            params![gid],
+        )
+        .unwrap();
+
+    db.merge_ghost_local_tracks().unwrap();
+
+    // 幽灵删除、行数回到 1；relation 与歌单链接都指向扫描行
+    let count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM tracks WHERE source = 'local'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(
+        db.relation_desired("track", "local", &canon_key, "liked")
+            .unwrap(),
+        Some(true)
+    );
+    let linked: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM playlist_tracks WHERE track_id = ?1",
+            params![tid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(linked, 1);
+    // 幂等：再跑一遍零变化
+    db.merge_ghost_local_tracks().unwrap();
+    assert_eq!(
+        db.conn
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE source='local'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
 }

@@ -300,13 +300,23 @@ impl LibraryDb {
         self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))
     }
 
+    /// v5 迁移步骤（幂等）：合并本地意图幽灵行（见 [`merge_ghost_local_tracks`]）。
+    /// 独立暴露供迁移测试直接驱动。
+    pub fn merge_ghost_local_tracks(&mut self) -> rusqlite::Result<()> {
+        merge_ghost_local_tracks(&self.conn)
+    }
+
     /// 幂等写入/更新曲目元数据；返回 track id。
     pub fn upsert_track(&mut self, t: &TrackRow) -> rusqlite::Result<i64> {
+        let source_key = canonical_local_key(t.source, &t.source_key);
         self.conn.execute(
             r#"INSERT INTO tracks (source, source_key, title, album, artist, duration_ms, cover_uri, album_artist, track_number, disc_number, year, genre)
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                ON CONFLICT(source, source_key) DO UPDATE SET
-                 title = excluded.title,
+                 title = CASE
+                   -- 意图方不知真实标题时以（原始）键代之，不得踩掉已有元数据
+                   WHEN excluded.title = ?13 THEN tracks.title
+                   ELSE excluded.title END,
                  album = COALESCE(excluded.album, tracks.album),
                  artist = COALESCE(excluded.artist, tracks.artist),
                  duration_ms = COALESCE(excluded.duration_ms, tracks.duration_ms),
@@ -318,7 +328,7 @@ impl LibraryDb {
                  genre = COALESCE(excluded.genre, tracks.genre)"#,
             params![
                 t.source,
-                t.source_key,
+                source_key,
                 t.title,
                 t.album,
                 t.artist,
@@ -328,12 +338,13 @@ impl LibraryDb {
                 t.track_number,
                 t.disc_number,
                 t.year,
-                t.genre
+                t.genre,
+                t.source_key
             ],
         )?;
         self.conn.query_row(
             "SELECT id FROM tracks WHERE source = ?1 AND source_key = ?2",
-            params![t.source, t.source_key],
+            params![t.source, source_key],
             |r| r.get(0),
         )
     }
@@ -1154,6 +1165,7 @@ impl LibraryDb {
         relation: &str,
         desired: bool,
     ) -> rusqlite::Result<()> {
+        let entity_key = canonical_local_key(provider, entity_key);
         let now = now_unix();
         let desired = i64::from(desired);
         // 已同步且与远端一致 → 仅刷新时间戳，不进 outbox。
@@ -1193,6 +1205,7 @@ impl LibraryDb {
         entity_key: &str,
         relation: &str,
     ) -> rusqlite::Result<Option<bool>> {
+        let entity_key = canonical_local_key(provider, entity_key);
         let v: Option<i64> = self
             .conn
             .query_row(
@@ -1224,6 +1237,7 @@ impl LibraryDb {
         entity_key: &str,
         relation: &str,
     ) -> rusqlite::Result<()> {
+        let entity_key = canonical_local_key(provider, entity_key);
         self.conn.execute(
             "UPDATE relations SET sync_state='synced', retry_count=0, last_sync_error=NULL, \
              last_remote_state=desired_state, updated_at=?1 \
@@ -1892,6 +1906,24 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// 本地键规范形：`local:<canonical path>`（与扫描器、播放身份同一约定，
+/// daemon local.rs P1 同款语义）。请求侧可能给非 canonical 路径（symlink、
+/// 旧挂载点拼写），不归一会让同一文件在 tracks 里长出第二条（扫描行 +
+/// 意图幽灵行），收藏/歌单/历史全部错位。文件暂不存在（离线盘/先藏后扫）
+/// 时保留原样，待文件出现后由写路径与 v3 迁移收敛。
+fn canonical_local_key(provider: &str, key: &str) -> String {
+    if provider != "local" {
+        return key.to_owned();
+    }
+    match key.strip_prefix("local:") {
+        Some(path) => match std::fs::canonicalize(path) {
+            Ok(c) => format!("local:{}", c.display()),
+            Err(_) => key.to_owned(),
+        },
+        None => key.to_owned(),
+    }
+}
+
 /// v3：本地媒体库域（里程碑 E）——local_files 文件生命周期列
 /// （mtime_ns/指纹/扫描代际/missing/scan_root）+ tracks 完整元数据列 +
 /// 多艺术家表 + 扫描根表。
@@ -1927,6 +1959,75 @@ const MIGRATION_V4: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_local_files_fingerprint ON local_files(fingerprint);
 CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist ON playlist_tracks(playlist_id);
 "#;
+
+/// v5：合并本地意图幽灵行。写路径归一化（`canonical_local_key`）落地前，
+/// 收藏/歌单写曾以非 canonical `local:<path>` upsert 出与扫描行并存的
+/// 幽灵 tracks 行（无 local_files、标题=键、无元数据），relations/歌单
+/// 链接指向幽灵。本迁移把可 canonical 化的幽灵合入对应扫描行后删除幽灵。
+/// 幂等：无幽灵（或路径已不存在/目标扫描行缺失）时零写入。
+pub(crate) fn merge_ghost_local_tracks(conn: &Connection) -> rusqlite::Result<()> {
+    let ghosts: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.source_key FROM tracks t \
+             WHERE t.source = 'local' AND t.source_key LIKE 'local:%' \
+             AND NOT EXISTS (SELECT 1 FROM local_files lf WHERE lf.track_id = t.id)",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (gid, key) in ghosts {
+        let Some(path) = key.strip_prefix("local:") else {
+            continue;
+        };
+        let Ok(c) = std::fs::canonicalize(path) else {
+            continue;
+        };
+        let canon = format!("local:{}", c.display());
+        if canon == key {
+            continue;
+        }
+        // 目标扫描行必须存在；文件从未正式入库 → 保留幽灵等下次扫描收敛。
+        let target: Option<i64> = conn
+            .query_row(
+                "SELECT t.id FROM tracks t WHERE t.source = 'local' AND t.source_key = ?1 \
+                 AND EXISTS (SELECT 1 FROM local_files lf WHERE lf.track_id = t.id)",
+                params![canon],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(tid) = target else { continue };
+        // relations：意图搬到规范键；规范键已有同 relation 行则弃幽灵保既有。
+        let rels: Vec<(String, i64)> = {
+            let mut stmt = conn.prepare(
+                "SELECT relation, desired_state FROM relations \
+                 WHERE entity_type = 'track' AND provider = 'local' AND entity_key = ?1",
+            )?;
+            let rows = stmt.query_map(params![key], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (relation, desired) in rels {
+            conn.execute(
+                "INSERT INTO relations (entity_type, provider, entity_key, relation, \
+                 desired_state, sync_state, last_remote_state, updated_at) \
+                 VALUES ('track', 'local', ?1, ?2, ?3, 'synced', ?3, ?4) \
+                 ON CONFLICT(entity_type, provider, entity_key, relation) DO NOTHING",
+                params![canon, relation, desired, now_unix()],
+            )?;
+            conn.execute(
+                "DELETE FROM relations WHERE entity_type = 'track' AND provider = 'local' \
+                 AND entity_key = ?1 AND relation = ?2",
+                params![key, relation],
+            )?;
+        }
+        // 歌单链接重指向（表无 (playlist_id, track_id) 唯一约束，直接 UPDATE）。
+        conn.execute(
+            "UPDATE playlist_tracks SET track_id = ?1 WHERE track_id = ?2",
+            params![tid, gid],
+        )?;
+        conn.execute("DELETE FROM tracks WHERE id = ?1", params![gid])?;
+    }
+    Ok(())
+}
 
 /// 逐级迁移到最新 user_version。
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
@@ -1985,6 +2086,22 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         let result = (|| -> rusqlite::Result<()> {
             conn.execute_batch(MIGRATION_V4)?;
             conn.pragma_update(None, "user_version", 4)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+    }
+    if current < 5 {
+        // v5（Rust 迁移，需 fs::canonicalize）：合并本地意图幽灵行到扫描行。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            merge_ghost_local_tracks(conn)?;
+            conn.pragma_update(None, "user_version", 5)?;
             Ok(())
         })();
         match result {
