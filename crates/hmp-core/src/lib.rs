@@ -22,9 +22,9 @@ pub use auth::CredentialSummary;
 pub use error::HmpError;
 pub use id::{AlbumId, ArtistId, PlaylistId, TrackId};
 pub use ipc::{
-    CommentItem, CommentPage, DaemonState, EnginePhase, ErrorInfo, Event, IpcErrorCode,
-    PlayRequest, PlaylistWriteOp, QueueEntry, QueuePage, Request, Response, TrackProvider,
-    TrackRef,
+    AccountInfo, CommentItem, CommentPage, DaemonState, EnginePhase, ErrorInfo, Event,
+    IpcErrorCode, LyricPage, PlayRequest, PlaylistWriteOp, QualityPrefDto, QueueEntry, QueuePage,
+    Request, Response, SearchAlbum, SearchPage, SearchSinger, SearchSong, TrackProvider, TrackRef,
 };
 pub use media::{Album, AlbumRef, ArtistRef, AudioQuality, CoverRef, Playlist, Track, TrackStub};
 pub use player::{

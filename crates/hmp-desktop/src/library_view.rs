@@ -470,11 +470,19 @@ fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
                     folder: None,
                 },
             },
-            None => song_row_from_qq(&row.source_key, row.title.clone(), qq_meta.get(&row.source_key)),
+            None => song_row_from_qq(
+                &row.source_key,
+                row.title.clone(),
+                qq_meta.get(&row.source_key),
+            ),
         })
         .collect();
     let total_ms: u64 = tracks.iter().map(|r| r.duration_ms.max(0) as u64).sum();
-    Some(PlaylistDetail { name, tracks, total_ms })
+    Some(PlaylistDetail {
+        name,
+        tracks,
+        total_ms,
+    })
 }
 
 /// 专辑详情：按专辑名（大小写不敏感精确）取本地曲目（track_number 序）；
@@ -565,15 +573,27 @@ fn artist_detail_from(db: &mut LibraryDb, param: &str) -> Option<ArtistDetail> {
     }
     // 年份降序、缺年份垫底，同年按名稳定序（发行时间线阅读顺序）。
     albums.sort_by(|a, b| {
-        let year_of = |text: &str| if text == "—" { i64::MIN } else { text.parse().unwrap_or(i64::MIN) };
-        year_of(&b.year_text).cmp(&year_of(&a.year_text)).then_with(|| a.name.cmp(&b.name))
+        let year_of = |text: &str| {
+            if text == "—" {
+                i64::MIN
+            } else {
+                text.parse().unwrap_or(i64::MIN)
+            }
+        };
+        year_of(&b.year_text)
+            .cmp(&year_of(&a.year_text))
+            .then_with(|| a.name.cmp(&b.name))
     });
     let cover_map = album_covers;
     let track_rows: Vec<SongRow> = tracks
         .iter()
         .map(|t| song_row_from_local(t, &cover_map))
         .collect();
-    Some(ArtistDetail { name, tracks: track_rows, albums })
+    Some(ArtistDetail {
+        name,
+        tracks: track_rows,
+        albums,
+    })
 }
 
 // ————————————————————————————————————————————————————————————
@@ -995,8 +1015,11 @@ mod tests {
         let mut db = LibraryDb::open_in_memory().unwrap();
         let dir = test_dir("pl-detail");
         let f = dir.join("a.flac");
-        db.add_local_file(&f, Some(&meta("夜曲", "周杰伦", "十一月的萧邦", 180_000, "flac")))
-            .unwrap();
+        db.add_local_file(
+            &f,
+            Some(&meta("夜曲", "周杰伦", "十一月的萧邦", 180_000, "flac")),
+        )
+        .unwrap();
         let key = format!("local:{}", f.display());
         db.upsert_track(&hmp_storage::TrackRow {
             source: "qq",
@@ -1031,10 +1054,16 @@ mod tests {
         let dir = test_dir("album-detail");
         let a = dir.join("a.flac");
         let b = dir.join("b.mp3");
-        db.add_local_file(&a, Some(&meta("夜曲", "周杰伦", "十一月的萧邦", 180_000, "flac")))
-            .unwrap();
-        db.add_local_file(&b, Some(&meta("发如雪", "周杰伦", "十一月的萧邦", 200_000, "mp3")))
-            .unwrap();
+        db.add_local_file(
+            &a,
+            Some(&meta("夜曲", "周杰伦", "十一月的萧邦", 180_000, "flac")),
+        )
+        .unwrap();
+        db.add_local_file(
+            &b,
+            Some(&meta("发如雪", "周杰伦", "十一月的萧邦", 200_000, "mp3")),
+        )
+        .unwrap();
         db.set_track_cover(
             &format!("local:{}", a.display()),
             "file:///covers/november.jpg",

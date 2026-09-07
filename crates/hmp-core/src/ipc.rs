@@ -178,6 +178,36 @@ pub enum Request {
     Subscribe,
     /// 播放 URI（MPRIS `OpenUri`；`file://` → 本地，其余 → 内部错误）。
     OpenUri(String),
+    /// 跳到队列 0 基位置曲目播放（不替换队列；AUDIT §8.8）。
+    /// 曲目级凭证拦截与 Play 同语义（QQ 曲目在 resolve_track 时判）。
+    QueuePlayAt(usize),
+    /// 快速搜索（免登录 smartbox；daemon 统一出网，AUDIT §8.2）。
+    Search {
+        /// 关键词。
+        keyword: String,
+    },
+    /// 歌词读取（LRC 文本 + 翻译；daemon 出网并解析 song_type，AUDIT §8.3）。
+    LyricGet {
+        /// 曲目 mid。
+        mid: String,
+    },
+    /// 账号状态读（登录态 + 昵称/uin/VIP 摘要；AUDIT §8.6）。
+    AccountStatus,
+    /// 音质偏好读（config.toml `[quality]`）。
+    QualityGet,
+    /// 音质偏好写（daemon 落 config.toml；UI 只发意图，AUDIT §8.7）。
+    QualitySet {
+        /// `"auto"` 或音质别名（`master`/`hires`/`atmos`/`flac`/`aac`/`320`/`128`）。
+        mode: String,
+        /// 是否允许降级回退。
+        fallback: bool,
+    },
+    /// QQ 封面取本地产物：daemon 下载进 `<data_dir>/covers/` 缓存，
+    /// 返回 `file://` 路径（UI 禁 HTTP；AUDIT §8.4）。
+    CoverGet {
+        /// 远程封面 URL。
+        url: String,
+    },
     /// 优雅退出后端。
     Quit,
 }
@@ -203,13 +233,30 @@ pub enum Response {
     Created(i64),
     /// `CommentList` 的响应。
     CommentList(CommentPage),
+    /// `Search` 的响应。
+    Search(SearchPage),
+    /// `LyricGet` 的响应。
+    Lyric(LyricPage),
+    /// `AccountStatus` 的响应。
+    AccountStatus(AccountInfo),
+    /// `QualityGet` / `QualitySet` 的响应。
+    Quality(QualityPrefDto),
+    /// `CoverGet` 的响应（`file://` 本地路径）。
+    Cover(String),
 }
 
 /// 订阅后的事件推送。
+///
+/// `StateChanged(DaemonState)` 较大（含完整播放状态快照），与轻量单位
+/// 变体并存属协议设计使然（跨进程按值传递；禁 box 化破坏锁定签名）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// 复合状态变更（初始订阅即推一次当前快照）。
     StateChanged(DaemonState),
+    /// 媒体库内容变更（扫描/监听/reconcile/写命令落库后触发；
+    /// 客户端按直读契约重查 sqlite，AUDIT §8.9）。
+    LibraryChanged,
 }
 
 /// 后端复合状态（单一状态出口，spec §4.2 `daemon.rs`）。
@@ -293,6 +340,74 @@ pub struct CommentPage {
     /// 评论总数。
     pub total: i64,
     pub comments: Vec<CommentItem>,
+}
+
+/// 快速搜索单曲结果（smartbox 窄投影）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SearchSong {
+    /// songmid。
+    pub mid: String,
+    /// 歌曲名。
+    pub name: String,
+    /// 歌手名（单一展示串）。
+    pub singer: String,
+}
+
+/// 快速搜索专辑结果。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SearchAlbum {
+    /// albummid。
+    pub mid: String,
+    pub name: String,
+    /// 歌手名。
+    pub singer: String,
+}
+
+/// 快速搜索歌手结果。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SearchSinger {
+    /// singermid。
+    pub mid: String,
+    pub name: String,
+}
+
+/// 搜索页（歌曲/专辑/歌手三组）。
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct SearchPage {
+    pub songs: Vec<SearchSong>,
+    pub albums: Vec<SearchAlbum>,
+    pub singers: Vec<SearchSinger>,
+}
+
+/// 歌词页（原始 LRC 文本；解析在客户端——桌面 lyrics.rs 复用）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LyricPage {
+    /// 原始歌词（LRC 文本，daemon 侧已解密 QRC）。
+    pub lyric: String,
+    /// 翻译歌词（LRC 文本；无翻译为空）。
+    pub translation: String,
+}
+
+/// 账号状态（展示投影；未登录时仅 `logged_in=false` 有意义）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AccountInfo {
+    /// 是否已登录（凭证存在且有效）。
+    pub logged_in: bool,
+    /// 昵称（拉取失败回退 "QQ {uin}"）。
+    pub nickname: String,
+    /// QQ 号。
+    pub uin: String,
+    /// VIP 摘要（如 "VIP 至 2027-01-01"；拉取失败为空）。
+    pub vip_summary: String,
+}
+
+/// 音质偏好（config.toml `[quality]` 的 IPC 形态）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct QualityPrefDto {
+    /// `"auto"` 或音质别名。
+    pub mode: String,
+    /// 是否允许降级回退。
+    pub fallback: bool,
 }
 
 /// 队列分页条目（纯 ID + 位置；标题/歌手由客户端经媒体库批量投影，
@@ -449,6 +564,20 @@ mod tests {
             Request::Command(PlayerCommand::Seek(std::time::Duration::from_secs(30))),
             Request::Status,
             Request::Subscribe,
+            Request::QueuePlayAt(3),
+            Request::Search {
+                keyword: "夜曲".into(),
+            },
+            Request::LyricGet { mid: "m".into() },
+            Request::AccountStatus,
+            Request::QualityGet,
+            Request::QualitySet {
+                mode: "flac".into(),
+                fallback: true,
+            },
+            Request::CoverGet {
+                url: "https://y.gtimg.cn/a.jpg".into(),
+            },
             Request::Quit,
         ];
         for req in reqs {
@@ -513,6 +642,55 @@ mod tests {
             let back: Response = decode_frame(&frame).unwrap();
             assert_eq!(back, resp);
         }
+    }
+
+    /// M8 后续新增的读响应与事件往返（Search/Lyric/AccountStatus/Quality/
+    /// Cover/LibraryChanged）。
+    #[test]
+    fn extended_read_responses_and_events_roundtrip() {
+        let search = SearchPage {
+            songs: vec![SearchSong {
+                mid: "0039MnYb0qxYhV".into(),
+                name: "夜曲".into(),
+                singer: "周杰伦".into(),
+            }],
+            albums: vec![SearchAlbum {
+                mid: "a".into(),
+                name: "十一月的萧邦".into(),
+                singer: "周杰伦".into(),
+            }],
+            singers: vec![SearchSinger {
+                mid: "s".into(),
+                name: "周杰伦".into(),
+            }],
+        };
+        let resps = vec![
+            Response::Search(search),
+            Response::Lyric(LyricPage {
+                lyric: "[00:01.00]test".into(),
+                translation: String::new(),
+            }),
+            Response::AccountStatus(AccountInfo {
+                logged_in: true,
+                nickname: "胡桃".into(),
+                uin: "10001".into(),
+                vip_summary: "VIP".into(),
+            }),
+            Response::Quality(QualityPrefDto {
+                mode: "auto".into(),
+                fallback: true,
+            }),
+            Response::Cover("file:///home/u/.local/share/hmp/covers/abc.jpg".into()),
+        ];
+        for resp in resps {
+            let frame = encode_frame(&resp).unwrap();
+            let back: Response = decode_frame(&frame).unwrap();
+            assert_eq!(back, resp);
+        }
+        let ev = Event::LibraryChanged;
+        let frame = encode_frame(&ev).unwrap();
+        let back: Event = decode_frame(&frame).unwrap();
+        assert_eq!(back, Event::LibraryChanged);
     }
 
     #[test]

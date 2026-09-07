@@ -68,6 +68,12 @@ fn requires_credential(req: &Request) -> bool {
     }
 }
 
+/// 音质别名合法（`auto` 或 `AudioQuality` 别名；守护不认识的模式直接拒绝，
+/// 避免 config.toml 落入损坏值——load 时会整体回默认）。
+fn quality_alias_valid(mode: &str) -> bool {
+    mode == "auto" || hmp_core::AudioQuality::from_alias(mode).is_some()
+}
+
 /// 单连接处理：请求/响应循环 + 订阅事件推送（reader 任务 + channel 并发版）。
 ///
 /// 帧读取剥离到独立 reader 任务（阻塞 `read_frame`，逐帧经 channel 投递），
@@ -116,6 +122,11 @@ async fn handle_connection(stream: UnixStream, mut handle: EngineHandle) -> std:
                 _ = handle.state_rx.changed(), if subscribed => {
                     let ev = Event::StateChanged(handle.state_rx.borrow().clone());
                     write_frame(&mut wr, &ev).await?;
+                }
+                // 库变更代际推进 → 轻量事件（客户端按直读契约重查 sqlite）。
+                _ = handle.library_rx.changed(), if subscribed => {
+                    handle.library_rx.borrow_and_update();
+                    write_frame(&mut wr, &Event::LibraryChanged).await?;
                 }
             }
         }
@@ -209,6 +220,8 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             });
             let resp = match result {
                 Some(Ok(())) => {
+                    // 收藏写落库 → 媒体库内容变更（客户端刷新"我喜欢"等页）。
+                    handle.library_tx.send_modify(|g| *g += 1);
                     if !is_local {
                         if let Some(h) = &handle.sync_handle {
                             h.trigger();
@@ -331,6 +344,8 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 });
             let resp = match result {
                 Some(Ok(Some(id))) => {
+                    // 歌单结构落库 → 媒体库内容变更。
+                    handle.library_tx.send_modify(|g| *g += 1);
                     if trigger_sync {
                         if let Some(h) = &handle.sync_handle {
                             h.trigger();
@@ -339,6 +354,7 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                     Response::Created(id)
                 }
                 Some(Ok(None)) => {
+                    handle.library_tx.send_modify(|g| *g += 1);
                     if trigger_sync {
                         if let Some(h) = &handle.sync_handle {
                             h.trigger();
@@ -435,6 +451,103 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 None => Response::Err {
                     code: IpcErrorCode::Internal,
                     message: "comment service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        // —— 内容读服务（AUDIT §8.2/8.3/8.6/8.4：daemon 持凭证统一出网）———
+        Ok(Request::Search { keyword }) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.search(&keyword).await {
+                    Ok(page) => Response::Search(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::LyricGet { mid }) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.lyric(&mid).await {
+                    Ok(page) => Response::Lyric(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::AccountStatus) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.account_status().await {
+                    Ok(info) => Response::AccountStatus(info),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::CoverGet { url }) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.cover(&url).await {
+                    Ok(path) => Response::Cover(path),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        // —— 音质偏好（AUDIT §8.7：daemon 落 config.toml，UI 只发意图）———
+        Ok(Request::QualityGet) => {
+            let q = hmp_storage::Config::load().quality;
+            let resp = Response::Quality(hmp_core::QualityPrefDto {
+                mode: q.mode,
+                fallback: q.fallback,
+            });
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::QualitySet { mode, fallback }) => {
+            let resp = match quality_alias_valid(&mode) {
+                true => {
+                    let mut config = hmp_storage::Config::load();
+                    config.quality = hmp_storage::QualityPref { mode, fallback };
+                    match config.save() {
+                        Ok(()) => {
+                            // daemon 每曲解析时重读 config，此处无需失效通知。
+                            Response::Ok
+                        }
+                        Err(e) => Response::Err {
+                            code: IpcErrorCode::Internal,
+                            message: e.to_string(),
+                        },
+                    }
+                }
+                false => Response::Err {
+                    code: IpcErrorCode::BadRequest,
+                    message: format!("unknown quality mode: {mode}"),
                 },
             };
             write_frame(wr, &resp).await?;
@@ -826,6 +939,102 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// 内容读服务未注入（测试引擎）→ 诚实报"不可用"，不静默成功。
+    #[tokio::test]
+    async fn content_reads_report_unavailable_without_service() {
+        let (sock, listener) = temp_socket().await;
+        let handle = test_engine(true).await;
+        tokio::spawn(async move { serve(listener, handle).await });
+        for req in [
+            Request::Search {
+                keyword: "x".into(),
+            },
+            Request::LyricGet { mid: "m".into() },
+            Request::AccountStatus,
+            Request::CoverGet {
+                url: "https://y.gtimg.cn/a.jpg".into(),
+            },
+        ] {
+            let resp = request(&sock, &req).await;
+            assert!(
+                matches!(resp, Response::Err { ref message, .. } if message.contains("unavailable")),
+                "未注入服务应报不可用: {req:?} → {resp:?}"
+            );
+        }
+    }
+
+    /// 收藏写落库 → 订阅端收到 `LibraryChanged`（AUDIT §8.9）。
+    #[tokio::test]
+    async fn favorite_write_pushes_library_changed() {
+        let (sock, listener) = temp_socket().await;
+        let (state_tx, _) = watch::channel(PlaybackState::default());
+        let (events_tx, _) = broadcast::channel(16);
+        let driver = Arc::new(SDriver {
+            state_tx,
+            events_tx,
+        });
+        let library = Arc::new(Mutex::new(
+            hmp_storage::LibraryDb::open_in_memory().unwrap(),
+        ));
+        let handle = PlaybackEngine::start_with_library(
+            driver,
+            Arc::new(SResolver),
+            Arc::new(|| true),
+            Some(library.clone()),
+            None,
+        );
+        let mut handle = handle;
+        handle.library = Some(library);
+        tokio::spawn(async move { serve(listener, handle).await });
+
+        // 连接 A 订阅；连接 B 写收藏 → A 收到 LibraryChanged。
+        let mut sub = UnixStream::connect(&sock).await.unwrap();
+        sub.write_all(&encode_frame(&Request::Subscribe).unwrap())
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 65536];
+        let n = sub.read(&mut buf).await.unwrap();
+        assert!(matches!(
+            decode_frame::<Event>(&buf[..n]).unwrap(),
+            Event::StateChanged(_)
+        ));
+        let resp = request(
+            &sock,
+            &Request::Favorite {
+                source: "local".into(),
+                key: "local:/tmp/a.flac".into(),
+                title: "a".into(),
+                desired: true,
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Ok));
+
+        let mut saw_library_changed = false;
+        for _ in 0..4 {
+            let read = tokio::time::timeout(std::time::Duration::from_secs(2), sub.read(&mut buf))
+                .await
+                .expect("库变更事件未推送（超时）");
+            let n = read.expect("读事件失败");
+            if let Event::LibraryChanged = decode_frame::<Event>(&buf[..n]).unwrap() {
+                saw_library_changed = true;
+                break;
+            }
+        }
+        assert!(saw_library_changed, "收藏写后应推 LibraryChanged");
+    }
+
+    /// 音质别名守卫：auto/合法别名放行，未知模式拒绝（防 config 落坏值）。
+    #[test]
+    fn quality_alias_guard() {
+        assert!(quality_alias_valid("auto"));
+        for alias in ["master", "hires", "atmos", "flac", "aac", "320", "128"] {
+            assert!(quality_alias_valid(alias), "合法别名: {alias}");
+        }
+        assert!(!quality_alias_valid("ultra"));
+        assert!(!quality_alias_valid(""));
     }
 
     #[tokio::test]

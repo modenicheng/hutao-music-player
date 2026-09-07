@@ -115,7 +115,8 @@ fn hover_slider_chain_reports_and_clears() {
     );
 
     // 歌单条目行（36px 纯内容行，自建歌单第一项）：同样上报
-    move_to(&ui, 120.0, 504.0);
+    // （主导航含搜索项共 9 行；歌单区在其下，首行 y=548）
+    move_to(&ui, 120.0, 548.0);
     assert!(bus.get_active(), "歌单条目行应上报");
     assert!(
         (bus.get_item_height() - 36.0).abs() < 0.5,

@@ -87,7 +87,11 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     bridge::load_data(&ui);
-    bridge::bind(&ui, std::sync::Arc::clone(&prefs));
+    bridge::bind(
+        &ui,
+        std::sync::Arc::clone(&prefs),
+        std::sync::Arc::clone(&runtime),
+    );
     player_bridge::bind(
         &ui,
         std::sync::Arc::clone(&runtime),

@@ -69,6 +69,34 @@
 
 **后端缺口全集**：docs/AUDIT.md §8（12 条 + 汇总表）。
 
+## 后端接口补齐轮（2026-09-07，AUDIT §8 大闭合）
+
+桌面端需要的读/写接口全部落地（docs/AUDIT.md §8 状态表为权威）：
+
+- **IPC 新面**（hmp-core/src/ipc.rs）：`QueuePlayAt(usize)`（事务式跳播，
+  队列不被单曲替换；越界报错、点当前曲 = ensure-play）、`Search{keyword}`
+  （免登录 smartbox）、`LyricGet{mid}`（LRC + 翻译；daemon 自查 song_type）、
+  `AccountStatus`（登录态/uin/昵称/VIP 摘要）、`QualityGet/Set`（daemon 落
+  config.toml，唯一事实源）、`CoverGet{url}`（QQ 封面下载进
+  `<data_dir>/covers/<hash>.jpg` 回 file://，仅收 y.gtimg.cn 来源）、
+  `Event::LibraryChanged`（watcher/sync/reconcile/收藏/歌单写触发）。
+- **桌面接线**：队列抽屉点行 → QueuePlayAt；音量滑杆读写 `user_volume`
+  原值（PlaybackState 新字段，serde default 兼容旧帧）；当前曲 QQ 封面
+  异步 CoverGet 换真图（`Player.current-mid` 复核防串台，每 mid 每进程
+  一次）；LibraryChanged → `bridge::refresh`（重查 sqlite + 重放当前详情
+  路由，库页不再是启动静态快照）；音质四档选择即写 IPC、启动从 daemon
+  同步（auto/未知别名保持现选）；设置账号页读 AccountStatus 真数据
+  （昵称拉取受 QQ 服务端 10000 影响，回退 "QQ {uin}"，CLI 同失败）。
+- **搜索页**（新 ui/search-page.slint + 侧栏入口）：关键词回车/按钮触发
+  （不做即时搜索——Vue 版 300ms 防抖属于内容页里程碑再对齐）；结果仅
+  歌曲（smartbox 窄投影无专辑/时长 → TrackTable 收起两列，时长显示 "—"
+  而非 0:00）；点行播放该曲。Vue 版 SearchView 的专辑/歌手 tab 待内容页。
+- **存储**：`track_meta_batch` 扩列 duration_ms/cover_uri（AUDIT §8.11），
+  队列投影 QQ 曲目不再 0:00，本地行封面直接读盘。
+- **真机冒烟**：release daemon + 帧协议脚本 13/13（搜索"薛凯琪 立春"
+  真结果、歌词 LRC、账号、音质写读还原、QQMusicDownloads 三曲队列
+  QueuePlayAt(2) 跳播不换队、LibraryChanged 推送、封面下载 file://）。
+
 ## 已知偏差（相对 Vue 版）
 
 - 数字等宽（tabular-nums）暂无 Slint 内建开关，接受默认字形；

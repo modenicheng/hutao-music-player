@@ -19,6 +19,8 @@ export global Player {
     in-out property <string> track-quality: "";
     /** 曲目最高音质档（0=标准 1=高清 2=无损 3=Hi-Res），Rust 从 quality 文案推导 */
     in-out property <int> track-max-tier: 0;
+    /** 当前曲源键（QQ mid / local: 路径；异步封面回包按此复核防串台） */
+    in-out property <string> current-mid: "";
 
     // —— UI 状态（overlay / 抽屉）———
     in-out property <bool> overlay-visible: false;
@@ -134,4 +136,18 @@ export global Data {
     in-out property <image> artist-photo;
     in-out property <[TrackRow]> artist-tracks;
     in-out property <[CoverCardData]> artist-albums;
+    // —— 搜索页（daemon Search IPC；时长 smartbox 不回 → 表格隐藏时长列）———
+    /** 0=初始 1=搜索中 2=有结果 3=无结果 4=失败 */
+    in-out property <int> search-state: 0;
+    in-out property <string> search-query: "";
+    in-out property <[TrackRow]> search-results;
+    in-out property <int> search-count: 0;
+    callback search(string);
+    // —— 账号（设置页；daemon AccountStatus IPC）———
+    /** 0=读取中 1=已读 */
+    in-out property <int> account-state: 0;
+    in-out property <bool> account-logged-in: false;
+    in-out property <string> account-nickname: "";
+    in-out property <string> account-uin: "";
+    in-out property <string> account-vip: "";
 }

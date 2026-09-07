@@ -146,12 +146,24 @@
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`：0 错误。
 - `cargo fmt --all -- --check`：干净。
 
-## 8. M8 后端缺口记录（Slint 桌面端接入真实后端；2026-09-07 复核，全部只记录不动手）
+## 8. M8 后端缺口记录（Slint 桌面端接入真实后端；2026-09-07 复核；同日接口补齐轮落地）
 
 > 背景：hmp-desktop 正从 mock-first（页面数据全部来自 mock.rs、播放由 PlayerHost 模拟，
 > `crates/hmp-desktop/src/main.rs:1-3`）转向接真实后端（hmp-daemon，Unix socket IPC）。
 > 解耦原则：UI 只发意图、daemon 单一状态源、UI 不做 HTTP/不碰凭证。
 > 以下每条均先读代码证实/证伪再记录；"不缺"的如实说明机制。
+>
+> **状态更新（2026-09-07 接口补齐轮）**：除注明外，下述缺口已全部落地——
+> IPC 新增 `QueuePlayAt / Search / LyricGet / AccountStatus / QualityGet / QualitySet /
+> CoverGet` 七个请求与 `Event::LibraryChanged` 事件（crates/hmp-core/src/ipc.rs）；
+> daemon 侧 `content.rs` 统一出网（搜索/歌词/账号/封面，TTL cache + 封面落
+> `covers/<hash>.jpg`）；`track_meta_batch` 扩列 duration/cover_uri；`PlaybackState`
+> 增加 `user_volume` 原值。真机冒烟 13/13 通过（QQMusicDownloads 本地队列 +
+> QQ 网络搜索/歌词）。仍开放的：#5 下载/已购域（产品决策）、#2 的内容详情
+> 半边（推荐/榜单/歌手页，随内容页里程碑）、#6 昵称拉取受 QQ 服务端
+> business code 10000 影响（CLI `hmp account profile` 同失败；AccountStatus
+> 诚实回退 `QQ {uin}`）。原条目保留作历史记录。
+
 
 1. **IPC 无媒体库读请求（读库 = 客户端直读 sqlite）——契约已成立，非临时方案**。
    `Request` 枚举（crates/hmp-core/src/ipc.rs:111-183）只有播放/队列/收藏写/歌单写/
@@ -286,14 +298,14 @@
 | # | 缺口 | 影响 | 建议最小解法 | 优先级 |
 |---|---|---|---|---|
 | 1 | IPC 无媒体库读（客户端直读 sqlite） | 非缺口：CLI 事实契约，schema/WAL 边界已可控 | 维持直读并文档化；刷新触发靠 #9 | —（契约确认） |
-| 2 | IPC 无搜索/内容详情 | M4 内容页无数据源；CLI 旁路直连、请求分散 | 新增 Search/ContentDetail 读请求，daemon 出网 | 高 |
-| 3 | IPC 无歌词读取 | M6 歌词页无数据源（仅废弃 AppCore 直连过） | 新增 LyricGet；daemon 内补 song_type | 中 |
-| 4 | QQ 封面无本地产物 | UI 无法显示 QQ 封面（MPRIS 靠客户端自行拉网） | daemon 下载进 covers/ 目录，下发 file:// | 中 |
-| 5 | 下载库/已购库无后端域 | downloads/purchased 页只能是 mock/空态 | M8 诚实空态；域设计列入 §5 候选 | 低 |
-| 6 | 登录态/账号无 IPC 读 | 账号面板/未登录引导无数据，只能从错误码猜 | 新增 AccountStatus 读请求 | 中 |
-| 7 | 音质偏好两处存储不收敛 | UI 选择对播放不生效，体验不一致 | 新增 SetQualityPreference，daemon 落 config.toml | 中 |
-| 8 | 队列无 PlayAt | 队列点歌语义缺失 | QueuePlayAt(usize)，复用事务式装载 | 中 |
-| 9 | 库变更无推送事件 | 库页静态快照永不更新 | Event 增 LibraryChanged，watcher/reconcile 触发 | 中 |
-| 10 | spawn_detached 绑定 current_exe | 桌面无法拉起 daemon（会把自身再 spawn） | exe 路径参数化（spawn_detached_exe） | 已解决（本轮重构） |
-| 11 | track_meta_batch 缺 duration/cover 投影 | 队列行 QQ 曲目 0:00、程序化封面 | 扩列读出口 | 低 |
-| 12 | 状态 volume 含 RG 补偿 | UI 音量滑杆与用户设定静默偏差 | 发布 user_volume 原值 | 低 |
+| 2 | IPC 无搜索/内容详情 | M4 内容页无数据源；CLI 旁路直连、请求分散 | ~~新增 Search/ContentDetail 读请求~~ **搜索已落地**（`Request::Search` + 桌面搜索页）；内容详情（推荐/榜单/歌手）随内容页里程碑 | 高（半闭合） |
+| 3 | IPC 无歌词读取 | M6 歌词页无数据源 | **已落地**：`Request::LyricGet`，daemon 经详情自查 song_type，TTL cache；M6 页面接线待页面移植 | 已闭合 |
+| 4 | QQ 封面无本地产物 | UI 无法显示 QQ 封面 | **已落地**：`Request::CoverGet` 下载进 `covers/<hash>.jpg`（复用 persist_cover 去重）回 `file://`；当前曲异步换真图（mid 复核防串台）；MPRIS 维持远程 URL（其客户端自行拉网，行为不变） | 已闭合 |
+| 5 | 下载库/已购库无后端域 | downloads/purchased 页只能是 mock/空态 | 域设计列入 §5 候选（产品决策，未动） | 低（开放） |
+| 6 | 登录态/账号无 IPC 读 | 账号面板/未登录引导无数据 | **已落地**：`Request::AccountStatus`（TTL cache；昵称失败回退 `QQ {uin}`；当前 QQ 服务端对 get_homepage 返 10000，CLI 同失败，非回归） | 已闭合 |
+| 7 | 音质偏好两处存储不收敛 | UI 选择对播放不生效 | **已落地**：`Request::QualityGet/Set`，daemon 落 config.toml（非法别名拒绝）；桌面选择即写 IPC，启动从 daemon 同步（auto/未知保持现选） | 已闭合 |
+| 8 | 队列无 PlayAt | 队列点歌语义缺失 | **已落地**：`Request::QueuePlayAt(usize)` 事务式跳播（越界报错/当前曲仅 ensure-play/失败回滚）；抽屉点行直连 | 已闭合 |
+| 9 | 库变更无推送事件 | 库页静态快照永不更新 | **已落地**：`Event::LibraryChanged`，watcher 批处理/sync reconcile/收藏/歌单写各触发；桌面收到后重查 sqlite + 重放当前详情路由 | 已闭合 |
+| 10 | spawn_detached 绑定 current_exe | 桌面无法拉起 daemon | exe 路径参数化（spawn_detached_exe） | 已解决（前轮） |
+| 11 | track_meta_batch 缺 duration/cover 投影 | 队列行 QQ 曲目 0:00、程序化封面 | **已落地**：TrackMeta 扩列两字段；桌面队列投影直接消费（本地行封面读盘，QQ 行占位、当前曲走 CoverGet） | 已闭合 |
+| 12 | 状态 volume 含 RG 补偿 | UI 音量滑杆与用户设定静默偏差 | **已落地**：`PlaybackState.user_volume` 原值随状态发布（serde default 兼容旧帧）；桌面滑杆读原值 | 已闭合 |

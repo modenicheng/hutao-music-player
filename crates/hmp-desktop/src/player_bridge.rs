@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, Global, Model, ModelRc, VecModel, Weak};
 
-use hmp_core::ipc::{DaemonState, Request};
+use hmp_core::ipc::{DaemonState, Request, Response};
 use hmp_core::{AudioQuality, PlayRequest, PlaybackState, PlaybackStatus, PlayerCommand, TrackId};
 
 use crate::backend::{BackendRuntime, QueueRowMeta, UiStateEvent};
@@ -112,23 +112,13 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
     }
 
     {
-        // 队列点击：协议无「跳转到队列第 N 个」语义（QueueCore::set_current
-        // 未暴露 IPC；LoadAndPlay 在队列场景被引擎忽略）→ 退化为 Play(该位置
-        // 曲目)，队列被单曲替换。语义限制记录于 M8 报告。
-        let mids = Arc::clone(&queue_mids);
+        // 队列点击：跳到该位置播放（QueuePlayAt，队列不被单曲替换，AUDIT §8.8）。
         let runtime = Arc::clone(&runtime);
         player.on_play_at(move |index| {
-            let mid = {
-                let mids = mids.lock().expect("queue mids");
-                let Ok(index) = usize::try_from(index) else {
-                    return;
-                };
-                mids.get(index).cloned()
-            };
-            let Some(mid) = mid else {
+            let Ok(index) = usize::try_from(index) else {
                 return;
             };
-            let request = Request::Play(play_request_for_mid(&mid));
+            let request = Request::QueuePlayAt(index);
             runtime.spawn(async move {
                 let _ = crate::backend::request(request).await;
             });
@@ -139,8 +129,9 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
 
     // —— 订阅：DaemonState 推送 → Player global（UI 线程应用）———
     let ui_weak: Weak<AppWindow> = ui.as_weak();
+    let runtime_for_state = Arc::clone(&runtime);
     let handler = Arc::new(move |event: UiStateEvent| {
-        apply_event(&ui_weak, &queue_mids, event);
+        apply_event(&ui_weak, &runtime_for_state, &queue_mids, event);
     });
     crate::backend::spawn_state_subscription(&runtime, handler);
 }
@@ -148,14 +139,6 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
 /// `row.source`（0=QQ 1=本地，UI 显式标记）→ 播放源（`PlayRequest` 分流）。
 fn play_request_for(row: &TrackRow) -> PlayRequest {
     play_request_for_source(row.mid.as_ref(), row.source == 1)
-}
-
-/// 按源键映射播放源：`local:` 前缀 → `Local`，其余 → `Track`（QQ 解析路径）。
-fn play_request_for_mid(mid: &str) -> PlayRequest {
-    play_request_for_source(
-        mid,
-        hmp_core::TrackProvider::from_id(mid) == hmp_core::TrackProvider::Local,
-    )
 }
 
 fn play_request_for_source(mid: &str, is_local: bool) -> PlayRequest {
@@ -198,11 +181,23 @@ fn bind_ui_toggles(ui: &AppWindow) {
 }
 
 /// 订阅事件 → Player global（UI 线程执行）。
-fn apply_event(ui_weak: &Weak<AppWindow>, queue_mids: &Mutex<Vec<String>>, event: UiStateEvent) {
+fn apply_event(
+    ui_weak: &Weak<AppWindow>,
+    runtime: &Arc<BackendRuntime>,
+    queue_mids: &Mutex<Vec<String>>,
+    event: UiStateEvent,
+) {
     let Some(ui) = ui_weak.upgrade() else {
         return;
     };
     let player = Player::get(&ui);
+
+    // 库内容变更（扫描/监听/reconcile/写命令落库）：重查 sqlite 刷新库页
+    // 与当前详情页（AUDIT §8.9；刷新前状态展示保持旧模型，不闪空态）。
+    if event.library_changed {
+        crate::bridge::refresh(&ui);
+        return;
+    }
 
     // 队列模型：仅结构变化（revision 前进 / 离线清空）时重建；
     // position 推送（~10Hz）绝不触发重建。
@@ -227,7 +222,7 @@ fn apply_event(ui_weak: &Weak<AppWindow>, queue_mids: &Mutex<Vec<String>>, event
         return;
     };
     let mids = queue_mids.lock().expect("queue mids").clone();
-    apply_daemon_state(&player, &state, &mids);
+    apply_daemon_state(&player, &state, &mids, ui_weak, runtime);
 }
 
 /// 离线（无 daemon / daemon 已退出）：播放态全空（音量保留本地值不重置）。
@@ -240,10 +235,22 @@ fn apply_offline(player: &Player) {
 }
 
 /// DaemonState → Player global 单向映射（daemon 是唯一状态出口）。
-fn apply_daemon_state(player: &Player, state: &DaemonState, queue_mids: &[String]) {
+fn apply_daemon_state(
+    player: &Player,
+    state: &DaemonState,
+    queue_mids: &[String],
+    ui_weak: &Weak<AppWindow>,
+    runtime: &Arc<BackendRuntime>,
+) {
     let playback = &state.playback;
     player.set_playing(playback.status == PlaybackStatus::Playing);
-    player.set_volume(playback.volume.clamp(0.0, 1.0) as f32);
+    // 音量展示用用户原值（playback.volume 含 RG 补偿，回设会静默偏移，AUDIT §8.12）。
+    let volume = if (playback.user_volume - 0.0).abs() > f64::EPSILON {
+        playback.user_volume
+    } else {
+        playback.volume
+    };
+    player.set_volume(volume.clamp(0.0, 1.0) as f32);
     player.set_can_previous(state.caps.can_go_previous);
     player.set_can_next(state.caps.can_go_next);
     player.set_queue_current_mid(current_mid(state, queue_mids).into());
@@ -253,20 +260,72 @@ fn apply_daemon_state(player: &Player, state: &DaemonState, queue_mids: &[String
         return;
     };
     player.set_has_track(true);
+    player.set_current_mid(track.id.0.as_str().into());
     player.set_position_ms(duration_ms_i32(&playback.position));
     player.set_duration_ms(playback.duration.as_ref().map(duration_ms_i32).unwrap_or(0));
     player.set_progress(progress_of(playback));
     player.set_title(track.title.as_str().into());
     player.set_artists(track.artist_names().into());
     player.set_cover(cover_for_track(&track.id.0, track.cover.as_ref()));
+    // QQ 远程封面：UI 禁直连 HTTP → 经 daemon CoverGet 换本地产物
+    // （先程序化占位，回包后按 mid 复核防串台；每 mid 每进程只请求一次，
+    // daemon 侧 covers/ 目录按内容哈希持久去重）。
+    if let Some(cover) = track.cover.as_ref() {
+        if cover.url.starts_with("https://") {
+            spawn_cover_fetch(ui_weak, runtime, track.id.0.clone(), cover.url.clone());
+        }
+    }
     let quality = playback.actual_quality.as_ref();
     player.set_track_quality(quality.map(quality_label).unwrap_or_default().into());
     player.set_track_max_tier(quality.map(quality_tier).unwrap_or(0));
 }
 
+/// 异步取 QQ 封面本地产物（CoverGet）；完成时当前曲仍是发起曲才应用。
+fn spawn_cover_fetch(
+    ui_weak: &Weak<AppWindow>,
+    runtime: &Arc<BackendRuntime>,
+    mid: String,
+    url: String,
+) {
+    // 去重：状态推送 ~10Hz，同一 mid 只发起一次（失败也不再重试，下一次
+    // 换曲回来时自然重试）。
+    thread_local! {
+        static REQUESTED: RefCell<std::collections::HashSet<String>> =
+            RefCell::new(std::collections::HashSet::new());
+    }
+    let first_request = REQUESTED.with(|set| set.borrow_mut().insert(mid.clone()));
+    if !first_request {
+        return;
+    }
+    let ui_weak = ui_weak.clone();
+    let runtime = Arc::clone(runtime);
+    runtime.spawn(async move {
+        let Ok(Response::Cover(uri)) = crate::backend::request(Request::CoverGet { url }).await
+        else {
+            return;
+        };
+        let path = uri.strip_prefix("file://").unwrap_or(&uri).to_string();
+        let ui_weak = ui_weak.clone();
+        let mid = mid.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let player = Player::get(&ui);
+            if player.get_current_mid() != mid.as_str() {
+                return; // 换曲竞态：迟到的封面不得串台
+            }
+            if let Some(image) = load_cover_cached(&path) {
+                player.set_cover(image);
+            }
+        });
+    });
+}
+
 /// 无当前曲（含 daemon 推送空态）：曲目区归零。
 fn clear_now_playing(player: &Player) {
     player.set_has_track(false);
+    player.set_current_mid("".into());
     player.set_position_ms(0);
     player.set_duration_ms(0);
     player.set_progress(0.0);
@@ -346,8 +405,22 @@ fn row_from_meta(meta: &QueueRowMeta) -> TrackRow {
         album_mid: "".into(),
         duration_ms: meta.duration_ms,
         quality: "".into(),
-        cover: crate::covers::cover_image(&cover_seed(meta)),
+        cover: queue_cover(meta),
     }
+}
+
+/// 队列行封面：本地库 file:// 封面直接读盘（扩列投影带出）；QQ 远程 URL
+/// 程序化占位（列表行不做逐行网络取图，仅当前曲经 CoverGet 换真图）。
+fn queue_cover(meta: &QueueRowMeta) -> slint::Image {
+    if let Some(uri) = &meta.cover_uri {
+        if !uri.starts_with("http://") && !uri.starts_with("https://") {
+            let path = uri.strip_prefix("file://").unwrap_or(uri);
+            if let Some(image) = load_cover_cached(path) {
+                return image;
+            }
+        }
+    }
+    crate::covers::cover_image(&cover_seed(meta))
 }
 
 /// 程序化封面种子：按专辑聚合（与 mock `album:{album-mid}` 同观感），
@@ -460,11 +533,11 @@ mod tests {
     fn play_requests_route_by_source() {
         // QQ 曲目 → Track；本地 → Local（`local:` 前缀独立可判）。
         assert_eq!(
-            play_request_for_mid("003Z3i2C"),
+            play_request_for_source("003Z3i2C", false),
             PlayRequest::Track(TrackId::new("003Z3i2C"))
         );
         assert_eq!(
-            play_request_for_mid("local:/music/a.flac"),
+            play_request_for_source("local:/music/a.flac", true),
             PlayRequest::Local(TrackId::new("local:/music/a.flac"))
         );
     }
@@ -489,6 +562,7 @@ mod tests {
             artists: "佚名".into(),
             album: "".into(),
             duration_ms: 1_000,
+            cover_uri: None,
         };
         let row = row_from_meta(&local);
         assert_eq!(row.source, 1);
@@ -501,6 +575,7 @@ mod tests {
             artists: "".into(),
             album: "".into(),
             duration_ms: 0,
+            cover_uri: None,
         };
         let row = row_from_meta(&qq);
         assert_eq!(row.source, 0);

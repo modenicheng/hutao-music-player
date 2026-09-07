@@ -169,6 +169,8 @@ pub struct UiStateEvent {
     /// 队列结构变化时的全量投影行；`None` = 结构未变，复用现有模型
     /// （position 推送 ~10Hz，绝不随它重建队列模型）。
     pub queue_rows: Option<Vec<QueueRowMeta>>,
+    /// 媒体库内容变更（`Event::LibraryChanged`；UI 重查 sqlite 刷新库页）。
+    pub library_changed: bool,
 }
 
 /// 队列行投影（IPC 纯 ID + 媒体库元数据）。`TrackRow` 组装在 UI 线程——
@@ -183,6 +185,9 @@ pub struct QueueRowMeta {
     pub album: String,
     /// 毫秒（媒体库未缓存 → 0）。
     pub duration_ms: i32,
+    /// 媒体库封面 URI（本地 file:// 或 QQ 远程 URL；QQ 远程 UI 禁直连，
+    /// 经 `CoverGet` IPC 换本地产物）。
+    pub cover_uri: Option<String>,
 }
 
 /// 订阅循环：首连走 [`connect_or_spawn`]（拉起 daemon）；后续断线重连只做
@@ -212,6 +217,7 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                             UiStateEvent {
                                 state: None,
                                 queue_rows: Some(Vec::new()),
+                                library_changed: false,
                             },
                         );
                     }
@@ -229,23 +235,38 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
             last_revision = None;
             while let Ok(Some(frame)) = read_frame(&mut stream).await {
                 let event = decode_frame::<Event>(&frame).ok();
-                let Some(Event::StateChanged(state)) = event else {
-                    continue;
-                };
-                // 队列结构变化 → 重拉队列并投影（revision 不随 position tick 前进）。
-                let queue_rows = if last_revision != Some(state.queue.revision) {
-                    last_revision = Some(state.queue.revision);
-                    Some(project_queue().await)
-                } else {
-                    None
-                };
-                dispatch_ui(
-                    &handler,
-                    UiStateEvent {
-                        state: Some(state),
-                        queue_rows,
-                    },
-                );
+                match event {
+                    Some(Event::LibraryChanged) => {
+                        // 库内容变更：轻量信号，不触发队列重建（队列结构由
+                        // StateChanged.revision 驱动）。
+                        dispatch_ui(
+                            &handler,
+                            UiStateEvent {
+                                state: None,
+                                queue_rows: None,
+                                library_changed: true,
+                            },
+                        );
+                    }
+                    Some(Event::StateChanged(state)) => {
+                        // 队列结构变化 → 重拉队列并投影（revision 不随 position tick 前进）。
+                        let queue_rows = if last_revision != Some(state.queue.revision) {
+                            last_revision = Some(state.queue.revision);
+                            Some(project_queue().await)
+                        } else {
+                            None
+                        };
+                        dispatch_ui(
+                            &handler,
+                            UiStateEvent {
+                                state: Some(state),
+                                queue_rows,
+                                library_changed: false,
+                            },
+                        );
+                    }
+                    _ => continue,
+                }
             }
             // EOF（daemon 退出）/ 读错误：断线，退避重连。
             tokio::time::sleep(RECONNECT_INTERVAL).await;
@@ -310,6 +331,7 @@ fn projected_row(id: String, meta: &HashMap<String, ProjectedMeta>) -> QueueRowM
             title: m.title.clone(),
             artists: m.artist.clone().unwrap_or_default(),
             album: m.album.clone().unwrap_or_default(),
+            cover_uri: m.cover_uri.clone(),
         },
         None => QueueRowMeta {
             title: id.clone(),
@@ -317,22 +339,23 @@ fn projected_row(id: String, meta: &HashMap<String, ProjectedMeta>) -> QueueRowM
             artists: String::new(),
             album: String::new(),
             duration_ms: 0,
+            cover_uri: None,
         },
     }
 }
 
-/// 投影元数据（`TrackMeta` 窄投影 + 本地曲目时长补齐）。
+/// 投影元数据（`TrackMeta` 扩列投影：含时长/封面，AUDIT §8.11）。
 struct ProjectedMeta {
     title: String,
     artist: Option<String>,
     album: Option<String>,
     duration_ms: Option<i64>,
+    cover_uri: Option<String>,
 }
 
-/// 媒体库批量投影查询（阻塞）：`track_meta_batch` 拿标题/歌手/专辑；
-/// 该窄投影不含时长，本地曲目另经 `library_tracks` 补齐（QQ 曲目时长
-/// 在 daemon 侧 stub 缓存中有落库，但 LibraryDb 无批量读出口 → 显示 0，
-/// 记入后端缺口）。库缺失/不可用返回空表（全部回退）。
+/// 媒体库批量投影查询（阻塞）：`track_meta_batch` 一次拿标题/歌手/专辑/
+/// 时长/封面（storage 扩列后 QQ stub 缓存的时长有了读出口，队列行不再
+/// 显示 0:00）。库缺失/不可用返回空表（全部回退）。
 fn query_library_meta(ids: &[String]) -> HashMap<String, ProjectedMeta> {
     let mut meta: HashMap<String, ProjectedMeta> = HashMap::new();
     let Ok(mut db) = hmp_storage::LibraryDb::open(&hmp_storage::data_dir().join("library.sqlite3"))
@@ -356,7 +379,8 @@ fn query_library_meta(ids: &[String]) -> HashMap<String, ProjectedMeta> {
                     title: m.title,
                     artist: m.artist,
                     album: m.album,
-                    duration_ms: None,
+                    duration_ms: m.duration_ms,
+                    cover_uri: m.cover_uri,
                 },
             );
         }
@@ -366,15 +390,6 @@ fn query_library_meta(ids: &[String]) -> HashMap<String, ProjectedMeta> {
     }
     if let Ok(rows) = db.track_meta_batch("local", &local) {
         absorb(rows);
-    }
-    // 本地曲目时长补齐（LibraryTrackRow 是唯一含 duration_ms 的批量出口）。
-    if let Ok(rows) = db.library_tracks(None, None, None, false) {
-        for row in rows {
-            let duration = row.duration_ms;
-            meta.entry(row.source_key).and_modify(|m| {
-                m.duration_ms = duration;
-            });
-        }
     }
     meta
 }
@@ -453,6 +468,7 @@ mod tests {
                 artist: Some("孙燕姿".into()),
                 album: None,
                 duration_ms: None,
+                cover_uri: None,
             },
         );
         let row = projected_row("mid-1".into(), &meta);
@@ -473,6 +489,7 @@ mod tests {
                 artist: None,
                 album: Some("本地专辑".into()),
                 duration_ms: Some(215_000),
+                cover_uri: Some("file:///covers/a.jpg".into()),
             },
         );
         meta.insert(
@@ -482,10 +499,16 @@ mod tests {
                 artist: None,
                 album: None,
                 duration_ms: Some(i64::MAX),
+                cover_uri: None,
             },
         );
         let row = projected_row("local:/a.flac".into(), &meta);
         assert_eq!(row.duration_ms, 215_000);
+        assert_eq!(
+            row.cover_uri.as_deref(),
+            Some("file:///covers/a.jpg"),
+            "扩列投影应带出封面 URI"
+        );
         let row = projected_row("local:/b.flac".into(), &meta);
         assert_eq!(row.duration_ms, i32::MAX);
     }

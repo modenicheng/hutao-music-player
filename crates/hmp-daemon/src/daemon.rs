@@ -58,17 +58,27 @@ impl Daemon {
             Some(hmp_storage::data_dir().join("playback_state.json")),
         );
         // 媒体库同步 worker（本地先提交 + QQ 乐观同步；无凭证时离线意图留存）。
-        let sync_handle =
-            crate::sync::SyncWorker::spawn(library.clone(), QqMusicClient::new(), store_from_env());
+        // 库变更代际通道贯穿 sync/watcher/server（AUDIT §8.9）。
+        let (library_tx, library_rx) = tokio::sync::watch::channel(0u64);
+        let sync_handle = crate::sync::SyncWorker::spawn(
+            library.clone(),
+            QqMusicClient::new(),
+            store_from_env(),
+            library_tx.clone(),
+        );
         let mut handle = handle;
         handle.sync_handle = Some(sync_handle.clone());
         handle.comment = Some(crate::comment::CommentService::new(
             store_from_env(),
             library.clone(),
         ));
+        // 内容读服务（搜索/歌词/账号/封面；daemon 持凭证统一出网，AUDIT §8.2-8.6）。
+        handle.content = Some(crate::content::ContentService::new(store_from_env()));
         handle.library = Some(library.clone());
+        handle.library_tx = library_tx.clone();
+        handle.library_rx = library_rx;
         // 本地目录监听（E2）：scan_roots 变化自动入库；无 root 时静默不启动。
-        let watcher = crate::watcher::LocalWatcher::spawn(library);
+        let watcher = crate::watcher::LocalWatcher::spawn(library, library_tx);
         // 已登录则启动即拉一次 QQ 用户库快照（spec §4：daemon 启动有凭证时 reconcile）。
         if store_from_env()
             .load()

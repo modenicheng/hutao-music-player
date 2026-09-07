@@ -1,5 +1,6 @@
 //! HMP 后台播放后端（docs/PROJECT.md §8.5）。
 pub mod comment;
+pub mod content;
 pub mod daemon;
 pub mod engine;
 pub mod local;

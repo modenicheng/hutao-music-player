@@ -22,6 +22,8 @@ pub struct FakeDriver {
     pub fail_next_load: std::sync::atomic::AtomicBool,
     /// 剩余失败次数（连续多次装载失败，如回滚也失败；0=不失败）。
     pub fail_remaining: std::sync::atomic::AtomicU32,
+    /// `play()` 调用计数（点当前曲「确保播放」断言用）。
+    pub plays: std::sync::atomic::AtomicU32,
 }
 
 impl FakeDriver {
@@ -39,6 +41,7 @@ impl FakeDriver {
             commands: Mutex::new(Vec::new()),
             fail_next_load: std::sync::atomic::AtomicBool::new(false),
             fail_remaining: std::sync::atomic::AtomicU32::new(0),
+            plays: std::sync::atomic::AtomicU32::new(0),
         });
         (d, state_rx, events_rx)
     }
@@ -97,7 +100,9 @@ impl PlaybackDriver for FakeDriver {
             s.actual_quality = Some(quality);
         });
     }
-    fn play(&self) {}
+    fn play(&self) {
+        self.plays.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     fn pause(&self) {}
     fn seek(&self, p: std::time::Duration) {
         self.commands.lock().unwrap().push(PlayerCommand::Seek(p));
@@ -1859,7 +1864,95 @@ async fn remove_current_rolls_back_on_replacement_load_failure() {
     );
 }
 
-/// `queue clear`（all=false）：保留当前曲，清除待播曲目；播放不受影响。
+/// `queue play-at N`（AUDIT §8.8）：跳到第 N 曲播放，**队列不被单曲替换**。
+#[tokio::test]
+async fn queue_play_at_jumps_without_replacing_queue() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![vec![
+        TrackId::new("a"),
+        TrackId::new("b"),
+        TrackId::new("c"),
+    ]]);
+    let (handle, _st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_idle().await;
+    assert_eq!(handle.state_rx.borrow().queue.current, Some(0));
+
+    handle.cmd(Request::QueuePlayAt(2)).await.unwrap(); // 点第 3 曲
+    wait_idle().await;
+    let st = handle.state_rx.borrow();
+    assert_eq!(
+        handle.queue_rx.borrow().tracks,
+        vec![TrackId::new("a"), TrackId::new("b"), TrackId::new("c")],
+        "跳播不得替换队列（旧实现退化 Play(单曲) 的回归）"
+    );
+    assert_eq!(st.queue.current, Some(2));
+    assert_eq!(driver.load_uris(), vec!["fake://a", "fake://c"]);
+}
+
+/// 跳播目标装载失败 → 回滚游标，原曲继续（事务语义）。
+#[tokio::test]
+async fn queue_play_at_rolls_back_on_load_failure() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = PartialFailResolver::new(
+        vec![vec![
+            TrackId::new("a"),
+            TrackId::new("b"),
+            TrackId::new("c"),
+        ]],
+        vec![TrackId::new("c")],
+    );
+    let (handle, _st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_idle().await;
+
+    handle.cmd(Request::QueuePlayAt(2)).await.unwrap();
+    wait_idle().await;
+    let st = handle.state_rx.borrow();
+    assert_eq!(st.queue.current, Some(0), "失败回滚：游标留在原曲");
+    assert_eq!(driver.load_uris(), vec!["fake://a"], "失败目标不得加载");
+    assert!(st.last_error.is_some(), "跳播失败详情应进入复合状态");
+}
+
+/// 越界跳播 → 发布错误、不动队列；点当前曲 = 确保播放（不重载）。
+#[tokio::test]
+async fn queue_play_at_out_of_range_and_current_semantics() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+    let (handle, _st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_idle().await;
+    assert_eq!(driver.load_uris(), vec!["fake://a"]);
+
+    handle.cmd(Request::QueuePlayAt(5)).await.unwrap();
+    wait_idle().await;
+    assert!(
+        handle.state_rx.borrow().last_error.is_some(),
+        "越界索引应发布错误"
+    );
+    assert_eq!(handle.state_rx.borrow().queue.current, Some(0));
+    assert_eq!(driver.load_uris().len(), 1, "越界不触发装载");
+
+    let plays_before = driver.plays.load(std::sync::atomic::Ordering::SeqCst);
+    handle.cmd(Request::QueuePlayAt(0)).await.unwrap(); // 点当前曲
+    wait_idle().await;
+    assert_eq!(driver.load_uris().len(), 1, "点当前曲不重载");
+    assert_eq!(
+        driver.plays.load(std::sync::atomic::Ordering::SeqCst),
+        plays_before + 1,
+        "点当前曲应确保播放（play() 恰好一次）"
+    );
+}
+
 #[tokio::test]
 async fn queue_clear_keeps_current_playing() {
     let (driver, _sr, _er) = FakeDriver::new();

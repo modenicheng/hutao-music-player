@@ -10,6 +10,7 @@ pub mod proxy;
 pub(crate) mod testutil;
 
 pub use proxy::PreparedMedia;
+pub use proxy::cdn_client;
 pub use proxy::prepare_stream;
 
 use thiserror::Error;

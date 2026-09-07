@@ -63,6 +63,10 @@ pub struct TrackMeta {
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
+    /// 时长（毫秒；AUDIT §8.11：QQ stub 缓存落库的时长有了批量读出口）。
+    pub duration_ms: Option<i64>,
+    /// 封面 URI（本地 `file://`；QQ 播放路径写入的远程 URL）。
+    pub cover_uri: Option<String>,
 }
 
 /// 关系行（收藏/订阅 = durable outbox 一体；`relations` 表）。
@@ -469,8 +473,8 @@ impl LibraryDb {
         for chunk in keys.chunks(500) {
             let placeholders = vec!["?"; chunk.len()].join(",");
             let sql = format!(
-                "SELECT source, source_key, title, artist, album FROM tracks \
-                 WHERE source = ?1 AND source_key IN ({placeholders})"
+                "SELECT source, source_key, title, artist, album, duration_ms, cover_uri \
+                 FROM tracks WHERE source = ?1 AND source_key IN ({placeholders})"
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = vec![&source];
             params.extend(chunk.iter().map(|k| k as &dyn rusqlite::ToSql));
@@ -482,6 +486,8 @@ impl LibraryDb {
                     title: r.get(2)?,
                     artist: r.get(3)?,
                     album: r.get(4)?,
+                    duration_ms: r.get(5)?,
+                    cover_uri: r.get(6)?,
                 })
             })?;
             out.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);

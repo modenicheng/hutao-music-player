@@ -446,8 +446,8 @@ fn batch_upsert_then_meta_batch_roundtrip() {
             title: "夜曲".into(),
             album: Some("十一月的萧邦".into()),
             artist: Some("周杰伦".into()),
-            duration_ms: Some(180_000),
-            cover_uri: None,
+            duration_ms: Some(193_000),
+            cover_uri: Some("https://y.gtimg.cn/x.jpg".into()),
             qq_song_id: None,
             ..Default::default()
         },
@@ -490,10 +490,17 @@ fn batch_upsert_then_meta_batch_roundtrip() {
     assert_eq!(metas.len(), 2);
     assert_eq!(metas[0].title, "夜曲");
     assert_eq!(metas[0].artist.as_deref(), Some("周杰伦"));
+    // 扩列投影（§8.11）：时长/封面随批查询返回，队列行不再显示 0:00。
+    assert_eq!(metas[0].duration_ms, Some(193_000));
+    assert_eq!(
+        metas[0].cover_uri.as_deref(),
+        Some("https://y.gtimg.cn/x.jpg")
+    );
     let locals = db
         .track_meta_batch("local", &["local:/m/a.flac".to_string()])
         .unwrap();
     assert_eq!(locals[0].title, "a.flac");
+    assert_eq!(locals[0].duration_ms, None);
 
     // 幂等重 upsert：更新标题，不重复建行。
     rows[0].title = "夜曲 2".into();

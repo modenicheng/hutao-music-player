@@ -1,12 +1,13 @@
-// 账号设置（AccountSettingsView.vue 的诚实版）：账号状态读接口未接入
-// （docs/AUDIT.md §8.6，daemon 未暴露登录态/昵称/VIP 查询）——资料占位、
-// 退出登录禁用，不伪造用户资料。
+// 账号设置（AccountSettingsView.vue）：数据 = daemon AccountStatus IPC
+// （docs/AUDIT.md §8.6 已补——登录态 + 昵称/uin/VIP 摘要；未登录诚实展示
+// 登录引导）。登录/退出流程仍属 CLI（`hmp login`），桌面不做凭证操作。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, Button, ButtonVariant } from "primitives.slint";
 import { PageHeader, FactRow } from "page-parts.slint";
 import { SettingsNav, SettingGroup } from "settings-parts.slint";
 import { Nav } from "nav.slint";
+import { Data } from "stores.slint";
 
 export component SettingsAccountPage inherits Rectangle {
     background: transparent;
@@ -29,7 +30,7 @@ export component SettingsAccountPage inherits Rectangle {
 
         SettingsNav { }
 
-        // —— 资料卡（头像 + 未接入文案 + 禁用退出）———
+        // —— 资料卡（头像 + 登录态/昵称 + 退出（登录流未入桌面，禁用））———
         Rectangle {
             height: 96px;
             border-radius: Theme.radius-lg;
@@ -66,44 +67,68 @@ export component SettingsAccountPage inherits Rectangle {
                     spacing: 3px;
 
                     Text {
-                        text: "账号未接入";
+                        text: Data.account-state == 0 ? "读取账号状态中…"
+                            : Data.account-logged-in ? Data.account-nickname
+                            : "未登录";
                         color: Theme.foreground;
                         font-size: 16.8px;
                         font-weight: 650;
                     }
                     Text {
-                        text: "云端账号同步与登录流将在后续版本接入";
+                        text: Data.account-state == 0 ? "正在向守护进程查询"
+                            : Data.account-logged-in ? "QQ 音乐 · 已登录"
+                            : "登录后可同步云端歌单与收藏";
                         color: Theme.muted-foreground;
                         font-size: 12.8px;
                     }
                 }
 
-                Button {
+                if Data.account-logged-in: Button {
                     variant: ButtonVariant.outline;
                     small: true;
                     text: "退出登录";
                     enabled: false;
-                    tool-tip: "账号体系尚未接入，退出登录即将上线";
+                    tool-tip: "桌面端登录/退出流未接入；请在终端运行 hmp login / hmp logout";
                     height: 32px;
                 }
             }
         }
 
-        // —— 信息行（只读；无接口的值诚实显示 "—"）———
+        // —— 信息行（只读；接口没给的值诚实显示 "—"）———
         SettingGroup {
             title: "账号信息";
 
             FactRow {
                 label: "昵称";
-                value: "—";
+                value: Data.account-logged-in ? Data.account-nickname : "—";
+            }
+            FactRow {
+                label: "QQ 号";
+                value: Data.account-logged-in ? Data.account-uin : "—";
             }
             FactRow {
                 label: "会员状态";
-                value: "—";
+                value: Data.account-logged-in && Data.account-vip != ""
+                    ? Data.account-vip
+                    : "—";
             }
             FactRow {
                 label: "数据来源";
-                value: "等待后端账号接口";
+                value: "守护进程 AccountStatus 接口";
+            }
+        }
+
+        if !Data.account-logged-in && Data.account-state == 1: SettingGroup {
+            title: "登录方式";
+
+            FactRow {
+                label: "命令行登录";
+                value: "hmp login";
+            }
+            Text {
+                text: "扫码登录暂未进入桌面端；在终端完成 `hmp login` 后回到此页刷新即可看到账号。";
+                color: Theme.muted-foreground;
+                font-size: 12.8px;
             }
         }
 

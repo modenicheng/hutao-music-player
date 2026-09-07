@@ -69,6 +69,47 @@ fn path_basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// UI 音质档（0=标准 1=高清 2=无损 3=Hi-Res）→ config 别名（写路径）。
+/// Hi-Res 档映射 `hires`：resolver 对 hires/master 请求同一 MASTER 文件
+/// 类型（上游无独立 Hi-Res 档，见 daemon player.rs 映射注释）。
+fn quality_tier_alias(tier: i32) -> Option<&'static str> {
+    match tier {
+        0 => Some("128"),
+        1 => Some("320"),
+        2 => Some("flac"),
+        3 => Some("hires"),
+        _ => None,
+    }
+}
+
+/// config 别名 → UI 音质档（读路径）。`auto`/未知 → None：保持 UI 现选，
+/// 不把非档位语义伪造成某一档。
+fn quality_alias_tier(mode: &str) -> Option<i32> {
+    match mode {
+        "128" => Some(0),
+        "320" | "aac" => Some(1),
+        "flac" => Some(2),
+        "hires" | "master" | "atmos" => Some(3),
+        _ => None,
+    }
+}
+
+/// 搜索结果行（smartbox 窄投影：无专辑/时长 → 对应列收起，mid 程序化封面）。
+fn search_track_row(song: &hmp_core::SearchSong) -> TrackRow {
+    TrackRow {
+        mid: song.mid.as_str().into(),
+        source: 0,
+        title: song.name.as_str().into(),
+        artists: song.singer.as_str().into(),
+        artist_mid: "".into(),
+        album: "".into(),
+        album_mid: "".into(),
+        duration_ms: 0,
+        quality: "".into(),
+        cover: crate::covers::cover_image(&format!("album:{}", song.mid)),
+    }
+}
+
 /// 把媒体库快照（直读 library.sqlite3，离线降级为空）装载进 Data global：
 /// 五个库页真数据；下载/已购两页后端无对应域，保留 mock 喂数据。
 pub fn load_data(ui: &AppWindow) {
@@ -245,6 +286,14 @@ pub fn load_data(ui: &AppWindow) {
     ));
 }
 
+/// 库变更刷新（`Event::LibraryChanged` 驱动，AUDIT §8.9）：重装载库页数据
+/// 并重放当前路由的详情装载。刷新失败/库缺失时 load_data 自行降级空态。
+pub fn refresh(ui: &AppWindow) {
+    load_data(ui);
+    let nav = Nav::get(ui);
+    apply_route(ui, nav.get_route(), nav.get_param());
+}
+
 /// 路由落地后的详情装载：歌单/专辑/歌手三页按参数查库填充 Data
 /// （同步读，单页查询量小；其他路由无详情数据）。found=false → 页面诚实空态。
 fn apply_route(ui: &AppWindow, route: crate::Route, param: SharedString) {
@@ -289,7 +338,10 @@ fn load_album_detail(ui: &AppWindow, param: &str) {
             data.set_album_artist(detail.artist.unwrap_or_default().into());
             let mut meta = vec![
                 // 年份无数据源 → "—"（不伪造发行时间）
-                detail.year.map(|y| y.to_string()).unwrap_or_else(|| "—".into()),
+                detail
+                    .year
+                    .map(|y| y.to_string())
+                    .unwrap_or_else(|| "—".into()),
                 format!("{} 首", detail.tracks.len()),
                 format!("总时长 {}", format_long_duration(detail.total_ms)),
             ];
@@ -297,8 +349,10 @@ fn load_album_detail(ui: &AppWindow, param: &str) {
             data.set_album_meta_items(model(
                 meta.into_iter().map(SharedString::from).collect::<Vec<_>>(),
             ));
-            data.set_album_cover(local_cover_image(detail.cover_uri.as_deref())
-                .unwrap_or_else(|| cover_image(&format!("album:{}", detail.name))));
+            data.set_album_cover(
+                local_cover_image(detail.cover_uri.as_deref())
+                    .unwrap_or_else(|| cover_image(&format!("album:{}", detail.name))),
+            );
             data.set_album_tracks(model(
                 detail.tracks.iter().map(SongRow::to_track_row).collect(),
             ));
@@ -342,8 +396,12 @@ fn load_artist_detail(ui: &AppWindow, param: &str) {
     }
 }
 
-/// 导航 / 主题 / 音质回调绑定（历史栈 + 偏好持久化）
-pub fn bind(ui: &AppWindow, prefs: Arc<Mutex<Prefs>>) {
+/// 导航 / 主题 / 音质 / 搜索 / 账号回调绑定（历史栈 + 偏好持久化 + IPC 出网）
+pub fn bind(
+    ui: &AppWindow,
+    prefs: Arc<Mutex<Prefs>>,
+    runtime: Arc<crate::backend::BackendRuntime>,
+) {
     // ——— 导航历史栈 ———
     let nav = Nav::get(ui);
     let history: Arc<Mutex<Vec<(crate::Route, SharedString)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -421,9 +479,13 @@ pub fn bind(ui: &AppWindow, prefs: Arc<Mutex<Prefs>>) {
     }
 
     // ——— 音质偏好 ———
+    // daemon config.toml 是唯一事实源（AUDIT §8.7）：选择即写 IPC，本地
+    // prefs 只作离线启动的展示兜底；启动时从 daemon 同步一次（CLI 写入
+    // 的变化桌面也可见）。
     {
         let prefs = Arc::clone(&prefs);
         let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let runtime = Arc::clone(&runtime);
         Quality::get(ui).on_select(move |tier| {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -431,6 +493,94 @@ pub fn bind(ui: &AppWindow, prefs: Arc<Mutex<Prefs>>) {
             Quality::get(&ui).set_selected(tier);
             prefs.lock().expect("prefs").quality = tier;
             crate::prefs::store(&prefs.lock().expect("prefs").clone());
+            if let Some(mode) = quality_tier_alias(tier) {
+                let request = hmp_core::Request::QualitySet {
+                    mode: mode.into(),
+                    fallback: true,
+                };
+                runtime.spawn(async move {
+                    let _ = crate::backend::request(request).await;
+                });
+            }
+        });
+    }
+    {
+        // 启动同步：daemon 侧偏好 → UI 选中档（auto/未知别名保持现选，
+        // 不伪造档位展示）。
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        runtime.spawn(async move {
+            let result = crate::backend::request(hmp_core::Request::QualityGet).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                if let Ok(hmp_core::Response::Quality(pref)) = result {
+                    if let Some(tier) = quality_alias_tier(&pref.mode) {
+                        Quality::get(&ui).set_selected(tier);
+                    }
+                }
+            });
+        });
+    }
+
+    // ——— 搜索（daemon Search IPC；免登录 smartbox）———
+    {
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let runtime = Arc::clone(&runtime);
+        Data::get(ui).on_search(move |query| {
+            let keyword = query.trim().to_string();
+            if keyword.is_empty() {
+                return;
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                let data = Data::get(&ui);
+                data.set_search_query(SharedString::from(keyword.clone()));
+                data.set_search_state(1);
+            }
+            let ui_weak = ui_weak.clone();
+            runtime.spawn(async move {
+                let result = crate::backend::request(hmp_core::Request::Search { keyword }).await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = ui_weak.upgrade() else {
+                        return;
+                    };
+                    let data = Data::get(&ui);
+                    match result {
+                        Ok(hmp_core::Response::Search(page)) => {
+                            let rows: Vec<TrackRow> =
+                                page.songs.iter().map(search_track_row).collect();
+                            let found = !rows.is_empty();
+                            data.set_search_count(rows.len() as i32);
+                            data.set_search_results(model(rows));
+                            data.set_search_state(if found { 2 } else { 3 });
+                        }
+                        // 离线/daemon 错误/协议错误统一失败态（页面文案覆盖）。
+                        _ => data.set_search_state(4),
+                    }
+                });
+            });
+        });
+    }
+
+    // ——— 账号状态（daemon AccountStatus IPC；设置页账号面板）———
+    {
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        runtime.spawn(async move {
+            let result = crate::backend::request(hmp_core::Request::AccountStatus).await;
+            let apply = move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                let data = Data::get(&ui);
+                if let Ok(hmp_core::Response::AccountStatus(info)) = result {
+                    data.set_account_logged_in(info.logged_in);
+                    data.set_account_nickname(info.nickname.clone().into());
+                    data.set_account_uin(info.uin.clone().into());
+                    data.set_account_vip(info.vip_summary.clone().into());
+                }
+                data.set_account_state(1);
+            };
+            let _ = slint::invoke_from_event_loop(apply);
         });
     }
 }
@@ -457,5 +607,38 @@ mod tests {
         assert_eq!(a.c1, b.c1);
         assert_eq!(a.c2, b.c2);
         assert_eq!(a.name, "深夜循环");
+    }
+
+    /// 档位 ↔ config 别名往返：写路径四个档位各有别名，读路径能映射回来。
+    #[test]
+    fn quality_tier_alias_roundtrip() {
+        for tier in 0..=3 {
+            let alias = quality_tier_alias(tier).expect("四档都有别名");
+            assert_eq!(quality_alias_tier(alias), Some(tier), "alias={alias}");
+        }
+        assert_eq!(quality_tier_alias(9), None);
+        // 读路径兼容 CLI 可写的其余别名；auto/未知不映射（保持 UI 现选）。
+        assert_eq!(quality_alias_tier("aac"), Some(1));
+        assert_eq!(quality_alias_tier("master"), Some(3));
+        assert_eq!(quality_alias_tier("atmos"), Some(3));
+        assert_eq!(quality_alias_tier("auto"), None);
+        assert_eq!(quality_alias_tier("bogus"), None);
+    }
+
+    #[test]
+    fn search_track_row_maps_song_fields() {
+        let song = hmp_core::SearchSong {
+            mid: "0039MnYb0qxYhV".into(),
+            name: "夜曲".into(),
+            singer: "周杰伦".into(),
+        };
+        let row = search_track_row(&song);
+        assert_eq!(row.mid, "0039MnYb0qxYhV");
+        assert_eq!(row.source, 0);
+        assert_eq!(row.title, "夜曲");
+        assert_eq!(row.artists, "周杰伦");
+        assert_eq!(row.album, "");
+        assert_eq!(row.duration_ms, 0);
+        assert!(row.cover.size().width > 0, "封面程序化占位非空");
     }
 }

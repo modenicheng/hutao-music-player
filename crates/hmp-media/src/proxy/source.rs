@@ -295,7 +295,9 @@ const TAIL_PROBE: u64 = 0x40;
 /// CDN 请求客户端：reqwest 默认无任何超时，连接被防火墙黑洞时取流会
 /// 永久挂起（无错误、无回退），流式期间还会占死 Semaphore 许可饿死其余
 /// 区间请求。连接超时 + 读超时兜住这类故障。
-pub(crate) fn cdn_client() -> reqwest::Client {
+///
+/// `pub`：daemon 侧 QQ 封面下载（ContentService）复用同一超时配置。
+pub fn cdn_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .read_timeout(std::time::Duration::from_secs(30))

@@ -48,6 +48,8 @@ pub struct SyncWorker {
     client: QqMusicClient,
     store: Box<dyn hmp_storage::credential::CredentialStore>,
     notify: mpsc::UnboundedReceiver<SyncMsg>,
+    /// 库变更代际（reconcile 落库后 bump，server 推 `LibraryChanged`）。
+    library_changed: tokio::sync::watch::Sender<u64>,
 }
 
 /// 单次重试间隔：`min(2^retry * 10s, 10min)`。
@@ -62,6 +64,7 @@ impl SyncWorker {
         library: Arc<Mutex<LibraryDb>>,
         client: QqMusicClient,
         store: Box<dyn hmp_storage::credential::CredentialStore>,
+        library_changed: tokio::sync::watch::Sender<u64>,
     ) -> SyncHandle {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut worker = Self {
@@ -69,6 +72,7 @@ impl SyncWorker {
             client,
             store,
             notify: rx,
+            library_changed,
         };
         tokio::spawn(async move { worker.run().await });
         SyncHandle { notify: tx }
@@ -81,11 +85,17 @@ impl SyncWorker {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => Some(SyncMsg::Sync),
             };
             match msg {
-                Some(SyncMsg::Sync) => self.sync_once().await,
+                Some(SyncMsg::Sync) => {
+                    if self.sync_once().await {
+                        self.library_changed.send_modify(|g| *g += 1);
+                    }
+                }
                 Some(SyncMsg::Reconcile) => {
                     // 先消费 outbox（推送完成再拉快照）：避免「已 synced 但快照旧 →
                     // 缺席误翻」的最终一致闪烁窗口。
-                    self.sync_once().await;
+                    if self.sync_once().await {
+                        self.library_changed.send_modify(|g| *g += 1);
+                    }
                     self.reconcile().await;
                 }
                 None => return, // 通道关闭（daemon 退出）
@@ -99,20 +109,24 @@ impl SyncWorker {
             return;
         };
         crate::reconcile::reconcile_user_library(&self.client, &credential, &self.library).await;
+        // 快照落库 → 媒体库内容变更（客户端刷新歌单/我喜欢页，AUDIT §8.9）。
+        self.library_changed.send_modify(|g| *g += 1);
     }
 
     /// 一轮同步：relations → playlists（owned）→ playlist_ops。
-    async fn sync_once(&mut self) {
+    /// 返回是否有行被消费（状态标记/本地行变更 → 媒体库内容变更）。
+    async fn sync_once(&mut self) -> bool {
         let Some(credential) = self.load_credential() else {
-            return; // 无凭证：离线意图留 outbox（合法状态）
+            return false; // 无凭证：离线意图留 outbox（合法状态）
         };
+        let mut changed = false;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let mut relations = {
             let Ok(mut lib) = self.library.lock() else {
-                return;
+                return changed;
             };
             lib.relations_pending().unwrap_or_default()
         };
@@ -121,12 +135,13 @@ impl SyncWorker {
             r.sync_state == "pending"
                 || now - r.updated_at >= retry_delay(r.retry_count).as_secs() as i64
         });
+        changed |= !relations.is_empty();
         for row in relations {
             self.sync_relation(&row, &credential).await;
         }
         let playlists = {
             let Ok(mut lib) = self.library.lock() else {
-                return;
+                return changed;
             };
             lib.playlists_pending().unwrap_or_default()
         };
@@ -136,12 +151,13 @@ impl SyncWorker {
             r.sync_state == "pending"
                 || now - r.updated_at.unwrap_or(0) >= retry_delay(r.retry_count).as_secs() as i64
         });
+        changed |= !playlists.is_empty();
         for row in playlists {
             self.sync_playlist(&row, &credential).await;
         }
         let ops = {
             let Ok(mut lib) = self.library.lock() else {
-                return;
+                return changed;
             };
             lib.playlist_ops_pending().unwrap_or_default()
         };
@@ -150,9 +166,11 @@ impl SyncWorker {
             o.sync_state == "pending"
                 || now - o.updated_at.unwrap_or(0) >= retry_delay(o.retry_count).as_secs() as i64
         });
+        changed |= !ops.is_empty();
         for op in ops {
             self.sync_playlist_op(&op, &credential).await;
         }
+        changed
     }
 
     fn load_credential(&self) -> Option<Credential> {

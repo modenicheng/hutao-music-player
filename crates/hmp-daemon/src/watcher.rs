@@ -45,7 +45,11 @@ impl WatchQueue {
 
 impl LocalWatcher {
     /// 启动监听。无 scan_roots / 全部 root 监听失败 → None（warn 不阻断 daemon）。
-    pub fn spawn(library: Arc<Mutex<LibraryDb>>) -> Option<Self> {
+    /// `library_changed`：批处理落库后 bump（server 推 `LibraryChanged`，AUDIT §8.9）。
+    pub fn spawn(
+        library: Arc<Mutex<LibraryDb>>,
+        library_changed: tokio::sync::watch::Sender<u64>,
+    ) -> Option<Self> {
         let roots: Vec<String> = {
             let mut lib = library.lock().ok()?;
             match lib.scan_roots() {
@@ -112,6 +116,7 @@ impl LocalWatcher {
         let task_library = Arc::clone(&library);
         let task_queue = Arc::clone(&queue);
         let task_watcher = Arc::clone(&watcher);
+        let task_notify = library_changed;
         let mut watched_task = watched.clone();
         let task = tokio::spawn(async move {
             loop {
@@ -120,6 +125,7 @@ impl LocalWatcher {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
                 let paths = task_queue.drain();
+                let had_events = !paths.is_empty();
                 // 按文件短锁：拷贝大目录时每文件 1MB 指纹读不长时间阻塞 engine/sync。
                 for p in paths {
                     let mut lib = match task_library.lock() {
@@ -128,6 +134,9 @@ impl LocalWatcher {
                     };
                     Self::handle_event(&mut lib, &p);
                     drop(lib);
+                }
+                if had_events {
+                    task_notify.send_modify(|g| *g += 1);
                 }
                 // 每轮无条件刷新：空闲时新增 scan_roots（CLI 新扫描目录/外接盘恢复）
                 // 也能在 1s 内注册监听。
@@ -235,7 +244,8 @@ mod tests {
         db.begin_scan(music.path()).unwrap();
         drop(db);
         let library = Arc::new(Mutex::new(LibraryDb::open(&db_path).unwrap()));
-        let Some(watcher) = LocalWatcher::spawn(library.clone()) else {
+        let (notify, _notify_rx) = tokio::sync::watch::channel(0u64);
+        let Some(watcher) = LocalWatcher::spawn(library.clone(), notify) else {
             eprintln!("跳过：环境不支持目录监听（无 inotify？）");
             return;
         };
@@ -282,7 +292,7 @@ mod tests {
         let db_path = lib_dir.path().join("library.sqlite3");
         let library = Arc::new(Mutex::new(LibraryDb::open(&db_path).unwrap()));
         assert!(
-            LocalWatcher::spawn(library.clone()).is_none(),
+            LocalWatcher::spawn(library.clone(), tokio::sync::watch::channel(0u64).0).is_none(),
             "无 root 不启动"
         );
         // 非音频文件事件不入库。
@@ -291,7 +301,8 @@ mod tests {
             let mut db = library.lock().unwrap();
             db.begin_scan(music.path()).unwrap();
         }
-        let Some(watcher) = LocalWatcher::spawn(library.clone()) else {
+        let (notify, _notify_rx) = tokio::sync::watch::channel(0u64);
+        let Some(watcher) = LocalWatcher::spawn(library.clone(), notify) else {
             eprintln!("跳过：环境不支持目录监听");
             return;
         };

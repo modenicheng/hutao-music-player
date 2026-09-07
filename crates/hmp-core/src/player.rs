@@ -57,6 +57,10 @@ pub struct PlaybackState {
     pub duration: Option<std::time::Duration>,
     /// 音量（0.0..=1.0）。
     pub volume: f64,
+    /// 用户音量（RG 补偿前的原值；`volume` 是叠加 ReplayGain 因子后
+    /// 下发驱动的值——UI/MPRIS 展示与回设都用本字段，AUDIT §8.12）。
+    #[serde(default = "default_user_volume")]
+    pub user_volume: f64,
     /// 循环模式。
     pub loop_mode: LoopMode,
     /// 是否随机播放。
@@ -81,6 +85,7 @@ impl Default for PlaybackState {
             position: std::time::Duration::ZERO,
             duration: None,
             volume: 1.0,
+            user_volume: 1.0,
             loop_mode: LoopMode::None,
             shuffle: false,
             can_seek: false,
@@ -89,6 +94,11 @@ impl Default for PlaybackState {
             load_gen: 0,
         }
     }
+}
+
+/// `user_volume` 的反序列化缺省（旧 daemon 帧无该字段 → 视作未补偿）。
+fn default_user_volume() -> f64 {
+    1.0
 }
 
 /// 播放控制能力（MPRIS `CanGoNext`/`CanGoPrevious` 等由上层队列核心发布）。

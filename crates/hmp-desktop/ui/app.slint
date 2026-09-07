@@ -18,6 +18,7 @@ import { SettingsPage } from "settings-page.slint";
 import { SettingsGeneralPage } from "settings-general-page.slint";
 import { SettingsPlaybackPage } from "settings-playback-page.slint";
 import { SettingsAccountPage } from "settings-account-page.slint";
+import { SearchPage } from "search-page.slint";
 import { Nav, Route } from "nav.slint";
 import { Player, Data, Quality } from "stores.slint";
 import { Theme } from "theme.slint";
@@ -139,19 +140,21 @@ export component AppWindow inherits Window {
                 width: parent.width;
             }
 
-            // 未移植模块（M4 在线内容页）：诚实占位——依赖 QQ 内容读接口
-            // （搜索/推荐/榜单），daemon IPC 尚未提供（docs/AUDIT.md §8.2）。
+            if Nav.route == Route.search: SearchPage {
+                width: parent.width;
+            }
+
+            // 未移植模块（M4 在线内容页）：诚实占位——推荐/榜单内容读接口
+            // 尚未排期（搜索已接 daemon Search IPC，docs/AUDIT.md §8.2）。
             if Nav.route == Route.home || Nav.route == Route.discover || Nav.route == Route.top
-                || Nav.route == Route.top-detail || Nav.route == Route.search: Rectangle {
+                || Nav.route == Route.top-detail: Rectangle {
                 width: parent.width;
                 height: 240px;
 
                 Text {
                     y: 96px;
                     width: parent.width;
-                    text: Nav.route == Route.search
-                        ? "搜索依赖 QQ 内容接口，等待守护进程补齐读接口后开放"
-                        : "在线内容页依赖 QQ 内容接口，等待守护进程补齐读接口（docs/AUDIT.md §8.2）";
+                    text: "在线内容页依赖 QQ 内容接口（推荐/榜单），后续版本接入";
                     color: Theme.muted-foreground;
                     font-size: 14px;
                     horizontal-alignment: center;

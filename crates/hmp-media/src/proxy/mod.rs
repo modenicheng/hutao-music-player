@@ -8,4 +8,4 @@ pub mod http;
 pub mod range;
 pub mod source;
 
-pub use source::{PreparedMedia, prepare_stream};
+pub use source::{PreparedMedia, cdn_client, prepare_stream};

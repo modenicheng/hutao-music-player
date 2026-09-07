@@ -23,7 +23,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     bridge::load_data(&ui);
-    bridge::bind(&ui, Arc::clone(&prefs));
+    bridge::bind(&ui, Arc::clone(&prefs), Arc::clone(&runtime));
     // 播放桥：连接/拉起 daemon → 订阅状态推送；彻底失败降级离线
     // （Player 全空、命令 no-op），UI 照常打开。
     player_bridge::bind(&ui, Arc::clone(&runtime), Arc::clone(&prefs));

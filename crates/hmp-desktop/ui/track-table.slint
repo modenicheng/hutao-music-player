@@ -13,6 +13,8 @@ export component TrackTable inherits Rectangle {
     in property <[TrackRow]> tracks;
     in property <bool> show-header: false;
     in property <bool> show-album: true;
+    /** 时长未知的数据源（如 smartbox 搜索结果）置 false → 显示 "—" 而非 0:00 */
+    in property <bool> show-duration: true;
 
     background: transparent;
     horizontal-stretch: 1;
@@ -67,7 +69,7 @@ export component TrackTable inherits Rectangle {
                     font-size: 12.5px;
                     vertical-alignment: center;
                 }
-                Text {
+                if root.show-duration: Text {
                     width: 64px;
                     text: "时长";
                     color: Theme.muted-foreground;
@@ -187,7 +189,7 @@ export component TrackTable inherits Rectangle {
 
                         Text {
                             width: 64px;
-                            text: root.format-duration(row.duration-ms);
+                            text: root.show-duration ? root.format-duration(row.duration-ms) : "—";
                             color: Theme.muted-foreground;
                             font-size: 13.4px;
                             horizontal-alignment: right;

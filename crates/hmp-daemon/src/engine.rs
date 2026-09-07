@@ -125,6 +125,12 @@ pub struct EngineHandle {
     pub sync_handle: Option<crate::sync::SyncHandle>,
     /// 评论服务（daemon 层注入；未注入时评论命令报不可用）。
     pub comment: Option<crate::comment::CommentService>,
+    /// 内容读服务（daemon 层注入；未注入时搜索/歌词/账号/封面命令报不可用）。
+    pub content: Option<crate::content::ContentService>,
+    /// 媒体库变更代际（watcher/sync/写命令 bump；server 据此推
+    /// `Event::LibraryChanged`，客户端重查 sqlite——直读契约的刷新信号）。
+    pub library_tx: watch::Sender<u64>,
+    pub library_rx: watch::Receiver<u64>,
 }
 
 impl EngineHandle {
@@ -267,6 +273,8 @@ impl PlaybackEngine {
         let (queue_tx, queue_rx) = watch::channel(QueueSnapshot::default());
         // sticky 终止信号：晚到的接收者立即可见（watch 保留当前值，Finding 7）。
         let (term_tx, term_rx) = watch::channel(false);
+        // 库变更代际（daemon 层可整体替换为贯穿 watcher/sync 的通道）。
+        let (library_tx, library_rx) = watch::channel(0u64);
         let queue_rev_after_restore = queue.revision();
         let mut engine = Self {
             driver,
@@ -320,6 +328,9 @@ impl PlaybackEngine {
             library: None,
             sync_handle: None,
             comment: None,
+            content: None,
+            library_tx,
+            library_rx,
         }
     }
 
@@ -411,6 +422,9 @@ impl PlaybackEngine {
                             }
                             self.publish();
                         }
+                        Request::QueuePlayAt(i) => {
+                            self.queue_play_at(i).await;
+                        }
                         Request::OpenUri(uri) => {
                             // MPRIS OpenUri：仅接受 file://（URL 解码后转本地播放）；其余 → 错误。
                             match url::Url::parse(&uri)
@@ -476,8 +490,12 @@ impl PlaybackEngine {
             can_go_next: self.queue.can_go_next(),
             can_go_previous: self.queue.can_go_previous(),
         };
+        // user_volume 原值随状态发布（playback.volume 是 RG 补偿后的驱动值；
+        // UI/MPRIS 展示与回设用原值，AUDIT §8.12）。
+        let mut playback = self.state_rx.borrow().clone();
+        playback.user_volume = self.user_volume;
         let state = DaemonState {
-            playback: self.state_rx.borrow().clone(),
+            playback,
             queue: self.queue.summary(),
             caps,
             seq: self.seq,
@@ -603,6 +621,47 @@ impl PlaybackEngine {
             self.queue.restore_state(saved);
             self.restore_phase_after_failure();
         }
+    }
+
+    /// 队列跳播（AUDIT §8.8）：跳到 0 基位置曲目播放，**不替换队列**。
+    /// 事务式（与 navigate_next 同模式）：先装载成功再提交队列游标与会话；
+    /// 失败回滚，旧曲继续。越界/已是当前曲 → 不动作（发布错误）。
+    async fn queue_play_at(&mut self, index: usize) {
+        let len = self.queue.summary().len;
+        if index >= len {
+            self.last_error = Some(ErrorInfo {
+                code: IpcErrorCode::Internal,
+                message: format!("queue play-at index {index} out of range (len {len})"),
+            });
+            self.seq += 1;
+            self.publish();
+            return;
+        }
+        if self.queue.current_idx() == Some(index) {
+            // 点当前曲 = 确保播放（对齐队列抽屉「点行即播」直觉）。
+            self.driver.play();
+            self.seq += 1;
+            self.publish();
+            return;
+        }
+        let saved = self.queue.save_state();
+        self.queue.set_current(index);
+        let Some(id) = self.queue.current().cloned() else {
+            return;
+        };
+        let old_session = self.session.clone();
+        let old_position = self.state_rx.borrow().position;
+        if self.load_and_play(id).await.is_ok() {
+            if let Some(old) = old_session {
+                self.close_session(&old, "manual", old_position.as_millis() as i64);
+            }
+        } else {
+            // 装载失败：回滚游标（原曲继续播放，状态一致）。
+            self.queue.restore_state(saved);
+            self.restore_phase_after_failure();
+        }
+        self.seq += 1;
+        self.publish();
     }
 
     async fn navigate_prev(&mut self) {
