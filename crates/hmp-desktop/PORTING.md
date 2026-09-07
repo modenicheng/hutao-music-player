@@ -29,11 +29,11 @@
 - [x] **M1 侧栏**：账户面板、主导航 8 项（exact 语义）、我的歌单宽窄双形态（宽=分组折叠、窄=两级滑动）、页脚（收起/设置/主题循环）、单一滑动高亮
 - [x] **M2 播放条**：长进度条（hover 增粗、点击/拖拽 seek）、封面+歌名、QualityBadge(向上弹层)、控制排、VolumeControl 竖向弹层（静音切换）、队列键；模拟播放桥（250ms Timer 推进、自动下一曲、上一曲 3s 规则）；QueueDrawer 主界面态（遮罩+定高+清空+空态+移除）
 - [x] **M3 库页**：TrackTable / CoverCard / SectionHeader / PageHeader / FactRow / 我喜欢页（hero 卡+喜欢列表+最近预览+歌单网格）/ 最近播放 / 音乐库（监视文件夹点击过滤）/ 下载（落盘明细）/ 已购（单曲表+专辑网格+页头金额聚合）
-- [ ] **M4 内容页**：首页 / 发现 / 排行榜+详情 / 搜索 / 歌单 / 专辑 / 歌手
-- [ ] **M5 设置**：总览三分类卡 + 常规（主题三选真实生效）/ 播放（音质四档+默认音量）/ 账号（只读+禁用纪律）
+- [x] **M4 内容页（本地投影轮，2026-09-07）**：歌单详情（playlist_tracks + 本地/QQ 元数据补全，头部 N 首+总时长）/ 专辑详情（library_albums 组行 + local_tracks_by_album，show-album=false）/ 歌手详情（track_artists 命中 + 展示串最长包含归一 + 曲目专辑聚合网格）；CoverCardGrid 换行网格；TrackTable 歌手/专辑链接接通（本地投影参数=展示名，空参禁用）。首页/发现/榜单/搜索仍为诚实占位（等 daemon 内容读接口，AUDIT §8.2）
+- [x] **M5 设置**：总览三分类卡 + 常规（主题三选真实生效，Theme.set-mode）/ 播放（音质四档 Quality.select + 默认音量 HSlider→Player.set-volume 双写）/ 账号（账号读接口未接入 AUDIT §8.6：资料卡诚实占位 + 退出登录禁用 + FactRow "—"）
 - [ ] **M6 播放页**：全屏 overlay（slide-bottom）、RulerProgress 刻度条、控制台、OKLab 取色（TrackPalette 覆写）、歌词（弹簧跟随+景深+逐字扫色+无滚动条）、评论区（编辑部式重排）、队列抽屉 themed 态
 - [ ] **M7 收尾**：ESC/键盘语义、焦点可达、reduced-motion 免动画、窄窗（⅓ 宽 683px）断点核对
-- [~] **M8 数据接线**：mock → daemon IPC（2026-09-07 完成首轮：播放/队列/收藏歌单/最近/本地库/侧栏歌单真数据，详见下方 M8 接线记录）；内容页（M4）与歌词（M6）等待后端补接口（docs/AUDIT.md §8）
+- [~] **M8 数据接线**：mock → daemon IPC（2026-09-07 完成首轮：播放/队列/收藏歌单/最近/本地库/侧栏歌单真数据，详见下方 M8 接线记录）；内容页（M4 余量）与歌词（M6）等待后端补接口（docs/AUDIT.md §8）
 
 ## 已定工程决策
 
@@ -52,6 +52,8 @@
 
 **真数据**：我喜欢 / 最近播放（真实时间戳文案）/ 音乐库（扫描根分组统计）/ 歌单（relation 分流，副标题 "N 首"）/ 侧栏歌单区（Data.sidebar-*，色对按 id 哈希确定性装饰）/ 播放条与队列（DaemonState → Player 单向映射，命令 → Request）。
 
+**M4.5 详情页接线（2026-09-07 第二轮）**：歌单/专辑/歌手三页详情 = 导航时同步直读 sqlite（`library_view::playlist_detail / album_detail / artist_detail`，`with_db` 单连接单投影，失败 → found=false 诚实空态）。**详情页参数约定**：歌单 = DB id；专辑/歌手 = 展示名（远端 mid 要等内容接口，AUDIT §8.2）——`SongRow::to_track_row` 把 `artist_mid/album_mid` 填成展示名，TrackTable 空参禁用链接；歌手页对含分隔符的展示串（如 "张韶涵/HOYO-MiX"）按 `library_artists` 名字做最长包含归一。装卸点 = `bridge::apply_route`（navigate/back 共用）。
+
 **仍 mock**：下载/已购两页（后端无此域，AUDIT §8.5）。
 
 **已知偏差（M8 新增）**：
@@ -62,7 +64,7 @@
 - 队列点歌 = `Play(该曲 id)`，整队被该单曲替换（无 PlayAt IPC，AUDIT §8.8）；
 - 队列行 QQ 曲目时长 0:00（`track_meta_batch` 无时长投影，AUDIT §8.11）；
 - 客户端音质偏好暂不生效（与 daemon config.toml 两处存储，AUDIT §8.7）；音量以 daemon 推送为准（含 RG 补偿语义，AUDIT §8.12）；
-- 歌手/专辑 mid 真数据行为空串（媒体库不存远端 mid），点击跳空参详情页（M4 落地时收敛）；
+- ~~歌手/专辑 mid 真数据行为空串~~（M4.5 收敛：详情页参数改用展示名，本地投影可跳转；QQ-only 歌手/专辑落"本地库无此内容"诚实空态，待内容接口换真 mid）；
 - 库页是启动静态快照（无 LibraryChanged 事件，AUDIT §8.9）。
 
 **后端缺口全集**：docs/AUDIT.md §8（12 条 + 汇总表）。
@@ -84,6 +86,11 @@
 - **debug vs release 渲染差距巨大**：debug 全场景重绘 ~30fps、release ~200fps（FemtoVG+OpenGL，`SLINT_DEBUG_PERFORMANCE="refresh_full_speed,console"` 实测）。日常视觉验收用 `cargo run --release -p hmp-desktop`；持续动画（EQ）把重绘压到 30fps 采样。
 - 集成测试基建：dev-dep `i-slint-backend-testing`（`init_no_event_loop` 进程级单例 → 一个测试二进制一个 #[test]）+ 公开 `Window::dispatch_event` 合成指针（`slint::platform::{WindowEvent, PointerEventButton}`）+ `mock_elapsed_time` 驱动 Timer；global 要在 app.slint `export {}` 后 Rust 侧才可读。
 - **布局显式 `alignment` 会让 stretch 失效**（视觉验收发现的坑，2026-09-06）：HorizontalLayout/VerticalLayout 一旦写了 `alignment: start/end/...`，剩余空间按对齐分配、所有子元素取首选宽，`horizontal-stretch` 不再参与 —— "标题 stretch:1 + 右侧动作区"的 space-between 写法必须**不写 alignment**。曾导致 PageHeader 动作区/SectionHeader"更多"/hero 播放全部全部挤在标题旁。
+- **绝对定位子元素默认在父级居中，不是 (0,0)**（2026-09-07 视觉验收确证）：非布局父级下，设了 width/height 但没设 x/y 的子元素落在 `((parent.w - self.w)/2, …)` —— 封面/标签列"莫名居中"都是它。要么显式 `x: 0`，要么干脆走布局（HorizontalLayout + cross-axis-alignment）。
+- **布局子元素里引用 parent.width 算首选宽会成环**（2026-09-07）：`width: parent.width - self.x` 这类绑定让布局解出负宽（实测 -312px），子元素四散。布局内子元素的几何交给布局分配（fixed 宽 + stretch），不要自引用父宽。
+- **HorizontalLayout/VerticalLayout 交叉轴默认 stretch**（读 i-slint-core layout.rs 确证）：定高子元素被顶对齐；可用 `cross-axis-alignment: center`（lower_layout.rs 的 "cross-axis-alignment" 绑定）或仓库旧的显式 `y: (parent.height - self.height)/2` 写法。
+- **Slint 组件必须先声明后使用**（同文件内）：SettingsNav 引用 PillOption 需把 PillOption 放前面（或把使用方挪到文件末尾）。
+- **CLI 双轨坑（QA 数据准备）**：`hmp scan` 直读/直写 sqlite（跟随 XDG_DATA_HOME），`hmp playlist create/add` 走 daemon IPC（写 daemon 自己的库，与 shell 里的 XDG_DATA_HOME 无关）——沙箱库扫描 + CLI 建歌单会脑裂。沙箱 QA 要么全直读（歌单行手工 SQL），要么对真库验收（本轮 dshot3.sh 取消 XDG 隔离）。
 - **逐行 stretch 列宽会漂移**：Slint 没有跨行共享的 CSS grid fr，每行自己的布局按"该行内容首选宽"分配 stretch 余量 → 短文本行的列位置肉眼可见地左右跳动（曲目表专辑列）。修法：按根宽算定宽（TrackTable 的 `grid-available × 1.4/2.2 / 0.8/2.2`；封面卡网格 `Theme.grid-card-width` 对应 Vue `repeat(auto-fill, minmax(9rem,1fr))`）。
 - **舍入对齐**：TS `Math.round` 在 slint 侧用 `Math.round`、Rust 侧用 `f64::round`；别顺手写成 floor/div_ceil（时长"2 小时 5/6 分钟"、"m:ss" 都栽过）。
 - 视觉 QA 基建：`examples/shot.rs`（`cargo run --release -p hmp-desktop --example shot -- <route> [--theme dark] [--playing] [--queue] [--hover X,Y] [--bus-hover X,Y,W,H]`，playing 走 `invoke_play_tracks` 让 PlayerHost 接管快照）+ `/tmp/hmp-qa2/dshot.sh`（niri 按 PID 找窗口 → focus-workspace/focus-window → `screenshot-window`，焦点校验+尺寸校验+重试）；Vue 对照用 `/tmp/hmp-qa/vshot2.mjs`（1420，视口 1018×1228 dpr=1.25，走真实主题循环切暗色）。winit 下 `dispatch_event(PointerMoved)` 不驱动 hover（testing backend 才行），hover 视觉用 `--bus-hover` 或真实指针。
@@ -96,4 +103,4 @@
   - 启动即连接 daemon socket（`$XDG_RUNTIME_DIR/hmp.sock`），连不上自动 `hmp serve --background`（CLI 同款）；失败降级离线（全空态、命令无效）。
   - 库页数据 = 启动时直读 `$XDG_DATA_HOME/hmp/library.sqlite3` 的静态快照：先 `hmp scan ~/Music` 入库本地曲目，QQ 侧 `hmp login` + `hmp library sync`。
   - 播放/收藏/歌单写全走 daemon（与 CLI/MPRIS 同一状态源）；`hmp quit` 后 UI 呈离线空态，不自动复活后端。
-- 视觉 QA：`cargo run --release -p hmp-desktop --example shot -- <route> [--theme dark] [--queue] [--playing]`（真实应用宿主，route 如 library/recent/local/downloads/purchased）+ `/tmp/hmp-qa2/dshot2.sh <name> <args…>`（niri 截图；daemon 需已在跑，播放态用 `hmp play` 预置）。
+- 视觉 QA：`cargo run --release -p hmp-desktop --example shot -- <route> [--param <值>] [--theme dark] [--queue] [--playing]`（真实应用宿主，route 如 library/recent/local/downloads/purchased/playlist/album/artist/settings*）+ `/tmp/hmp-qa2/dshot3.sh <name> <args…>`（niri 截图；**不隔离 XDG_DATA_HOME**，直读真实用户库；daemon 需已在跑，播放态用 `hmp play` 预置）。

@@ -113,4 +113,25 @@ export global Data {
     in-out property <int> purchased-single-count;
     in-out property <int> purchased-album-count;
     in-out property <string> purchased-total;
+    // —— 歌单详情页（导航时装载；found=false → 诚实"未找到"空态）———
+    in-out property <bool> playlist-found: false;
+    in-out property <string> playlist-name: "";
+    in-out property <[string]> playlist-meta-items;
+    in-out property <image> playlist-cover;
+    in-out property <[TrackRow]> playlist-tracks;
+    // —— 专辑详情页（参数 = 专辑名，本地投影）———
+    in-out property <bool> album-found: false;
+    in-out property <string> album-name: "";
+    /** 歌手链接参数（本地投影 = 歌手名；空串禁用链接） */
+    in-out property <string> album-artist: "";
+    in-out property <[string]> album-meta-items;
+    in-out property <image> album-cover;
+    in-out property <[TrackRow]> album-tracks;
+    // —— 歌手详情页（参数 = 歌手名，本地投影）———
+    in-out property <bool> artist-found: false;
+    in-out property <string> artist-name: "";
+    in-out property <[string]> artist-meta-items;
+    in-out property <image> artist-photo;
+    in-out property <[TrackRow]> artist-tracks;
+    in-out property <[CoverCardData]> artist-albums;
 }

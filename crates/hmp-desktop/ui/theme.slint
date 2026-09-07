@@ -8,6 +8,8 @@ export global Theme {
     out property <bool> dark: mode == 2 || (mode == 0 && Palette.color-scheme == ColorScheme.dark);
     /** 主题循环（跟随系统 → 浅色 → 深色 → …），Rust 侧持久化 */
     callback cycle-mode();
+    /** 直接设档（设置页三选：0=跟随系统 1=浅色 2=深色），Rust 侧持久化 */
+    callback set-mode(int);
 
     // 窗口宽度（AppWindow 双向绑定），驱动 sidebar-width 的 clamp(14rem, 17vw, 18rem)
     in-out property <length> win-width: 1280px;

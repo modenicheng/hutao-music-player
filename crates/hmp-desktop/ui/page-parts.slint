@@ -3,6 +3,7 @@
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, TextLink } from "primitives.slint";
+import { CoverCardData } from "data.slint";
 
 // —— 内容页页头：返回 + 大标题 + 元信息行 + 右侧动作区 ——
 export component PageHeader inherits Rectangle {
@@ -10,10 +11,13 @@ export component PageHeader inherits Rectangle {
     in property <bool> show-back: false;
     /** 元信息条目，如 ["45 首", "3 个歌单"]（渲染时以 · 分隔） */
     in property <[string]> meta-items;
+    /** 首位元信息渲染成链接（专辑页的歌手跳转；空串不渲染） */
+    in property <string> meta-link: "";
+    callback meta-link-clicked();
 
     callback back;
 
-    height: meta-items.length > 0 ? 84px : 64px;
+    height: meta-items.length > 0 || meta-link != "" ? 84px : 64px;
     background: transparent;
     horizontal-stretch: 1;
 
@@ -59,15 +63,23 @@ export component PageHeader inherits Rectangle {
                     overflow: elide;
                 }
 
-                if meta-items.length > 0: HorizontalLayout {
+                if meta-items.length > 0 || meta-link != "": HorizontalLayout {
                     spacing: Theme.space-2;
                     alignment: LayoutAlignment.start;
+
+                    if meta-link != "": TextLink {
+                        text: root.meta-link;
+                        font-size: 14px;
+                        clicked => {
+                            root.meta-link-clicked();
+                        }
+                    }
 
                     for item[index] in meta-items: HorizontalLayout {
                         spacing: Theme.space-2;
                         alignment: LayoutAlignment.start;
 
-                        if index > 0: Text {
+                        if index > 0 || meta-link != "": Text {
                             text: "·";
                             color: Theme.muted-foreground;
                             font-size: 14px;
@@ -259,6 +271,36 @@ export component CoverCard inherits Rectangle {
             font-size: 12.5px;
             overflow: elide;
             wrap: no-wrap;
+        }
+    }
+}
+
+// —— 封面卡网格（Vue repeat(auto-fill, minmax(9rem,1fr)) 的换行对应物）：
+// Slint 布局不能 wrap，按容器宽算列数后绝对定位（列宽同 Theme.grid-card-width
+// 公式），行数撑起容器高度。点击回调带卡 mid（歌单 id / 专辑名等页面自解释）。
+export component CoverCardGrid inherits Rectangle {
+    in property <[CoverCardData]> cards;
+    callback card-clicked(string);
+
+    background: transparent;
+    height: rows > 0 ? rows * card-h + (rows - 1) * 16px : 0px;
+
+    property <int> cols: Math.max(1, Math.floor((self.width + 16px) / 160px));
+    property <int> rows: Math.ceil(cards.length / cols);
+    property <length> card-w: (self.width - (cols - 1) * 16px) / cols;
+    // 封面(宽+4 hover 余量) + spacing 8×2 + 标题/副标题行高
+    property <length> card-h: card-w + 4px + 16px + 22px + 19px;
+
+    for card[index] in cards: CoverCard {
+        x: Math.mod(index, cols) * (card-w + 16px);
+        y: Math.floor(index / cols) * (card-h + 16px);
+        width: card-w;
+        height: card-h;
+        cover: card.cover;
+        title: card.title;
+        subtitle: card.subtitle;
+        clicked => {
+            root.card-clicked(card.mid);
         }
     }
 }

@@ -1,0 +1,83 @@
+// 专辑详情（AlbumView.vue）：封面 + 页头（返回/标题/歌手链接/元信息/播放全部）
+// + 通栏曲目表（专辑列冗余关闭）。本地投影：厂牌/简介/收藏计数无数据源。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { Button, ButtonVariant } from "primitives.slint";
+import { PageHeader } from "page-parts.slint";
+import { TrackTable } from "track-table.slint";
+import { Nav, Route } from "nav.slint";
+import { Data, Player } from "stores.slint";
+
+export component AlbumPage inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-4;
+
+        if !Data.album-found: Text {
+            text: "本地媒体库中没有这张专辑";
+            color: Theme.muted-foreground;
+            font-size: 14px;
+            horizontal-alignment: center;
+        }
+
+        if Data.album-found: Rectangle {
+            // 两段式头部（Vue .album-head）。子元素勿引用 parent.width
+            //（布局首选宽计算成环，会解出负宽）。
+            width: parent.width;
+            height: 176px;
+
+            HorizontalLayout {
+                spacing: Theme.space-8;
+                cross-axis-alignment: center;
+
+                Rectangle {
+                    width: 176px;
+                    height: 176px;
+                    border-radius: Theme.radius-lg;
+                    clip: true;
+                    background: Theme.muted;
+                    drop-shadow-blur: 2px;
+                    drop-shadow-color: #241F1B.transparentize(0.92);
+                    drop-shadow-offset-y: 1px;
+
+                    Image {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        source: Data.album-cover;
+                        image-fit: ImageFit.cover;
+                    }
+                }
+
+                // 信息列：页头在上；收藏专辑/收藏数无后端域（AUDIT §8.5），如实缺席
+                PageHeader {
+                    horizontal-stretch: 1;
+                    title: Data.album-name;
+                    show-back: true;
+                    meta-link: Data.album-artist;
+                    meta-items: Data.album-meta-items;
+
+                    back => {
+                        Nav.back();
+                    }
+                    meta-link-clicked => {
+                        Nav.navigate(Route.artist, Data.album-artist);
+                    }
+                }
+            }
+        }
+
+        // 专辑内曲目同属一张专辑，专辑列冗余关闭（同 Vue show-album=false）
+        if Data.album-found: TrackTable {
+            tracks: Data.album-tracks;
+            show-header: true;
+            show-album: false;
+        }
+    }
+}

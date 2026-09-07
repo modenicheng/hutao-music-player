@@ -1,0 +1,105 @@
+// 歌手详情（ArtistView.vue）：hero（左图右信息：返回/大名字/统计带）+ 热门歌曲
+// + 专辑网格。本地投影：照片/简介/MV/相似歌手无数据源，如实缺席。
+import { Theme } from "theme.slint";
+import { PageHeader, SectionHeader, CoverCardGrid } from "page-parts.slint";
+import { TrackTable } from "track-table.slint";
+import { Nav, Route } from "nav.slint";
+import { Data } from "stores.slint";
+
+export component ArtistPage inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-6;
+
+        if !Data.artist-found: Text {
+            text: "本地媒体库中没有该歌手";
+            color: Theme.muted-foreground;
+            font-size: 14px;
+            horizontal-alignment: center;
+        }
+
+        if Data.artist-found: Rectangle {
+            // hero：封面照 | 页头（名字 + 统计），垂直居中。子元素勿引用
+            // parent.width（布局首选宽计算成环，会解出负宽）。
+            width: parent.width;
+            height: 176px;
+
+            HorizontalLayout {
+                spacing: Theme.space-8;
+                cross-axis-alignment: center;
+
+                Rectangle {
+                    width: 176px;
+                    height: 176px;
+                    border-radius: Theme.radius-lg;
+                    clip: true;
+                    background: Theme.muted;
+                    drop-shadow-blur: 2px;
+                    drop-shadow-color: #241F1B.transparentize(0.92);
+                    drop-shadow-offset-y: 1px;
+
+                    Image {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        source: Data.artist-photo;
+                        image-fit: ImageFit.cover;
+                    }
+                }
+
+                PageHeader {
+                    horizontal-stretch: 1;
+                    title: Data.artist-name;
+                    show-back: true;
+                    meta-items: Data.artist-meta-items;
+
+                    back => {
+                        Nav.back();
+                    }
+                }
+            }
+        }
+
+        if Data.artist-found && Data.artist-tracks.length > 0: VerticalLayout {
+            spacing: Theme.space-4;
+
+            SectionHeader {
+                title: "歌曲";
+            }
+            TrackTable {
+                tracks: Data.artist-tracks;
+                show-header: true;
+            }
+        }
+
+        if Data.artist-found && Data.artist-albums.length > 0: VerticalLayout {
+            spacing: Theme.space-4;
+
+            SectionHeader {
+                title: "专辑";
+            }
+            CoverCardGrid {
+                width: parent.width;
+                cards: Data.artist-albums;
+                card-clicked(name) => {
+                    Nav.navigate(Route.album, name);
+                }
+            }
+        }
+
+        if Data.artist-found && Data.artist-tracks.length == 0 && Data.artist-albums.length == 0: Text {
+            height: 64px;
+            text: "该歌手在本地媒体库中暂无曲目";
+            color: Theme.muted-foreground;
+            font-size: 14px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}

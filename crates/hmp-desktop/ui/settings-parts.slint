@@ -1,0 +1,342 @@
+// 设置页共用件（SettingsNav.vue / 设置组卡 / 设置行 / 档位胶囊 / 停用开关 /
+// 横向音量条 / 分类卡）。禁用档位 = 诚实"未接线"展示（DESIGN.md 纪律）。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { AppIcon } from "primitives.slint";
+import { Nav, Route } from "nav.slint";
+
+// —— 设置组卡片：中性表面 + 组标题 + 行集合（@children）———
+export component SettingGroup inherits Rectangle {
+    in property <string> title;
+    callback title-clicked;
+
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-3;
+    drop-shadow-blur: 2px;
+    drop-shadow-color: #241F1B.transparentize(0.92);
+    drop-shadow-offset-y: 1px;
+
+    VerticalLayout {
+        padding-left: Theme.space-5;
+        padding-right: Theme.space-5;
+        padding-top: Theme.space-4;
+        padding-bottom: Theme.space-4;
+        spacing: Theme.space-1;
+
+        if title != "": Text {
+            text: root.title;
+            color: Theme.foreground;
+            font-size: 16px;
+            font-weight: 650;
+        }
+
+        @children
+    }
+}
+
+// —— 设置行：左标签+描述，右控制区（@children）；separator = 顶部发丝线 ———
+// 交叉轴默认 stretch 会把定高控件顶对齐，控制区显式 center（同 PageHeader y 居中语义）
+export component SettingRow inherits Rectangle {
+    in property <string> label;
+    in property <string> desc: "";
+    in property <bool> separator: false;
+    height: desc == "" ? 44px : 56px;
+    background: transparent;
+
+    // x 必须显式置 0：Slint 绝对定位子元素默认在父级居中，不是左上角
+    VerticalLayout {
+        x: 0;
+        width: parent.width - control-w.width;
+        height: parent.height;
+        alignment: LayoutAlignment.center;
+        spacing: 2px;
+
+        Text {
+            text: root.label;
+            color: Theme.foreground;
+            font-size: 14.6px;
+            font-weight: 550;
+            overflow: elide;
+        }
+        if desc != "": Text {
+            text: root.desc;
+            color: Theme.muted-foreground;
+            font-size: 12.8px;
+            overflow: elide;
+        }
+    }
+
+    // 控制区贴右缘、取自然宽（默认 width=100% 会盖住标签列）
+    control-w := HorizontalLayout {
+        x: parent.width - self.width;
+        width: self.preferred-width;
+        height: parent.height;
+        horizontal-stretch: 0;
+        cross-axis-alignment: center;
+        spacing: Theme.space-2;
+
+        @children
+    }
+
+    if separator: Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.hairline;
+    }
+}
+
+// 组说明行（group-caption）：说明文字，灰、小
+export component SettingCaption inherits Rectangle {
+    in property <string> text;
+    height: 28px;
+    background: transparent;
+
+    Text {
+        width: parent.width;
+        text: root.text;
+        color: Theme.muted-foreground;
+        font-size: 12.8px;
+        vertical-alignment: center;
+    }
+}
+
+// —— 档位胶囊（启动页/语言/主题）：active=muted 底，disabled 诚实未接线 ——
+export component PillOption inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    in property <string> tool-tip: "";
+    callback clicked;
+
+    // 布局内保持自然宽（设置行控制区里不被拉伸成通栏）
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    height: 30px;
+    border-radius: Theme.radius-full;
+    border-width: 1px;
+    border-color: root.active ? Theme.border-strong : Theme.border;
+    background: root.active || (touch.has-hover && root.enabled) ? Theme.muted : transparent;
+    opacity: root.enabled ? 1 : 0.45;
+    animate background {
+        duration: Theme.duration-fast;
+    }
+    accessible-role: button;
+    accessible-label: text;
+    accessible-enabled: root.enabled;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    if tool-tip != "": Tooltip {
+        text: @markdown("\{root.tool-tip}");
+    }
+
+    HorizontalLayout {
+        padding-left: 12.8px;
+        padding-right: 12.8px;
+        spacing: 6.4px;
+        alignment: LayoutAlignment.center;
+
+        if icon.width > 0: AppIcon {
+            source: root.icon;
+            icon-color: Theme.foreground;
+            width: 16.8px;
+            height: 16.8px;
+        }
+        Text {
+            text: root.text;
+            color: Theme.foreground;
+            font-size: 13.6px;
+            font-weight: root.active ? 550 : 400;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// —— 停用开关（播放行为未接线）：轨道+滑块一律灰 ——
+export component DisabledSwitch inherits Rectangle {
+    width: 36px;
+    height: 20px;
+    border-radius: Theme.radius-full;
+    background: Theme.muted;
+    border-width: 1px;
+    border-color: Theme.border;
+    opacity: 0.55;
+
+    Rectangle {
+        x: 2.4px;
+        y: (parent.height - self.height) / 2;
+        width: 15.2px;
+        height: 15.2px;
+        border-radius: Theme.radius-full;
+        background: Theme.surface-3;
+        drop-shadow-blur: 2px;
+        drop-shadow-color: #241F1B.transparentize(0.88);
+        drop-shadow-offset-y: 1px;
+    }
+}
+
+// —— 横向滑条（设置页默认音量）：4px 轨 + 12px thumb，整条命中直接跟随 ——
+export component HSlider inherits Rectangle {
+    in property <float> value: 0.5;
+    callback changed(float);
+
+    height: 20px;
+    background: transparent;
+
+    Rectangle {
+        y: (parent.height - 4px) / 2;
+        width: parent.width;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.track;
+
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: root.value * parent.width;
+            height: parent.height;
+            border-radius: 2px;
+            background: Theme.track-accent;
+        }
+    }
+
+    Rectangle {
+        width: 12px;
+        height: 12px;
+        border-radius: Theme.radius-full;
+        background: Theme.surface-3;
+        border-width: 2px;
+        border-color: Theme.track-accent;
+        x: clamp(root.value * parent.width - self.width / 2, 0px, parent.width - self.width);
+        y: (parent.height - self.height) / 2;
+    }
+
+    TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.changed(clamp(self.mouse-x / self.width, 0.0, 1.0));
+            }
+        }
+        moved => {
+            root.changed(clamp(self.mouse-x / self.width, 0.0, 1.0));
+        }
+    }
+}
+
+// —— 设置总览分类卡：图标盒 + 标题/描述 + 右向箭头，hover 上浮 ——
+export component CategoryCard inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> desc;
+    callback clicked;
+
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-3;
+    drop-shadow-blur: touch.has-hover ? 12px : 2px;
+    drop-shadow-color: #241F1B.transparentize(touch.has-hover ? 0.82 : 0.92);
+    drop-shadow-offset-y: touch.has-hover ? 4px : 1px;
+    animate drop-shadow-blur {
+        duration: Theme.duration-normal;
+    }
+    animate drop-shadow-color {
+        duration: Theme.duration-normal;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding: Theme.space-5;
+        spacing: Theme.space-4;
+        cross-axis-alignment: center;
+
+        Rectangle {
+            width: 44px;
+            height: 44px;
+            border-radius: Theme.radius-md;
+            background: Theme.muted;
+
+            AppIcon {
+                source: root.icon;
+                icon-color: Theme.foreground;
+                width: 21.6px;
+                height: 21.6px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: LayoutAlignment.center;
+            spacing: 3px;
+
+            Text {
+                text: root.title;
+                color: Theme.foreground;
+                font-size: 16px;
+                font-weight: 650;
+                overflow: elide;
+            }
+            Text {
+                text: root.desc;
+                color: Theme.muted-foreground;
+                font-size: 12.8px;
+                overflow: elide;
+            }
+        }
+
+        AppIcon {
+            source: Icons.expand_more;
+            icon-color: Theme.muted-foreground;
+            width: 14.4px;
+            height: 14.4px;
+            rotation-angle: -90deg;
+        }
+    }
+}
+
+// —— 设置子页导航（总览页不显示）：路由驱动的中性胶囊 tab ——
+// （Slint 组件须先声明后使用，故置文件末尾）
+export component SettingsNav inherits Rectangle {
+    height: 30px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        alignment: LayoutAlignment.start;
+
+        PillOption {
+            text: "常规";
+            active: Nav.route == Route.settings-general;
+            clicked => {
+                Nav.navigate(Route.settings-general, "");
+            }
+        }
+        PillOption {
+            text: "播放";
+            active: Nav.route == Route.settings-playback;
+            clicked => {
+                Nav.navigate(Route.settings-playback, "");
+            }
+        }
+        PillOption {
+            text: "账号";
+            active: Nav.route == Route.settings-account;
+            clicked => {
+                Nav.navigate(Route.settings-account, "");
+            }
+        }
+    }
+}

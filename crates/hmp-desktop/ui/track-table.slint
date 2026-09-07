@@ -153,25 +153,36 @@ export component TrackTable inherits Rectangle {
                                 }
                             }
 
-                            // 歌手名 hover 提亮 + 跳转（覆盖在文本上）
+                            // 歌手名 hover 提亮 + 跳转（覆盖在文本上）；
+                            // 无参数（QQ 行远端 mid 缺失/无歌手数据）→ 链接禁用
                             TouchArea {
                                 x: title-text.width + 6px;
                                 width: parent.width - self.x;
-                                mouse-cursor: pointer;
+                                enabled: row.artist-mid != "";
+                                mouse-cursor: row.artist-mid != "" ? pointer : default;
                                 clicked => {
                                     Nav.navigate(Route.artist, row.artist-mid);
                                 }
                             }
                         }
 
-                        // 专辑（可点跳专辑页；窄窗由 show-album 收起）
-                        if root.show-album: TextLink {
+                        // 专辑（可点跳专辑页；窄窗由 show-album 收起；
+                        // 无参数 → 退化纯文本，不渲染死链接）
+                        if root.show-album && row.album-mid != "": TextLink {
                             width: root.album-w;
                             text: row.album;
                             font-size: 13.4px;
                             clicked => {
                                 Nav.navigate(Route.album, row.album-mid);
                             }
+                        }
+                        if root.show-album && row.album-mid == "": Text {
+                            width: root.album-w;
+                            text: row.album;
+                            color: Theme.muted-foreground;
+                            font-size: 13.4px;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
 
                         Text {

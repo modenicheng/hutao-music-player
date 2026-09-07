@@ -11,6 +11,13 @@ import { RecentPage } from "recent-page.slint";
 import { MusicLibraryPage } from "music-library-page.slint";
 import { DownloadsPage } from "downloads-page.slint";
 import { PurchasedPage } from "purchased-page.slint";
+import { PlaylistPage } from "playlist-page.slint";
+import { AlbumPage } from "album-page.slint";
+import { ArtistPage } from "artist-page.slint";
+import { SettingsPage } from "settings-page.slint";
+import { SettingsGeneralPage } from "settings-general-page.slint";
+import { SettingsPlaybackPage } from "settings-playback-page.slint";
+import { SettingsAccountPage } from "settings-account-page.slint";
 import { Nav, Route } from "nav.slint";
 import { Player, Data, Quality } from "stores.slint";
 import { Theme } from "theme.slint";
@@ -104,16 +111,47 @@ export component AppWindow inherits Window {
                 width: parent.width;
             }
 
-            // 未移植模块（M4/M5 落地）：诚实占位
-            if Nav.route != Route.library && Nav.route != Route.recent && Nav.route != Route.local
-                && Nav.route != Route.downloads && Nav.route != Route.purchased: Rectangle {
+            if Nav.route == Route.playlist: PlaylistPage {
+                width: parent.width;
+            }
+
+            if Nav.route == Route.album: AlbumPage {
+                width: parent.width;
+            }
+
+            if Nav.route == Route.artist: ArtistPage {
+                width: parent.width;
+            }
+
+            if Nav.route == Route.settings: SettingsPage {
+                width: parent.width;
+            }
+
+            if Nav.route == Route.settings-general: SettingsGeneralPage {
+                width: parent.width;
+            }
+
+            if Nav.route == Route.settings-playback: SettingsPlaybackPage {
+                width: parent.width;
+            }
+
+            if Nav.route == Route.settings-account: SettingsAccountPage {
+                width: parent.width;
+            }
+
+            // 未移植模块（M4 在线内容页）：诚实占位——依赖 QQ 内容读接口
+            // （搜索/推荐/榜单），daemon IPC 尚未提供（docs/AUDIT.md §8.2）。
+            if Nav.route == Route.home || Nav.route == Route.discover || Nav.route == Route.top
+                || Nav.route == Route.top-detail || Nav.route == Route.search: Rectangle {
                 width: parent.width;
                 height: 240px;
 
                 Text {
                     y: 96px;
                     width: parent.width;
-                    text: "该模块移植中（模块清单见 crates/hmp-desktop/PORTING.md）";
+                    text: Nav.route == Route.search
+                        ? "搜索依赖 QQ 内容接口，等待守护进程补齐读接口后开放"
+                        : "在线内容页依赖 QQ 内容接口，等待守护进程补齐读接口（docs/AUDIT.md §8.2）";
                     color: Theme.muted-foreground;
                     font-size: 14px;
                     horizontal-alignment: center;

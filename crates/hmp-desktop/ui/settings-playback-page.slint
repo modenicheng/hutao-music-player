@@ -1,0 +1,158 @@
+// 播放设置（PlaybackSettingsView.vue）：音质四档（Quality.select 持久化）与
+// 默认音量（Player.set-volume：本地偏好 + daemon IPC 双写）真实生效；
+// 播放行为开关未接线，禁用展示。
+import { Theme } from "theme.slint";
+import { PageHeader } from "page-parts.slint";
+import {
+    SettingsNav, SettingGroup, SettingRow, SettingCaption, HSlider, DisabledSwitch,
+} from "settings-parts.slint";
+import { Nav } from "nav.slint";
+import { Player, Quality } from "stores.slint";
+
+export component SettingsPlaybackPage inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-4;
+        max-width: 896px;
+
+        PageHeader {
+            title: "播放设置";
+            show-back: true;
+            back => {
+                Nav.back();
+            }
+        }
+
+        SettingsNav { }
+
+        // —— 音质偏好 ——
+        SettingGroup {
+            title: "音质偏好";
+            VerticalLayout {
+                spacing: Theme.space-2;
+
+                for tier in [0, 1, 2, 3]: quality-touch := Rectangle {
+                    height: 52px;
+                    border-radius: Theme.radius-md;
+                    border-width: 1px;
+                    border-color: Quality.selected == tier ? Theme.border-strong : Theme.border;
+                    background: Quality.selected == tier || quality-hover.has-hover
+                        ? Theme.muted : transparent;
+                    animate background {
+                        duration: Theme.duration-fast;
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: Theme.space-4;
+                        cross-axis-alignment: center;
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: LayoutAlignment.center;
+                            spacing: 2px;
+
+                            Text {
+                                text: Quality.tier-label(tier);
+                                color: Theme.foreground;
+                                font-size: 14.6px;
+                                font-weight: 550;
+                            }
+                            Text {
+                                text: Quality.tier-detail(tier);
+                                color: Theme.muted-foreground;
+                                font-size: 12.4px;
+                            }
+                        }
+
+                        // 单选圆点：选中实心（内嵌 surface 环，同 Vue quality-dot）
+                        Rectangle {
+                            width: 16px;
+                            height: 16px;
+                            border-radius: Theme.radius-full;
+                            border-width: 1.5px;
+                            border-color: Theme.border-strong;
+                            background: Quality.selected == tier ? Theme.primary : transparent;
+
+                            Rectangle {
+                                visible: Quality.selected == tier;
+                                width: 6px;
+                                height: 6px;
+                                border-radius: Theme.radius-full;
+                                background: Theme.surface-3;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                    }
+
+                    quality-hover := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            Quality.select(tier);
+                        }
+                    }
+                }
+            }
+
+            SettingCaption {
+                text: "实际播放档位取偏好与曲目最高档中较低的一档，与播放条音质徽章联动";
+            }
+        }
+
+        // —— 音量 ——
+        SettingGroup {
+            title: "音量";
+
+            SettingRow {
+                label: "默认音量";
+                desc: "与底部播放条的音量控制实时同步";
+
+                HSlider {
+                    width: 176px;
+                    value: Player.volume;
+                    changed(value) => {
+                        Player.set-volume(value);
+                    }
+                }
+                Text {
+                    width: 44px;
+                    text: "\{Math.round(Player.volume * 100)}%";
+                    color: Theme.muted-foreground;
+                    font-size: 13.6px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // —— 播放行为（未接线：禁用开关诚实展示）———
+        SettingGroup {
+            title: "播放行为";
+
+            SettingRow {
+                label: "启动后恢复上次队列";
+                desc: "打开应用时接续上次听到的位置";
+
+                DisabledSwitch { }
+            }
+
+            SettingRow {
+                label: "歌曲间淡入淡出";
+                desc: "切换曲目时做短交叉淡化";
+                separator: true;
+
+                DisabledSwitch { }
+            }
+
+            SettingCaption {
+                text: "播放行为依赖播放守护进程的对应能力，即将上线";
+            }
+        }
+    }
+}

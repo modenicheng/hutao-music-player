@@ -1,0 +1,106 @@
+// 常规设置（GeneralSettingsView.vue）：主题三选真实生效；启动页/语言未接线档位禁用展示。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { PageHeader } from "page-parts.slint";
+import { SettingsNav, SettingGroup, SettingRow, SettingCaption, PillOption } from "settings-parts.slint";
+import { Nav } from "nav.slint";
+
+export component SettingsGeneralPage inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-4;
+        max-width: 896px;
+
+        PageHeader {
+            title: "常规设置";
+            show-back: true;
+            back => {
+                Nav.back();
+            }
+        }
+
+        SettingsNav { }
+
+        // —— 外观 ——
+        SettingGroup {
+            title: "外观";
+
+            SettingRow {
+                label: "主题模式";
+                desc: "品牌胡桃木色阶不变，切换的只是明暗两态";
+
+                PillOption {
+                    icon: Icons.brightness_auto;
+                    text: "跟随系统";
+                    active: Theme.mode == 0;
+                    clicked => {
+                        Theme.set-mode(0);
+                    }
+                }
+                PillOption {
+                    icon: Icons.light_mode;
+                    text: "浅色";
+                    active: Theme.mode == 1;
+                    clicked => {
+                        Theme.set-mode(1);
+                    }
+                }
+                PillOption {
+                    icon: Icons.dark_mode;
+                    text: "深色";
+                    active: Theme.mode == 2;
+                    clicked => {
+                        Theme.set-mode(2);
+                    }
+                }
+            }
+
+            SettingCaption {
+                text: Theme.mode == 0
+                    ? "当前生效：跟随系统（当前 \{Theme.dark ? "深色" : "浅色"}）"
+                    : Theme.mode == 1 ? "当前生效：浅色" : "当前生效：深色";
+            }
+        }
+
+        // —— 通用 ——
+        SettingGroup {
+            title: "通用";
+
+            SettingRow {
+                label: "启动页";
+                desc: "应用启动时默认打开的页面";
+
+                PillOption {
+                    text: "首页";
+                    active: true;
+                }
+                PillOption {
+                    text: "上次页面";
+                    enabled: false;
+                    tool-tip: "即将上线";
+                }
+            }
+
+            SettingRow {
+                label: "语言";
+                desc: "界面显示语言";
+                separator: true;
+
+                PillOption {
+                    text: "简体中文";
+                    active: true;
+                }
+                PillOption {
+                    text: "English";
+                    enabled: false;
+                    tool-tip: "即将上线";
+                }
+            }
+        }
+    }
+}

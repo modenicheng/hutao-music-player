@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use slint::{ComponentHandle, Global, ModelRc, SharedString, Weak};
 
 use crate::covers::cover_image;
-use crate::format::{format_bytes, format_cny};
-use crate::library_view::{self, PlaylistEntry, SongRow};
+use crate::format::{format_bytes, format_cny, format_long_duration};
+use crate::library_view::{self, PlaylistEntry, SongRow, local_cover_image};
 use crate::mock;
 use crate::prefs::Prefs;
 use crate::{
@@ -245,6 +245,103 @@ pub fn load_data(ui: &AppWindow) {
     ));
 }
 
+/// 路由落地后的详情装载：歌单/专辑/歌手三页按参数查库填充 Data
+/// （同步读，单页查询量小；其他路由无详情数据）。found=false → 页面诚实空态。
+fn apply_route(ui: &AppWindow, route: crate::Route, param: SharedString) {
+    match route {
+        crate::Route::Playlist => load_playlist_detail(ui, &param),
+        crate::Route::Album => load_album_detail(ui, &param),
+        crate::Route::Artist => load_artist_detail(ui, &param),
+        _ => {}
+    }
+}
+
+fn load_playlist_detail(ui: &AppWindow, param: &str) {
+    let data = Data::get(ui);
+    let detail = param
+        .parse::<i64>()
+        .ok()
+        .and_then(library_view::playlist_detail);
+    match detail {
+        Some(detail) => {
+            data.set_playlist_found(true);
+            data.set_playlist_name(detail.name.into());
+            data.set_playlist_meta_items(model(vec![
+                format!("{} 首", detail.tracks.len()).into(),
+                format!("总时长 {}", format_long_duration(detail.total_ms)).into(),
+            ]));
+            // 与库页歌单卡同一 seed（playlist:{id}），实体身份一致
+            data.set_playlist_cover(cover_image(&format!("playlist:{param}")));
+            data.set_playlist_tracks(model(
+                detail.tracks.iter().map(SongRow::to_track_row).collect(),
+            ));
+        }
+        None => data.set_playlist_found(false),
+    }
+}
+
+fn load_album_detail(ui: &AppWindow, param: &str) {
+    let data = Data::get(ui);
+    match library_view::album_detail(param) {
+        Some(detail) => {
+            data.set_album_found(true);
+            data.set_album_name(detail.name.clone().into());
+            data.set_album_artist(detail.artist.unwrap_or_default().into());
+            let mut meta = vec![
+                // 年份无数据源 → "—"（不伪造发行时间）
+                detail.year.map(|y| y.to_string()).unwrap_or_else(|| "—".into()),
+                format!("{} 首", detail.tracks.len()),
+                format!("总时长 {}", format_long_duration(detail.total_ms)),
+            ];
+            meta.push("本地媒体库".into());
+            data.set_album_meta_items(model(
+                meta.into_iter().map(SharedString::from).collect::<Vec<_>>(),
+            ));
+            data.set_album_cover(local_cover_image(detail.cover_uri.as_deref())
+                .unwrap_or_else(|| cover_image(&format!("album:{}", detail.name))));
+            data.set_album_tracks(model(
+                detail.tracks.iter().map(SongRow::to_track_row).collect(),
+            ));
+        }
+        None => data.set_album_found(false),
+    }
+}
+
+fn load_artist_detail(ui: &AppWindow, param: &str) {
+    let data = Data::get(ui);
+    match library_view::artist_detail(param) {
+        Some(detail) => {
+            data.set_artist_found(true);
+            data.set_artist_name(detail.name.clone().into());
+            data.set_artist_meta_items(model(vec![
+                format!("{} 首歌曲", detail.tracks.len()).into(),
+                format!("{} 张专辑", detail.albums.len()).into(),
+                "本地媒体库".into(),
+            ]));
+            // 与 Vue 版同款 seed（artist:{name}），同实体各处同图
+            data.set_artist_photo(cover_image(&format!("artist:{}", detail.name)));
+            data.set_artist_tracks(model(
+                detail.tracks.iter().map(SongRow::to_track_row).collect(),
+            ));
+            data.set_artist_albums(model(
+                detail
+                    .albums
+                    .iter()
+                    .map(|album| CoverCardData {
+                        mid: album.name.clone().into(),
+                        title: album.name.clone().into(),
+                        subtitle: format!("{} · {} 首", album.year_text, album.track_count).into(),
+                        // 真封面优先（与专辑页同源），缺失回退程序化封面
+                        cover: local_cover_image(album.cover_uri.as_deref())
+                            .unwrap_or_else(|| cover_image(&format!("album:{}", album.name))),
+                    })
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        None => data.set_artist_found(false),
+    }
+}
+
 /// 导航 / 主题 / 音质回调绑定（历史栈 + 偏好持久化）
 pub fn bind(ui: &AppWindow, prefs: Arc<Mutex<Prefs>>) {
     // ——— 导航历史栈 ———
@@ -272,6 +369,7 @@ pub fn bind(ui: &AppWindow, prefs: Arc<Mutex<Prefs>>) {
             nav.set_route(route);
             nav.set_param(param);
             nav.set_can_go_back(!history.lock().expect("nav history").is_empty());
+            apply_route(&ui, nav.get_route(), nav.get_param());
         });
     }
     {
@@ -288,6 +386,7 @@ pub fn bind(ui: &AppWindow, prefs: Arc<Mutex<Prefs>>) {
                 nav.set_param(param);
             }
             nav.set_can_go_back(!history.lock().expect("nav history").is_empty());
+            apply_route(&ui, nav.get_route(), nav.get_param());
         });
     }
 
@@ -303,6 +402,20 @@ pub fn bind(ui: &AppWindow, prefs: Arc<Mutex<Prefs>>) {
             let next = (theme.get_mode() + 1) % 3;
             theme.set_mode(next);
             prefs.lock().expect("prefs").theme_mode = next;
+            crate::prefs::store(&prefs.lock().expect("prefs").clone());
+        });
+    }
+
+    // ——— 主题直接设档（设置页三选）———
+    {
+        let prefs = Arc::clone(&prefs);
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        Theme::get(ui).on_set_mode(move |mode| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            Theme::get(&ui).set_mode(mode);
+            prefs.lock().expect("prefs").theme_mode = mode;
             crate::prefs::store(&prefs.lock().expect("prefs").clone());
         });
     }

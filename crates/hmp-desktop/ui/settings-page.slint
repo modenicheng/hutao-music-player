@@ -1,0 +1,62 @@
+// 设置总览（SettingsView.vue）：页头 + 三张分类卡进入子页；实际设置项都在子页里。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { PageHeader } from "page-parts.slint";
+import { CategoryCard } from "settings-parts.slint";
+import { Nav, Route } from "nav.slint";
+
+export component SettingsPage inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-4;
+
+        PageHeader {
+            title: "设置";
+            meta-items: ["外观与播放偏好保存在本机"];
+        }
+
+        // 三分类卡（Vue repeat(auto-fill, minmax(13rem,1fr))，上限 56rem）
+        Rectangle {
+            height: 84px;
+            max-width: 896px;
+
+            cards := HorizontalLayout {
+                width: parent.width;
+                spacing: Theme.space-4;
+
+                CategoryCard {
+                    width: (parent.width - 2 * Theme.space-4) / 3;
+                    icon: Icons.settings;
+                    title: "常规";
+                    desc: "主题外观、启动行为与语言偏好";
+                    clicked => {
+                        Nav.navigate(Route.settings-general, "");
+                    }
+                }
+                CategoryCard {
+                    width: (parent.width - 2 * Theme.space-4) / 3;
+                    icon: Icons.volume_up;
+                    title: "播放";
+                    desc: "音质档位、音量与播放行为";
+                    clicked => {
+                        Nav.navigate(Route.settings-playback, "");
+                    }
+                }
+                CategoryCard {
+                    width: (parent.width - 2 * Theme.space-4) / 3;
+                    icon: Icons.person;
+                    title: "账号";
+                    desc: "会员状态与本地资料";
+                    clicked => {
+                        Nav.navigate(Route.settings-account, "");
+                    }
+                }
+            }
+        }
+    }
+}
