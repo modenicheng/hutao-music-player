@@ -11,6 +11,29 @@ export component QueueDrawer inherits Rectangle {
     background: transparent;
     clip: false;
 
+    // 面板软卸载：隐藏后保持挂载一个动画周期（淡出播完），随后 visible=false。
+    // opacity 0 不参与命中剔除——面板若常驻挂载，其内部 TouchArea/滚动条会
+    // 在隐藏时拦走内容区右缘 ~380px 的点击与拖拽（滚动条 thumb 恰好被盖住，
+    // 表现为"无法拖动"）；visible=false 才真正退出命中测试。
+    property <bool> qv <=> Player.queue-visible;
+    property <bool> fade-hold: false;
+    property <bool> panel-mounted: qv || fade-hold;
+    changed qv => {
+        if (self.qv) {
+            self.fade-hold = false;
+        } else {
+            self.fade-hold = true;
+            unmount-timer.restart();
+        }
+    }
+    unmount-timer := Timer {
+        interval: Theme.duration-normal + 50ms;
+        running: false;
+        triggered => {
+            root.fade-hold = false;
+        }
+    }
+
     function format-duration(ms: int) -> string {
         if (ms <= 0) {
             return "0:00";
@@ -40,6 +63,7 @@ export component QueueDrawer inherits Rectangle {
 
     // —— 右上浮板：底边停在 PlayerBar 上方 ——
     panel := Rectangle {
+        visible: root.panel-mounted;
         x: parent.width - self.width - Theme.layout-gap;
         y: Theme.layout-gap;
         width: min(380px, parent.width - Theme.layout-gap * 2);
@@ -56,6 +80,9 @@ export component QueueDrawer inherits Rectangle {
             duration: Theme.duration-normal;
             easing: cubic-bezier(0.2, 0, 0, 1);
         }
+        // 隐藏态延迟一个动画周期后 visible=false 软卸载（见组件头部说明）：
+        // opacity 0 不参与命中剔除，常驻挂载时面板内部的 TouchArea/滚动条
+        // 会拦走内容区右缘 ~380px 的点击与拖拽——滚动条 thumb 恰好被盖住
 
         VerticalLayout {
             // Vue 面板自带内距：头部上方留白

@@ -509,27 +509,36 @@ export component Scroll inherits Rectangle {
     changed scroll-offset => {
         wake();
     }
-
+    // 命中条：固定几何（不随 thumb 移动）——拖拽参考系必须静止，mouse-y 才能被
+    // 1:1 映射回 viewport；TouchArea 若放进 thumb（会移动）内，mouse-y 相对坐标
+    // 随之漂移，稳态下 thumb 只以半速跟随、越拖越脱节。比 thumb 宽一点好抓，
+    // 无 scroll_event 处理（默认 Reject），滚轮穿透给 Flickable。
     if !hide-scrollbar && scrollable > 0px: Rectangle {
-        x: parent.width - self.width;
-        y: thumb-y;
-        width: 6px;
-        height: thumb-h;
-        border-radius: 3px;
-        background: Theme.neutral-600;
-        opacity: thumb-touch.has-hover ? 0.85 : thumb-active ? 0.7 : 0;
-        animate opacity {
-            duration: Theme.duration-fast;
-        }
+        // 条件元素无默认填充语义，必须显式撑满宿主——里面 track-touch 的
+        // parent.width/height 都以它为基准
+        width: parent.width;
+        height: parent.height;
 
-        thumb-touch := TouchArea {
-            property <length> drag-start-mouse: 0px;
-            property <length> drag-start-thumb: 0px;
+        track-touch := TouchArea {
+            x: parent.width - self.width;
+            y: 0;
+            width: 10px;
+            height: parent.height;
+
+            // 按下时指针相对 thumb 顶的偏移（钳在 thumb 内），拖拽中保持抓取点
+            property <length> grab-offset: 0px;
 
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down) {
-                    drag-start-mouse = self.mouse-y;
-                    drag-start-thumb = root.thumb-y;
+                    // 点击轨道即定位：thumb 中心吸附到指针处（overlay 滚动条惯例），
+                    // 随后按抓取点 1:1 拖拽——不吸附的话抓取点被钳进 thumb，
+                    // 第一次移动会出现跳变
+                    flick.viewport-y = -clamp(
+                            self.mouse-y - root.thumb-h / 2,
+                            0px,
+                            flick.height - root.thumb-h,
+                        ) * root.scrollable / (flick.height - root.thumb-h);
+                    grab-offset = self.mouse-y - root.thumb-y;
                     root.user-scroll();
                     root.wake();
                 }
@@ -537,12 +546,26 @@ export component Scroll inherits Rectangle {
             moved => {
                 if (root.scrollable > 0px && flick.height > root.thumb-h) {
                     flick.viewport-y = -clamp(
-                            drag-start-thumb + self.mouse-y - drag-start-mouse,
+                            self.mouse-y - grab-offset,
                             0px,
                             flick.height - root.thumb-h,
                         ) * root.scrollable / (flick.height - root.thumb-h);
                 }
                 root.wake();
+            }
+        }
+
+        // thumb 纯视觉（拖拽命中在 track-touch），hover/拖拽中常亮
+        Rectangle {
+            x: parent.width - self.width;
+            y: thumb-y;
+            width: 6px;
+            height: thumb-h;
+            border-radius: 3px;
+            background: Theme.neutral-600;
+            opacity: track-touch.has-hover ? 0.85 : thumb-active ? 0.7 : 0;
+            animate opacity {
+                duration: Theme.duration-fast;
             }
         }
     }
