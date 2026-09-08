@@ -1,25 +1,42 @@
 // 竖向音量（VolumeControl.vue，DESIGN.md v0.2/v0.11）：
-// 静息只有图标；点击向上展开细长窄条（宽 44px，数值 + 4px 细轨，高 160px）。
+// 静息只有图标；hover 弹出上方细长窄条（宽 44px，数值 + 4px 细轨），
+// 离开图标与面板 180ms 后自动收起（宽限跨过与图标的 10px 缝隙）。
 // 图标点击 = 静音切换（volume_up / volume_off 资产切换）；拖拽为直接指针跟随。
+// 悬浮层用组件内 overlay 而非 PopupWindow：hover 状态需同组件直读，
+// 且 PlayerBar 无裁剪，负 y 覆盖内容区绘制正常。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon } from "primitives.slint";
+import { AppIcon, EqClock } from "primitives.slint";
 import { Player } from "stores.slint";
 
 export component VolumeControl inherits Rectangle {
     width: 36px;
     height: 36px;
-    border-radius: Theme.radius-full;
+    border-radius: Theme.pill(self.height);
     background: icon-touch.has-hover ? Theme.muted : transparent;
     animate background {
         duration: Theme.duration-fast;
+        easing: cubic-bezier(0.2, 0, 0, 1);
     }
 
     // 静音记忆：非零音量时记录，静音后恢复（init 快照 + 点击时更新，避免自引用绑定环）
-    property <float> last-volume: 1.0;
     property <bool> muted: Player.volume <= 0.01;
+    property <float> last-volume: 1.0;
     init => {
         last-volume = Player.volume > 0.01 ? Player.volume : 1.0;
+    }
+
+    // —— hover 悬浮层：图标/面板任一 hover 即开；全离开后宽限 180ms 再收
+    // （跨过图标与面板间 10px 缝隙；事件分帧派发时的瞬时双 false 也被宽限吸收）。
+    // 收起用 EqClock 截止时刻而非 Timer：时钟常跑（33ms 粒度），声明式绑定
+    // 不依赖定时器重启，testing backend 与真机行为一致。———
+    property <bool> pop-hover:
+        icon-touch.has-hover || pop-cover.has-hover || vol-touch.has-hover;
+    property <duration> leave-at: 0ms;
+    property <bool> pop-open:
+        self.pop-hover || (self.leave-at != 0ms && EqClock.t - self.leave-at < 180ms);
+    changed pop-hover => {
+        self.leave-at = self.pop-hover ? 0ms : EqClock.t;
     }
 
     icon-touch := TouchArea {
@@ -43,18 +60,31 @@ export component VolumeControl inherits Rectangle {
         y: (parent.height - self.height) / 2;
     }
 
-    volume-pop := PopupWindow {
+    // —— 悬浮面板（图标上方 10px，宽 44 值 208 高）———
+    volume-pop := Rectangle {
+        visible: root.pop-open;
+        opacity: root.pop-open ? 1 : 0;
+        animate opacity {
+            duration: Theme.duration-fast;
+            easing: cubic-bezier(0.2, 0, 0, 1);
+        }
         x: (parent.width - self.width) / 2;
         y: -self.height - 10px;
         width: 44px;
         height: 208px;
 
         Rectangle {
+            width: parent.width;
+            height: parent.height;
             border-radius: Theme.radius-lg;
             background: Theme.surface-3;
             drop-shadow-blur: 12px;
             drop-shadow-color: #241F1B.transparentize(0.82);
             drop-shadow-offset-y: 4px;
+
+            // 垫底 hover 传感：接住面板空白区（滑块 TouchArea 在上层优先命中）
+            pop-cover := TouchArea {
+            }
 
             VerticalLayout {
                 padding-top: 10px;
@@ -95,7 +125,7 @@ export component VolumeControl inherits Rectangle {
                     Rectangle {
                         width: 12px;
                         height: 12px;
-                        border-radius: Theme.radius-full;
+                        border-radius: Theme.pill(self.height);
                         background: Theme.surface-3;
                         border-width: 2px;
                         border-color: Theme.track-accent;
@@ -103,7 +133,7 @@ export component VolumeControl inherits Rectangle {
                         y: clamp((1 - Player.volume) * parent.height - self.height / 2, 0px, parent.height - self.height);
                     }
 
-                    TouchArea {
+                    vol-touch := TouchArea {
                         pointer-event(event) => {
                             if (event.kind == PointerEventKind.down) {
                                 Player.set-volume(1.0 - clamp(self.mouse-y / self.height, 0.0, 1.0));
