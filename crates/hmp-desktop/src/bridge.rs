@@ -2,7 +2,9 @@
 //! （旧版对接 AppCore 的桥随旧 UI 契约废弃，M8 数据接线时重写回来；
 //! 页面数据源 = [`library_view`] 直读 library.sqlite3，播放/命令桥另行接线。）
 
+use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use slint::{ComponentHandle, Global, ModelRc, SharedString, Weak};
 
@@ -17,6 +19,9 @@ use crate::{
 
 const RECENT_PREVIEW_SIZE: usize = 5;
 const NAV_HISTORY_CAP: usize = 50;
+/// 库变更刷新防抖：watcher 批处理每 ~1s bump 一次，扫描期连发——
+/// 静默 500ms 才触发一次重查，避免 UI 随扫描进度反复重载。
+const REFRESH_DEBOUNCE: Duration = Duration::from_millis(500);
 
 fn model<T: 'static + Clone>(items: Vec<T>) -> ModelRc<T> {
     ModelRc::new(VecModel::from(items))
@@ -113,8 +118,49 @@ fn search_track_row(song: &hmp_core::SearchSong) -> TrackRow {
 /// 把媒体库快照（直读 library.sqlite3，离线降级为空）装载进 Data global：
 /// 五个库页真数据；下载/已购两页后端无对应域，保留 mock 喂数据。
 pub fn load_data(ui: &AppWindow) {
+    apply_snapshot(ui, &library_view::load_snapshot());
+}
+
+/// 库变更刷新（`Event::LibraryChanged` 驱动，AUDIT §8.9）：防抖合并 + 后台
+/// 读库。SQLite 读移出 UI 线程（此前刷新在 UI 线程同步全量读，扫描期是
+/// 按钮卡死来源）；模型落地（slint::Image 构造、回调重绑）仍回 UI 线程。
+/// 详情页数据也后台算好——路由参数在 UI 线程取（Nav global 非 Send）。
+pub fn schedule_refresh(ui: &AppWindow, runtime: &Arc<crate::backend::BackendRuntime>) {
+    thread_local! {
+        static TIMER: RefCell<slint::Timer> = RefCell::new(slint::Timer::default());
+    }
+    let ui_weak = ui.as_weak();
+    let runtime = Arc::clone(runtime);
+    TIMER.with(|cell| {
+        let timer = cell.borrow();
+        timer.stop();
+        timer.start(slint::TimerMode::SingleShot, REFRESH_DEBOUNCE, move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let nav = Nav::get(&ui);
+            let route = nav.get_route();
+            let param = nav.get_param();
+            let ui_weak = ui_weak.clone();
+            runtime.spawn(async move {
+                // 阻塞 rusqlite 在 runtime 工作线程执行（与 backend 队列
+                // 投影同惯例；投影数据均为纯数据，满足 Send）。
+                let snap = library_view::load_snapshot();
+                let detail = load_detail(route, &param);
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = ui_weak.upgrade() else {
+                        return;
+                    };
+                    apply_snapshot(&ui, &snap);
+                    apply_detail(&ui, &detail);
+                });
+            });
+        });
+    });
+}
+
+fn apply_snapshot(ui: &AppWindow, snap: &library_view::Snapshot) {
     let data = Data::get(ui);
-    let snap = library_view::load_snapshot();
 
     // ——— 我喜欢 ———
     data.set_liked(model(
@@ -286,35 +332,39 @@ pub fn load_data(ui: &AppWindow) {
     ));
 }
 
-/// 库变更刷新（`Event::LibraryChanged` 驱动，AUDIT §8.9）：重装载库页数据
-/// 并重放当前路由的详情装载。刷新失败/库缺失时 load_data 自行降级空态。
-pub fn refresh(ui: &AppWindow) {
-    load_data(ui);
-    let nav = Nav::get(ui);
-    apply_route(ui, nav.get_route(), nav.get_param());
+/// 路由落地后的详情装载（导航路径：单次同步读，单页查询量小；库变更刷新
+/// 路径走后台预计算 + [`apply_detail`]）。found=false → 页面诚实空态。
+fn apply_route(ui: &AppWindow, route: crate::Route, param: SharedString) {
+    apply_detail(ui, &load_detail(route, &param));
 }
 
-/// 路由落地后的详情装载：歌单/专辑/歌手三页按参数查库填充 Data
-/// （同步读，单页查询量小；其他路由无详情数据）。found=false → 页面诚实空态。
-fn apply_route(ui: &AppWindow, route: crate::Route, param: SharedString) {
+/// 详情页数据（纯数据、Send——供库变更刷新在后台线程预算）。
+/// `Playlist` 携带 id 串（封面 seed 用，与库页歌单卡同一实体身份）。
+enum DetailData {
+    Playlist(String, Option<library_view::PlaylistDetail>),
+    Album(Option<library_view::AlbumDetail>),
+    Artist(Option<library_view::ArtistDetail>),
+    None,
+}
+
+fn load_detail(route: crate::Route, param: &str) -> DetailData {
     match route {
-        crate::Route::Playlist => load_playlist_detail(ui, &param),
-        crate::Route::Album => load_album_detail(ui, &param),
-        crate::Route::Artist => load_artist_detail(ui, &param),
-        _ => {}
+        crate::Route::Playlist => DetailData::Playlist(
+            param.to_string(),
+            param.parse::<i64>().ok().and_then(library_view::playlist_detail),
+        ),
+        crate::Route::Album => DetailData::Album(library_view::album_detail(param)),
+        crate::Route::Artist => DetailData::Artist(library_view::artist_detail(param)),
+        _ => DetailData::None,
     }
 }
 
-fn load_playlist_detail(ui: &AppWindow, param: &str) {
+fn apply_detail(ui: &AppWindow, detail: &DetailData) {
     let data = Data::get(ui);
-    let detail = param
-        .parse::<i64>()
-        .ok()
-        .and_then(library_view::playlist_detail);
     match detail {
-        Some(detail) => {
+        DetailData::Playlist(param, Some(detail)) => {
             data.set_playlist_found(true);
-            data.set_playlist_name(detail.name.into());
+            data.set_playlist_name(detail.name.clone().into());
             data.set_playlist_meta_items(model(vec![
                 format!("{} 首", detail.tracks.len()).into(),
                 format!("总时长 {}", format_long_duration(detail.total_ms)).into(),
@@ -325,17 +375,11 @@ fn load_playlist_detail(ui: &AppWindow, param: &str) {
                 detail.tracks.iter().map(SongRow::to_track_row).collect(),
             ));
         }
-        None => data.set_playlist_found(false),
-    }
-}
-
-fn load_album_detail(ui: &AppWindow, param: &str) {
-    let data = Data::get(ui);
-    match library_view::album_detail(param) {
-        Some(detail) => {
+        DetailData::Playlist(_, None) => data.set_playlist_found(false),
+        DetailData::Album(Some(detail)) => {
             data.set_album_found(true);
             data.set_album_name(detail.name.clone().into());
-            data.set_album_artist(detail.artist.unwrap_or_default().into());
+            data.set_album_artist(detail.artist.clone().unwrap_or_default().into());
             let mut meta = vec![
                 // 年份无数据源 → "—"（不伪造发行时间）
                 detail
@@ -357,14 +401,8 @@ fn load_album_detail(ui: &AppWindow, param: &str) {
                 detail.tracks.iter().map(SongRow::to_track_row).collect(),
             ));
         }
-        None => data.set_album_found(false),
-    }
-}
-
-fn load_artist_detail(ui: &AppWindow, param: &str) {
-    let data = Data::get(ui);
-    match library_view::artist_detail(param) {
-        Some(detail) => {
+        DetailData::Album(None) => data.set_album_found(false),
+        DetailData::Artist(Some(detail)) => {
             data.set_artist_found(true);
             data.set_artist_name(detail.name.clone().into());
             data.set_artist_meta_items(model(vec![
@@ -392,7 +430,8 @@ fn load_artist_detail(ui: &AppWindow, param: &str) {
                     .collect::<Vec<_>>(),
             ));
         }
-        None => data.set_artist_found(false),
+        DetailData::Artist(None) => data.set_artist_found(false),
+        DetailData::None => {}
     }
 }
 

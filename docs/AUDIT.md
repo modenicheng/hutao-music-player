@@ -309,3 +309,60 @@
 | 10 | spawn_detached 绑定 current_exe | 桌面无法拉起 daemon | exe 路径参数化（spawn_detached_exe） | 已解决（前轮） |
 | 11 | track_meta_batch 缺 duration/cover 投影 | 队列行 QQ 曲目 0:00、程序化封面 | **已落地**：TrackMeta 扩列两字段；桌面队列投影直接消费（本地行封面读盘，QQ 行占位、当前曲走 CoverGet） | 已闭合 |
 | 12 | 状态 volume 含 RG 补偿 | UI 音量滑杆与用户设定静默偏差 | **已落地**：`PlaybackState.user_volume` 原值随状态发布（serde default 兼容旧帧）；桌面滑杆读原值 | 已闭合 |
+
+## §14 播放操作链路审计（2026-09-08，"无法播放、按钮失灵"专项）
+
+### 现场根因（非代码缺陷也计入）
+
+1. **运行中的 daemon 是过期二进制**：真机常驻的 `hmp serve` 为 09-07 16:38
+   release 构建（≈`25301ad`），不含 `9fd5727` 输出设备候选序修复——引擎
+   装载后设备打不开，卡在「Engine 自称 Playing、进度冻结在恢复点、
+   State 卡 Loading」的假播放态。重启到当前构建后恢复正常。
+   教训：桌面 `connect_or_spawn` 会复用任何已占用 socket 的旧 daemon，
+   协议演进时旧 daemon 对新请求回 BadRequest（见 §14.2 修复的静默吞错）。
+
+2. **媒体库垃圾行**：`local:/mnt/d/QQMusicDownloads`（目录）与 4 条已不存在的
+   /tmp 测试曲被 upsert 进真库（目录行为 `File::open(dir)` 在 Linux 成功、
+   解码 0 字节挂死 → 装载 5s 超时的唯一出口）。已手工清理；根治见 §14.1-3。
+
+### 代码修复（本轮落地）
+
+1. **PlayList 协议缺口（上一曲/下一曲永久禁用的根因）**：桌面
+   `on_play_tracks(tracks, start)` 签名收整列表，实际只发点击行的单曲
+   `Request::Play`，daemon `queue.replace([单曲])` 把队列清成 1 首——
+   can_go_previous/next 恒 false、抽屉恒 1 行。修复：
+   - `Request::PlayList { ids, start }`（hmp-core ipc）；
+   - engine `play_list`：事务式（装载起播曲成功才 `queue.replace(ids, start)`），
+     stub 解析两路——库内 id 批量投影（免逐文件 read_meta，大列表不卡引擎）、
+     未命中走解析器；凭证门与 `Play(Track)` 同口径（列表含 QQ 曲目才要求登录）；
+   - 桌面整表发送 + `SENT_META` 显示层 overlay（库外 QQ 曲目队列行标题不回退 mid）。
+2. **命令静默吞错（"点了没反应"的主因）**：全部命令回调 `let _ = request()`
+   丢弃结果。修复：`request()` 冷启动窗口重试（NotFound/Refused ×4×250ms，
+   覆盖订阅循环拉起 daemon 的窗口）；拒绝/传输失败 → `Player.feedback` 反馈条
+   （4s 自动消退，NotLoggedIn 给人话文案）；daemon `last_error` 与离线翻转同样
+   浮出（去重防 10Hz 推送刷屏）。
+3. **目录/缺失路径源头拒绝**：`LocalSourceResolver` 的 `local_stub`/`resolve_local`
+   加 `is_file` 守卫（目录不再入队/入库），列表解析返回空 → 确定性失败。
+4. **装载失败即时反馈**：`wait_current_applied` 订阅驱动事件，同代
+   `PlayerEvent::Error` 立即失败（此前只能等 5s 超时，坏文件的「点了没反应」
+   窗口从 5s 收到即时）；超时兜底保留（驱动静默卡死场景）。
+5. **音量 0 回跳**：`apply_daemon_state` 弃用「user_volume==0 视为未设置回退
+   RG 补偿值」的 hack（静音是合法值），恒用引擎发布的 user_volume 原值。
+6. **UI 线程阻塞隐患**：`LibraryChanged` 刷新从「UI 线程同步全量读库」改为
+   500ms 防抖 + 后台线程读快照/详情，UI 线程只做模型落地。
+
+### 验证
+
+- 单测：engine PlayList 三例（整表+下标/库快路径绕过解析器/装载失败保持旧队列）、
+  local 目录守卫两例、desktop overlay/文案两例；workspace 全绿。
+- 真机：`examples/playlist_smoke.rs`（12 首整表入队、下标起播、进度真实推进、
+  上一曲可用）；`tests/live_daemon.rs`（#[ignore] E2E：订阅落地 → toggle/next
+  → daemon 生效 → 推送回写 → play-tracks 整表替换 + 队列投影无 mid 回退）。
+
+### 遗留
+
+- FLAC 标签文件级乱码（`立春 - 薛凯琪.flac` 下载时双重编码，库内其余曲目正常）
+  ——数据问题不修代码；如需处理应在下载链路做编码探测。
+- `show-overlay` 无挂载组件（M6 播放页未移植，点击封面区暂无响应，已知缺口）。
+- 运维提醒：协议演进后需重启 daemon；桌面自动拉起只认 current_exe 同目录与
+  PATH 的 `hmp`，release 部署需同步重建。

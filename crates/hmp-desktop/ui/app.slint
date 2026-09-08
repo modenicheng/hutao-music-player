@@ -171,6 +171,30 @@ export component AppWindow inherits Window {
         height: Theme.player-bar-height;
     }
 
+    // —— 操作反馈条（命令被拒/离线/装载失败；Rust 写入、4s 自动清空）——
+    // 深胡桃实底 pill，亮暗两主题同读法；位于内容区底部内缘、播放条上方。
+    if Player.feedback != "": Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: content.y + content.height - self.height - Theme.space-3;
+        height: 36px;
+        width: min(feedback-text.preferred-width + 40px, parent.width - Theme.space-6 * 2);
+        border-radius: Theme.pill(self.height);
+        background: Theme.track-deep;
+        drop-shadow-blur: 16px;
+        drop-shadow-color: #241F1B.transparentize(0.82);
+        drop-shadow-offset-y: 4px;
+
+        feedback-text := Text {
+            x: 20px;
+            width: parent.width - 40px;
+            text: Player.feedback;
+            color: Theme.track-deep-fg;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
     // —— 播放列表抽屉（遮罩 + 右上浮板）———
     QueueDrawer {
         x: 0;

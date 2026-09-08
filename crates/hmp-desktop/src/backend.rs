@@ -153,13 +153,49 @@ fn find_hmp_in_dirs<I: Iterator<Item = PathBuf>>(dirs: I) -> Option<PathBuf> {
 
 /// 单发请求-响应（每命令一条短连接，CLI `request()` 同模式）。
 /// 命令-查询分离：`Response::Ok` 仅代表受理，真实结果经订阅事件呈现。
+///
+/// 冷启动窗口重试：订阅循环首连经 `connect_or_spawn` 拉起 daemon 需
+/// ~0.3-3s，此窗口内的命令短连接会得到 NotFound/Refused——逐次退避重试
+/// （不拉起：daemon 生命周期归订阅循环，命令路径不重复 spawn），耗尽才
+/// 报错（调用方降级提示，不再静默丢弃点击）。
 pub async fn request(req: Request) -> Result<Response, BackendError> {
-    let mut stream = connect().await?;
+    /// NotFound/Refused 的重试次数（×250ms ≈ 1s，覆盖常规冷启动窗口）。
+    const CONNECT_RETRIES: u32 = 4;
+    const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+    let mut stream = None;
+    for attempt in 0..=CONNECT_RETRIES {
+        match connect().await {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(BackendError::Io(e))
+                if (e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::ConnectionRefused)
+                    && attempt < CONNECT_RETRIES =>
+            {
+                tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let Some(mut stream) = stream else {
+        return Err(BackendError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "daemon unreachable after retries",
+        )));
+    };
     write_frame(&mut stream, &req).await?;
     let Some(frame) = read_frame(&mut stream).await? else {
         return Err(BackendError::Protocol("daemon closed connection".into()));
     };
-    decode_frame::<Response>(&frame).map_err(|e| BackendError::Protocol(e.to_string()))
+    let response = decode_frame::<Response>(&frame).map_err(|e| BackendError::Protocol(e.to_string()));
+    if let Ok(Response::Err { code, message }) = &response {
+        // 拒绝型响应（未登录/越界等）此前被 `let _ =` 静默吞掉——UI「点了
+        // 没反应」的主要来源之一；至少留一条 warn 级日志可查。
+        tracing::warn!(?code, %message, "daemon rejected request");
+    }
+    response
 }
 
 /// 订阅事件（跨线程投递到 UI 线程；全部字段 Send）。

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use slint::{ComponentHandle, Global, Model, ModelRc, TimerMode, VecModel, Weak};
 
 use hmp_core::ipc::{DaemonState, Request, Response};
-use hmp_core::{AudioQuality, PlayRequest, PlaybackState, PlaybackStatus, PlayerCommand, TrackId};
+use hmp_core::{AudioQuality, PlaybackState, PlaybackStatus, PlayerCommand, TrackId};
 
 use crate::backend::{BackendRuntime, QueueRowMeta, UiStateEvent};
 use crate::{AppWindow, Player, TrackRow};
@@ -53,6 +53,83 @@ impl EchoGuard {
     }
 }
 
+/// 反馈条自动消退延时（操作提示停留量级；期间有新消息则重置）。
+const FEEDBACK_DISMISS: Duration = Duration::from_millis(4_000);
+
+/// 随 PlayList 发出的显示元数据（UI 线程读写；仅队列行显示层兜底）。
+struct SentMeta {
+    title: String,
+    artists: String,
+    album: String,
+    duration_ms: i32,
+}
+
+// 最近一次 play-tracks 的列表元数据（mid → 行显示数据）。daemon 侧 stub
+// 只保证 id（搜索结果等库外 QQ 曲目无库行），队列投影 title 会回退成
+// mid——这里按发送时的 UI 行补真名。UI 线程独占（thread_local）。
+thread_local! {
+    static SENT_META: RefCell<HashMap<String, SentMeta>> = RefCell::new(HashMap::new());
+}
+
+// 反馈条宿主 weak + 消退定时器（UI 线程独占；invoke_from_event_loop 落地）。
+thread_local! {
+    static FEEDBACK_UI: RefCell<Weak<AppWindow>> = RefCell::new(Weak::default());
+    static FEEDBACK_TIMER: RefCell<slint::Timer> = RefCell::new(slint::Timer::default());
+}
+
+/// 命令派发（命令-查询分离 + 错误浮出）：受理（`Response::Ok`）即静默，
+/// 真实结果经状态推送呈现；被拒/传输失败 → 反馈条给用户可读的解释
+/// （未登录等用户可自救的错误给人话文案，其余透传 daemon 消息）。
+fn dispatch_command(runtime: &Arc<BackendRuntime>, ui_weak: &Weak<AppWindow>, req: Request) {
+    let runtime = Arc::clone(runtime);
+    let ui_weak = ui_weak.clone();
+    runtime.spawn(async move {
+        match crate::backend::request(req).await {
+            Ok(Response::Ok) => {}
+            Ok(Response::Err { code, message }) => {
+                show_feedback(&ui_weak, friendly_error(code, &message));
+            }
+            // 查询型响应不会出现在命令路径；宽容忽略。
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("{e}: 播放命令未送达");
+                show_feedback(&ui_weak, "播放服务未连接，操作没有生效".into());
+            }
+        }
+    });
+}
+
+/// daemon 拒绝码 → 用户可读文案。
+fn friendly_error(code: hmp_core::IpcErrorCode, message: &str) -> String {
+    match code {
+        hmp_core::IpcErrorCode::NotLoggedIn => {
+            "未登录：播放在线曲目需要先在 设置 → 账号 扫码登录".into()
+        }
+        _ => format!("操作未生效：{message}"),
+    }
+}
+
+/// 设置反馈条文本并（重）启动 4s 消退定时器。任意线程可调（经
+/// invoke_from_event_loop 落到 UI 线程；反馈条属性/Timer 均只属于 UI 线程）。
+fn show_feedback(ui_weak: &Weak<AppWindow>, message: String) {
+    let ui_weak = ui_weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        // 消退定时器闭包稍后经 FEEDBACK_UI 取窗口（此刻须先存好）。
+        FEEDBACK_UI.with(|cell| *cell.borrow_mut() = ui_weak);
+        let Some(ui) = FEEDBACK_UI.with(|cell| cell.borrow().upgrade()) else {
+            return;
+        };
+        Player::get(&ui).set_feedback(message.into());
+        FEEDBACK_TIMER.with(|cell| {
+            cell.borrow().start(slint::TimerMode::SingleShot, FEEDBACK_DISMISS, || {
+                if let Some(ui) = FEEDBACK_UI.with(|cell| cell.borrow().upgrade()) {
+                    Player::get(&ui).set_feedback("".into());
+                }
+            });
+        });
+    });
+}
+
 /// 绑定 Player global 命令回调并挂载订阅任务（bootstrap：首连在订阅循环内
 /// 完成，必要时经 connect_or_spawn 拉起 daemon；彻底失败降级离线模式）。
 /// runtime 由调用方持有存活到 `ui.run()` 结束（订阅任务挂在上面）。
@@ -66,16 +143,15 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
     // 拖拽/回显竞态抑制：命令回调写、订阅回调读（均在 UI 线程）。
     let echo: Arc<Mutex<EchoGuard>> = Arc::new(Mutex::new(EchoGuard::default()));
 
-    // —— 命令回调 → Request（命令-查询分离：受理即返回，结果经状态推送呈现；
-    // 离线时短连接失败被丢弃 = 静默 no-op）———
+    // —— 命令回调 → Request（命令-查询分离：受理即静默，拒绝/传输失败经
+    // 反馈条浮出——此前 `let _ =` 吞错是「按钮点了没反应」且无解释的主因）———
+    let ui_weak: Weak<AppWindow> = ui.as_weak();
     macro_rules! command_callback {
         ($name:ident, $req:expr) => {{
             let runtime = Arc::clone(&runtime);
+            let ui_weak = ui_weak.clone();
             player.$name(move || {
-                let runtime = Arc::clone(&runtime);
-                runtime.spawn(async move {
-                    let _ = crate::backend::request($req).await;
-                });
+                dispatch_command(&runtime, &ui_weak, $req);
             });
         }};
     }
@@ -85,21 +161,19 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
     command_callback!(on_clear_queue, Request::QueueClear { all: true });
     {
         let runtime = Arc::clone(&runtime);
+        let ui_weak = ui_weak.clone();
         player.on_remove_at(move |index| {
             let Ok(index) = usize::try_from(index) else {
                 return;
             };
-            let request = Request::QueueRemove(index);
-            runtime.spawn(async move {
-                let _ = crate::backend::request(request).await;
-            });
+            dispatch_command(&runtime, &ui_weak, Request::QueueRemove(index));
         });
     }
     {
         // 进度条松手 seek（拖拽全程纯本地回显，见 player-bar.slint）：立即把
         // 展示进度钉在落点并记录 PendingSeek——daemon 确认到点前旧位置推送
         // 不回写，杜绝回跳闪烁；seek 只发一次，不再有逐移动事件的 IPC 风暴。
-        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let ui_weak = ui_weak.clone();
         let runtime = Arc::clone(&runtime);
         let echo = Arc::clone(&echo);
         player.on_seek_percent(move |percent| {
@@ -118,7 +192,10 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
                 deadline: Instant::now() + SEEK_PIN_TIMEOUT,
             });
             let request = Request::Command(PlayerCommand::Seek(Duration::from_millis(position_ms)));
+            let runtime = Arc::clone(&runtime);
             runtime.spawn(async move {
+                // seek 被拒（离线等）不弹反馈条：进度展示有 daemon 推送兜底，
+                // 拖动场景弹提示反而干扰（重试覆盖冷启动窗口即可）。
                 let _ = crate::backend::request(request).await;
             });
         });
@@ -183,35 +260,57 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
     }
 
     {
-        // 播放列表入口：取 start 行按 source 映射播放源（清队列换源语义）。
+        // 播放列表入口：可见列表整表入队、点击行为起播（清队列换源语义，
+        // 与 Vue playTracks 一致）——此前只发点击行单曲，daemon 把队列
+        // replace 成 1 首，上一曲/下一曲从此永久禁用（审计根因）。
+        // 显示元数据随发随记（SENT_META overlay）：搜索结果等库外 QQ 曲目
+        // 入队后投影回退 title=mid，用发送时的 UI 行补真名（仅显示层）。
         let runtime = Arc::clone(&runtime);
+        let ui_weak = ui_weak.clone();
         player.on_play_tracks(move |tracks, start| {
             let count = tracks.row_count();
+            if count == 0 {
+                return;
+            }
             let start = usize::try_from(start)
                 .ok()
                 .filter(|index| *index < count)
-                .unwrap_or(0);
-            let Some(row) = tracks.row_data(start) else {
+                .unwrap_or(0)
+                .min(count - 1);
+            let mut ids = Vec::with_capacity(count);
+            let mut sent_meta = HashMap::new();
+            for index in 0..count {
+                let Some(row) = tracks.row_data(index) else {
+                    continue;
+                };
+                sent_meta.insert(
+                    row.mid.to_string(),
+                    SentMeta {
+                        title: row.title.to_string(),
+                        artists: row.artists.to_string(),
+                        album: row.album.to_string(),
+                        duration_ms: row.duration_ms,
+                    },
+                );
+                ids.push(TrackId::new(row.mid.to_string()));
+            }
+            if ids.is_empty() {
                 return;
-            };
-            let request = Request::Play(play_request_for(&row));
-            runtime.spawn(async move {
-                let _ = crate::backend::request(request).await;
-            });
+            }
+            SENT_META.with(|cell| *cell.borrow_mut() = sent_meta);
+            dispatch_command(&runtime, &ui_weak, Request::PlayList { ids, start });
         });
     }
 
     {
         // 队列点击：跳到该位置播放（QueuePlayAt，队列不被单曲替换，AUDIT §8.8）。
         let runtime = Arc::clone(&runtime);
+        let ui_weak = ui_weak.clone();
         player.on_play_at(move |index| {
             let Ok(index) = usize::try_from(index) else {
                 return;
             };
-            let request = Request::QueuePlayAt(index);
-            runtime.spawn(async move {
-                let _ = crate::backend::request(request).await;
-            });
+            dispatch_command(&runtime, &ui_weak, Request::QueuePlayAt(index));
         });
     }
 
@@ -227,25 +326,12 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
     crate::backend::spawn_state_subscription(&runtime, handler);
 }
 
-/// `row.source`（0=QQ 1=本地，UI 显式标记）→ 播放源（`PlayRequest` 分流）。
-fn play_request_for(row: &TrackRow) -> PlayRequest {
-    play_request_for_source(row.mid.as_ref(), row.source == 1)
-}
-
 /// SetVolume 命令（短连接；受理即返回，结果经状态推送呈现）。
+/// 音量不弹反馈条：拖动场景逐次提示是噪音，推送值即最终真相。
 fn send_volume_ipc(runtime: &Arc<BackendRuntime>, volume: f64) {
     runtime.spawn(async move {
         let _ = crate::backend::request(Request::Command(PlayerCommand::SetVolume(volume))).await;
     });
-}
-
-fn play_request_for_source(mid: &str, is_local: bool) -> PlayRequest {
-    let id = TrackId::new(mid);
-    if is_local {
-        PlayRequest::Local(id)
-    } else {
-        PlayRequest::Track(id)
-    }
 }
 
 /// 队列抽屉 / 播放页 overlay 的纯 UI 回写（不产生 IPC；与模拟桥行为一致）。
@@ -291,10 +377,10 @@ fn apply_event(
     };
     let player = Player::get(&ui);
 
-    // 库内容变更（扫描/监听/reconcile/写命令落库）：重查 sqlite 刷新库页
-    // 与当前详情页（AUDIT §8.9；刷新前状态展示保持旧模型，不闪空态）。
+    // 库内容变更（扫描/监听/reconcile/写命令落库）：防抖 + 后台重查 sqlite
+    // 刷新库页与当前详情页（AUDIT §8.9；UI 线程只做模型落地，不再同步读库）。
     if event.library_changed {
-        crate::bridge::refresh(&ui);
+        crate::bridge::schedule_refresh(&ui, runtime);
         return;
     }
 
@@ -318,6 +404,8 @@ fn apply_event(
 
     let Some(state) = event.state else {
         apply_offline(&player);
+        // 订阅只在在线↔离线翻转时投递一次空态：提示一次，不随重试刷屏。
+        show_feedback(ui_weak, "播放服务未连接，播放操作暂不可用".into());
         return;
     };
     let mids = queue_mids.lock().expect("queue mids").clone();
@@ -327,10 +415,18 @@ fn apply_event(
 /// 离线（无 daemon / daemon 已退出）：播放态全空（音量保留本地值不重置）。
 fn apply_offline(player: &Player) {
     player.set_playing(false);
+    player.set_loading(false);
     player.set_can_previous(false);
     player.set_can_next(false);
     player.set_queue_current_mid("".into());
+    LAST_SHOWN_ERROR.with(|cell| *cell.borrow_mut() = None);
     clear_now_playing(player);
+}
+
+// daemon `last_error` 已展示消息（去重：状态推送 ~10Hz 携带同一错误，
+// 只在消息变化时弹一次；成功装载清空 last_error 时同步复位）。
+thread_local! {
+    static LAST_SHOWN_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// DaemonState → Player global 单向映射（daemon 是唯一状态出口）。
@@ -344,15 +440,33 @@ fn apply_daemon_state(
 ) {
     let playback = &state.playback;
     player.set_playing(playback.status == PlaybackStatus::Playing);
-    // 音量展示用用户原值（playback.volume 含 RG 补偿，回设会静默偏移，AUDIT §8.12）；
-    // 本地回显窗口内（音量拖动中，推送仍带旧值）不回写，避免与 thumb 打架。
-    let volume = if (playback.user_volume - 0.0).abs() > f64::EPSILON {
-        playback.user_volume
-    } else {
-        playback.volume
-    };
+    // 引擎阶段：装载/解析中间态暴露给 UI（主键/播放页的中间态依据）。
+    player.set_loading(matches!(
+        state.phase,
+        hmp_core::EnginePhase::Resolving | hmp_core::EnginePhase::Loading
+    ));
+    // daemon 侧引擎错误（解析失败/取流失败等）浮出：与命令拒绝同一反馈条。
+    match &state.last_error {
+        Some(err) => {
+            let is_new = LAST_SHOWN_ERROR.with(|cell| {
+                let mut shown = cell.borrow_mut();
+                let changed = shown.as_deref() != Some(err.message.as_str());
+                if changed {
+                    *shown = Some(err.message.clone());
+                }
+                changed
+            });
+            if is_new {
+                show_feedback(ui_weak, format!("播放出错：{}", err.message));
+            }
+        }
+        None => LAST_SHOWN_ERROR.with(|cell| *cell.borrow_mut() = None),
+    }
+    // 音量展示用用户原值（playback.volume 含 RG 补偿，回设会静默偏移，
+    // AUDIT §8.12；引擎恒随状态发布 user_volume，0.0 是合法静音不再是
+    // 「未设置」哨兵——旧回退 hack 会让静音后 thumb 回跳补偿值）。
     if echo.lock().expect("echo").volume_echo_expired() {
-        player.set_volume(volume.clamp(0.0, 1.0) as f32);
+        player.set_volume(playback.user_volume.clamp(0.0, 1.0) as f32);
     }
     player.set_can_previous(state.caps.can_go_previous);
     player.set_can_next(state.caps.can_go_next);
@@ -463,6 +577,7 @@ fn clear_now_playing(player: &Player) {
     player.set_cover(slint::Image::default());
     player.set_track_quality("".into());
     player.set_track_max_tier(0);
+    player.set_loading(false);
 }
 
 /// 当前曲 mid：队列摘要 `current`（规范下标）指向最近一次投影列表
@@ -520,7 +635,7 @@ fn quality_tier(quality: &AudioQuality) -> i32 {
 /// 队列投影行 → TrackRow（UI 线程：slint::Image 只能在此构造）。
 /// 歌手/专辑 mid 在 IPC ID 投影里不存在（链接型列在队列抽屉未使用）。
 fn row_from_meta(meta: &QueueRowMeta) -> TrackRow {
-    TrackRow {
+    let mut row = TrackRow {
         mid: meta.mid.as_str().into(),
         source: if hmp_core::TrackProvider::from_id(&meta.mid) == hmp_core::TrackProvider::Local {
             1
@@ -535,7 +650,22 @@ fn row_from_meta(meta: &QueueRowMeta) -> TrackRow {
         duration_ms: meta.duration_ms,
         quality: "".into(),
         cover: queue_cover(meta),
+    };
+    // 库外曲目（搜索结果等，daemon stub 只有 id）标题回退 mid 时，用
+    // play-tracks 发出时的 UI 行元数据补真名（仅显示层，不写库）。
+    if row.title == row.mid {
+        SENT_META.with(|cell| {
+            if let Some(sent) = cell.borrow().get(row.mid.as_str()) {
+                row.title = sent.title.as_str().into();
+                row.artists = sent.artists.as_str().into();
+                row.album = sent.album.as_str().into();
+                if sent.duration_ms > 0 {
+                    row.duration_ms = sent.duration_ms;
+                }
+            }
+        });
     }
+    row
 }
 
 /// 队列行封面：本地库 file:// 封面直接读盘（扩列投影带出）；QQ 远程 URL
@@ -659,16 +789,45 @@ mod tests {
     }
 
     #[test]
-    fn play_requests_route_by_source() {
-        // QQ 曲目 → Track；本地 → Local（`local:` 前缀独立可判）。
+    fn friendly_error_gives_login_hint_for_not_logged_in() {
         assert_eq!(
-            play_request_for_source("003Z3i2C", false),
-            PlayRequest::Track(TrackId::new("003Z3i2C"))
+            friendly_error(hmp_core::IpcErrorCode::NotLoggedIn, "not logged in"),
+            "未登录：播放在线曲目需要先在 设置 → 账号 扫码登录"
         );
+        // 其余错误透传 daemon 消息（用户看得到失败原因）。
         assert_eq!(
-            play_request_for_source("local:/music/a.flac", true),
-            PlayRequest::Local(TrackId::new("local:/music/a.flac"))
+            friendly_error(hmp_core::IpcErrorCode::Internal, "boom"),
+            "操作未生效：boom"
         );
+    }
+
+    #[test]
+    fn row_from_meta_overlays_sent_meta_for_out_of_library_tracks() {
+        let meta = QueueRowMeta {
+            mid: "0039MnYb0qxYhV".into(),
+            // 库外曲目投影回退：标题 = id
+            title: "0039MnYb0qxYhV".into(),
+            artists: "".into(),
+            album: "".into(),
+            duration_ms: 0,
+            cover_uri: None,
+        };
+        SENT_META.with(|cell| {
+            *cell.borrow_mut() = HashMap::from([(
+                "0039MnYb0qxYhV".to_string(),
+                SentMeta {
+                    title: "夜曲".into(),
+                    artists: "周杰伦".into(),
+                    album: "十一月的萧邦".into(),
+                    duration_ms: 226_000,
+                },
+            )]);
+        });
+        let row = row_from_meta(&meta);
+        assert_eq!(row.title, "夜曲");
+        assert_eq!(row.artists, "周杰伦");
+        assert_eq!(row.album, "十一月的萧邦");
+        assert_eq!(row.duration_ms, 226_000);
     }
 
     #[test]

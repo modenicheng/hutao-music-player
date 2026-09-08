@@ -25,6 +25,10 @@ export global Player {
     in-out property <int> track-max-tier: 0;
     /** 当前曲源键（QQ mid / local: 路径；异步封面回包按此复核防串台） */
     in-out property <string> current-mid: "";
+    /** 引擎装载中（Resolving/Loading）：主播放键等交互的中间态依据 */
+    in-out property <bool> loading: false;
+    /** 操作反馈（命令被拒/离线/装载失败时 Rust 写入，4s 自动清空；空串不显示） */
+    in-out property <string> feedback: "";
 
     // —— UI 状态（overlay / 抽屉）———
     in-out property <bool> overlay-visible: false;
