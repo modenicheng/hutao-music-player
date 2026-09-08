@@ -17,43 +17,90 @@ enum LoadCommand {
     Shutdown,
 }
 
-/// Open the platform default output stream (safe variant).
+/// Open a server-routed output stream (safe variant).
 ///
-/// Deliberately does NOT use [`OutputStreamBuilder::open_default_stream()`]:
-/// on failure that helper falls back to enumerating and opening EVERY output
-/// device (rodio 0.21 `stream.rs`), and cpal's ALSA enumerator really opens
-/// `plughw:N` passthrough PCMs per card (`cpal-0.16 host/alsa/enumerate.rs`,
-/// USB DACs usually being card 0). Opening a passthrough PCM takes the
-/// hardware exclusively behind the system audio server's back, which starves
+/// Never enumerates-and-opens hardware devices: on failure rodio 0.21's
+/// `OutputStreamBuilder::open_default_stream()` falls back to opening EVERY
+/// output device, and cpal's ALSA enumerator really opens `plughw:N`
+/// passthrough PCMs per card (`cpal-0.16 host/alsa/enumerate.rs`, USB DACs
+/// usually being card 0). Opening a passthrough PCM takes the hardware
+/// exclusively behind the system audio server's back, which starves
 /// PipeWire/PulseAudio and makes the device fail/disappear from system audio
-/// controls (2026-09-07 DAWN PRO2 incident). We only ever open the platform
-/// default output; if that fails we refuse to play rather than grab hardware.
+/// controls (2026-09-07 DAWN PRO2 incident).
+///
+/// Instead we walk the server-routed PCM candidates in preference order
+/// (`"default"` → `"pipewire"` → `"pulse"`) and open the first that works.
+/// The fallback exists because a system's `"default"` PCM is not always
+/// server-routed: e.g. a missing `pcm.!default` override leaves ALSA's
+/// built-in plug→dmix default, which fails outright when the audio server
+/// holds the same card (2026-09-08: dmix could not open the PipeWire-held
+/// PRO2 slave, daemon exited at startup, desktop auto-spawn failed → whole
+/// UI offline). `pipewire`/`pulse` PCMs route through the server too, so
+/// they can never grab hardware; direct hardware PCMs stay refused in any
+/// case.
 fn open_default_output() -> Result<OutputStream, StreamError> {
     use rodio::cpal::traits::{DeviceTrait, HostTrait};
 
-    let device = rodio::cpal::default_host()
-        .default_output_device()
-        .ok_or(StreamError::NoDevice)?;
-    if cfg!(target_os = "linux") {
-        // The cpal ALSA host names its default device "default"; that PCM is
-        // routed through the system audio server. Any passthrough/card PCM
-        // must never be used as our output.
-        let name = device.name().map_err(|_| StreamError::NoDevice)?;
-        if !is_routed_default_pcm(&name) {
-            tracing::error!(%name, "refusing non-default pcm as audio output");
-            return Err(StreamError::NoDevice);
+    let host = rodio::cpal::default_host();
+    let mut candidates: Vec<(usize, rodio::cpal::Device)> = Vec::new();
+    let consider = |device: Option<rodio::cpal::Device>,
+                    candidates: &mut Vec<(usize, rodio::cpal::Device)>| {
+        let Some(device) = device else { return };
+        let Ok(name) = device.name() else {
+            return;
+        };
+        let Some(preference) = server_routed_preference(&name) else {
+            return;
+        };
+        if candidates
+            .iter()
+            .any(|(_, device)| device.name().ok().as_deref() == Some(name.as_str()))
+        {
+            return;
+        }
+        candidates.push((preference, device));
+    };
+    consider(host.default_output_device(), &mut candidates);
+    if let Ok(devices) = host.output_devices() {
+        for device in devices {
+            consider(Some(device), &mut candidates);
         }
     }
-    OutputStreamBuilder::from_device(device)?.open_stream()
+    candidates.sort_by_key(|&(preference, _)| preference);
+
+    let mut last_error = StreamError::NoDevice;
+    for (_, device) in candidates {
+        let name = device.name().unwrap_or_else(|_| "<unnamed>".into());
+        let builder = match OutputStreamBuilder::from_device(device) {
+            Ok(builder) => builder,
+            Err(error) => {
+                tracing::warn!(%name, %error, "server-routed pcm failed, trying next");
+                last_error = error;
+                continue;
+            }
+        };
+        match builder.open_stream() {
+            Ok(stream) => {
+                tracing::info!(%name, "audio output opened via server-routed pcm");
+                return Ok(stream);
+            }
+            Err(error) => {
+                tracing::warn!(%name, %error, "server-routed pcm failed, trying next");
+                last_error = error;
+            }
+        }
+    }
+    Err(last_error)
 }
 
-/// Pure output-device policy: does this PCM name route through the system
-/// audio server as the platform default? Only the ALSA `"default"` PCM is
-/// accepted; direct hardware PCMs (`hw:*`, `plughw:*`, `front:*`,
-/// `surround*:*`) and other server plugin names are refused so the player can
-/// never grab exclusive hardware behind PipeWire/PulseAudio.
-fn is_routed_default_pcm(name: &str) -> bool {
-    name == "default"
+/// Server-routed PCM policy: preference order of PCM names that always route
+/// through the system audio server. Direct hardware PCMs (`hw:*`, `plughw:*`,
+/// `front:*`, `surround*:*`), OSS (`oss`) and JACK (`jack`) are refused so the
+/// player can never grab exclusive hardware behind PipeWire/PulseAudio.
+fn server_routed_preference(name: &str) -> Option<usize> {
+    ["default", "pipewire", "pulse"]
+        .into_iter()
+        .position(|candidate| candidate == name)
 }
 
 /// Audio output plus the channels used by all application adapters.
@@ -320,14 +367,16 @@ async fn drive(
 
 #[cfg(test)]
 mod tests {
-    use super::is_routed_default_pcm;
+    use super::*;
 
-    /// 输出设备安全策略：只允许经系统音频服务器路由的 "default" PCM。
-    /// 回归守护：防止再次引入"枚举/直通设备 fallback"而独占硬件
+    /// 输出设备安全策略：只允许经系统音频服务器路由的 PCM。回归守护：
+    /// 防止再次引入"枚举/直通设备 fallback"而独占硬件
     /// （2026-09-07 DAWN PRO2 被抢事件）。
     #[test]
-    fn output_policy_accepts_only_routed_default_pcm() {
-        assert!(is_routed_default_pcm("default"));
+    fn output_policy_accepts_only_server_routed_pcms() {
+        assert_eq!(server_routed_preference("default"), Some(0));
+        assert_eq!(server_routed_preference("pipewire"), Some(1));
+        assert_eq!(server_routed_preference("pulse"), Some(2));
     }
 
     #[test]
@@ -339,12 +388,28 @@ mod tests {
             "front:0",
             "front:CARD=PRO2,DEV=0",
             "surround51:0",
-            "pipewire",
-            "pulse",
             "jack",
+            "oss",
             "",
         ] {
-            assert!(!is_routed_default_pcm(name), "{name} must be refused");
+            assert_eq!(
+                server_routed_preference(name),
+                None,
+                "{name} must be refused"
+            );
         }
+    }
+
+    /// 候选序恒为 default → pipewire → pulse：与枚举顺序无关，
+    /// 任何系统上都优先语义上的平台默认 PCM。
+    #[test]
+    fn candidate_preference_orders_default_first() {
+        let mut prefs: Vec<Option<usize>> = vec![
+            server_routed_preference("pulse"),
+            server_routed_preference("default"),
+            server_routed_preference("pipewire"),
+        ];
+        prefs.sort_by_key(|p| p.unwrap_or(usize::MAX));
+        assert_eq!(prefs, vec![Some(0), Some(1), Some(2)]);
     }
 }
