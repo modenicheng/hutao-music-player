@@ -54,40 +54,44 @@ impl LocalSourceResolver {
 
     /// 列表解析用的轻量 stub：canonicalize + 读文件元数据（与 `resolve_local`
     /// 同一提取逻辑；title 回退文件名）。供媒体库批量缓存与队列投影。
-    fn local_stub(&self, id: &TrackId) -> hmp_core::TrackStub {
+    /// 非常规文件（目录/设备/不存在）→ `None`：目录曾被当曲目 upsert 进库
+    /// （垃圾行进 UI 列表、播放必败 5s 超时），此处源头拒绝。
+    fn local_stub(&self, id: &TrackId) -> Option<hmp_core::TrackStub> {
         let id = Self::canonical_id(id.clone());
-        let (title, artists, album, duration_ms) = match Self::path_of(&id) {
-            Ok(p) => {
-                let meta = hmp_storage::read_meta(std::path::Path::new(p));
-                let title = meta
-                    .as_ref()
-                    .map(|m| m.title.clone())
-                    .filter(|t| !t.is_empty())
-                    .or_else(|| {
-                        std::path::Path::new(p)
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_else(|| id.to_string());
-                let artists = meta
-                    .as_ref()
-                    .and_then(|m| m.artist.clone())
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                let album = meta.as_ref().and_then(|m| m.album.clone());
-                let duration_ms = meta.as_ref().and_then(|m| m.duration_ms);
-                (title, artists, album, duration_ms)
-            }
-            Err(_) => (id.to_string(), Vec::new(), None, None),
+        let path = Self::path_of(&id).ok()?;
+        let canonical = std::fs::canonicalize(path).ok()?;
+        if !canonical.is_file() {
+            return None;
+        }
+        let (title, artists, album, duration_ms) = {
+            let meta = hmp_storage::read_meta(&canonical);
+            let title = meta
+                .as_ref()
+                .map(|m| m.title.clone())
+                .filter(|t| !t.is_empty())
+                .or_else(|| {
+                    canonical
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| id.to_string());
+            let artists = meta
+                .as_ref()
+                .and_then(|m| m.artist.clone())
+                .into_iter()
+                .collect::<Vec<_>>();
+            let album = meta.as_ref().and_then(|m| m.album.clone());
+            let duration_ms = meta.as_ref().and_then(|m| m.duration_ms);
+            (title, artists, album, duration_ms)
         };
-        hmp_core::TrackStub {
+        Some(hmp_core::TrackStub {
             id,
             title,
             artists,
             album,
             duration_ms,
-        }
+        })
     }
 
     /// 按本地 id 解析（入库 + 构造 ResolvedTrack）。
@@ -95,6 +99,11 @@ impl LocalSourceResolver {
         let id = Self::canonical_id(id);
         let path = Self::path_of(&id)?;
         let path = std::fs::canonicalize(path).map_err(|_| EngineError::TrackNotFound)?;
+        // 目录/设备节点：Linux 上 File::open(dir) 成功而解码挂死，错误只会在
+        // 引擎 5s 超时才浮出；源头拒绝 + 不入库（垃圾行防御）。
+        if !path.is_file() {
+            return Err(EngineError::TrackNotFound);
+        }
         let meta = hmp_storage::read_meta(&path);
         let title = meta
             .as_ref()
@@ -186,8 +195,10 @@ impl SourceResolver for LocalSourceResolver {
     {
         match src {
             PlayRequest::Local(id) => {
-                let stub = self.local_stub(id);
-                Box::pin(async move { Ok(vec![stub]) })
+                // 非常规文件（目录/不存在）→ 空列表：调用方按「源解析为空」
+                // 确定性失败，且 cache_stubs 不会把垃圾行写进库。
+                let stubs: Vec<hmp_core::TrackStub> = self.local_stub(id).into_iter().collect();
+                Box::pin(async move { Ok(stubs) })
             }
             // 媒体库/GUI 等通用入口可能以 `Track(local:...)` 表达本地单曲；
             // provider 由稳定 id 前缀识别，不能误送 QQ 解析器。
@@ -195,8 +206,8 @@ impl SourceResolver for LocalSourceResolver {
                 if hmp_core::TrackProvider::from_id(id.as_ref())
                     == hmp_core::TrackProvider::Local =>
             {
-                let stub = self.local_stub(id);
-                Box::pin(async move { Ok(vec![stub]) })
+                let stubs: Vec<hmp_core::TrackStub> = self.local_stub(id).into_iter().collect();
+                Box::pin(async move { Ok(stubs) })
             }
             // 里程碑 E：`album:local:<专辑名>` → 本地专辑曲目列表（按名匹配）。
             PlayRequest::Album(id) if id.as_ref().starts_with("local:") => {
@@ -389,12 +400,38 @@ mod tests {
     async fn generic_track_with_local_id_resolves_as_local_source() {
         let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
         let resolver = LocalSourceResolver::new(lib);
-        let source = PlayRequest::Track(TrackId::new("local:C:\\Music\\song.flac"));
+        // 真实临时文件（目录/缺失路径如今被 is_file 守卫拒成空列表）。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("song.flac");
+        std::fs::write(&path, b"not-a-real-flac-but-exists").unwrap();
+        let source = PlayRequest::Track(TrackId::new(format!("local:{}", path.display())));
 
         let stubs = resolver.resolve_source_ids(&source).await.unwrap();
 
         assert_eq!(stubs.len(), 1);
-        assert_eq!(stubs[0].id, TrackId::new("local:C:\\Music\\song.flac"));
+        assert_eq!(
+            stubs[0].id,
+            TrackId::new(format!("local:{}", std::fs::canonicalize(&path).unwrap().display()))
+        );
+    }
+
+    #[tokio::test]
+    async fn directory_and_missing_paths_resolve_to_no_tracks() {
+        let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        let resolver = LocalSourceResolver::new(lib);
+        let dir = tempfile::tempdir().unwrap();
+        // 目录：Linux File::open 能成功、解码挂死——解析期即拒（不入库）。
+        let dir_src = PlayRequest::Local(TrackId::new(format!("local:{}", dir.path().display())));
+        assert!(resolver.resolve_source_ids(&dir_src).await.unwrap().is_empty());
+        // 不存在路径：空列表（确定性失败，而非装载超时）。
+        let missing_src = PlayRequest::Local(TrackId::new("local:/nonexistent/hmp-audit/x.flac"));
+        assert!(
+            resolver
+                .resolve_source_ids(&missing_src)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// 本地解析：无标签文件 → 文件名回退；入库后可再查；URI = file://（URL 编码）。

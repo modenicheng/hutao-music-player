@@ -63,6 +63,13 @@ fn requires_credential(req: &Request) -> bool {
             // 歌单内 QQ 曲目在曲目级 resolve_track 时再按凭证拦截。
             !s.is_local_source()
         }
+        Request::PlayList { ids, .. } => {
+            // 混排列表只要含 QQ 曲目即按 Play(Track) 同口径要求凭证
+            //（QQ 取流必须登录；纯 local 列表离线可播）。
+            ids.iter().any(|id| {
+                hmp_core::TrackProvider::from_id(id.as_ref()) != hmp_core::TrackProvider::Local
+            })
+        }
         Request::LibrarySync => true,
         _ => false,
     }

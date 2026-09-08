@@ -111,6 +111,14 @@ impl TrackRef {
 pub enum Request {
     /// 清空队列并播放该源。
     Play(PlayRequest),
+    /// 清空队列并按显式曲目列表播放（GUI 列表入口：可见列表整表替换 +
+    /// `start` 为点击行下标；`Play` 只承载后端可自解析的单一源）。
+    PlayList {
+        /// 曲目 id 序列（QQ mid / `local:<路径>` 混排）。
+        ids: Vec<TrackId>,
+        /// 起播下标（越界钳制到末位）。
+        start: usize,
+    },
     /// 插到当前曲之后并立即播放。
     PlayNext(PlayRequest),
     /// 追加到队尾（不播放）。

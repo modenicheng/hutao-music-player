@@ -2599,3 +2599,133 @@ async fn session_persist_failure_is_swallowed() {
     let st = h.state_rx.borrow().clone();
     assert_eq!(st.playback.status, PlaybackStatus::Playing);
 }
+
+/// PlayList（GUI 列表入口）：显式列表整表替换 + 起播下标。无媒体库时
+/// 逐 id 走解析器（每 id 一次 resolve_source_ids，FakeResolver 每次弹一个
+/// 单元素列表）。
+#[tokio::test]
+async fn play_list_replaces_queue_and_starts_at_index() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![
+        vec![TrackId::new("a")],
+        vec![TrackId::new("b")],
+        vec![TrackId::new("c")],
+    ]);
+    let (handle, _st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::PlayList {
+            ids: vec![
+                TrackId::new("a"),
+                TrackId::new("b"),
+                TrackId::new("c"),
+            ],
+            start: 2,
+        })
+        .await
+        .unwrap();
+    wait_idle().await;
+    let state = handle.state_rx.borrow().clone();
+    assert_eq!(state.queue.current, Some(2), "起播下标生效");
+    assert_eq!(handle.queue_rx.borrow().tracks.len(), 3, "整表入队（非单曲）");
+    assert_eq!(driver.load_uris(), vec!["fake://c"]);
+    assert!(state.caps.can_go_previous, "多曲队列 → 上一曲可用");
+    // 空列表：确定性拒绝，不 panic、不动队列。
+    handle.cmd(Request::PlayList { ids: vec![], start: 0 }).await.unwrap();
+    wait_idle().await;
+    assert!(handle.state_rx.borrow().last_error.is_some());
+    assert_eq!(handle.queue_rx.borrow().tracks.len(), 3);
+}
+
+/// PlayList 快路径：id 已在媒体库（GUI 列表来自库投影）→ stub 直接用库行，
+/// 不触解析器列表（FakeResolver 空列表被弹会 panic——即断言快路径未走慢路）。
+#[tokio::test]
+async fn play_list_library_fast_path_skips_resolver() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![]);
+    let library = std::sync::Arc::new(std::sync::Mutex::new(
+        hmp_storage::LibraryDb::open_in_memory().unwrap(),
+    ));
+    library
+        .lock()
+        .unwrap()
+        .upsert_tracks_batch(&[
+            hmp_storage::TrackRow {
+                source: "local",
+                source_key: "local:/a.flac".into(),
+                title: "曲 A".into(),
+                ..Default::default()
+            },
+            hmp_storage::TrackRow {
+                source: "local",
+                source_key: "local:/b.flac".into(),
+                title: "曲 B".into(),
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+    let (handle, _st) = start_engine_with_library(driver.clone(), resolver, library).await;
+    handle
+        .cmd(Request::PlayList {
+            ids: vec![
+                TrackId::new("local:/a.flac"),
+                TrackId::new("local:/b.flac"),
+            ],
+            start: 0,
+        })
+        .await
+        .unwrap();
+    wait_idle().await;
+    assert_eq!(handle.queue_rx.borrow().tracks.len(), 2);
+    assert_eq!(driver.load_uris(), vec!["fake://local:/a.flac"]);
+}
+
+/// PlayList 装载失败（起播曲 resolve_track 失败）：队列保持原状（事务式），
+/// 仅发布错误——与 Play 的 P1 语义一致。
+#[tokio::test]
+async fn play_list_load_failure_keeps_old_queue() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    // 第一次 PlayList 建队 [a, b]；第二次 [x, y] 的起播曲 y 装载失败。
+    let resolver = PartialFailResolver::new(
+        vec![
+            vec![TrackId::new("a")],
+            vec![TrackId::new("b")],
+            vec![TrackId::new("x")],
+            vec![TrackId::new("y")],
+        ],
+        vec![TrackId::new("y")],
+    );
+    let (handle, _st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::PlayList {
+            ids: vec![TrackId::new("a"), TrackId::new("b")],
+            start: 0,
+        })
+        .await
+        .unwrap();
+    wait_idle().await;
+    assert_eq!(driver.load_uris(), vec!["fake://a"]);
+
+    handle
+        .cmd(Request::PlayList {
+            ids: vec![TrackId::new("x"), TrackId::new("y")],
+            start: 1,
+        })
+        .await
+        .unwrap();
+    wait_idle().await;
+    let state = handle.state_rx.borrow().clone();
+    assert!(
+        state.last_error.is_some(),
+        "起播曲失败应发布错误（而非静默）"
+    );
+    assert_eq!(
+        handle.queue_rx.borrow().tracks,
+        vec![TrackId::new("a"), TrackId::new("b")],
+        "装载失败不提交新队列（旧队列保持）"
+    );
+    assert_eq!(
+        state.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("a"),
+        "旧曲继续是当前曲"
+    );
+}

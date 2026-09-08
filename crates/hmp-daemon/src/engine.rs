@@ -349,6 +349,7 @@ impl PlaybackEngine {
                         }
                         Request::Command(cmd) => self.handle_player_command(cmd).await,
                         Request::Play(src) => self.play_source(src, false).await,
+                        Request::PlayList { ids, start } => self.play_list(ids, start).await,
                         Request::PlayNext(src) => self.play_source(src, true).await,
                         Request::QueueAppend(src) => {
                             match self.resolver.resolve_source_ids(&src).await {
@@ -771,6 +772,121 @@ impl PlaybackEngine {
         }
     }
 
+    /// `Request::PlayList`（GUI 列表入口）：显式曲目列表整表替换 + 起播下标，
+    /// 与 [`play_source`] 同一事务式流程——起播曲装载成功才提交
+    /// `queue.replace(ids, start)`；装载/解析失败保持旧队列/旧曲，仅发布错误。
+    ///
+    /// stub 解析走两路：id 已在媒体库（GUI 列表本身来自库投影）→ 批量读库
+    /// 构建（免逐文件 read_meta，大列表「全部播放」不卡引擎命令循环）；
+    /// 未命中才走解析器（本地读标签、QQ 落 id stub——库行标题不为 mid 所覆写，
+    /// 显示层元数据由客户端 overlay 兜底）。seq 同 play_source：命令完成后推进。
+    async fn play_list(&mut self, ids: Vec<TrackId>, start: usize) {
+        if ids.is_empty() {
+            self.last_error = Some(ErrorInfo {
+                code: IpcErrorCode::Internal,
+                message: "play list is empty".into(),
+            });
+            self.restore_phase_after_failure();
+            self.seq += 1;
+            self.publish();
+            return;
+        }
+        self.phase = hmp_core::EnginePhase::Resolving;
+        let stubs = match self.resolve_id_stubs(&ids).await {
+            Ok(stubs) => stubs,
+            Err(e) => {
+                self.last_error = Some(error_info(&e));
+                self.restore_phase_after_failure();
+                self.seq += 1;
+                self.publish();
+                return;
+            }
+        };
+        self.cache_stubs(&stubs);
+        let start = start.min(ids.len() - 1);
+        let first_id = ids[start].clone();
+        // 装载前捕获旧会话与旧位置（与 play_source 同模式）。
+        let old_session = self.session.clone();
+        let old_position = self.state_rx.borrow().position;
+        match self.load_and_play(first_id.clone()).await {
+            Ok(()) => {
+                if let Some(old) = old_session {
+                    self.close_session(&old, "manual", old_position.as_millis() as i64);
+                }
+                self.queue.replace(ids, start);
+                // 会话恢复续播（与 play_source 同语义）：起播曲命中恢复曲 → seek。
+                if let Some(r) = self.restored.take() {
+                    if first_id == r.current {
+                        self.driver.command(PlayerCommand::Seek(
+                            std::time::Duration::from_millis(r.position_ms),
+                        ));
+                    }
+                }
+                self.seq += 1;
+                self.publish();
+                self.schedule_preload(&first_id);
+            }
+            Err(e) => {
+                self.last_error = Some(error_info(&e));
+                self.restore_phase_after_failure();
+                self.seq += 1;
+                self.publish();
+            }
+        }
+    }
+
+    /// 列表 id → stub：库内 id 批量投影（快路径），未命中走解析器逐个补。
+    /// 解析器失败（如 QQ 未登录）整体失败——半截列表不提交队列。
+    async fn resolve_id_stubs(
+        &self,
+        ids: &[TrackId],
+    ) -> Result<Vec<hmp_core::TrackStub>, EngineError> {
+        let mut known: std::collections::HashMap<String, hmp_core::TrackStub> =
+            std::collections::HashMap::new();
+        if let Some(library) = &self.library {
+            let mut qq_keys = Vec::new();
+            let mut local_keys = Vec::new();
+            for id in ids {
+                if hmp_core::TrackProvider::from_id(id.as_ref())
+                    == hmp_core::TrackProvider::Local
+                {
+                    local_keys.push(id.to_string());
+                } else {
+                    qq_keys.push(id.to_string());
+                }
+            }
+            let mut lib = library.lock().unwrap();
+            for source_meta in [("qq", &qq_keys), ("local", &local_keys)] {
+                let (source, keys) = source_meta;
+                for meta in lib.track_meta_batch(source, keys).unwrap_or_default() {
+                    known.insert(
+                        meta.source_key.clone(),
+                        hmp_core::TrackStub {
+                            id: TrackId::new(meta.source_key.clone()),
+                            title: meta.title,
+                            artists: meta.artist.into_iter().collect(),
+                            album: meta.album,
+                            duration_ms: meta.duration_ms.map(|ms| ms.clamp(0, u32::MAX as i64)),
+                        },
+                    );
+                }
+            }
+        }
+        let mut stubs = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(stub) = known.get(id.as_ref()) {
+                stubs.push(stub.clone());
+                continue;
+            }
+            let resolved = self
+                .resolver
+                .resolve_source_ids(&PlayRequest::Track(id.clone()))
+                .await?;
+            stubs.extend(resolved);
+        }
+        Ok(stubs)
+    }
+
     async fn on_ended(&mut self) {
         self.end_session("ended");
         let saved = self.queue.save_state();
@@ -899,7 +1015,7 @@ impl PlaybackEngine {
         // 等待驱动应用装载（真实驱动为异步管道）：完成前发布的复合状态
         // 不得携带旧曲目（Bug 2：play-next 后显示旧曲）。超时/通道断开 →
         // 失败路径（调用方回滚队列、保留旧曲；不创建播放历史）。
-        if let Err(e) = self.wait_current_applied(&expected).await {
+        if let Err(e) = self.wait_current_applied(&expected, load_gen).await {
             // 未确认装载：新解密代理此刻释放；旧 active_media 保持。
             drop(res.media);
             if let Some(p) = prev {
@@ -1017,8 +1133,19 @@ impl PlaybackEngine {
     /// 超时（`load_timeout`，默认 5s）→ `Timeout`：调用方按装载失败处理
     /// （回滚队列、旧曲继续），不得把未确认的装载当成功提交
     /// （此前仅 warn 后继续置 Playing/建历史）。
-    async fn wait_current_applied(&mut self, expected: &TrackId) -> Result<(), EngineError> {
+    /// 两条失败出口：驱动 `Error` 事件（同代，打开/解码失败——**即时**
+    /// 返回，「点了没反应」窗口从 5s 收到立即）与超时兜底（驱动静默
+    /// 卡死）。完成前发布的复合状态不得携带旧曲目（Bug 2：play-next
+    /// 后显示旧曲）。
+    async fn wait_current_applied(
+        &mut self,
+        expected: &TrackId,
+        load_gen: u64,
+    ) -> Result<(), EngineError> {
         let deadline = tokio::time::Instant::now() + self.load_timeout;
+        // 独立事件订阅：只看本次订阅之后的事件（订阅前已发 error 的微小
+        // 竞口由超时兜底），同代过滤防旧曲错误误伤。
+        let mut events = self.driver.subscribe_events();
         loop {
             {
                 let cur = self.state_rx.borrow();
@@ -1026,20 +1153,35 @@ impl PlaybackEngine {
                     return Ok(());
                 }
             }
-            if tokio::time::Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
                 return Err(EngineError::Timeout);
             }
-            // changed() 在无新状态时挂起：必须用 timeout 包裹，否则驱动不发布
-            // 任何状态（如装载失败静默）时永不超时——失败装载无法被识别。
-            match tokio::time::timeout(
-                deadline.saturating_duration_since(tokio::time::Instant::now()),
-                self.state_rx.changed(),
-            )
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => return Err(EngineError::Internal("state channel closed".into())),
-                Err(_elapsed) => return Err(EngineError::Timeout),
+            tokio::select! {
+                // changed() 在无新状态时挂起：必须用剩余时间兜底，否则驱动
+                // 不发布任何状态（如装载失败静默）时永不超时。
+                changed = self.state_rx.changed() => {
+                    if changed.is_err() {
+                        return Err(EngineError::Internal("state channel closed".into()));
+                    }
+                }
+                ev = events.recv() => {
+                    match ev {
+                        Ok(PlayerEvent::Error { load_gen: ev_gen, error }) if ev_gen == load_gen => {
+                            return Err(EngineError::Internal(format!(
+                                "driver load error: {error}"
+                            )));
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return Err(EngineError::Internal("event channel closed".into()));
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(remaining) => {
+                    return Err(EngineError::Timeout);
+                }
             }
         }
     }
@@ -1057,7 +1199,7 @@ impl PlaybackEngine {
             quality: prev.quality,
             load_gen: prev.load_gen,
         });
-        if self.wait_current_applied(&id).await.is_ok() {
+        if self.wait_current_applied(&id, prev.load_gen).await.is_ok() {
             self.driver.seek(position);
             self.driver.play();
         } else {
