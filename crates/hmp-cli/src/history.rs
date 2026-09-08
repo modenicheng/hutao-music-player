@@ -69,6 +69,8 @@ mod tests {
             track_id: 1,
             title: "测试曲".into(),
             artist: Some("歌手".into()),
+            source: "qq".into(),
+            source_key: "002testmid".into(),
             started_at: 1_786_190_400,
             ended_at: Some(1_786_190_500),
             listened_ms: 95_000,

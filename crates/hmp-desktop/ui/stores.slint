@@ -1,6 +1,6 @@
 // 应用状态 globals（player.ts / qualityStore.ts 的 Slint 对应物）。
 // 状态属性由 Rust 权威写入；回调发命令给 Rust（模拟播放桥，M8 换真实后端）。
-import { TrackRow, CoverCardData, FolderRow, PlaylistCover } from "data.slint";
+import { TrackRow, CoverCardData, FolderRow, PlaylistCover, LyricRow, CommentRow } from "data.slint";
 
 export global Player {
     // —— 播放状态快照（PlayerStateSnapshot）———
@@ -19,6 +19,8 @@ export global Player {
     in-out property <bool> can-next: false;
     in-out property <string> title: "";
     in-out property <string> artists: "";
+    /** 专辑名（播放页 meta 展示；无专辑数据为空串） */
+    in-out property <string> album: "";
     in-out property <image> cover;
     in-out property <string> track-quality: "";
     /** 曲目最高音质档（0=标准 1=高清 2=无损 3=Hi-Res），Rust 从 quality 文案推导 */
@@ -50,6 +52,8 @@ export global Player {
     callback remove-at(int);
     callback clear-queue();
     callback seek-percent(float);
+    /** 精确到时间的 seek（歌词行/词点击；毫秒，daemon 秒粒度取整） */
+    callback seek-ms(int);
     callback set-volume(float);
     /** 播放列表开关语义：开着时再点即收起 */
     callback toggle-queue();
@@ -95,7 +99,6 @@ export global Data {
     // —— 侧栏歌单区（宽侧栏分组/窄边栏二级共用同一份真歌单）———
     in-out property <[PlaylistCover]> sidebar-created;
     in-out property <[PlaylistCover]> sidebar-favorited;
-    in-out property <[TrackRow]> recent-preview;
     // —— 最近播放页 ——
     in-out property <[TrackRow]> recent;
     in-out property <int> recent-count;
@@ -158,4 +161,30 @@ export global Data {
     in-out property <string> account-nickname: "";
     in-out property <string> account-uin: "";
     in-out property <string> account-vip: "";
+}
+
+// 播放页 overlay 数据（NowPlayingBody.vue 的对应物；Rust 权威写入）。
+// 歌词跟随弹簧/景深在 now-playing.slint 页内自算，只消费 active-line。
+export global NowPlaying {
+    // —— 歌词（LyricGet IPC → lyrics.rs 解析）———
+    in-out property <[LyricRow]> lyrics;
+    in-out property <bool> lyrics-loading: false;
+    /** 换词表代际（Rust 每次重设模型 +1；页内弹簧据此直达当前行） */
+    in-out property <int> lyrics-generation: 0;
+    /** 当前播放行下标（Rust 每次状态推送按 position 折算；-1 = 前奏/无歌词） */
+    in-out property <int> active-line: -1;
+
+    // —— 评论（CommentList IPC；QQ 曲目专属，本地曲空态）———
+    in-out property <[CommentRow]> comments;
+    /** 0=未加载 1=加载中 2=就绪 3=失败 */
+    in-out property <int> comment-state: 0;
+    /** 头部总数文案（"1.2万"），Rust 格式化 */
+    in-out property <string> comment-total: "";
+    /** 0=最热 1=最新；切换经 request-comments 重拉 */
+    in-out property <int> comment-sort: 0;
+    callback request-comments();
+
+    // —— 喜欢（mock 态：换曲回落未点亮，与原型一致）———
+    in-out property <bool> liked: false;
+    callback toggle-liked();
 }

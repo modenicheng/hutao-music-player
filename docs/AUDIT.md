@@ -359,6 +359,35 @@
   上一曲可用）；`tests/live_daemon.rs`（#[ignore] E2E：订阅落地 → toggle/next
   → daemon 生效 → 推送回写 → play-tracks 整表替换 + 队列投影无 mid 回退）。
 
+### 追加修复（2026-09-08 下午，"播放历史/播放列表"二次报障）
+
+1. **现场复发确认（§14.1 同款）**：真机 daemon 仍为 09-07 16:38 旧构建，
+   桌面端（14:23 新构建）发 `PlayList` → 旧 daemon 反序列化拒绝
+   `unknown variant 'PlayList'`，错误浮出条如实展示（§14.2 生效的证明）。
+   处置：重建 release 三件套 + `hmp quit` + 重拉 daemon（桌面订阅循环
+   只连不拉起，新 daemon 起后被自动接管）。
+2. **RecentPlay 播放键投影缺口**：`recent_plays` 不带 source/source_key，
+   历史页 QQ 行 mid 只能置空 → `resolve_id_stubs` 走解析器必败、整单拒绝
+   （"半截列表不提交"语义下，一行空 id 拖垮整个历史列表回放）。修复：
+   - `RecentPlay` 增列 `source`/`source_key`（JOIN 已有，随手投影）；
+   - 桌面 `recent_rows` 按 source 分流：本地行直接用 source_key（去掉
+     `local_path` 回查），QQ 行经 `track_meta_batch` 补全（与我喜欢页同口径）；
+   - 发送端剔除空 mid 行并重映射起播下标（防御库外残行）。
+3. **真机端到端**：真实历史 12 首（全 local）整表 PlayList → Ok、
+   起播首行、队列 12 行；空列表 PlayList → 协议接受（不再 unknown variant）。
+   `立春 - 薛凯琪` 标题乱码为 §14 遗留已录数据问题，非回归。
+4. **最近播放改 LRU 视图（产品决策，推翻"按会话流水展示"）**：同曲重复播放
+   在历史页产生重复行、当前曲高亮也随之多份。新增 `recent_tracks`（storage）：
+   `ROW_NUMBER() OVER (PARTITION BY track_id ORDER BY started_at DESC)` 取每曲
+   最近一次会话，一曲一行、再播置顶、limit 截断（LRU 语义）；桌面历史页
+   切换到该视图（页头"共 N 首"= 去重后曲目数）。`recent_plays` 会话流水
+   保留给 CLI `history`（审计/收听时长视角，不裁剪）。真库验证：51 条流水
+   → 12 首各一行。
+5. **我喜欢页移除"最近播放预览"区块（产品决策）**：`recent-preview` 属性、
+   桥接取前 5 逻辑随之删除，最近播放只保留整页入口（侧栏导航）。hover_slider
+   集成测试此前隐式依赖预览区真数据行充当内容页可命中行——改播种合成
+   `liked` 行（与真库解耦，同文件侧栏播种先例）。
+
 ### 遗留
 
 - FLAC 标签文件级乱码（`立春 - 薛凯琪.flac` 下载时双重编码，库内其余曲目正常）
@@ -366,3 +395,43 @@
 - `show-overlay` 无挂载组件（M6 播放页未移植，点击封面区暂无响应，已知缺口）。
 - 运维提醒：协议演进后需重启 daemon；桌面自动拉起只认 current_exe 同目录与
   PATH 的 `hmp`，release 部署需同步重建。
+
+## §15 播放页（M6）初移植——歌词页 & 评论（2026-09-08）
+
+`now-playing.slint`（NowPlayingBody.vue + PlayerOverlay.vue 移植）：
+全屏 overlay（`Player.overlay-visible` 条件挂载，隐藏即卸载；PlayerBar 封面
+点击 `show-overlay` / 收起键 / ESC 关闭），环境层渐变+封面低透明放大，
+首屏舞台定高一屏（左封面+信息随其下：标题+裸心形喜欢 mock/歌手/专辑 |
+右整列歌词），上滑抵达评论区，底部控制台常驻（刻度进度条：每 10% 一根
+刻度、四分之一加高、拖拽时间气泡；左音质+音量、中 48px 主播放键、右评论/
+队列跳转键）。歌词跟随：原型 LyricsPane 的临界阻尼弹簧（ω=12 半隐式欧拉
+dt=16ms）以 16ms Timer 在 Slint 层复刻；景深亮度按行中心↔视口中心距离
+衰减；用户接管（按行/滚轮）暂停 3s；点行 `seek-ms` 精确跳转。
+
+数据管线（player_bridge）：换曲检测（PREV_MID）→ QQ 曲 `LyricGet` →
+`lyrics.rs::parse_lrc` → `NowPlaying.lyrics`（代际 +1 触发弹簧直达）；
+`active-line` 由状态推送按 position 折算（拖拽 pinned 期间不折算）；评论
+`CommentList`（hot/new，(mid,sort) key 去重，overlay 打开即装载）；本地曲
+诚实空态（歌词"暂无歌词"、评论就绪空）。`Player` 增 `album`/`seek-ms`。
+
+**与原型的已知偏差**（数据/引擎差异）：无逐字扫色（daemon 只投影行级
+LRC，QRC 词级时间轴未透出）；景深无 blur（Slint 无滤镜），焦点行以字号
+强调替代；评论扁平投影（无楼中楼/展开回复动画/吸顶节头）；头像=首字
+占位、喜欢/点赞=mock 态（换曲回落）、shuffle/repeat=UI mock；跳评论为
+瞬时跳转（原型 smooth scroll）。
+
+**验证**：workspace 全绿；真数据帧验证（QQ mid：LRC 1013B+翻译 350B、
+评论 360 条）；shot-headless 扩展 `--overlay/--seed/--wheel/--wait` 出图
+验收（首屏弹簧焦点行居中+景深衰减；评论区居中列+节头 tab+发丝线）。
+注：testing backend 不泵跨线程 invoke，无头实例收不到 daemon 推送——
+数据管线以原始帧单独验证，布局以 --seed 出图验收。
+
+### Slint 新坑（本轮入册）
+
+1. 顶层 `const` 不存在 → 组件 property 替代；
+2. `if`/`for` 块内的元素 id 对外层不可见——引用它的属性/Timer 必须
+   同步下沉到该作用域（歌词弹簧因此挂在舞台节点）；
+3. `@linear-gradient` stop 只接受 float（0..1），px 不行；
+4. `%` 不是取模（`Math.mod`）；字符串拼接用 `"\{expr}"` 模板；
+5. 函数体内未声明标识符直接赋值解析错（局部量用 let，或内联表达式）；
+6. 负 delta 滚轮 = 向下滚。

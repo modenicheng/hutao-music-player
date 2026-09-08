@@ -246,14 +246,16 @@ fn liked_rows(
     )
 }
 
-/// 最近播放：`recent_plays` 按开始时间倒序；latest/earliest 取首尾真实时间戳。
-/// 本地行经本地曲目表补全时长/专辑/封面；QQ 行 source_key 不可恢复（投影缺口）。
+/// 最近播放：`recent_tracks` LRU 视图（一曲一行，再播置顶——同曲重复播放
+/// 不再产生重复行/重复高亮）；latest/earliest 取首尾真实时间戳。
+/// 播放键随投影下发（source/source_key）：本地行经本地曲目表补全时长/专辑/封面，
+/// QQ 行经 `track_meta_batch` 补全歌手/专辑（与我喜欢页同口径，mid 可直接回放）。
 fn recent_rows(
     db: &mut LibraryDb,
     local_by_key: &HashMap<String, LibraryTrackRow>,
     album_covers: &HashMap<String, String>,
 ) -> Option<(Vec<SongRow>, String, String)> {
-    let plays = db.recent_plays(RECENT_LIMIT).ok()?;
+    let plays = db.recent_tracks(RECENT_LIMIT).ok()?;
     if plays.is_empty() {
         return Some((
             Vec::new(),
@@ -263,58 +265,50 @@ fn recent_rows(
     }
     let latest = format_stamp(plays.first().map(|p| p.started_at).unwrap_or_default());
     let earliest = format_stamp(plays.last().map(|p| p.started_at).unwrap_or_default());
+    let qq_meta = qq_meta_map(db, plays.iter().map(|p| p.source_key.clone()).collect());
     let rows = plays
         .into_iter()
-        .map(|play| {
-            // local_path 命中 → 本地行（RecentPlay 无 source 列，以此判源）；
-            // 未命中 → QQ 行，mid 无法回查（tracks.id → source_key 无读 API）置空。
-            let local_path = db.local_path(play.track_id).ok().flatten();
-            match local_path {
-                Some(path) => {
-                    let key = format!("local:{path}");
-                    match local_by_key.get(key.as_str()) {
-                        Some(t) => SongRow {
+        .map(|play| match play.source.as_str() {
+            "local" => {
+                let key = play.source_key;
+                match local_by_key.get(key.as_str()) {
+                    Some(t) => SongRow {
+                        mid: key,
+                        source: 1,
+                        title: play.title,
+                        artists: play.artist.unwrap_or_default(),
+                        album: t.album.clone().unwrap_or_default(),
+                        duration_ms: t.duration_ms.unwrap_or(0) as i32,
+                        quality: quality_text(format_of_key(&t.source_key)),
+                        cover_uri: t
+                            .album
+                            .as_deref()
+                            .and_then(|album| album_covers.get(album).cloned()),
+                        folder: None,
+                    },
+                    None => {
+                        let quality = quality_text(format_of_key(&key));
+                        SongRow {
                             mid: key,
                             source: 1,
                             title: play.title,
                             artists: play.artist.unwrap_or_default(),
-                            album: t.album.clone().unwrap_or_default(),
-                            duration_ms: t.duration_ms.unwrap_or(0) as i32,
-                            quality: quality_text(format_of_key(&t.source_key)),
-                            cover_uri: t
-                                .album
-                                .as_deref()
-                                .and_then(|album| album_covers.get(album).cloned()),
+                            album: String::new(),
+                            duration_ms: 0,
+                            quality,
+                            cover_uri: None,
                             folder: None,
-                        },
-                        None => {
-                            let quality = quality_text(format_of_key(&key));
-                            SongRow {
-                                mid: key,
-                                source: 1,
-                                title: play.title,
-                                artists: play.artist.unwrap_or_default(),
-                                album: String::new(),
-                                duration_ms: 0,
-                                quality,
-                                cover_uri: None,
-                                folder: None,
-                            }
                         }
                     }
                 }
-                None => SongRow {
-                    mid: String::new(),
-                    source: 0,
-                    title: play.title,
-                    artists: play.artist.unwrap_or_default(),
-                    album: String::new(),
-                    duration_ms: 0,
-                    quality: String::new(),
-                    cover_uri: None,
-                    folder: None,
-                },
             }
+            // QQ 行：mid 即播放键（此前 RecentPlay 不带 source/source_key，
+            // 只能置空 → 整表播放必败）；元数据走库内缓存批量补全。
+            _ => song_row_from_qq(
+                &play.source_key,
+                play.title,
+                qq_meta.get(play.source_key.as_str()),
+            ),
         })
         .collect();
     Some((rows, latest, earliest))
@@ -873,7 +867,8 @@ mod tests {
         assert_eq!(qq.quality, "");
     }
 
-    /// 最近播放投影：latest/earliest 用真实时间戳格式化；本地行补全时长。
+    /// 最近播放投影：latest/earliest 用真实时间戳格式化；本地行补全时长；
+    /// 同曲两次播放收敛为一行（LRU 视图，不产生重复行/重复高亮）。
     #[test]
     fn recent_rows_format_latest_and_earliest() {
         let mut db = LibraryDb::open_in_memory().unwrap();
@@ -886,7 +881,7 @@ mod tests {
         .unwrap();
         let key = format!("local:{}", f.display());
         let id = db.track_id("local", &key).unwrap().unwrap();
-        // 两条会话：新的一条决定 latest，旧的决定 earliest。
+        // 两次播放同一曲：LRU 去重后仅一行，时间戳取最近一次会话。
         let ev = db.record_play_start(id, 1_785_000_000).unwrap(); // 2026-07-25 17:20 UTC
         db.record_play_end(
             ev,
@@ -911,14 +906,52 @@ mod tests {
         .unwrap();
 
         let snap = read_snapshot(&mut db).expect("projection ok");
-        assert_eq!(snap.recent.len(), 2);
+        assert_eq!(snap.recent.len(), 1, "同曲两次播放收敛为一行");
         assert_eq!(snap.recent_latest, "08-08 12:00");
-        assert_eq!(snap.recent_earliest, "07-25 17:20");
+        assert_eq!(snap.recent_earliest, "08-08 12:00");
         let row = &snap.recent[0];
         assert_eq!(row.mid, key);
         assert_eq!(row.source, 1);
         assert_eq!(row.duration_ms, 200_000, "本地行经曲目表补全时长");
         assert_eq!(row.quality, "FLAC");
+    }
+
+    /// 最近播放 QQ 行：播放键随投影下发（source/source_key → mid），
+    /// 元数据经库内缓存补全——此前 mid 只能置空，整表播放（PlayList）必败。
+    #[test]
+    fn recent_rows_qq_row_keeps_playable_mid() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        db.upsert_track(&hmp_storage::TrackRow {
+            source: "qq",
+            source_key: "mid-9".into(),
+            title: "晴天".into(),
+            artist: Some("周杰伦".into()),
+            album: Some("叶惠美".into()),
+            duration_ms: Some(269_000),
+            ..Default::default()
+        })
+        .unwrap();
+        let id = db.track_id("qq", "mid-9").unwrap().unwrap();
+        let ev = db.record_play_start(id, 1_786_190_400).unwrap();
+        db.record_play_end(
+            ev,
+            &PlayEnd {
+                track_id: id,
+                ended_at: 1_786_191_600,
+                listened_ms: 120_000,
+                reason: "ended",
+            },
+        )
+        .unwrap();
+
+        let snap = read_snapshot(&mut db).expect("projection ok");
+        assert_eq!(snap.recent.len(), 1);
+        let row = &snap.recent[0];
+        assert_eq!(row.mid, "mid-9", "QQ 行 mid 必须可回放");
+        assert_eq!(row.source, 0);
+        assert_eq!(row.title, "晴天");
+        assert_eq!(row.artists, "周杰伦");
+        assert_eq!(row.album, "叶惠美");
     }
 
     /// 文件夹分组：按扫描根前缀聚合（嵌套根取最长优先）；根外曲目不入任何组；

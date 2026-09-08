@@ -6,6 +6,7 @@ import { Scroll, HoverBus, EqClock, EqClockHost } from "primitives.slint";
 import { Sidebar } from "sidebar.slint";
 import { PlayerBar } from "player-bar.slint";
 import { QueueDrawer } from "queue-drawer.slint";
+import { NowPlayingOverlay } from "now-playing.slint";
 import { LibraryPage } from "library-page.slint";
 import { RecentPage } from "recent-page.slint";
 import { MusicLibraryPage } from "music-library-page.slint";
@@ -20,12 +21,12 @@ import { SettingsPlaybackPage } from "settings-playback-page.slint";
 import { SettingsAccountPage } from "settings-account-page.slint";
 import { SearchPage } from "search-page.slint";
 import { Nav, Route } from "nav.slint";
-import { Player, Data, Quality } from "stores.slint";
+import { Player, Data, Quality, NowPlaying } from "stores.slint";
 import { Theme } from "theme.slint";
-import { TrackRow, CoverCardData, FolderRow } from "data.slint";
+import { TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow } from "data.slint";
 
 // 供生成代码（Rust 侧）访问的 global 与数据结构（HoverBus/EqClock 供集成测试探针）
-export { Theme, Nav, Player, Quality, Data, Route, TrackRow, CoverCardData, FolderRow, HoverBus, EqClock }
+export { Theme, Nav, Player, Quality, Data, NowPlaying, Route, TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, HoverBus, EqClock }
 
 export component AppWindow inherits Window {
     title: "胡桃音乐";
@@ -193,6 +194,14 @@ export component AppWindow inherits Window {
             vertical-alignment: center;
             overflow: elide;
         }
+    }
+
+    // —— 播放页 overlay（M6：首屏=封面+歌词，上滑=评论；条件挂载=隐藏即卸载）———
+    if Player.overlay-visible: NowPlayingOverlay {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
     }
 
     // —— 播放列表抽屉（遮罩 + 右上浮板）———

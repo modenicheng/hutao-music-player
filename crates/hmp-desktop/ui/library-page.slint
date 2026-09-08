@@ -1,5 +1,5 @@
 // 我喜欢（LibraryView.vue，v0.6/v0.13）：页头元信息 → 我喜欢 hero 卡（中性表面卡
-// + 心形渐变封面，播放全部）→ 喜欢列表 → 最近播放预览 → 创建/收藏歌单网格。
+// + 心形渐变封面，播放全部）→ 喜欢列表 → 创建/收藏歌单网格。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, Button, ButtonVariant } from "primitives.slint";
@@ -104,23 +104,6 @@ export component LibraryPage inherits Rectangle {
         TrackTable {
             tracks: Data.liked;
             show-header: true;
-        }
-
-        // —— 最近播放预览（整页入口在最近播放页）——
-        VerticalLayout {
-            spacing: Theme.space-4;
-
-            SectionHeader {
-                title: "最近播放";
-                more-to: "recent";
-                more-clicked => {
-                    Nav.navigate(Route.recent, "");
-                }
-            }
-            TrackTable {
-                tracks: Data.recent-preview;
-                show-header: true;
-            }
         }
 
         // —— 创建的歌单 ——

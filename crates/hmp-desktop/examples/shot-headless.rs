@@ -16,6 +16,58 @@ use std::sync::Arc;
 
 use slint::{ComponentHandle, Global};
 
+fn seed_demo(ui: &hmp_desktop::AppWindow) {
+    use hmp_desktop::{CommentRow, LyricRow, NowPlaying, Player};
+    let player = Player::get(ui);
+    player.set_has_track(true);
+    player.set_title("希望有羽毛和翅膀".into());
+    player.set_artists("知更鸟 / HOYO-MiX / Chevy".into());
+    player.set_album("崩坏星穹铁道-空气蛹 INSIDE".into());
+    player.set_playing(true);
+    player.set_duration_ms(229_000);
+    player.set_position_ms(61_000);
+    player.set_progress(61.0 / 229.0);
+
+    // 行级 LRC 样例（时间轴覆盖 60s 附近，验证焦点行与弹簧）
+    let lrc = (0..24)
+        .map(|i| {
+            let t = 8_000 + i as u64 * 6_500;
+            let m = t / 60_000;
+            let sec = (t % 60_000) / 1_000;
+            format!("[{m:02}:{sec:02}.{:02}]歌词第{}行 希望有羽毛和翅膀", (t % 1000) / 10, i % 10 + 1)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lines = hmp_desktop::parse_lrc(&lrc, "");
+    let rows: Vec<LyricRow> = lines
+        .iter()
+        .map(|l| LyricRow {
+            timestamp_ms: l.timestamp_ms as i32,
+            text: l.text.clone().into(),
+            translation: "".into(),
+        })
+        .collect();
+    let np = NowPlaying::get(ui);
+    np.set_lyrics(slint::ModelRc::new(slint::VecModel::from(rows)));
+    np.set_lyrics_generation(1);
+    // 61s → 焦点行 8（8s 起每 6.5s 一行），模拟 Rust 推送折算结果
+    np.set_active_line(8);
+
+    let comments: Vec<CommentRow> = (0..6)
+        .map(|i| CommentRow {
+            cm_id: format!("cm{i}").into(),
+            nickname: format!("乐评人{i}").into(),
+            initial: "乐".into(),
+            content: format!("第{i}条评论：这段旋律把星穹列车的旅途感写尽了，知更鸟的声线像羽毛一样落在心上。").into(),
+            time_text: "09-08 14:0".into(),
+            like_text: if i == 0 { "2.3万".into() } else { format!("{}", 1000 - i * 137).into() },
+        })
+        .collect();
+    np.set_comments(slint::ModelRc::new(slint::VecModel::from(comments)));
+    np.set_comment_total("8.6万".into());
+    np.set_comment_state(2);
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut route_str = String::from("library");
     let mut out = String::from("/tmp/hmp-qa2/hover-headless.png");
@@ -25,6 +77,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pre_ms: u64 = 600;
     let mut flight: Option<u64> = None;
     let mut queue = false;
+    let mut overlay = false;
+    let mut wheel: Option<(f32, f32, f32, u32)> = None;
+    let mut wait_ms: u64 = 0;
+    let mut seed = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -56,6 +112,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--pre-ms" => pre_ms = args.next().and_then(|v| v.parse().ok()).unwrap_or(600),
             "--flight" => flight = args.next().and_then(|v| v.parse().ok()),
             "--queue" => queue = true,
+            "--overlay" => overlay = true,
+            // 合成数据灌 Player/NowPlaying（布局/弹簧/高亮验收；不依赖 daemon 推送）
+            "--seed" => seed = true,
+            // 真实时间等待 IPC/网络回包（回调进 slint 队列，随后续 step_to 处理）
+            "--wait" => wait_ms = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            // X,Y,DY：截图前在 (X,Y) 派发 N 次滚轮（滚动到评论区用）
+            "--wheel" => {
+                let v = args.next().unwrap_or_default();
+                let parts: Vec<&str> = v.split(',').collect();
+                wheel = Some((parts[0].parse().unwrap(), parts[1].parse().unwrap(),
+                    parts[2].parse().unwrap(), parts[3].parse().unwrap()));
+            }
             other => route_str = other.to_owned(),
         }
     }
@@ -120,6 +188,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if queue {
         hmp_desktop::Player::get(&ui).set_queue_visible(true);
     }
+    if seed {
+        seed_demo(&ui);
+    }
+    if overlay {
+        // 走回调（打开 overlay + 触发评论装载），与真实点击链路一致
+        hmp_desktop::Player::get(&ui).invoke_show_overlay();
+    }
 
     // 第二段 hover：先收敛第一次 placement，再移动触发行间滑动 + 黏滞形变
     if let Some((x, y)) = then_hover {
@@ -138,6 +213,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+
+    if let Some((x, y, dy, times)) = wheel {
+        for _ in 0..times {
+            ui.window().dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                position: slint::LogicalPosition::new(x, y),
+                delta_x: 0.0,
+                delta_y: dy,
+            });
+            step_to(80);
+        }
+    }
+
+    if wait_ms > 0 {
+        // 真实时间等 IPC/网络，同时小步泵帧——invoke_from_event_loop 的回调
+        // 只在事件循环迭代里执行，纯 sleep 会把回包堵在队列外
+        let cycles = wait_ms / 100;
+        for _ in 0..cycles {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            step_to(100);
+        }
+    }
 
     match flight {
         // 抓动画中帧：只推进到指定时刻

@@ -1,0 +1,853 @@
+// 播放页 overlay（NowPlayingBody.vue + PlayerOverlay.vue，M6 移植）：
+// 环境层（渐变 + 封面低透明放大）→ 首屏舞台定高一屏（左封面+信息随其下 |
+// 右整列歌词）→ 上滑抵达评论区；底部控制台常驻（刻度进度条 + 控制排）。
+// 歌词跟随：原型 LyricsPane 的临界阻尼弹簧（ω=12，半隐式欧拉）以 16ms
+// Timer 在 Slint 层复刻——几何全在页内，active-line 由 Rust 按推送折算。
+// 与原型的已知偏差（数据/引擎差异，AUDIT §14 追加）：无逐字扫色（QRC 词级
+// 时间轴未投影，行级 LRC）；景深无 blur（Slint 无滤镜），焦点行以字号强调；
+// 评论为扁平投影（无楼中楼/吸顶头）；头像用首字占位（UI 禁网）。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { AppIcon, Scroll } from "primitives.slint";
+import { QualityBadge } from "quality-badge.slint";
+import { VolumeControl } from "volume-control.slint";
+import { Player, NowPlaying } from "stores.slint";
+
+export component NowPlayingOverlay inherits Rectangle {
+    background: @linear-gradient(180deg, Theme.track-grad-from, Theme.track-grad-to);
+    clip: true;
+
+    // —— 排序 tab 数据（下标即 NowPlaying.comment-sort）———
+    property <[string]> sort-tabs: ["最热", "最新"];
+
+
+    // —— 环境层：封面放大低透明铺底（Slint 无 blur 滤镜，靠低透明度融入渐变）———
+    if Player.has-track && Player.cover.width > 0: Rectangle {
+        x: -parent.width * 0.12;
+        y: -parent.height * 0.12;
+        width: parent.width * 1.24;
+        height: parent.height * 1.24;
+
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: Player.cover;
+            opacity: 0.1;
+        }
+    }
+
+    // —— 收起键：裸 chevron 向下，墨色随环境对比度 ——
+    collapse-touch := TouchArea {
+        x: Theme.space-4;
+        y: Theme.space-4;
+        width: 36px;
+        height: 36px;
+        mouse-cursor: pointer;
+        clicked => {
+            Player.hide-overlay();
+        }
+        AppIcon {
+            source: Icons.expand_more;
+            icon-color: collapse-touch.has-hover
+                ? Theme.track-on-ambient : Theme.track-on-ambient.transparentize(0.25);
+            width: 22px;
+            height: 22px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+
+    VerticalLayout {
+        // —— 内容滚动区：首屏舞台（定高一屏）+ 评论区 ——
+        page := Scroll {
+            vertical-stretch: 1;
+
+            if !Player.has-track: Rectangle {
+                width: parent.width;
+                height: page.view-height;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: Theme.space-2;
+                    Text {
+                        text: "还没有播放中的歌曲";
+                        color: Theme.foreground;
+                        font-size: 21px;
+                        font-weight: 650;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: "从发现、搜索或歌单里挑一首开始吧";
+                        color: Theme.muted-foreground;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            if Player.has-track: stage-rect := Rectangle {
+                width: parent.width;
+                // 舞台定高 = 滚动视口高（100cqh）：歌词列长内容不能撑爆舞台
+                height: page.view-height;
+
+                // —— 歌词跟随弹簧（原型 LyricsPane 的临界阻尼弹簧，Slint 层复刻：
+                //    ω=12 半隐式欧拉 dt=16ms；几何全在舞台作用域内）———
+                property <int> row-h: 88;
+                property <float> follow-x: 0;
+                property <float> follow-v: 0;
+                /** 用户接管歌词滚动期间弹簧静默（3s 后恢复跟随） */
+                property <bool> following: true;
+                /** 换词表/进页后免动画直达当前行 */
+                property <bool> snap-pending: true;
+                property <int> last-generation: -1;
+                property <float> lyr-view-h: lyrics-scroll.view-height / 1px;
+                property <float> lyr-content-h: lyrics-scroll.content-height / 1px;
+                /** 首尾留白：首行/末行也能滚到视口中心（Apple Music 式） */
+                property <float> lyr-pad-top: lyr-view-h * 0.45;
+                property <float> lyr-pad-bottom: lyr-view-h * 0.52;
+
+                function lyr-target() -> float {
+                    return (NowPlaying.active-line < 0 || NowPlaying.lyrics.length <= 0)
+                        ? 0
+                        : clamp(lyr-pad-top + NowPlaying.active-line * row-h + row-h / 2 - lyr-view-h / 2,
+                            0, Math.max(0, lyr-content-h - lyr-view-h));
+                }
+
+                function user-took-over() {
+                    following = false;
+                    take-over-timer.restart();
+                }
+
+                follow-tick := Timer {
+                    interval: 16ms;
+                    running: true;
+                    triggered => {
+                        if (NowPlaying.lyrics-generation != stage-rect.last-generation) {
+                            stage-rect.last-generation = NowPlaying.lyrics-generation;
+                            stage-rect.snap-pending = true;
+                        }
+                        if (!stage-rect.following) {
+                            // 接管期间弹簧贴住实际位置，恢复跟随时不跳变
+                            stage-rect.follow-x = -lyrics-scroll.scroll-offset / 1px;
+                            stage-rect.follow-v = 0;
+                        } else if (stage-rect.snap-pending) {
+                            stage-rect.snap-pending = false;
+                            stage-rect.follow-x = stage-rect.lyr-target();
+                            stage-rect.follow-v = 0;
+                            lyrics-scroll.scroll-offset = -stage-rect.follow-x * 1px;
+                        } else {
+                            stage-rect.follow-v = stage-rect.follow-v
+                                + (144 * (stage-rect.lyr-target() - stage-rect.follow-x)
+                                    - 24 * stage-rect.follow-v) * 0.016;
+                            stage-rect.follow-x = stage-rect.follow-x + stage-rect.follow-v * 0.016;
+                            if (abs(stage-rect.lyr-target() - stage-rect.follow-x) < 0.5
+                                && abs(stage-rect.follow-v) < 8) {
+                                stage-rect.follow-x = stage-rect.lyr-target();
+                                stage-rect.follow-v = 0;
+                            }
+                            lyrics-scroll.scroll-offset = -stage-rect.follow-x * 1px;
+                        }
+                    }
+                }
+
+                take-over-timer := Timer {
+                    interval: 3s;
+                    running: false;
+                    triggered => {
+                        stage-rect.following = true;
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-left: Theme.space-10;
+                    padding-right: Theme.space-10;
+                    padding-top: Theme.space-8;
+                    padding-bottom: Theme.space-6;
+                    spacing: Theme.space-8;
+
+                    // —— 左列：封面 + 信息随其下 ——
+                    Rectangle {
+                        width: min(parent.height * 0.52, 336px);
+                        horizontal-stretch: 0;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: Theme.space-5;
+
+                            Image {
+                                height: parent.width;
+                                source: Player.cover;
+                            }
+
+                            VerticalLayout {
+                                spacing: 6px;
+
+                                HorizontalLayout {
+                                    spacing: Theme.space-2;
+                                    vertical-stretch: 0;
+
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: Player.title;
+                                        color: Theme.foreground;
+                                        font-size: 28px;
+                                        font-weight: 700;
+                                        wrap: word-wrap;
+                                        overflow: elide;
+                                        max-height: 76px;
+                                    }
+                                    like-touch := TouchArea {
+                                        width: 32px;
+                                        height: 32px;
+                                        y: (parent.height - self.height) / 2;
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            NowPlaying.liked = !NowPlaying.liked;
+                                        }
+                                        AppIcon {
+                                            source: NowPlaying.liked
+                                                ? Icons.favorite_filled : Icons.favorite_outline;
+                                            // 裸心形 = 标题字号 × 0.8，与字形视觉对齐
+                                            width: 22.4px;
+                                            height: 22.4px;
+                                            icon-color: NowPlaying.liked ? #E5484D : Theme.foreground;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: Player.artists;
+                                    color: Theme.muted-foreground;
+                                    font-size: 16px;
+                                    overflow: elide;
+                                }
+                                if Player.album != "": Text {
+                                    text: Player.album;
+                                    color: Theme.muted-foreground;
+                                    font-size: 14px;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+
+                    // —— 右列：整列歌词（内部自滚，无滚动条）———
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+
+                        lyrics-scroll := Scroll {
+                            hide-scrollbar: true;
+
+                            Rectangle {
+                                width: parent.width;
+                                height: stage-rect.lyr-pad-top * 1px;
+                            }
+
+                            for line[i] in NowPlaying.lyrics: Rectangle {
+                                width: parent.width;
+                                height: stage-rect.row-h * 1px;
+                                clip: true;
+
+                                // 景深：亮度按「行中心 ↔ 视口中心」距离衰减
+                                //（指数衰减的线性近似；blur Slint 无对应物，略）
+                                property <float> dist: abs(
+                                        stage-rect.lyr-pad-top + i * stage-rect.row-h + stage-rect.row-h / 2
+                                        + lyrics-scroll.scroll-offset / 1px
+                                        - stage-rect.lyr-view-h / 2) / stage-rect.row-h;
+                                opacity: max(0.34, 1 - 0.132 * dist);
+
+                                row-touch := TouchArea {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    mouse-cursor: pointer;
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.down) {
+                                            stage-rect.user-took-over();
+                                        }
+                                    }
+                                    scroll-event(event) => {
+                                        stage-rect.user-took-over();
+                                        return reject;
+                                    }
+                                    clicked => {
+                                        Player.seek-ms(line.timestamp-ms);
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+                                    padding-left: Theme.space-4;
+                                    padding-right: Theme.space-4;
+
+                                    Text {
+                                        text: line.text;
+                                        wrap: word-wrap;
+                                        overflow: elide;
+                                        horizontal-alignment: center;
+                                        color: i == NowPlaying.active-line
+                                            ? Theme.track-accent : Theme.foreground;
+                                        font-size: i == NowPlaying.active-line ? 26px : 23px;
+                                        font-weight: i == NowPlaying.active-line ? 700 : 600;
+                                        animate font-size {
+                                            duration: 150ms;
+                                            easing: cubic-bezier(0.2, 0, 0, 1);
+                                        }
+                                    }
+                                    if line.translation != "": Text {
+                                        text: line.translation;
+                                        overflow: elide;
+                                        horizontal-alignment: center;
+                                        color: Theme.muted-foreground;
+                                        font-size: 15px;
+                                        font-weight: 500;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                width: parent.width;
+                                height: stage-rect.lyr-pad-bottom * 1px;
+                            }
+
+                            if NowPlaying.lyrics.length == 0 && !NowPlaying.lyrics-loading: Rectangle {
+                                width: parent.width;
+                                height: page.view-height;
+
+                                Text {
+                                    y: parent.height / 2 - self.height / 2;
+                                    width: parent.width;
+                                    text: NowPlaying.lyrics-loading ? "歌词加载中…" : "暂无歌词";
+                                    color: Theme.muted-foreground;
+                                    font-size: 15px;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // —— 评论区（继续上滑自然抵达；顶部透明→端色过渡带消接缝）———
+            if Player.has-track: Rectangle {
+                width: parent.width;
+                min-height: page.view-height * 0.75;
+                background: @linear-gradient(180deg, transparent 0.0, Theme.track-grad-to 0.12);
+
+                VerticalLayout {
+                    padding-left: Theme.space-8;
+                    padding-right: Theme.space-8;
+                    padding-bottom: Theme.space-12;
+                    // 编辑部式 736px 阅读列，水平居中
+                    cross-axis-alignment: center;
+
+                    Rectangle {
+                        width: min(parent.width, 736px);
+                        horizontal-stretch: 0;
+
+                        VerticalLayout {
+                            // 节头：标题 + 总数 + 下划线排序 tab
+                            HorizontalLayout {
+                                padding-bottom: Theme.space-3;
+                                spacing: Theme.space-3;
+                                alignment: space-between;
+
+                                HorizontalLayout {
+                                    spacing: Theme.space-2;
+                                    cross-axis-alignment: center;
+
+                                    Text {
+                                        text: "评论";
+                                        color: Theme.foreground;
+                                        font-size: 17px;
+                                        font-weight: 700;
+                                    }
+                                    if NowPlaying.comment-total != "": Text {
+                                        text: NowPlaying.comment-total;
+                                        color: Theme.muted-foreground;
+                                        font-size: 13px;
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: Theme.space-5;
+                                    cross-axis-alignment: center;
+
+                                    for tab[si] in root.sort-tabs: TouchArea {
+                                        property <bool> is-active: NowPlaying.comment-sort == si;
+                                        width: tab-text.preferred-width;
+                                        height: 30px;
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            if (!is-active) {
+                                                NowPlaying.comment-sort = si;
+                                                NowPlaying.request-comments();
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            tab-text := Text {
+                                                text: tab;
+                                                color: is-active ? Theme.foreground : Theme.muted-foreground;
+                                                font-size: 14px;
+                                                font-weight: is-active ? 650 : 400;
+                                            }
+                                            Rectangle {
+                                                height: 2px;
+                                                background: Theme.foreground;
+                                                opacity: is-active ? 1 : 0;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 输入框（mock：不发送）——半透明前景混色板 + 假 placeholder
+                            Rectangle {
+                                height: 40px;
+                                border-radius: Theme.radius-md;
+                                background: Theme.foreground.transparentize(0.93);
+                                border-width: 1px;
+                                border-color: Theme.hairline;
+
+                                composer := TextInput {
+                                    x: Theme.space-3;
+                                    y: (parent.height - self.height) / 2;
+                                    width: parent.width - self.x - 68px;
+                                    color: Theme.foreground;
+                                    font-size: 13.5px;
+                                }
+                                if composer.text == "": Text {
+                                    x: Theme.space-3;
+                                    y: (parent.height - self.height) / 2;
+                                    width: parent.width - self.x - 68px;
+                                    text: "随乐一想，发表你的评论…";
+                                    color: Theme.muted-foreground;
+                                    font-size: 13.5px;
+                                }
+                                HorizontalLayout {
+                                    padding-right: Theme.space-2;
+                                    cross-axis-alignment: center;
+                                    alignment: end;
+
+                                    Rectangle {
+                                        width: 52px;
+                                        height: 28px;
+                                        border-radius: Theme.pill(self.height);
+                                        background: Theme.foreground.transparentize(0.9);
+
+                                        Text {
+                                            width: parent.width;
+                                            y: (parent.height - self.height) / 2;
+                                            text: "发送";
+                                            color: Theme.muted-foreground;
+                                            font-size: 12.5px;
+                                            horizontal-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: Theme.space-4;
+                            }
+                            if NowPlaying.comment-state == 1: Text {
+                                text: "评论加载中…";
+                                color: Theme.muted-foreground;
+                                font-size: 13.5px;
+                            }
+                            if NowPlaying.comment-state == 3: Text {
+                                text: "评论加载失败，稍后再试";
+                                color: Theme.muted-foreground;
+                                font-size: 13.5px;
+                            }
+                            if NowPlaying.comment-state == 2 && NowPlaying.comments.length == 0: Text {
+                                text: "暂无评论";
+                                color: Theme.muted-foreground;
+                                font-size: 13.5px;
+                            }
+
+                            for comment in NowPlaying.comments: VerticalLayout {
+                                padding-top: Theme.space-3;
+                                padding-bottom: Theme.space-3;
+
+                                // 编辑部式发丝线分隔
+                                Rectangle {
+                                    height: 1px;
+                                    background: Theme.hairline;
+                                }
+
+                                HorizontalLayout {
+                                    padding-top: Theme.space-3;
+                                    spacing: Theme.space-3;
+
+                                    // 头像占位：首字圆板（UI 禁网不拉真头像）
+                                    Rectangle {
+                                        width: 34px;
+                                        height: 34px;
+                                        border-radius: Theme.pill(self.height);
+                                        background: Theme.foreground.transparentize(0.92);
+
+                                        Text {
+                                            width: parent.width;
+                                            y: (parent.height - self.height) / 2;
+                                            text: comment.initial;
+                                            color: Theme.muted-foreground;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                            horizontal-alignment: center;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 4px;
+
+                                        HorizontalLayout {
+                                            spacing: Theme.space-2;
+                                            Text {
+                                                text: comment.nickname;
+                                                color: Theme.muted-foreground;
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                            }
+                                            Text {
+                                                text: comment.time-text;
+                                                color: Theme.muted-foreground;
+                                                font-size: 12px;
+                                                opacity: 0.8;
+                                            }
+                                        }
+                                        Text {
+                                            text: comment.content;
+                                            color: Theme.foreground;
+                                            font-size: 14px;
+                                            wrap: word-wrap;
+                                        }
+                                        HorizontalLayout {
+                                            alignment: end;
+
+                                            comment-like := TouchArea {
+                                                width: 44px;
+                                                height: 24px;
+                                                property <bool> liked: false;
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    comment-like.liked = !comment-like.liked;
+                                                }
+                                                HorizontalLayout {
+                                                    spacing: 4px;
+
+                                                    AppIcon {
+                                                        source: comment-like.liked
+                                                            ? Icons.favorite_filled : Icons.favorite_outline;
+                                                        icon-color: comment-like.liked
+                                                            ? #E5484D : Theme.muted-foreground;
+                                                        width: 14px;
+                                                        height: 14px;
+                                                        y: (parent.height - self.height) / 2;
+                                                    }
+                                                    Text {
+                                                        text: comment.like-text;
+                                                        color: comment-like.liked ? #E5484D : Theme.muted-foreground;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // —— 底部控制台：常驻，不随内容滚动 ——
+        Rectangle {
+            height: 116px;
+            background: Theme.track-grad-to.transparentize(0.22);
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: 1px;
+                background: Theme.hairline;
+            }
+
+            VerticalLayout {
+                padding-left: Theme.space-6;
+                padding-right: Theme.space-6;
+                padding-top: Theme.space-3;
+                spacing: Theme.space-2;
+
+                // —— 刻度进度条（RulerProgress.vue）：静息 3px/hover 6px，
+                // 每 10% 一根刻度、四分之一处加高；拖拽回显同 PlayerBar ——
+                ruler := Rectangle {
+                    height: 30px;
+
+                    property <float> shown: Player.seeking
+                        ? clamp(Player.drag-progress, 0.0, 1.0)
+                        : clamp(Player.progress, 0.0, 1.0);
+
+                    Rectangle {
+                        y: (parent.height - 6px) / 2;
+                        width: parent.width;
+                        height: ruler-touch.has-hover || ruler-touch.pressed ? 6px : 3px;
+                        border-radius: self.height / 2;
+                        background: Theme.track;
+                        animate height {
+                            duration: Theme.duration-fast;
+                            easing: cubic-bezier(0.2, 0, 0, 1);
+                        }
+
+                        Rectangle {
+                            x: 0;
+                            y: 0;
+                            width: parent.width * ruler.shown;
+                            height: parent.height;
+                            border-radius: parent.border-radius;
+                            background: Theme.track-accent;
+                        }
+                    }
+                    for t in [10, 20, 30, 40, 60, 70, 80, 90]: Rectangle {
+                        x: parent.width * t / 100 - self.width / 2;
+                        y: (parent.height - 12px) / 2;
+                        width: 1px;
+                        height: 12px;
+                        background: Theme.track;
+                        opacity: parent.width * t / 100 <= parent.width * ruler.shown ? 0.55 : 1;
+                    }
+                    for t in [25, 50, 75]: Rectangle {
+                        x: parent.width * t / 100 - self.width / 2;
+                        y: (parent.height - 18px) / 2;
+                        width: 1.5px;
+                        height: 18px;
+                        background: Theme.track;
+                        opacity: parent.width * t / 100 <= parent.width * ruler.shown ? 0.55 : 1;
+                    }
+                    Rectangle {
+                        x: parent.width * ruler.shown - self.width / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: ruler-touch.has-hover || ruler-touch.pressed ? 12px : 0px;
+                        height: self.width;
+                        border-radius: Theme.pill(self.height);
+                        background: Theme.track-accent;
+                        animate width {
+                            duration: Theme.duration-fast;
+                            easing: cubic-bezier(0.2, 0, 0, 1);
+                        }
+                    }
+                    if ruler-touch.pressed: Rectangle {
+                        x: clamp(parent.width * ruler.shown - self.width / 2, 0px, parent.width - self.width);
+                        y: -26px;
+                        width: 64px;
+                        height: 24px;
+                        border-radius: Theme.radius-md;
+                        background: Theme.track-deep;
+
+                        property <int> shown-secs: Math.floor(ruler.shown * Player.duration-ms / 1000);
+                        Text {
+                            width: parent.width;
+                            y: (parent.height - self.height) / 2;
+                            text: "\{Math.floor(parent.shown-secs / 60)}:\{Math.mod(parent.shown-secs, 60) < 10 ? "0" : ""}\{Math.mod(parent.shown-secs, 60)}";
+                            color: Theme.track-deep-fg;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    ruler-touch := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: pointer;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down) {
+                                Player.seeking = true;
+                                Player.drag-progress = clamp(self.mouse-x / parent.width, 0.0, 1.0);
+                            } else if (event.kind == PointerEventKind.up) {
+                                Player.seek-percent(Player.drag-progress);
+                                Player.seeking = false;
+                            } else if (event.kind == PointerEventKind.cancel) {
+                                Player.seeking = false;
+                            }
+                        }
+                        moved => {
+                            Player.drag-progress = clamp(self.mouse-x / parent.width, 0.0, 1.0);
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    height: 44px;
+                    spacing: Theme.space-2;
+
+                    // 左簇：音质徽章 + 音量（复用 PlayerBar 同款）
+                    HorizontalLayout {
+                        horizontal-stretch: 1;
+                        spacing: Theme.space-2;
+                        alignment: start;
+
+                        QualityBadge {
+                            y: (parent.height - self.height) / 2;
+                        }
+                        VolumeControl {
+                            y: (parent.height - self.height) / 2;
+                        }
+                    }
+
+                    // 中簇：随机 / 上一曲 / 主播放键 / 下一曲 / 循环
+                    HorizontalLayout {
+                        spacing: Theme.space-4;
+                        alignment: center;
+
+                        shuffle-touch := TouchArea {
+                            property <bool> on: false;
+                            width: 36px;
+                            height: 36px;
+                            y: (parent.height - self.height) / 2;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                shuffle-touch.on = !shuffle-touch.on;
+                            }
+                            AppIcon {
+                                source: Icons.shuffle;
+                                icon-color: shuffle-touch.on ? Theme.track-accent : Theme.muted-foreground;
+                                width: 18px;
+                                height: 18px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                        prev-touch := TouchArea {
+                            width: 36px;
+                            height: 36px;
+                            y: (parent.height - self.height) / 2;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                Player.previous();
+                            }
+                            AppIcon {
+                                source: Icons.skip_previous;
+                                icon-color: Theme.foreground;
+                                width: 22px;
+                                height: 22px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                        // 主播放键：48px 圆，曲目层强调色——最大但不过分高出邻键
+                        play-touch := TouchArea {
+                            width: 48px;
+                            height: 48px;
+                            y: (parent.height - self.height) / 2;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                Player.toggle-play();
+                            }
+                            Rectangle {
+                                width: parent.width;
+                                height: parent.height;
+                                border-radius: Theme.pill(self.height);
+                                background: Theme.track-accent;
+                                opacity: Player.loading ? 0.55 : 1;
+
+                                AppIcon {
+                                    source: Player.playing ? Icons.pause : Icons.play_arrow;
+                                    icon-color: Theme.track-on-accent;
+                                    width: 24px;
+                                    height: 24px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                            }
+                        }
+                        next-touch := TouchArea {
+                            width: 36px;
+                            height: 36px;
+                            y: (parent.height - self.height) / 2;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                Player.next();
+                            }
+                            AppIcon {
+                                source: Icons.skip_next;
+                                icon-color: Theme.foreground;
+                                width: 22px;
+                                height: 22px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                        repeat-touch := TouchArea {
+                            property <bool> on: false;
+                            width: 36px;
+                            height: 36px;
+                            y: (parent.height - self.height) / 2;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                repeat-touch.on = !repeat-touch.on;
+                            }
+                            AppIcon {
+                                source: Icons.repeat;
+                                icon-color: repeat-touch.on ? Theme.track-accent : Theme.muted-foreground;
+                                width: 18px;
+                                height: 18px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                    }
+
+                    // 右簇：跳转键（纯图标）——评论 / 播放列表
+                    HorizontalLayout {
+                        horizontal-stretch: 1;
+                        spacing: Theme.space-2;
+                        alignment: end;
+
+                        jump-comments := TouchArea {
+                            width: 36px;
+                            height: 36px;
+                            y: (parent.height - self.height) / 2;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                page.scroll-offset = -min(page.view-height,
+                                    Math.max(0px, page.content-height - page.view-height));
+                            }
+                            AppIcon {
+                                source: Icons.comment_outline;
+                                icon-color: jump-comments.has-hover
+                                    ? Theme.foreground : Theme.muted-foreground;
+                                width: 20px;
+                                height: 20px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                        jump-queue := TouchArea {
+                            width: 36px;
+                            height: 36px;
+                            y: (parent.height - self.height) / 2;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                Player.toggle-queue();
+                            }
+                            AppIcon {
+                                source: Icons.queue_music;
+                                icon-color: jump-queue.has-hover
+                                    ? Theme.foreground : Theme.muted-foreground;
+                                width: 22px;
+                                height: 22px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

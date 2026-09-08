@@ -256,6 +256,9 @@ fn play_session_roundtrip() {
     assert_eq!(recent[0].listened_ms, 115_000);
     assert_eq!(recent[0].reason, "ended");
     assert_eq!(recent[0].ended_at, Some(1120));
+    // 播放键投影（GUI 历史页整表播放的 id 来源）
+    assert_eq!(recent[0].source, "qq");
+    assert_eq!(recent[0].source_key, "mid123");
     // play_count 累加
     let count: i64 = db
         .conn
@@ -275,6 +278,53 @@ fn play_session_roundtrip() {
         )
         .unwrap();
     assert_eq!(last, Some(1120));
+}
+
+/// 最近播放 LRU 视图：一曲一行（同曲多会话去重，行字段取最近一次会话）、
+/// 再播置顶、limit 截断。会话流水视图（recent_plays）不裁剪。
+#[test]
+fn recent_tracks_is_lru_dedup_view() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let id_a = db.upsert_track(&row()).unwrap();
+    let mut row_b = row();
+    row_b.source_key = "mid456".into();
+    row_b.title = "另一曲".into();
+    let id_b = db.upsert_track(&row_b).unwrap();
+
+    let play = |db: &mut LibraryDb, id: i64, started: i64, listened: i64| {
+        let ev = db.record_play_start(id, started).unwrap();
+        db.record_play_end(
+            ev,
+            &PlayEnd {
+                track_id: id,
+                ended_at: started + 60,
+                listened_ms: listened,
+                reason: "ended",
+            },
+        )
+        .unwrap();
+    };
+    // A@1000 → B@2000 → A@3000：流水 3 条，LRU 应为 [A, B]。
+    play(&mut db, id_a, 1_000, 10_000);
+    play(&mut db, id_b, 2_000, 15_000);
+    play(&mut db, id_a, 3_000, 20_000);
+
+    assert_eq!(db.recent_plays(10).unwrap().len(), 3, "流水视图按会话记条");
+    let lru = db.recent_tracks(10).unwrap();
+    assert_eq!(lru.len(), 2, "LRU 视图一曲一行");
+    assert_eq!(lru[0].source_key, "mid123");
+    assert_eq!(lru[0].listened_ms, 20_000, "行字段取最近一次会话");
+    assert_eq!(lru[1].source_key, "mid456");
+
+    // 再播 B → 移到最前（move-to-front）。
+    play(&mut db, id_b, 4_000, 5_000);
+    let lru = db.recent_tracks(10).unwrap();
+    assert_eq!(
+        lru.iter().map(|p| p.source_key.as_str()).collect::<Vec<_>>(),
+        ["mid456", "mid123"]
+    );
+    // limit 截断 = 缓存容量。
+    assert_eq!(db.recent_tracks(1).unwrap().len(), 1);
 }
 
 #[test]

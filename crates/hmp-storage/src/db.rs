@@ -117,6 +117,10 @@ pub struct RecentPlay {
     pub track_id: i64,
     pub title: String,
     pub artist: Option<String>,
+    /// 来源（`qq` | `local`）与来源身份（QQ mid / `local:<路径>`）。
+    /// 播放键：GUI 历史页整表播放靠它回查（仅 sqlite row id 时 QQ 行无法重建）。
+    pub source: String,
+    pub source_key: String,
     pub started_at: i64,
     pub ended_at: Option<i64>,
     pub listened_ms: i64,
@@ -403,11 +407,12 @@ impl LibraryDb {
         Ok(n as u32)
     }
 
-    /// 最近播放（默认按开始时间倒序）。
+    /// 最近播放（默认按开始时间倒序）。带 source/source_key 播放键投影
+    /// （GUI 历史页整表播放的 id 来源，与收藏页 `list_favorites` 同口径）。
     pub fn recent_plays(&mut self, limit: u32) -> rusqlite::Result<Vec<RecentPlay>> {
         let mut stmt = self.conn.prepare(
-            r#"SELECT p.track_id, t.title, t.artist, p.started_at, p.ended_at,
-                      p.listened_ms, COALESCE(p.end_reason, '')
+            r#"SELECT p.track_id, t.title, t.artist, t.source, t.source_key,
+                      p.started_at, p.ended_at, p.listened_ms, COALESCE(p.end_reason, '')
                FROM play_events p JOIN tracks t ON t.id = p.track_id
                ORDER BY p.started_at DESC, p.id DESC LIMIT ?1"#,
         )?;
@@ -416,10 +421,46 @@ impl LibraryDb {
                 track_id: r.get(0)?,
                 title: r.get(1)?,
                 artist: r.get(2)?,
-                started_at: r.get(3)?,
-                ended_at: r.get(4)?,
-                listened_ms: r.get(5)?,
-                reason: r.get(6)?,
+                source: r.get(3)?,
+                source_key: r.get(4)?,
+                started_at: r.get(5)?,
+                ended_at: r.get(6)?,
+                listened_ms: r.get(7)?,
+                reason: r.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 最近播放（LRU 视图）：一曲一行，按最近一次播放倒序——播放即移到最前，
+    /// 同曲重复播放不产生重复行（行字段取该曲最近一次会话）。
+    /// GUI 历史页用这份；会话流水（含同曲多条）走 [`recent_plays`]（CLI history）。
+    pub fn recent_tracks(&mut self, limit: u32) -> rusqlite::Result<Vec<RecentPlay>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT p.track_id, t.title, t.artist, t.source, t.source_key,
+                      p.started_at, p.ended_at, p.listened_ms, COALESCE(p.end_reason, '')
+               FROM (
+                   SELECT *, ROW_NUMBER() OVER (
+                       PARTITION BY track_id ORDER BY started_at DESC, id DESC
+                   ) AS rn
+                   FROM play_events
+               ) p
+               JOIN tracks t ON t.id = p.track_id
+               WHERE p.rn = 1
+               ORDER BY p.started_at DESC, p.id DESC
+               LIMIT ?1"#,
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(RecentPlay {
+                track_id: r.get(0)?,
+                title: r.get(1)?,
+                artist: r.get(2)?,
+                source: r.get(3)?,
+                source_key: r.get(4)?,
+                started_at: r.get(5)?,
+                ended_at: r.get(6)?,
+                listened_ms: r.get(7)?,
+                reason: r.get(8)?,
             })
         })?;
         rows.collect()

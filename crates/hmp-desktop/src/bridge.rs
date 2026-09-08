@@ -17,7 +17,6 @@ use crate::{
     AppWindow, CoverCardData, Data, FolderRow, Nav, PlaylistCover, Quality, Theme, TrackRow,
 };
 
-const RECENT_PREVIEW_SIZE: usize = 5;
 const NAV_HISTORY_CAP: usize = 50;
 /// 库变更刷新防抖：watcher 批处理每 ~1s bump 一次，扫描期连发——
 /// 静默 500ms 才触发一次重查，避免 UI 随扫描进度反复重载。
@@ -185,14 +184,7 @@ fn apply_snapshot(ui: &AppWindow, snap: &library_view::Snapshot) {
         snap.favorited.iter().map(sidebar_cover).collect::<Vec<_>>(),
     ));
 
-    // ——— 最近播放（预览 = 我喜欢页前 5；latest/earliest 已按真实时间戳格式化）———
-    data.set_recent_preview(model(
-        snap.recent
-            .iter()
-            .take(RECENT_PREVIEW_SIZE)
-            .map(SongRow::to_track_row)
-            .collect::<Vec<_>>(),
-    ));
+    // ——— 最近播放（latest/earliest 已按真实时间戳格式化）———
     data.set_recent(model(
         snap.recent
             .iter()

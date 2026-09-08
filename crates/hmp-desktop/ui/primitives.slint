@@ -252,7 +252,10 @@ export component Equalizer inherits Rectangle {
 
 // ——— HoverGroup 滑动高亮（HoverGroup.vue 的 Slint 对应物）———
 // 组内 HoverItem hover 时把几何（窗口系 absolute-position）上报 HoverBus；
-// 组内唯一的块 + 可选 indicator 复制几何并随动滑动。
+// 组内唯一的块 + 可选 indicator 复制几何并随动滑动。换行瞬间触发黏滞形变：
+// 块沿运动主轴拉伸（峰值 1 + min(dist/110, 0.6) * viscosity）、原点钉在运动
+// 前缘（前缘贴目标、尾端拖后），240ms 双段 easeOutQuint 回弹到 1——对齐
+// Vue triggerStretch；静止时倍率恒 1，圆角精确贴合。
 // 归属判定：上报的行几何必须落在组边界内（窗口坐标）——无需 id，多组天然共存。
 //
 // 关键机制事实（读 i-slint-core-1.17 input.rs / input_items.rs 确证）：
@@ -277,6 +280,54 @@ export global HoverBus {
     in-out property <int> active-group: 0;
     in-out property <int> next-group-id: 0;
 
+    // —— 黏滞形变飞行状态（HoverGroup.vue triggerStretch 对应物）———
+    // 全局单份：同一时刻只有活跃组在换行飞行；各组的块只在本组活跃时消费，
+    // 离开组即视为取消（对齐 hideBlock 的 cancel）。走 240ms 瞬态：先沿运动
+    // 主轴拉到峰值（30% 处）再回弹到 1——scale 只在飞行中非 1，静止时圆角
+    // 精确贴合。不挂 EqClock（几何依赖常跑时钟会致 30fps 常驻重绘），由
+    // 活跃组的 Timer 逐帧推进 fly-t。
+    /** 已飞行时长（Timer 逐帧推进）；0 且 !flying = 静止 */
+    in-out property <bool> flying: false;
+    in-out property <duration> fly-t: 0ms;
+    /** 本次飞行的沿轴峰值倍率与运动方向（主轴 + 前缘） */
+    in-out property <float> fly-peak: 1.0;
+    in-out property <bool> fly-horizontal: true;
+    /** 运动前缘：1 = 右/下缘锚定，-1 = 左/上缘，0 = 居中（无该轴分量） */
+    in-out property <int> fly-edge-x: 0;
+    in-out property <int> fly-edge-y: 0;
+    /** 当前瞬态沿轴倍率（静止恒 1；测试观察 + 语义输出口） */
+    out property <float> fly-parallel: !root.flying ? 1.0 : root.stretch-at(root.fly-t, root.fly-peak);
+
+    /** 飞行曲线：0→72ms 拉到峰值、72→240ms 回弹，双段 easeOutQuint
+        （解析式 1-(1-t)^5，对应 WAAPI 关键帧 cubic-bezier(0.22,1,0.36,1)） */
+    public pure function stretch-at(elapsed: duration, peak: float) -> float {
+        if (elapsed <= 0ms || elapsed >= 240ms || peak <= 1.0) {
+            return 1.0;
+        }
+        if (elapsed <= 72ms) {
+            return 1.0 + (peak - 1.0) * root.ease-out-quint(elapsed / 72ms);
+        }
+        return 1.0 + (peak - 1.0) * (1.0 - root.ease-out-quint((elapsed - 72ms) / 168ms));
+    }
+
+    pure function ease-out-quint(t: float) -> float {
+        return 1.0 - Math.pow(1.0 - t, 5.0);
+    }
+
+    /** 换行触发形变：from/to 为组本地坐标（只取增量）。峰值为
+        1 + min(dist/110, 0.6) * viscosity，原点钉在运动前缘——前缘贴住
+        目标、尾端被拖在后面。重入时先归位再拉起（对齐 WAAPI cancel）。 */
+    public function trigger-stretch(prev: Point, next: Point, viscosity: float) {
+        let fx = (next.x - prev.x) / 1px;
+        let fy = (next.y - prev.y) / 1px;
+        root.fly-horizontal = Math.abs(fx) >= Math.abs(fy);
+        root.fly-edge-x = fx > 0.0 ? 1 : (fx < 0.0 ? -1 : 0);
+        root.fly-edge-y = fy > 0.0 ? 1 : (fy < 0.0 ? -1 : 0);
+        root.fly-peak = 1.0 + Math.min(Math.sqrt(fx * fx + fy * fy) / 110.0, 0.6) * viscosity;
+        root.fly-t = 0ms;
+        root.flying = true;
+    }
+
     public function hover(group-id: int, pos: Point, w: length, h: length, suppress: bool) {
         item-pos = pos;
         item-width = w;
@@ -289,6 +340,9 @@ export global HoverBus {
 
     public function leave() {
         active = false;
+        // 对齐 Vue hideBlock：收起时取消进行中的形变
+        root.flying = false;
+        root.fly-t = 0ms;
     }
 }
 
@@ -304,7 +358,7 @@ export component HoverGroup inherits Rectangle {
     in property <bool> indicator-align-start: false;
     /** 行圆角复制（Vue 逐行复制 computed border-radius；本仓同组内行圆角一致） */
     in property <length> item-radius: 0px;
-    /** 黏滞形变强度占位（本轮未启用手写形变，保留语义接口） */
+    /** 黏滞形变强度：越大换行时沿运动轴拉伸越明显（HoverGroup.vue viscosity） */
     in property <float> viscosity: 1.0;
     out property <bool> hovering: has-report;
 
@@ -331,17 +385,36 @@ export component HoverGroup inherits Rectangle {
     property <length> geo-w;
     property <length> geo-h;
 
-    // 首次出现不滑动（块直接跳到位、只做淡入），离开过一次后 placed 语义生效
-    // （对齐 Vue 版 placed；避免块从 0,0 飞入）
+    // 首次出现不滑动（块直接跳到位、只做淡入），首次定位后即永久生效
+    // （对齐 Vue 版 placed：置位后不再复位，同一轮连续换行也滑动/形变）
     property <bool> placed: false;
+
+    // —— 黏滞形变消费（本组活跃时才跟随总线飞行，其余时刻恒 1）———
+    // 淡出中的块（!has-report）不消费飞行：别组紧接着触发的形变不会串到
+    // 本组正在消失的块上。
+    property <float> parallel-now: root.has-report ? HoverBus.fly-parallel : 1.0;
+    property <float> sx: HoverBus.fly-horizontal ? root.parallel-now : 1.0;
+    property <float> sy: HoverBus.fly-horizontal ? 1.0 : root.parallel-now;
+    property <float> ox: HoverBus.fly-edge-x > 0 ? 1.0 : HoverBus.fly-edge-x < 0 ? 0.0 : 0.5;
+    property <float> oy: HoverBus.fly-edge-y > 0 ? 1.0 : HoverBus.fly-edge-y < 0 ? 0.0 : 0.5;
 
     property <int> bus-seq <=> HoverBus.report-seq;
     changed bus-seq => {
         root.sync-geometry();
     }
-    changed has-report => {
-        if (!has-report) {
-            root.placed = true;
+
+    // 形变推进 Timer：只有活跃组且飞行中运行（同时刻至多一个组在飞）；
+    // 16ms ≈ 60fps，240ms 飞行共 15 帧，静止时零开销
+    Timer {
+        interval: 16ms;
+        running: root.has-report && HoverBus.flying;
+        triggered => {
+            if (HoverBus.fly-t + 16ms >= 240ms) {
+                HoverBus.flying = false;
+                HoverBus.fly-t = 0ms;
+            } else {
+                HoverBus.fly-t += 16ms;
+            }
         }
     }
 
@@ -349,19 +422,31 @@ export component HoverGroup inherits Rectangle {
         if (!root.has-report) {
             return;
         }
-        root.geo-x = HoverBus.item-pos.x - root.absolute-position.x;
-        root.geo-y = HoverBus.item-pos.y - root.absolute-position.y;
+        let nx = HoverBus.item-pos.x - root.absolute-position.x;
+        let ny = HoverBus.item-pos.y - root.absolute-position.y;
+        if (root.placed) {
+            // 换行触发黏滞形变（首次定位只跳位淡入，不形变）
+            HoverBus.trigger-stretch({x: root.geo-x, y: root.geo-y}, {x: nx, y: ny}, root.viscosity);
+        }
+        root.geo-x = nx;
+        root.geo-y = ny;
         root.geo-w = HoverBus.item-width;
         root.geo-h = HoverBus.item-height;
+        root.placed = true;
     }
 
-    // 块垫在内容之下（对齐 Vue：内容绘制在 hover-block 之上）
+    // 裁掉形变时尾端被拖出组界的部分，保持列表边缘整洁（对齐 Vue overflow: hidden）
+    clip: true;
+
+    // 块垫在内容之下（对齐 Vue：内容绘制在 hover-block 之上）。
+    // 外层是基准几何（滑动/尺寸动画不动），内层承担黏滞形变：静止时恰好
+    // 铺满外层（倍率恒 1，圆角精确贴合），飞行中沿运动主轴放大、原点钉在
+    // 运动前缘——前缘贴住目标行，尾端被拖在后面延迟回弹。
     block := Rectangle {
         x: root.geo-x;
         y: root.geo-y;
         width: root.geo-w;
         height: root.geo-h;
-        background: root.highlight-color;
         opacity: root.hovering ? root.highlight-opacity : 0;
         animate x {
             duration: 140ms;
@@ -385,6 +470,15 @@ export component HoverGroup inherits Rectangle {
         }
         animate opacity {
             duration: Theme.duration-normal;
+        }
+
+        Rectangle {
+            width: parent.width * root.sx;
+            height: parent.height * root.sy;
+            x: (parent.width - self.width) * root.ox;
+            y: (parent.height - self.height) * root.oy;
+            background: root.highlight-color;
+            border-radius: root.item-radius;
         }
     }
 
@@ -453,6 +547,10 @@ export component HoverItem inherits Rectangle {
         }
 
         VerticalLayout {
+            // 行内容块垂直居中（对应 Vue 行 flex align-items: center）：
+            // 内容块按首选高布局、默认顶放，定高子元素（队列抽屉 36px 封面）
+            // 不足行高时整块会贴住行顶——队列抽屉 49px 行即此症状
+            alignment: LayoutAlignment.center;
             @children
         }
     }
@@ -484,8 +582,11 @@ export component Scroll inherits Rectangle {
         }
     }
 
-    /** 观察滚动位置（changed 只能挂自身属性，走别名） */
-    property <length> scroll-offset <=> flick.viewport-y;
+    /** 观察滚动位置（changed 只能挂自身属性，走别名）；播放页歌词弹簧
+     * 需要程序化回写视口，对外可写（in-out） */
+    in-out property <length> scroll-offset <=> flick.viewport-y;
+    /** 内容全高（弹簧 clamp 的滚动上限 = self - view-height） */
+    out property <length> content-height: flick.viewport-height;
     property <bool> thumb-active: false;
     property <length> scrollable: max(flick.viewport-height - flick.height, 0px);
     property <length> thumb-h: scrollable <= 0px ? flick.height

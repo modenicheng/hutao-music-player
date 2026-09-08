@@ -80,6 +80,23 @@ fn hover_slider_chain_reports_and_clears() {
                 c2: color,
             },
         ])));
+        // 我喜欢列表同样播种：内容页滚动命中的行此前隐式依赖真库
+        // "最近播放预览"区块（预览已从我喜欢页移除），改由合成行承载。
+        let rows: Vec<hmp_desktop::TrackRow> = (0..6)
+            .map(|i| hmp_desktop::TrackRow {
+                mid: format!("liked-{i}").into(),
+                source: 0,
+                title: format!("喜欢曲目 {i}").into(),
+                artists: "测试歌手".into(),
+                artist_mid: "".into(),
+                album: "".into(),
+                album_mid: "".into(),
+                duration_ms: 200_000,
+                quality: "".into(),
+                cover: slint::Image::default(),
+            })
+            .collect();
+        data.set_liked(slint::ModelRc::new(slint::VecModel::from(rows)));
     }
 
     let nav_route = Arc::new(Mutex::new(hmp_desktop::Route::Library));

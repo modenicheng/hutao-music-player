@@ -5,7 +5,7 @@
 //! 命令 no-op。全部 UI 写发生在 UI 线程（回调与订阅投递闭包内）。
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,7 +16,7 @@ use hmp_core::ipc::{DaemonState, Request, Response};
 use hmp_core::{AudioQuality, PlaybackState, PlaybackStatus, PlayerCommand, TrackId};
 
 use crate::backend::{BackendRuntime, QueueRowMeta, UiStateEvent};
-use crate::{AppWindow, Player, TrackRow};
+use crate::{AppWindow, CommentRow, LyricRow, NowPlaying, Player, TrackRow};
 
 /// seek 落点确认容忍：daemon 推送位置与目标差 ≤ 此值视为已生效
 /// （播放中位置持续前进，容忍取推送周期量级）。
@@ -279,12 +279,22 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
                 .min(count - 1);
             let mut ids = Vec::with_capacity(count);
             let mut sent_meta = HashMap::new();
+            // 空 mid 行剔除（如历史页库外残行的投影兜底）——空 id 会让 daemon
+            // 解析器整体失败；起播下标按剔除量重映射，保持指向同一曲目。
+            let mut play_start = start;
             for index in 0..count {
                 let Some(row) = tracks.row_data(index) else {
                     continue;
                 };
+                let mid = row.mid.to_string();
+                if mid.is_empty() {
+                    if index < start {
+                        play_start = play_start.saturating_sub(1);
+                    }
+                    continue;
+                }
                 sent_meta.insert(
-                    row.mid.to_string(),
+                    mid.clone(),
                     SentMeta {
                         title: row.title.to_string(),
                         artists: row.artists.to_string(),
@@ -292,11 +302,12 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
                         duration_ms: row.duration_ms,
                     },
                 );
-                ids.push(TrackId::new(row.mid.to_string()));
+                ids.push(TrackId::new(mid));
             }
             if ids.is_empty() {
                 return;
             }
+            let start = play_start.min(ids.len() - 1);
             SENT_META.with(|cell| *cell.borrow_mut() = sent_meta);
             dispatch_command(&runtime, &ui_weak, Request::PlayList { ids, start });
         });
@@ -314,7 +325,35 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
         });
     }
 
-    bind_ui_toggles(ui);
+    {
+        // 歌词行点击：精确时间 seek（Seek 序列化为秒粒度，毫秒取整）。
+        let runtime = Arc::clone(&runtime);
+        let ui_weak = ui_weak.clone();
+        player.on_seek_ms(move |ms| {
+            if ms < 0 {
+                return;
+            }
+            dispatch_command(
+                &runtime,
+                &ui_weak,
+                Request::Command(PlayerCommand::Seek(std::time::Duration::from_millis(
+                    ms as u64,
+                ))),
+            );
+        });
+    }
+
+    {
+        // 评论排序切换 / 首次打开：重拉（是否真的重拉由 maybe_load_comments
+        // 的 key 去重决定，UI 回调只是触发信号）。
+        let runtime = Arc::clone(&runtime);
+        let ui_weak = ui_weak.clone();
+        NowPlaying::get(ui).on_request_comments(move || {
+            maybe_load_comments(&runtime, &ui_weak);
+        });
+    }
+
+    bind_ui_toggles(ui, &runtime);
 
     // —— 订阅：DaemonState 推送 → Player global（UI 线程应用）———
     let ui_weak: Weak<AppWindow> = ui.as_weak();
@@ -335,7 +374,7 @@ fn send_volume_ipc(runtime: &Arc<BackendRuntime>, volume: f64) {
 }
 
 /// 队列抽屉 / 播放页 overlay 的纯 UI 回写（不产生 IPC；与模拟桥行为一致）。
-fn bind_ui_toggles(ui: &AppWindow) {
+fn bind_ui_toggles(ui: &AppWindow, runtime: &Arc<BackendRuntime>) {
     let player = Player::get(ui);
     let ui_weak: Weak<AppWindow> = ui.as_weak();
     player.on_toggle_queue(move || {
@@ -351,9 +390,12 @@ fn bind_ui_toggles(ui: &AppWindow) {
         }
     });
     let ui_weak: Weak<AppWindow> = ui.as_weak();
+    let runtime_for_overlay = Arc::clone(runtime);
     player.on_show_overlay(move || {
         if let Some(ui) = ui_weak.upgrade() {
             Player::get(&ui).set_overlay_visible(true);
+            // 打开即装载评论（key 去重；歌词走换曲路径，不在此重拉）
+            maybe_load_comments(&runtime_for_overlay, &ui_weak);
         }
     });
     let ui_weak: Weak<AppWindow> = ui.as_weak();
@@ -403,7 +445,7 @@ fn apply_event(
     }
 
     let Some(state) = event.state else {
-        apply_offline(&player);
+        apply_offline(&player, ui_weak);
         // 订阅只在在线↔离线翻转时投递一次空态：提示一次，不随重试刷屏。
         show_feedback(ui_weak, "播放服务未连接，播放操作暂不可用".into());
         return;
@@ -413,20 +455,27 @@ fn apply_event(
 }
 
 /// 离线（无 daemon / daemon 已退出）：播放态全空（音量保留本地值不重置）。
-fn apply_offline(player: &Player) {
+fn apply_offline(player: &Player, ui_weak: &Weak<AppWindow>) {
     player.set_playing(false);
     player.set_loading(false);
     player.set_can_previous(false);
     player.set_can_next(false);
     player.set_queue_current_mid("".into());
     LAST_SHOWN_ERROR.with(|cell| *cell.borrow_mut() = None);
-    clear_now_playing(player);
+    clear_now_playing(player, ui_weak);
 }
 
 // daemon `last_error` 已展示消息（去重：状态推送 ~10Hz 携带同一错误，
 // 只在消息变化时弹一次；成功装载清空 last_error 时同步复位）。
+// 其余为播放页（M6）数据管线状态：全部仅在 UI 线程触碰。
 thread_local! {
     static LAST_SHOWN_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// 歌词时间戳（毫秒升序，与 NowPlaying.lyrics 同源）；active-line 折算用
+    static LYRIC_STAMPS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// 上一次状态推送的当前曲 mid（换曲检测：重置喜欢态/重拉歌词与评论）
+    static PREV_MID: RefCell<String> = const { RefCell::new(String::new()) };
+    /// 已装载评论的 (mid, sort)：未变不重拉（overlay 打开期间按推送驱动）
+    static COMMENT_KEY: RefCell<Option<(String, i32)>> = const { RefCell::new(None) };
 }
 
 /// DaemonState → Player global 单向映射（daemon 是唯一状态出口）。
@@ -474,12 +523,42 @@ fn apply_daemon_state(
 
     let Some(track) = &playback.current else {
         echo.lock().expect("echo").pending_seek = None;
-        clear_now_playing(player);
+        clear_now_playing(player, ui_weak);
         return;
     };
     player.set_has_track(true);
     player.set_current_mid(track.id.0.as_str().into());
     player.set_duration_ms(playback.duration.as_ref().map(duration_ms_i32).unwrap_or(0));
+
+    // 换曲检测：重置播放页 mock 态（喜欢回落）并重拉歌词/评论。
+    let mid = track.id.0.clone();
+    let mid_changed = PREV_MID.with(|cell| {
+        let mut prev = cell.borrow_mut();
+        let changed = prev.as_str() != mid;
+        if changed {
+            *prev = mid.clone();
+        }
+        changed
+    });
+    if mid_changed {
+        if let Some(ui) = ui_weak.upgrade() {
+            let np = NowPlaying::get(&ui);
+            np.set_liked(false);
+            np.set_active_line(-1);
+            LYRIC_STAMPS.with(|cell| cell.borrow_mut().clear());
+            if mid.starts_with("local:") {
+                // 本地曲无歌词管线：立即空态（不发起 LyricGet）
+                np.set_lyrics(ModelRc::new(VecModel::from(Vec::<LyricRow>::new())));
+                np.set_lyrics_loading(false);
+                np.set_lyrics_generation(np.get_lyrics_generation() + 1);
+            } else {
+                np.set_lyrics_loading(true);
+                spawn_lyric_fetch(ui_weak, runtime, mid.clone());
+            }
+            COMMENT_KEY.with(|cell| *cell.borrow_mut() = None);
+            maybe_load_comments(runtime, ui_weak);
+        }
+    }
 
     // 进度展示：拖拽中（seeking）或落点未确认（松手 seek 后旧位置推送在途）
     // 时冻结展示值。拖拽开始即清落点（松手时会重新钉）；确认到点 / 超时 /
@@ -506,9 +585,11 @@ fn apply_daemon_state(
     if !progress_pinned {
         player.set_position_ms(duration_ms_i32(&playback.position));
         player.set_progress(progress_of(playback));
+        update_active_line(ui_weak, duration_ms_i32(&playback.position));
     }
     player.set_title(track.title.as_str().into());
     player.set_artists(track.artist_names().into());
+    player.set_album(track.album.as_ref().map(|a| a.name.as_str()).unwrap_or_default().into());
     player.set_cover(cover_for_track(&track.id.0, track.cover.as_ref()));
     // QQ 远程封面：UI 禁直连 HTTP → 经 daemon CoverGet 换本地产物
     // （先程序化占位，回包后按 mid 复核防串台；每 mid 每进程只请求一次，
@@ -521,6 +602,174 @@ fn apply_daemon_state(
     let quality = playback.actual_quality.as_ref();
     player.set_track_quality(quality.map(quality_label).unwrap_or_default().into());
     player.set_track_max_tier(quality.map(quality_tier).unwrap_or(0));
+}
+
+/// 播放页歌词装载（QQ 曲目）：LyricGet → LRC 解析 → 模型落地。
+/// 每 mid 每进程只请求一次（失败不重试，换曲再回来时自然重试）；
+/// 回包时当前曲已换 → 丢弃（串台守卫，同封面取回路径）。
+fn spawn_lyric_fetch(
+    ui_weak: &Weak<AppWindow>,
+    runtime: &Arc<BackendRuntime>,
+    mid: String,
+) {
+    thread_local! {
+        static REQUESTED: RefCell<std::collections::HashSet<String>> = RefCell::new(HashSet::new());
+    }
+    if !REQUESTED.with(|set| set.borrow_mut().insert(mid.clone())) {
+        return;
+    }
+    let ui_weak = ui_weak.clone();
+    let runtime = Arc::clone(runtime);
+    runtime.spawn(async move {
+        let lines = match crate::backend::request(Request::LyricGet { mid: mid.clone() }).await {
+            Ok(Response::Lyric(page)) => {
+                crate::lyrics::parse_lrc(&page.lyric, &page.translation)
+            }
+            _ => Vec::new(),
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            if Player::get(&ui).get_current_mid() != mid.as_str() {
+                return;
+            }
+            let np = NowPlaying::get(&ui);
+            LYRIC_STAMPS.with(|cell| {
+                *cell.borrow_mut() = lines.iter().map(|line| line.timestamp_ms).collect()
+            });
+            let rows: Vec<LyricRow> = lines
+                .into_iter()
+                .map(|line| LyricRow {
+                    timestamp_ms: line.timestamp_ms as i32,
+                    text: line.text.into(),
+                    translation: line.translation.into(),
+                })
+                .collect();
+            np.set_lyrics(ModelRc::new(VecModel::from(rows)));
+            np.set_lyrics_loading(false);
+            np.set_lyrics_generation(np.get_lyrics_generation() + 1);
+        });
+    });
+}
+
+/// 播放位置 → 歌词焦点行下标（末条 ≤ 位置的最后一行；前奏为 -1）。
+/// 推送 ~10Hz 驱动，行级高亮足够；拖拽进度条期间（pinned）不折算。
+fn update_active_line(ui_weak: &Weak<AppWindow>, position_ms: i32) {
+    let Some(ui) = ui_weak.upgrade() else {
+        return;
+    };
+    let stamps = LYRIC_STAMPS.with(|cell| cell.borrow().clone());
+    let position = position_ms.max(0) as u64;
+    let mut line: i32 = -1;
+    for (index, stamp) in stamps.iter().enumerate() {
+        if *stamp <= position {
+            line = index as i32;
+        } else {
+            break;
+        }
+    }
+    let np = NowPlaying::get(&ui);
+    if np.get_active_line() != line {
+        np.set_active_line(line);
+    }
+}
+
+/// 评论装载驱动：overlay 打开 + 有当前曲 + (mid, sort) 未变 → 拉取。
+/// 状态推送 ~10Hz 携带调用（key 去重后是幂等空转）；排序切换改 key 后生效。
+fn maybe_load_comments(runtime: &Arc<BackendRuntime>, ui_weak: &Weak<AppWindow>) {
+    let Some(ui) = ui_weak.upgrade() else {
+        return;
+    };
+    let player = Player::get(&ui);
+    if !player.get_overlay_visible() {
+        return;
+    }
+    let mid = player.get_current_mid().to_string();
+    if mid.is_empty() {
+        return;
+    }
+    let np = NowPlaying::get(&ui);
+    let sort = np.get_comment_sort();
+    let key = (mid.clone(), sort);
+    if COMMENT_KEY.with(|cell| cell.borrow().as_ref() == Some(&key)) {
+        return;
+    }
+    COMMENT_KEY.with(|cell| *cell.borrow_mut() = Some(key));
+    if mid.starts_with("local:") {
+        // 本地曲目无评论域：直接就绪空态（诚实：不显示加载中）
+        np.set_comments(ModelRc::new(VecModel::from(Vec::<CommentRow>::new())));
+        np.set_comment_total("".into());
+        np.set_comment_state(2);
+        return;
+    }
+    np.set_comment_state(1);
+    spawn_comment_fetch(ui_weak, runtime, mid, sort);
+}
+
+/// 评论拉取（CommentList）：回包按 (mid, sort) 守卫，只应用仍有效的结果。
+fn spawn_comment_fetch(
+    ui_weak: &Weak<AppWindow>,
+    runtime: &Arc<BackendRuntime>,
+    mid: String,
+    sort: i32,
+) {
+    let ui_weak = ui_weak.clone();
+    let runtime = Arc::clone(runtime);
+    runtime.spawn(async move {
+        let sort_name = if sort == 1 { "new" } else { "hot" };
+        let result = crate::backend::request(Request::CommentList {
+            mid: mid.clone(),
+            sort: sort_name.into(),
+        })
+        .await;
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let np = NowPlaying::get(&ui);
+            if Player::get(&ui).get_current_mid() != mid.as_str()
+                || np.get_comment_sort() != sort
+            {
+                return;
+            }
+            match result {
+                Ok(Response::CommentList(page)) => {
+                    let rows: Vec<CommentRow> = page
+                        .comments
+                        .into_iter()
+                        .map(|c| CommentRow {
+                            cm_id: c.cm_id.into(),
+                            initial: c
+                                .nickname
+                                .chars()
+                                .next()
+                                .map(String::from)
+                                .unwrap_or_default()
+                                .into(),
+                            nickname: c.nickname.into(),
+                            content: c.content.into(),
+                            time_text: crate::library_view::format_stamp(c.time).into(),
+                            like_text: like_count_text(c.like_count).into(),
+                        })
+                        .collect();
+                    np.set_comment_total(like_count_text(page.total).into());
+                    np.set_comments(ModelRc::new(VecModel::from(rows)));
+                    np.set_comment_state(2);
+                }
+                _ => np.set_comment_state(3),
+            }
+        });
+    });
+}
+
+/// 计数文案：≥1万 → "x.x万"（与原型 formatCount 同口径）。
+fn like_count_text(count: i64) -> String {
+    if count >= 10_000 {
+        format!("{:.1}万", count as f64 / 10_000.0)
+    } else {
+        count.to_string()
+    }
 }
 
 /// 异步取 QQ 封面本地产物（CoverGet）；完成时当前曲仍是发起曲才应用。
@@ -566,7 +815,7 @@ fn spawn_cover_fetch(
 }
 
 /// 无当前曲（含 daemon 推送空态）：曲目区归零。
-fn clear_now_playing(player: &Player) {
+fn clear_now_playing(player: &Player, ui_weak: &Weak<AppWindow>) {
     player.set_has_track(false);
     player.set_current_mid("".into());
     player.set_position_ms(0);
@@ -574,10 +823,26 @@ fn clear_now_playing(player: &Player) {
     player.set_progress(0.0);
     player.set_title("".into());
     player.set_artists("".into());
+    player.set_album("".into());
     player.set_cover(slint::Image::default());
     player.set_track_quality("".into());
     player.set_track_max_tier(0);
     player.set_loading(false);
+    // 播放页数据随曲清空（无曲时 overlay 呈空态，不留上一曲残页）
+    PREV_MID.with(|cell| cell.borrow_mut().clear());
+    LYRIC_STAMPS.with(|cell| cell.borrow_mut().clear());
+    COMMENT_KEY.with(|cell| *cell.borrow_mut() = None);
+    if let Some(ui) = ui_weak.upgrade() {
+        let np = NowPlaying::get(&ui);
+        np.set_liked(false);
+        np.set_active_line(-1);
+        np.set_lyrics(ModelRc::new(VecModel::from(Vec::<LyricRow>::new())));
+        np.set_lyrics_loading(false);
+        np.set_lyrics_generation(np.get_lyrics_generation() + 1);
+        np.set_comments(ModelRc::new(VecModel::from(Vec::<CommentRow>::new())));
+        np.set_comment_state(0);
+        np.set_comment_total("".into());
+    }
 }
 
 /// 当前曲 mid：队列摘要 `current`（规范下标）指向最近一次投影列表
