@@ -23,19 +23,27 @@ export component SearchPage inherits Rectangle {
             show-back: false;
         }
 
-        // —— 搜索框（回车或按钮触发；不做即时搜索）———
+        // —— 搜索框（回车或按钮触发；不做即时搜索）
+        // （Vue .search-box：radius-full 胶囊 + --input 底 + 聚焦描边 --ring）———
         Rectangle {
-            height: 44px;
-            border-radius: Theme.radius-md;
+            height: 50px;
+            border-radius: Theme.pill(self.height);
             border-width: 1px;
-            border-color: input.has-focus ? Theme.primary : Theme.border;
-            background: Theme.surface-2;
+            border-color: input.has-focus ? Theme.ring : transparent;
+            background: Theme.input-bg;
+            animate border-color {
+                duration: Theme.duration-fast;
+                easing: cubic-bezier(0.2, 0, 0, 1);
+            }
 
             HorizontalLayout {
                 padding-left: Theme.space-4;
                 padding-right: 6px;
                 spacing: Theme.space-3;
-                alignment: LayoutAlignment.center;
+                // 默认 stretch：图标/按钮定宽、TextInput(stretch 1) 撑满 → 按钮贴右
+                //（显式设 alignment 会连 stretch 一起关掉，整组塌成首选宽）
+                // 显式定高的图标/按钮默认顶对齐，必须显式居中
+                cross-axis-alignment: center;
 
                 AppIcon {
                     source: Icons.search;
@@ -68,6 +76,18 @@ export component SearchPage inherits Rectangle {
                         Data.search(input.text);
                     }
                 }
+            }
+
+            // 占位文案（基座 TextInput 无 placeholder 属性；Vue input placeholder）
+            if input.text == "": Text {
+                x: Theme.space-4 + 19px + Theme.space-3;
+                width: parent.width - self.x - 96px;
+                height: parent.height;
+                text: "搜索歌曲、专辑、歌手";
+                color: Theme.muted-foreground;
+                font-size: 14.5px;
+                vertical-alignment: center;
+                overflow: elide;
             }
         }
 

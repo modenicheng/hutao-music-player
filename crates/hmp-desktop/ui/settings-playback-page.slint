@@ -45,6 +45,11 @@ export component SettingsPlaybackPage inherits Rectangle {
                         ? Theme.muted : transparent;
                     animate background {
                         duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
+                    }
+                    animate border-color {
+                        duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
                     }
 
                     HorizontalLayout {
@@ -71,21 +76,31 @@ export component SettingsPlaybackPage inherits Rectangle {
                             }
                         }
 
-                        // 单选圆点：选中实心（内嵌 surface 环，同 Vue quality-dot）
+                        // 单选圆点（Vue quality-dot）：选中 = primary 描边 +
+                        // surface 内环 + primary 实心芯（inset box-shadow 的对应物；
+                        // 之前的"surface 芯"画法把里外画反了）
                         Rectangle {
                             width: 16px;
                             height: 16px;
-                            border-radius: Theme.radius-full;
+                            border-radius: Theme.pill(self.height);
                             border-width: 1.5px;
-                            border-color: Theme.border-strong;
-                            background: Quality.selected == tier ? Theme.primary : transparent;
+                            border-color: Quality.selected == tier ? Theme.primary : Theme.border-strong;
+                            background: Quality.selected == tier ? Theme.surface-3 : transparent;
+                            animate border-color {
+                                duration: Theme.duration-fast;
+                                easing: cubic-bezier(0.2, 0, 0, 1);
+                            }
+                            animate background {
+                                duration: Theme.duration-fast;
+                                easing: cubic-bezier(0.2, 0, 0, 1);
+                            }
 
                             Rectangle {
                                 visible: Quality.selected == tier;
-                                width: 6px;
-                                height: 6px;
-                                border-radius: Theme.radius-full;
-                                background: Theme.surface-3;
+                                width: 8px;
+                                height: 8px;
+                                border-radius: Theme.pill(self.height);
+                                background: Theme.primary;
                                 x: (parent.width - self.width) / 2;
                                 y: (parent.height - self.height) / 2;
                             }

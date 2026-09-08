@@ -268,13 +268,23 @@ export global HoverBus {
     in-out property <bool> suppress-indicator: false;
     /** 指针仍在某个上报行上（行退出且无新行接管时置 false，收起所有滑块） */
     in-out property <bool> active: false;
+    /** 上报序号：hover() 每次 +1，组级 changed 监听用（值不变则 changed 不触发） */
+    in-out property <int> report-seq: 0;
+    /** 当前命中行所属的组 id（HoverGroup init 时从 next-group-id 领取）。
+        归属按组 id 判定而不用几何包含：行与组的 absolute-position 可能来自
+        不同布局代际（实测偏差数 px），几何判定会随机失败且会把淡出中的块
+        拖去别组的行（混用滑块）。 */
+    in-out property <int> active-group: 0;
+    in-out property <int> next-group-id: 0;
 
-    public function hover(pos: Point, w: length, h: length, suppress: bool) {
+    public function hover(group-id: int, pos: Point, w: length, h: length, suppress: bool) {
         item-pos = pos;
         item-width = w;
         item-height = h;
         suppress-indicator = suppress;
+        active-group = group-id;
         active = true;
+        report-seq += 1;
     }
 
     public function leave() {
@@ -292,36 +302,65 @@ export component HoverGroup inherits Rectangle {
     in property <length> indicator-icon-size: 16px;
     /** indicator 水平对齐：false=居中（默认），true=居左（曲目表贴序号位） */
     in property <bool> indicator-align-start: false;
+    /** 行圆角复制（Vue 逐行复制 computed border-radius；本仓同组内行圆角一致） */
+    in property <length> item-radius: 0px;
+    /** 黏滞形变强度占位（本轮未启用手写形变，保留语义接口） */
+    in property <float> viscosity: 1.0;
     out property <bool> hovering: has-report;
 
     public pure function has-indicator() -> bool {
         return indicator-icon.width > 0;
     }
 
-    property <bool> has-report:
-        HoverBus.active
-        && HoverBus.item-width > 0px
-        && HoverBus.item-pos.x >= root.absolute-position.x
-        && HoverBus.item-pos.y >= root.absolute-position.y
-        && HoverBus.item-pos.x + HoverBus.item-width <= root.absolute-position.x + root.width
-        && HoverBus.item-pos.y + HoverBus.item-height <= root.absolute-position.y + root.height;
+    // 本组实例的唯一 id（init 时从总线领取）；归属判定 = 总线 active-group 是否是它。
+    // 不用几何包含判定：行与组的 absolute-position 可能来自不同布局代际
+    // （实测偏差数 px），几何判定会随机失败且会把淡出中的块拖去别组的行
+    // （混用滑块）。组 id 归属与布局无关。
+    in-out property <int> group-id: 0;
+    init => {
+        HoverBus.next-group-id += 1;
+        root.group-id = HoverBus.next-group-id;
+    }
+
+    property <bool> has-report: HoverBus.active && HoverBus.active-group == root.group-id;
+
+    // —— 组本地几何（只被 sync-geometry 写入）———
+    // 别组上报时本地几何冻结：淡出中的块停在原位，不跟随别组目标（禁混用滑块）
+    property <length> geo-x;
+    property <length> geo-y;
+    property <length> geo-w;
+    property <length> geo-h;
 
     // 首次出现不滑动（块直接跳到位、只做淡入），离开过一次后 placed 语义生效
     // （对齐 Vue 版 placed；避免块从 0,0 飞入）
     property <bool> placed: false;
 
+    property <int> bus-seq <=> HoverBus.report-seq;
+    changed bus-seq => {
+        root.sync-geometry();
+    }
     changed has-report => {
         if (!has-report) {
             root.placed = true;
         }
     }
 
+    function sync-geometry() {
+        if (!root.has-report) {
+            return;
+        }
+        root.geo-x = HoverBus.item-pos.x - root.absolute-position.x;
+        root.geo-y = HoverBus.item-pos.y - root.absolute-position.y;
+        root.geo-w = HoverBus.item-width;
+        root.geo-h = HoverBus.item-height;
+    }
+
     // 块垫在内容之下（对齐 Vue：内容绘制在 hover-block 之上）
     block := Rectangle {
-        x: HoverBus.item-pos.x - root.absolute-position.x;
-        y: HoverBus.item-pos.y - root.absolute-position.y;
-        width: HoverBus.item-width;
-        height: HoverBus.item-height;
+        x: root.geo-x;
+        y: root.geo-y;
+        width: root.geo-w;
+        height: root.geo-h;
         background: root.highlight-color;
         opacity: root.hovering ? root.highlight-opacity : 0;
         animate x {
@@ -378,6 +417,8 @@ export component HoverGroup inherits Rectangle {
     提供（命中按钮时按钮优先，不会触发行点击）。 */
 export component HoverItem inherits Rectangle {
     in property <bool> suppress-indicator: false;
+    /** 所属 HoverGroup 的 id（使用方以 hg.group-id 传入） */
+    in property <int> group-id: -1;
     callback clicked;
     out property <bool> hovered: item-touch.has-hover;
     background: transparent;
@@ -399,7 +440,7 @@ export component HoverItem inherits Rectangle {
 
         changed has-hover => {
             if (self.has-hover) {
-                HoverBus.hover(root.absolute-position, root.width, root.height, root.suppress-indicator);
+                HoverBus.hover(root.group-id, root.absolute-position, root.width, root.height, root.suppress-indicator);
                 root.reported-pos = root.absolute-position;
                 root.reported-w = root.width;
                 root.reported-h = root.height;

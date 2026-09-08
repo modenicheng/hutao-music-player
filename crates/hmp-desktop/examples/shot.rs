@@ -40,7 +40,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let mut playing = false;
     let mut queue = false;
     let mut hover: Option<(f32, f32)> = None;
-    let mut bus_hover: Option<(f32, f32, f32, f32, bool)> = None;
+    let mut bus_hover: Option<(i32, f32, f32, f32, f32, bool)> = None;
     let mut theme: Option<i32> = None;
 
     let mut args = std::env::args().skip(1);
@@ -55,6 +55,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 hover = Some((x.parse().unwrap(), y.parse().unwrap()));
             }
             "--bus-hover" => {
+                // GROUP,X,Y,W,H[,suppress]
                 let v = args.next().unwrap_or_default();
                 let parts: Vec<&str> = v.split(',').collect();
                 bus_hover = Some((
@@ -62,7 +63,8 @@ fn main() -> Result<(), slint::PlatformError> {
                     parts[1].parse().unwrap(),
                     parts[2].parse().unwrap(),
                     parts[3].parse().unwrap(),
-                    parts.get(4).map(|s| *s == "1").unwrap_or(false),
+                    parts[4].parse().unwrap(),
+                    parts.get(5).map(|s| *s == "1").unwrap_or(false),
                 ));
             }
             "--theme" => match args.next().unwrap_or_default().as_str() {
@@ -124,9 +126,9 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
     }
-    if let Some((x, y, w, h, suppress)) = bus_hover {
+    if let Some((group, x, y, w, h, suppress)) = bus_hover {
         let bus = hmp_desktop::HoverBus::get(&ui);
-        bus.invoke_hover(slint::LogicalPosition::new(x, y), w, h, suppress);
+        bus.invoke_hover(group, slint::LogicalPosition::new(x, y), w, h, suppress);
     }
 
     ui.run()

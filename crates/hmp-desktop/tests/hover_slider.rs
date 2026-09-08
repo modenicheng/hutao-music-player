@@ -93,9 +93,16 @@ fn hover_slider_chain_reports_and_clears() {
     let bus = hmp_desktop::HoverBus::get(&ui);
     assert!(!bus.get_active(), "初始应无人上报");
 
+    // 步进推进 mock 时间让初始布局/动画（侧栏展开等）收敛，再合成指针事件——
+    // 否则命中测试落在动画中途的布局代际上，行几何与视觉不一致
+    for _ in 0..40 {
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    }
+
     // 悬停主导航第一行（首页，y=60..100；Button 覆盖整行）：
     // 祖先 TouchArea 必须仍感知并按行几何上报
     move_to(&ui, 120.0, 80.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
     assert!(bus.get_active(), "满行 Button 之下行级 hover 应激活总线");
     assert!(
         (bus.get_item_pos().y - 60.0).abs() < 0.5,

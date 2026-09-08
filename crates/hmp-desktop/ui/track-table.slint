@@ -80,7 +80,7 @@ export component TrackTable inherits Rectangle {
             }
         }
 
-        HoverGroup {
+        hg := HoverGroup {
             highlight-color: Theme.neutral-200;
             highlight-opacity: 0.6;
             indicator-icon: Icons.play_arrow;
@@ -93,6 +93,7 @@ export component TrackTable inherits Rectangle {
                 spacing: 2px;
 
                 for row[index] in tracks: hover-item := HoverItem {
+                    group-id: hg.group-id;
                     height: root.row-height;
                     suppress-indicator: Player.queue-current-mid == row.mid;
                     clicked => {
@@ -125,6 +126,7 @@ export component TrackTable inherits Rectangle {
                                 opacity: hover-item.hovered ? 0 : 1;
                                 animate opacity {
                                     duration: Theme.duration-fast;
+                                    easing: cubic-bezier(0.2, 0, 0, 1);
                                 }
                             }
                         }
@@ -172,6 +174,10 @@ export component TrackTable inherits Rectangle {
                         // 无参数 → 退化纯文本，不渲染死链接）
                         if root.show-album && row.album-mid != "": TextLink {
                             width: root.album-w;
+                            // 撑满行高：TextLink 组件内固定高 20px 会被行布局
+                            // 顶对齐（交叉轴默认顶对齐），专辑文字随之上浮。
+                            // 不能写 parent.height（布局子元素引用父高成环）
+                            height: root.row-height;
                             text: row.album;
                             font-size: 13.4px;
                             clicked => {

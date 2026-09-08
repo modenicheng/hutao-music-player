@@ -58,6 +58,8 @@ export global Theme {
     out property <color> border: dark ? #4B4A46 : #D2CECD;
     out property <color> border-strong: dark ? #676460 : #B6AEAC;
     out property <color> ring: walnut-400;
+    // --input（输入框底色，SearchView 大搜索框等）
+    out property <color> input-bg: dark ? #3A3835 : #E4E1E0;
     out property <color> muted: dark ? #262523 : #E4E1E0;
     out property <color> muted-foreground: neutral-500;
     out property <color> track: dark ? #4B4A46 : #D2CECD;
@@ -98,6 +100,14 @@ export global Theme {
     out property <length> radius-md: 8px;
     out property <length> radius-lg: 12px;
     out property <length> radius-full: 999px;
+
+    /** CSS --radius-full 的正确对应物（胶囊/圆）。Slint 的圆角横纵两轴**各自**
+        独立钳制（femtovg rounded_rect_varying：rx=min(r,w/2)、ry=min(r,h/2)），
+        与 CSS 四角等比缩到恰好相接不同——r 直接给 999px 时非正方形会画成椭圆。
+        统一经 pill(短边) 取值：min(999px, 短边/2) = CSS 的半圆端盖。 */
+    public pure function pill(size: length) -> length {
+        return Math.min(radius-full, size / 2);
+    }
 
     // ——— 尺寸 ———
     out property <length> control-height-sm: 32px;

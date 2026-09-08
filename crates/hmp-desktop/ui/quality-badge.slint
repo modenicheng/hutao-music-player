@@ -9,10 +9,11 @@ import { Player, Quality } from "stores.slint";
 export component QualityBadge inherits Rectangle {
     width: badge-text.preferred-width + 16px;
     height: 22px;
-    border-radius: Theme.radius-full;
+    border-radius: Theme.pill(self.height);
     background: touch.has-hover ? Theme.muted : Theme.track-accent-soft;
     animate background {
         duration: Theme.duration-fast;
+        easing: cubic-bezier(0.2, 0, 0, 1);
     }
 
     touch := TouchArea {
@@ -33,6 +34,7 @@ export component QualityBadge inherits Rectangle {
         height: parent.height;
         animate color {
             duration: Theme.duration-fast;
+            easing: cubic-bezier(0.2, 0, 0, 1);
         }
     }
 
@@ -67,6 +69,7 @@ export component QualityBadge inherits Rectangle {
                     background: option-touch.has-hover && tier <= Player.track-max-tier ? Theme.track-accent-soft : transparent;
                     animate background {
                         duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
                     }
 
                     option-touch := TouchArea {

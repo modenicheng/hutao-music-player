@@ -73,7 +73,7 @@ export component MusicLibraryPage inherits Rectangle {
                 }
             }
 
-            HoverGroup {
+            hg := HoverGroup {
                 highlight-color: Theme.neutral-200;
                 highlight-opacity: 0.6;
 
@@ -81,6 +81,7 @@ export component MusicLibraryPage inherits Rectangle {
                     spacing: 2px;
 
                     for folder[index] in Data.folders: folder-item := HoverItem {
+                        group-id: hg.group-id;
                         height: 40px;
                         clicked => {
                             Data.filter-folder(index);

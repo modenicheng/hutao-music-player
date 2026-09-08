@@ -26,10 +26,13 @@ export component PageHeader inherits Rectangle {
 
         if show-back: Rectangle {
             width: 36px;
-            border-radius: Theme.radius-full;
+            // Vue .page-back 2.25rem 定方：布局默认纵向拉伸会把 radius-full 撑成竖椭圆
+            height: 36px;
+            border-radius: Theme.pill(self.height);
             background: back-touch.has-hover ? Theme.muted : transparent;
             animate background {
                 duration: Theme.duration-fast;
+                easing: cubic-bezier(0.2, 0, 0, 1);
             }
 
             back-touch := TouchArea {
@@ -151,6 +154,7 @@ export component SectionHeader inherits Rectangle {
                     vertical-alignment: center;
                     animate color {
                         duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
                     }
                 }
                 // expand-more 旋转 -90° 指向右（同 Vue .more-arrow）
@@ -162,6 +166,7 @@ export component SectionHeader inherits Rectangle {
                     rotation-angle: -90deg;
                     animate icon-color {
                         duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
                     }
                 }
             }
@@ -208,12 +213,19 @@ export component CoverCard inherits Rectangle {
                 drop-shadow-offset-y: card-touch.has-hover ? 6px : 1px;
                 animate y {
                     duration: Theme.duration-normal;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
                 }
                 animate drop-shadow-blur {
                     duration: Theme.duration-normal;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
                 }
                 animate drop-shadow-color {
                     duration: Theme.duration-normal;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
+                }
+                animate drop-shadow-offset-y {
+                    duration: Theme.duration-normal;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
                 }
 
                 Image {
@@ -225,18 +237,25 @@ export component CoverCard inherits Rectangle {
                     image-fit: ImageFit.cover;
                 }
 
-                // 播放浮层按钮：hover 卡片时浮现（2.5rem，右下 0.6rem）
+                // 播放浮层按钮：hover 卡片时浮现（2.5rem，右下 0.6rem；
+                // Vue 还有 translateY(0.35rem)→0 的上滑）
                 Rectangle {
                     width: 40px;
                     height: 40px;
-                    border-radius: Theme.radius-full;
+                    border-radius: Theme.pill(self.height);
                     background: Theme.primary;
                     opacity: card-touch.has-hover && play-touch.has-hover ? 1 : card-touch.has-hover ? 0.96 : 0;
+                    y: parent.height - self.height - 9.6px
+                        + (card-touch.has-hover ? 0px : 5.6px);
                     animate opacity {
                         duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
+                    }
+                    animate y {
+                        duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
                     }
                     x: parent.width - self.width - 9.6px;
-                    y: parent.height - self.height - 9.6px;
 
                     play-touch := TouchArea {
                         mouse-cursor: pointer;
@@ -316,8 +335,10 @@ export component FactRow inherits Rectangle {
     height: 44px;
     background: transparent;
 
+    // 交叉轴显式居中：默认顶对齐会让显式定高的值行浮在标签上方
     HorizontalLayout {
         spacing: Theme.space-4;
+        cross-axis-alignment: center;
 
         Text {
             width: 96px;
@@ -330,6 +351,7 @@ export component FactRow inherits Rectangle {
             horizontal-stretch: 1;
             spacing: Theme.space-2;
             alignment: LayoutAlignment.start;
+            cross-axis-alignment: center;
 
             Text {
                 text: root.value;

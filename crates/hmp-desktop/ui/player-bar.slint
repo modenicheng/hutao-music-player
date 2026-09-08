@@ -167,11 +167,12 @@ export component PlayerBar inherits Rectangle {
                     y: (parent.height - 36px) / 2;
                     width: 36px;
                     height: 36px;
-                    border-radius: Theme.radius-full;
+                    border-radius: Theme.pill(self.height);
                     background: prev-touch.has-hover && Player.can-previous ? Theme.muted : transparent;
                     opacity: Player.can-previous ? 1 : 0.35;
                     animate background {
                         duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
                     }
 
                     prev-touch := TouchArea {
@@ -197,10 +198,11 @@ export component PlayerBar inherits Rectangle {
                     y: 0;
                     width: 41.6px;
                     height: 41.6px;
-                    border-radius: Theme.radius-full;
+                    border-radius: Theme.pill(self.height);
                     background: play-touch.has-hover ? Theme.primary-hover : Theme.primary;
                     animate background {
                         duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
                     }
 
                     play-touch := TouchArea {
@@ -225,11 +227,12 @@ export component PlayerBar inherits Rectangle {
                     y: (parent.height - 36px) / 2;
                     width: 36px;
                     height: 36px;
-                    border-radius: Theme.radius-full;
+                    border-radius: Theme.pill(self.height);
                     background: next-touch.has-hover && Player.can-next ? Theme.muted : transparent;
                     opacity: Player.can-next ? 1 : 0.35;
                     animate background {
                         duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
                     }
 
                     next-touch := TouchArea {
@@ -267,10 +270,11 @@ export component PlayerBar inherits Rectangle {
                 if Player.queue.length > 0: Rectangle {
                     width: 36px;
                     height: 36px;
-                    border-radius: Theme.radius-full;
+                    border-radius: Theme.pill(self.height);
                     background: queue-touch.has-hover ? Theme.muted : transparent;
                     animate background {
                         duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
                     }
 
                     queue-touch := TouchArea {

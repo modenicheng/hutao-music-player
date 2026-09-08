@@ -91,8 +91,10 @@ export component Sidebar inherits Rectangle {
         Scroll {
             vertical-stretch: 1;
 
-            HoverGroup {
+            // 整条侧栏单一滑块（Vue 同构）；行是 Button → 块复制 radius-md
+            hg := HoverGroup {
                 highlight-color: Theme.neutral-300;
+                item-radius: Theme.radius-md;
                 highlight-opacity: 0.6;
 
                 VerticalLayout {
@@ -110,6 +112,7 @@ export component Sidebar inherits Rectangle {
                         {label: "下载", icon: Icons.download, target: Route.downloads, exact: false},
                         {label: "已购音乐", icon: Icons.shopping_bag, target: Route.purchased, exact: false},
                     ]: HoverItem {
+                        group-id: hg.group-id;
                         height: 40px;
 
                         Button {
@@ -154,6 +157,7 @@ export component Sidebar inherits Rectangle {
                             spacing: 0px;
 
                             HoverItem {
+                                group-id: hg.group-id;
                                 height: 40px;
 
                                 HorizontalLayout {
@@ -221,6 +225,7 @@ export component Sidebar inherits Rectangle {
                                     padding-left: 24px;
 
                                     for playlist in root.playlists-of(group.group): HoverItem {
+                                        group-id: hg.group-id;
                                         height: 36px;
 
                                         HorizontalLayout {
@@ -269,6 +274,7 @@ export component Sidebar inherits Rectangle {
                                 {label: "自建歌单", icon: Icons.playlist_play, group: 0},
                                 {label: "收藏歌单", icon: Icons.bookmark, group: 1},
                             ]: HoverItem {
+                                group-id: hg.group-id;
                                 height: 40px;
 
                                 Button {
@@ -297,6 +303,7 @@ export component Sidebar inherits Rectangle {
                             }
 
                             HoverItem {
+                                group-id: hg.group-id;
                                 height: 40px;
 
                                 Button {
@@ -314,6 +321,7 @@ export component Sidebar inherits Rectangle {
                             }
 
                             for playlist in root.slider-covers(): HoverItem {
+                                group-id: hg.group-id;
                                 height: 40px;
 
                                 Button {
