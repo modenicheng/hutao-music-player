@@ -6,8 +6,12 @@ export global Player {
     // —— 播放状态快照（PlayerStateSnapshot）———
     in-out property <bool> has-track: false;
     in-out property <bool> playing: false;
-    /** 0..1，拖拽中由 UI 本地覆盖 */
+    /** 0..1，Rust 权威写入；拖拽中冻结（seeking=true 期间 Rust 不回写） */
     in-out property <float> progress: 0.0;
+    /** 主进度条拖拽中：UI 显示 drag-progress（纯本地回显），Rust 暂停 daemon 进度回写 */
+    in-out property <bool> seeking: false;
+    /** 拖拽中的本地进度 0..1（仅 seeking=true 时有意义） */
+    in-out property <float> drag-progress: 0.0;
     in-out property <int> position-ms: 0;
     in-out property <int> duration-ms: 0;
     in-out property <float> volume: 1.0;

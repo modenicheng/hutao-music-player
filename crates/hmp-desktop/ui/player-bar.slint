@@ -39,12 +39,15 @@ export component PlayerBar inherits Rectangle {
                 background: Theme.track;
                 animate height {
                     duration: Theme.duration-fast;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
                 }
 
                 Rectangle {
                     x: 0;
                     y: 0;
-                    width: parent.width * clamp(Player.progress, 0.0, 1.0);
+                    width: parent.width * (Player.seeking
+                        ? clamp(Player.drag-progress, 0.0, 1.0)
+                        : clamp(Player.progress, 0.0, 1.0));
                     height: parent.height;
                     border-radius: parent.border-radius;
                     background: Theme.track-accent;
@@ -57,13 +60,22 @@ export component PlayerBar inherits Rectangle {
                 mouse-cursor: pointer;
                 pointer-event(event) => {
                     if (event.kind == PointerEventKind.down) {
-                        Player.seek-percent(clamp(self.mouse-x / parent.width, 0.0, 1.0));
+                        Player.seeking = true;
+                        Player.drag-progress = clamp(self.mouse-x / parent.width, 0.0, 1.0);
+                    } else if (event.kind == PointerEventKind.up) {
+                        // 松手只发一次 seek；拖拽全程纯本地回显（拖拽中逐次 seek
+                        // 会随 daemon 推送打架并造成 IPC 风暴卡顿）
+                        Player.seek-percent(Player.drag-progress);
+                        Player.seeking = false;
+                    } else if (event.kind == PointerEventKind.cancel) {
+                        // 抓取被打断（指针离开窗口等）：放弃拖拽、不 seek，
+                        // 展示值由下一条 daemon 推送恢复
+                        Player.seeking = false;
                     }
                 }
                 moved => {
-                    if (self.pressed) {
-                        Player.seek-percent(clamp(self.mouse-x / parent.width, 0.0, 1.0));
-                    }
+                    // moved 仅在按下抓取后派发（i-slint-core input_items.rs）
+                    Player.drag-progress = clamp(self.mouse-x / parent.width, 0.0, 1.0);
                 }
             }
         }

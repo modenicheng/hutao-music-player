@@ -6,16 +6,52 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use slint::{ComponentHandle, Global, Model, ModelRc, VecModel, Weak};
+use slint::{ComponentHandle, Global, Model, ModelRc, TimerMode, VecModel, Weak};
 
 use hmp_core::ipc::{DaemonState, Request, Response};
 use hmp_core::{AudioQuality, PlayRequest, PlaybackState, PlaybackStatus, PlayerCommand, TrackId};
 
 use crate::backend::{BackendRuntime, QueueRowMeta, UiStateEvent};
 use crate::{AppWindow, Player, TrackRow};
+
+/// seek 落点确认容忍：daemon 推送位置与目标差 ≤ 此值视为已生效
+/// （播放中位置持续前进，容忍取推送周期量级）。
+const SEEK_CONFIRM_TOLERANCE_MS: u64 = 600;
+/// seek 落点钉住超时：daemon 未确认（离线 / seek 失败）也恢复跟随。
+const SEEK_PIN_TIMEOUT: Duration = Duration::from_millis(1_000);
+/// 音量本地回显窗口：窗口内 daemon 推送的旧音量不回写（拖动防打架）。
+const VOLUME_ECHO_WINDOW: Duration = Duration::from_millis(500);
+/// 音量 SetVolume IPC 节流最小间隔（mousemove 级调用合并 + 尾随补发）。
+const VOLUME_IPC_INTERVAL: Duration = Duration::from_millis(100);
+/// 音量偏好落盘合并间隔：停手后写一次，拖动中不逐次同步写盘。
+const VOLUME_STORE_DELAY: Duration = Duration::from_millis(600);
+
+/// 松手 seek 的落点（进度条拖拽只在松手时 seek 一次）：daemon 确认到点 /
+/// 超时 / 换曲前，携带旧位置的推送不回写展示进度，避免回跳闪烁。
+#[derive(Clone)]
+struct PendingSeek {
+    target_ms: u64,
+    mid: String,
+    deadline: Instant,
+}
+
+/// 拖拽/回显竞态抑制（全部 UI 线程读写，Mutex 只为在 bind 的闭包间共享）。
+#[derive(Default)]
+struct EchoGuard {
+    pending_seek: Option<PendingSeek>,
+    volume_echo_until: Option<Instant>,
+}
+
+impl EchoGuard {
+    /// daemon 音量推送是否可回写（本地回显窗口已过）。
+    fn volume_echo_expired(&self) -> bool {
+        self.volume_echo_until.is_none_or(|until| Instant::now() >= until)
+    }
+}
 
 /// 绑定 Player global 命令回调并挂载订阅任务（bootstrap：首连在订阅循环内
 /// 完成，必要时经 connect_or_spawn 拉起 daemon；彻底失败降级离线模式）。
@@ -27,6 +63,8 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
 
     // 最近一次队列投影的 mid 列表（UI 线程读写：applier 写、play_at 读）。
     let queue_mids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    // 拖拽/回显竞态抑制：命令回调写、订阅回调读（均在 UI 线程）。
+    let echo: Arc<Mutex<EchoGuard>> = Arc::new(Mutex::new(EchoGuard::default()));
 
     // —— 命令回调 → Request（命令-查询分离：受理即返回，结果经状态推送呈现；
     // 离线时短连接失败被丢弃 = 静默 no-op）———
@@ -58,17 +96,27 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
         });
     }
     {
-        // 进度条：百分比 × 当前展示时长（时长以 daemon 推送为准）。
+        // 进度条松手 seek（拖拽全程纯本地回显，见 player-bar.slint）：立即把
+        // 展示进度钉在落点并记录 PendingSeek——daemon 确认到点前旧位置推送
+        // 不回写，杜绝回跳闪烁；seek 只发一次，不再有逐移动事件的 IPC 风暴。
         let ui_weak: Weak<AppWindow> = ui.as_weak();
         let runtime = Arc::clone(&runtime);
+        let echo = Arc::clone(&echo);
         player.on_seek_percent(move |percent| {
-            let Some(duration_ms) = ui_weak
-                .upgrade()
-                .map(|ui| Player::get(&ui).get_duration_ms())
-            else {
+            let Some(ui) = ui_weak.upgrade() else {
                 return;
             };
-            let position_ms = (duration_ms.max(0) as f32 * percent.clamp(0.0, 1.0)).round() as u64;
+            let player = Player::get(&ui);
+            let percent = percent.clamp(0.0, 1.0);
+            let duration_ms = player.get_duration_ms().max(0) as f32;
+            let position_ms = (duration_ms * percent).round() as u64;
+            player.set_position_ms(position_ms as i32);
+            player.set_progress(if duration_ms > 0.0 { percent } else { 0.0 });
+            echo.lock().expect("echo").pending_seek = Some(PendingSeek {
+                target_ms: position_ms,
+                mid: player.get_current_mid().to_string(),
+                deadline: Instant::now() + SEEK_PIN_TIMEOUT,
+            });
             let request = Request::Command(PlayerCommand::Seek(Duration::from_millis(position_ms)));
             runtime.spawn(async move {
                 let _ = crate::backend::request(request).await;
@@ -77,17 +125,59 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
     }
 
     {
-        // 音量：写本地偏好（离线启动兜底值），展示值等 daemon 推送回写。
-        let prefs = Arc::clone(&prefs);
+        // 音量：本地立即回显（thumb/数值跟手）；SetVolume IPC 按 100ms 节流 +
+        // 尾随补发、偏好落盘停手 600ms 合并一次——此前 mousemove 级调用逐次
+        // 同步写盘 + 短连接，是音量拖动卡顿来源。daemon 推送的旧值在回显窗口
+        // 内不回写（apply_daemon_state）。定时器/节流态全在 UI 线程（Timer 非
+        // Send，以 Rc 挂进回调闭包保活）。
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let prefs_for_send = Arc::clone(&prefs);
+        let prefs_for_store = Arc::clone(&prefs);
         let runtime = Arc::clone(&runtime);
+        let echo = Arc::clone(&echo);
+        let pending: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
+        let last_sent: Rc<RefCell<Option<Instant>>> = Rc::new(RefCell::new(None));
+        let ipc_timer = Rc::new(slint::Timer::default());
+        let store_timer = Rc::new(slint::Timer::default());
+        let send_pending: Rc<dyn Fn()> = Rc::new({
+            let pending = Rc::clone(&pending);
+            let last_sent = Rc::clone(&last_sent);
+            let runtime = Arc::clone(&runtime);
+            move || {
+                if let Some(volume) = pending.borrow_mut().take() {
+                    *last_sent.borrow_mut() = Some(Instant::now());
+                    send_volume_ipc(&runtime, volume);
+                }
+            }
+        });
         player.on_set_volume(move |volume| {
             let volume = f64::from(volume).clamp(0.0, 1.0);
-            prefs.lock().expect("prefs").volume = volume as f32;
-            crate::prefs::store(&prefs.lock().expect("prefs").clone());
-            let runtime = Arc::clone(&runtime);
-            runtime.spawn(async move {
-                let _ = crate::backend::request(Request::Command(PlayerCommand::SetVolume(volume)))
-                    .await;
+            prefs_for_send.lock().expect("prefs").volume = volume as f32;
+            if let Some(ui) = ui_weak.upgrade() {
+                Player::get(&ui).set_volume(volume as f32);
+            }
+            echo.lock().expect("echo").volume_echo_until =
+                Some(Instant::now() + VOLUME_ECHO_WINDOW);
+
+            // IPC 节流：距上次发送不足间隔 → 记为待发并定尾随定时器，否则立即发
+            *pending.borrow_mut() = Some(volume);
+            let now = Instant::now();
+            let since_send =
+                last_sent.borrow().map(|t| now.saturating_duration_since(t));
+            match since_send {
+                Some(elapsed) if elapsed < VOLUME_IPC_INTERVAL => {
+                    let callback = Rc::clone(&send_pending);
+                    ipc_timer.start(TimerMode::SingleShot, VOLUME_IPC_INTERVAL - elapsed, move || callback());
+                }
+                _ => {
+                    send_pending();
+                }
+            }
+
+            // 偏好落盘：停手后写一次（拖动中不断重启合并）
+            let prefs = Arc::clone(&prefs_for_store);
+            store_timer.start(TimerMode::SingleShot, VOLUME_STORE_DELAY, move || {
+                crate::prefs::store(&prefs.lock().expect("prefs").clone());
             });
         });
     }
@@ -130,8 +220,9 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
     // —— 订阅：DaemonState 推送 → Player global（UI 线程应用）———
     let ui_weak: Weak<AppWindow> = ui.as_weak();
     let runtime_for_state = Arc::clone(&runtime);
+    let echo_for_state = Arc::clone(&echo);
     let handler = Arc::new(move |event: UiStateEvent| {
-        apply_event(&ui_weak, &runtime_for_state, &queue_mids, event);
+        apply_event(&ui_weak, &runtime_for_state, &queue_mids, &echo_for_state, event);
     });
     crate::backend::spawn_state_subscription(&runtime, handler);
 }
@@ -139,6 +230,13 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
 /// `row.source`（0=QQ 1=本地，UI 显式标记）→ 播放源（`PlayRequest` 分流）。
 fn play_request_for(row: &TrackRow) -> PlayRequest {
     play_request_for_source(row.mid.as_ref(), row.source == 1)
+}
+
+/// SetVolume 命令（短连接；受理即返回，结果经状态推送呈现）。
+fn send_volume_ipc(runtime: &Arc<BackendRuntime>, volume: f64) {
+    runtime.spawn(async move {
+        let _ = crate::backend::request(Request::Command(PlayerCommand::SetVolume(volume))).await;
+    });
 }
 
 fn play_request_for_source(mid: &str, is_local: bool) -> PlayRequest {
@@ -185,6 +283,7 @@ fn apply_event(
     ui_weak: &Weak<AppWindow>,
     runtime: &Arc<BackendRuntime>,
     queue_mids: &Mutex<Vec<String>>,
+    echo: &Mutex<EchoGuard>,
     event: UiStateEvent,
 ) {
     let Some(ui) = ui_weak.upgrade() else {
@@ -222,7 +321,7 @@ fn apply_event(
         return;
     };
     let mids = queue_mids.lock().expect("queue mids").clone();
-    apply_daemon_state(&player, &state, &mids, ui_weak, runtime);
+    apply_daemon_state(&player, &state, &mids, echo, ui_weak, runtime);
 }
 
 /// 离线（无 daemon / daemon 已退出）：播放态全空（音量保留本地值不重置）。
@@ -239,31 +338,61 @@ fn apply_daemon_state(
     player: &Player,
     state: &DaemonState,
     queue_mids: &[String],
+    echo: &Mutex<EchoGuard>,
     ui_weak: &Weak<AppWindow>,
     runtime: &Arc<BackendRuntime>,
 ) {
     let playback = &state.playback;
     player.set_playing(playback.status == PlaybackStatus::Playing);
-    // 音量展示用用户原值（playback.volume 含 RG 补偿，回设会静默偏移，AUDIT §8.12）。
+    // 音量展示用用户原值（playback.volume 含 RG 补偿，回设会静默偏移，AUDIT §8.12）；
+    // 本地回显窗口内（音量拖动中，推送仍带旧值）不回写，避免与 thumb 打架。
     let volume = if (playback.user_volume - 0.0).abs() > f64::EPSILON {
         playback.user_volume
     } else {
         playback.volume
     };
-    player.set_volume(volume.clamp(0.0, 1.0) as f32);
+    if echo.lock().expect("echo").volume_echo_expired() {
+        player.set_volume(volume.clamp(0.0, 1.0) as f32);
+    }
     player.set_can_previous(state.caps.can_go_previous);
     player.set_can_next(state.caps.can_go_next);
     player.set_queue_current_mid(current_mid(state, queue_mids).into());
 
     let Some(track) = &playback.current else {
+        echo.lock().expect("echo").pending_seek = None;
         clear_now_playing(player);
         return;
     };
     player.set_has_track(true);
     player.set_current_mid(track.id.0.as_str().into());
-    player.set_position_ms(duration_ms_i32(&playback.position));
     player.set_duration_ms(playback.duration.as_ref().map(duration_ms_i32).unwrap_or(0));
-    player.set_progress(progress_of(playback));
+
+    // 进度展示：拖拽中（seeking）或落点未确认（松手 seek 后旧位置推送在途）
+    // 时冻结展示值。拖拽开始即清落点（松手时会重新钉）；确认到点 / 超时 /
+    // 换曲则恢复跟随。
+    let mut progress_pinned = false;
+    {
+        let mut guard = echo.lock().expect("echo");
+        if player.get_seeking() {
+            guard.pending_seek = None;
+            progress_pinned = true;
+        } else if let Some(pending) = guard.pending_seek.as_ref() {
+            let confirmed = playback
+                .position
+                .as_millis()
+                .abs_diff(u128::from(pending.target_ms))
+                <= u128::from(SEEK_CONFIRM_TOLERANCE_MS);
+            if confirmed || pending.deadline <= Instant::now() || pending.mid != track.id.0 {
+                guard.pending_seek = None;
+            } else {
+                progress_pinned = true;
+            }
+        }
+    }
+    if !progress_pinned {
+        player.set_position_ms(duration_ms_i32(&playback.position));
+        player.set_progress(progress_of(playback));
+    }
     player.set_title(track.title.as_str().into());
     player.set_artists(track.artist_names().into());
     player.set_cover(cover_for_track(&track.id.0, track.cover.as_ref()));
