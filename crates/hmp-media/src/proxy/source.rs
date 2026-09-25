@@ -845,7 +845,10 @@ mod tests {
         );
 
         // 验证内容一致
-        let path = prepared.uri.strip_prefix("file://").unwrap();
+        let path = url::Url::parse(&prepared.uri)
+            .unwrap()
+            .to_file_path()
+            .unwrap();
         let decoded = std::fs::read(path).unwrap();
         assert_eq!(decoded, plaintext, "回退内容应与明文一致");
     }
