@@ -7,6 +7,7 @@ mod core;
 pub mod source;
 
 pub use core::PlayerCore;
+pub use core::open_default_output;
 
 #[cfg(test)]
 mod tests {

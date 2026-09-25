@@ -17,7 +17,47 @@ enum LoadCommand {
     Shutdown,
 }
 
-/// Open a server-routed output stream (safe variant).
+/// Open the platform-appropriate output stream (safe variant).
+///
+/// Candidate devices come from [`collect_output_candidates`] (platform
+/// policy); each is tried in preference order and the first stream that
+/// opens wins. Never fatal: an empty candidate list or all-failed opens
+/// surfaces as `Err` and the caller falls back to the silent sink.
+pub fn open_default_output() -> Result<OutputStream, StreamError> {
+    use rodio::cpal::traits::DeviceTrait;
+
+    let mut candidates = collect_output_candidates();
+    candidates.sort_by_key(|&(preference, _)| preference);
+
+    let mut last_error = StreamError::NoDevice;
+    for (_, device) in candidates {
+        let name = device.name().unwrap_or_else(|_| "<unnamed>".into());
+        let builder = match OutputStreamBuilder::from_device(device) {
+            Ok(builder) => builder,
+            Err(error) => {
+                tracing::warn!(%name, %error, "audio device rejected builder config, trying next");
+                last_error = error;
+                continue;
+            }
+        };
+        match builder.open_stream() {
+            Ok(stream) => {
+                tracing::info!(%name, "audio output device opened");
+                return Ok(stream);
+            }
+            Err(error) => {
+                tracing::warn!(%name, %error, "audio device open failed, trying next");
+                last_error = error;
+            }
+        }
+    }
+    Err(last_error)
+}
+
+/// Candidate output devices with preference order (lower = tried first).
+type OutputCandidates = Vec<(usize, rodio::cpal::Device)>;
+
+/// Unix candidate policy: server-routed PCMs only.
 ///
 /// Never enumerates-and-opens hardware devices: on failure rodio 0.21's
 /// `OutputStreamBuilder::open_default_stream()` falls back to opening EVERY
@@ -38,8 +78,9 @@ enum LoadCommand {
 /// UI offline). `pipewire`/`pulse` PCMs route through the server too, so
 /// they can never grab hardware; direct hardware PCMs stay refused in any
 /// case.
-fn open_default_output() -> Result<OutputStream, StreamError> {
-    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+#[cfg(unix)]
+fn collect_output_candidates() -> OutputCandidates {
+    use rodio::cpal::traits::HostTrait;
 
     let host = rodio::cpal::default_host();
     let mut candidates: Vec<(usize, rodio::cpal::Device)> = Vec::new();
@@ -66,37 +107,45 @@ fn open_default_output() -> Result<OutputStream, StreamError> {
             consider(Some(device), &mut candidates);
         }
     }
-    candidates.sort_by_key(|&(preference, _)| preference);
-
-    let mut last_error = StreamError::NoDevice;
-    for (_, device) in candidates {
-        let name = device.name().unwrap_or_else(|_| "<unnamed>".into());
-        let builder = match OutputStreamBuilder::from_device(device) {
-            Ok(builder) => builder,
-            Err(error) => {
-                tracing::warn!(%name, %error, "server-routed pcm failed, trying next");
-                last_error = error;
-                continue;
-            }
-        };
-        match builder.open_stream() {
-            Ok(stream) => {
-                tracing::info!(%name, "audio output opened via server-routed pcm");
-                return Ok(stream);
-            }
-            Err(error) => {
-                tracing::warn!(%name, %error, "server-routed pcm failed, trying next");
-                last_error = error;
-            }
-        }
-    }
-    Err(last_error)
+    candidates
 }
 
-/// Server-routed PCM policy: preference order of PCM names that always route
-/// through the system audio server. Direct hardware PCMs (`hw:*`, `plughw:*`,
-/// `front:*`, `surround*:*`), OSS (`oss`) and JACK (`jack`) are refused so the
-/// player can never grab exclusive hardware behind PipeWire/PulseAudio.
+/// Windows candidate policy: WASAPI render endpoints, default first.
+///
+/// cpal's WASAPI host opens every stream in *shared* mode — samples go
+/// through audiodg's mixer graph, never exclusively to the hardware — so the
+/// ALSA `plughw` exclusivity incident cannot happen here and no name filter
+/// is needed. The default render endpoint is tried first; every other
+/// endpoint follows as ordered fallback (default disabled/unplugged, virtual
+/// cables like VB-CABLE, HDMI/DP monitor audio hotplug races). The default
+/// may appear twice (it also shows up in the enumeration); a second failed
+/// open of the same endpoint is harmless and keeps this branch trivial.
+///
+/// Device names are localized (e.g. "耳机 (DAWN PRO2)", "扬声器 (Realtek(R)
+/// Audio)") — do NOT reintroduce literal-name matching here.
+#[cfg(windows)]
+fn collect_output_candidates() -> OutputCandidates {
+    use rodio::cpal::traits::HostTrait;
+
+    let host = rodio::cpal::default_host();
+    let mut candidates = Vec::new();
+    if let Some(device) = host.default_output_device() {
+        candidates.push((0, device));
+    }
+    if let Ok(devices) = host.output_devices() {
+        for device in devices {
+            candidates.push((1, device));
+        }
+    }
+    candidates
+}
+
+/// Server-routed PCM policy (Unix only): preference order of PCM names that
+/// always route through the system audio server. Direct hardware PCMs
+/// (`hw:*`, `plughw:*`, `front:*`, `surround*:*`), OSS (`oss`) and JACK
+/// (`jack`) are refused so the player can never grab exclusive hardware
+/// behind PipeWire/PulseAudio.
+#[cfg(unix)]
 fn server_routed_preference(name: &str) -> Option<usize> {
     ["default", "pipewire", "pulse"]
         .into_iter()
@@ -115,14 +164,39 @@ pub struct PlayerCore {
 
 impl PlayerCore {
     /// Open the platform default output device.
+    ///
+    /// 无音频输出可用（无设备/无音频服务的 VM、CI、带声卡被独占的会话）时
+    /// 不再致命：回退 rodio 无设备静默 sink + 泵线程——队列时钟照常推进
+    /// （EOS/自动切歌/位置上报/SMTC 照常），仅无声。daemon 必须可启动，
+    /// 是否可出声不应决定 IPC 服务存活（桌面自动拉起依赖它）。
     pub fn new() -> Result<Self, HmpError> {
-        let output = open_default_output().map_err(|error| {
-            HmpError::Playback(format!(
-                "open default audio output: {error} (no system audio server reachable?)"
-            ))
-        })?;
-        let sink = Sink::connect_new(output.mixer());
-        Ok(Self::from_sink(sink, Some(output)))
+        match open_default_output() {
+            Ok(output) => {
+                let sink = Sink::connect_new(output.mixer());
+                Ok(Self::from_sink(sink, Some(output)))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "no audio output available; using silent output (clock keeps running)"
+                );
+                let (sink, mut output) = Sink::new();
+                std::thread::spawn(move || {
+                    loop {
+                        let samples_per_tick =
+                            (output.sample_rate() as usize * output.channels() as usize / 100)
+                                .max(1);
+                        for _ in 0..samples_per_tick {
+                            if output.next().is_none() {
+                                return;
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                });
+                Ok(Self::from_sink(sink, None))
+            }
+        }
     }
 
     fn from_sink(sink: Sink, output: Option<OutputStream>) -> Self {
@@ -367,11 +441,14 @@ async fn drive(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     /// 输出设备安全策略：只允许经系统音频服务器路由的 PCM。回归守护：
     /// 防止再次引入"枚举/直通设备 fallback"而独占硬件
-    /// （2026-09-07 DAWN PRO2 被抢事件）。
+    /// （2026-09-07 DAWN PRO2 被抢事件）。Unix 策略（Windows 走 WASAPI
+    /// 共享模式全接纳，见 `collect_output_candidates` 平台分叉）。
+    #[cfg(unix)]
     #[test]
     fn output_policy_accepts_only_server_routed_pcms() {
         assert_eq!(server_routed_preference("default"), Some(0));
@@ -379,6 +456,7 @@ mod tests {
         assert_eq!(server_routed_preference("pulse"), Some(2));
     }
 
+    #[cfg(unix)]
     #[test]
     fn output_policy_refuses_hardware_passthrough_and_plugins() {
         for name in [
@@ -402,6 +480,7 @@ mod tests {
 
     /// 候选序恒为 default → pipewire → pulse：与枚举顺序无关，
     /// 任何系统上都优先语义上的平台默认 PCM。
+    #[cfg(unix)]
     #[test]
     fn candidate_preference_orders_default_first() {
         let mut prefs: Vec<Option<usize>> = vec![

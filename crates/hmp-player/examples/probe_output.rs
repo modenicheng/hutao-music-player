@@ -1,6 +1,10 @@
-//! 一次性音频输出探针（QA 用，不进 CI）：列出 cpal ALSA host 的输出设备并
-//! 按 `open_default_output` 的候选策略逐个尝试，打印各阶段错误。
+//! 音频输出探针（QA 用，不进 CI）：列出 cpal host 的输出设备，并按
+//! `open_default_output` 的生产候选策略实际开流，打印各阶段错误。
 //! `cargo run -p hmp-player --example probe_output`
+//!
+//! 平台口径：Unix 只认 server-routed PCM（default/pipewire/pulse），
+//! Windows WASAPI 共享模式全接纳（默认端点优先）。诊断"无声/拉起失败"
+//! 先跑这个，别猜。
 
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
 
@@ -23,20 +27,9 @@ fn main() {
         Some(device) => println!("name: {:?}", device.name().ok()),
         None => println!("none"),
     }
-    println!("—— try open candidates in policy order ——");
-    for name in ["default", "pipewire", "pulse"] {
-        let Some(device) = host.output_devices().ok().and_then(|mut devices| {
-            devices.find(|device| device.name().ok().as_deref() == Some(name))
-        }) else {
-            println!("{name}: not enumerated");
-            continue;
-        };
-        match rodio::OutputStreamBuilder::from_device(device) {
-            Ok(builder) => match builder.open_stream() {
-                Ok(_) => println!("{name}: open OK"),
-                Err(error) => println!("{name}: open_stream ERR: {error}"),
-            },
-            Err(error) => println!("{name}: from_device ERR: {error}"),
-        }
+    println!("—— production open_default_output() ——");
+    match hmp_player::open_default_output() {
+        Ok(_stream) => println!("open OK (real device stream created)"),
+        Err(error) => println!("open ERR: {error}  (daemon 会回退静默 sink)"),
     }
 }
