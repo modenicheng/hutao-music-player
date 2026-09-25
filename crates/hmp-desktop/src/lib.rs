@@ -12,6 +12,7 @@ pub mod lyrics;
 pub mod mock;
 pub mod player_bridge;
 pub mod prefs;
+pub mod track_theme;
 
 pub use app::{
     AppCommand, AppCore, AppEvent, ThemeMode, UiFeatureData, UiLyricData, UiPage, UiQueueData,

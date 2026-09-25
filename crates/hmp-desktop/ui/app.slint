@@ -1,9 +1,10 @@
-// 应用壳（MainLayout.vue + PlayerOverlay/QueueDrawer 挂载点）：
-// surface-1 底 + layout-gap 内距网格——侧栏（跨两行）/ 内容浮板 / 播放条；
+// 应用壳（MainLayout.vue + PlayerOverlay/QueueDrawer 挂载点 + 自绘标题栏）：
+// surface-1 底 + layout-gap 内距网格——顶栏 / 侧栏（跨两行）/ 内容浮板 / 播放条；
 // 侧栏宽度过渡（slow S 曲线），≤52rem 自动收图标栏（手动切换优先）。
 import { Theme } from "theme.slint";
 import { Scroll, HoverBus, EqClock, EqClockHost } from "primitives.slint";
 import { Sidebar } from "sidebar.slint";
+import { TitleBar, WinChrome } from "title-bar.slint";
 import { PlayerBar } from "player-bar.slint";
 import { QueueDrawer } from "queue-drawer.slint";
 import { NowPlayingOverlay } from "now-playing.slint";
@@ -21,12 +22,12 @@ import { SettingsPlaybackPage } from "settings-playback-page.slint";
 import { SettingsAccountPage } from "settings-account-page.slint";
 import { SearchPage } from "search-page.slint";
 import { Nav, Route } from "nav.slint";
-import { Player, Data, Quality, NowPlaying } from "stores.slint";
+import { Player, Data, Quality, NowPlaying, TrackPalette } from "stores.slint";
 import { Theme } from "theme.slint";
 import { TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow } from "data.slint";
 
 // 供生成代码（Rust 侧）访问的 global 与数据结构（HoverBus/EqClock 供集成测试探针）
-export { Theme, Nav, Player, Quality, Data, NowPlaying, Route, TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, HoverBus, EqClock }
+export { Theme, Nav, Player, Quality, Data, NowPlaying, TrackPalette, Route, TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, HoverBus, EqClock, WinChrome }
 
 export component AppWindow inherits Window {
     title: "胡桃音乐";
@@ -34,8 +35,12 @@ export component AppWindow inherits Window {
     preferred-height: 800px;
     min-width: 683px;
     min-height: 576px;
-    // 无边框：niri/winit 的 CSD 标题栏缺 CJK 字体（显示方框），平铺下也不需要
+    // 无边框：niri/winit 的 CSD 标题栏缺 CJK 字体（显示方框），平铺下也不需要；
+    // 标题栏自绘（title-bar.slint），窗口操作按钮 Windows 风格
     no-frame: true;
+    // 无边框窗口的边缘拖拽改尺寸命中带（winit 判定用，语言层仅声明）：
+    // 8px = layout-gap——内容面板距窗缘恰有内距，命中带不吃面板点击
+    resize-border-width: Theme.layout-gap;
 
     // Equalizer 共享时钟驱动（0×0 不可见，见 primitives.slint）
     EqClockHost { }
@@ -65,167 +70,229 @@ export component AppWindow inherits Window {
         easing: cubic-bezier(0.2, 0, 0, 1);
     }
 
-    // —— 侧栏（跨两行）———
-    Sidebar {
-        x: pad;
-        y: pad;
-        width: sidebar-w;
-        height: parent.height - pad * 2;
-        collapsed: sidebar-collapsed;
-        toggle-collapsed => {
-            manual-collapsed = sidebar-collapsed ? 0 : 1;
+    // —— 全局按键收口：空格 = 播放/暂停 ———
+    // 包裹全窗的 FocusScope 自身不持有焦点（不设 forward-focus、禁
+    // focus-on-click/focus-on-tab-navigation，不抢任何组件焦点）：按键从聚焦
+    // 元素起沿父链冒泡——esc-scope（窗口默认焦点）reject 的空格在这里收口；
+    // TextInput（搜索框/评论输入框）聚焦时空格被输入框 accept，天然不冲突。
+    space-scope := FocusScope {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        key-pressed(event) => {
+            if (event.text == " ") {
+                Player.toggle-play();
+                return accept;
+            }
+            return reject;
         }
-    }
 
-    // —— 内容浮板（滚动交给内部 Scroll）———
-    content := Rectangle {
-        x: pad + sidebar-w + pad;
-        y: pad;
-        width: parent.width - self.x - pad;
-        height: parent.height - pad * 2 - Theme.player-bar-height - pad;
-        border-radius: Theme.radius-lg;
-        clip: true;
-        background: Theme.surface-2;
+        // —— 侧栏（跨两行；顶栏以下开始）———
+        Sidebar {
+            x: pad;
+            y: pad + Theme.title-bar-height;
+            width: sidebar-w;
+            height: parent.height - pad * 2 - Theme.title-bar-height;
+            collapsed: sidebar-collapsed;
+            toggle-collapsed => {
+                manual-collapsed = sidebar-collapsed ? 0 : 1;
+            }
+        }
 
-        Scroll {
+        // —— 内容浮板（滚动交给内部 Scroll）———
+        content := Rectangle {
+            x: pad + sidebar-w + pad;
+            y: pad + Theme.title-bar-height;
+            width: parent.width - self.x - pad;
+            height: parent.height - pad * 2 - Theme.title-bar-height - Theme.player-bar-height - pad;
+            border-radius: Theme.radius-lg;
+            clip: true;
+            background: Theme.surface-2;
+
+            Scroll {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+
+                if Nav.route == Route.library: LibraryPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.recent: RecentPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.local: MusicLibraryPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.downloads: DownloadsPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.purchased: PurchasedPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.playlist: PlaylistPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.album: AlbumPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.artist: ArtistPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.settings: SettingsPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.settings-general: SettingsGeneralPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.settings-playback: SettingsPlaybackPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.settings-account: SettingsAccountPage {
+                    width: parent.width;
+                }
+
+                if Nav.route == Route.search: SearchPage {
+                    width: parent.width;
+                }
+
+                // 未移植模块（M4 在线内容页）：诚实占位——推荐/榜单内容读接口
+                // 尚未排期（搜索已接 daemon Search IPC，docs/AUDIT.md §8.2）。
+                if Nav.route == Route.home || Nav.route == Route.discover || Nav.route == Route.top
+                    || Nav.route == Route.top-detail: Rectangle {
+                    width: parent.width;
+                    height: 240px;
+
+                    Text {
+                        y: 96px;
+                        width: parent.width;
+                        text: "在线内容页依赖 QQ 内容接口（推荐/榜单），后续版本接入";
+                        color: Theme.muted-foreground;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // —— 播放条 ———
+        PlayerBar {
+            x: content.x;
+            y: content.y + content.height + pad;
+            width: content.width;
+            height: Theme.player-bar-height;
+        }
+
+        // —— 操作反馈条（命令被拒/离线/装载失败；Rust 写入、4s 自动清空）——
+        // 深胡桃实底 pill，亮暗两主题同读法；位于内容区底部内缘、播放条上方。
+        if Player.feedback != "": Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: content.y + content.height - self.height - Theme.space-3;
+            height: 36px;
+            width: min(feedback-text.preferred-width + 40px, parent.width - Theme.space-6 * 2);
+            border-radius: Theme.pill(self.height);
+            background: Theme.track-deep;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #241F1B.transparentize(0.82);
+            drop-shadow-offset-y: 4px;
+
+            feedback-text := Text {
+                x: 20px;
+                width: parent.width - 40px;
+                text: Player.feedback;
+                color: Theme.track-deep-fg;
+                font-size: 13px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        // —— 播放页 overlay（M6：首屏=封面+歌词，上滑=评论）———
+        // slide-bottom 入/退场：挂载保持 = 可见或退场动画未播完（软卸载，
+        // 同 QueueDrawer 的 fade-hold 模式）；leaving 驱动滑出方向
+        property <bool> overlay-ov <=> Player.overlay-visible;
+        property <bool> overlay-hold: false;
+        changed overlay-ov => {
+            if (self.overlay-ov) {
+                overlay-unmount-timer.stop();
+            } else {
+                overlay-unmount-timer.restart();
+            }
+            self.overlay-hold = true;
+        }
+        overlay-unmount-timer := Timer {
+            interval: Theme.duration-slow + 60ms;
+            running: false;
+            triggered => {
+                space-scope.overlay-hold = false;
+            }
+        }
+        if overlay-ov || overlay-hold: NowPlayingOverlay {
+            x: 0;
+            y: Theme.title-bar-height;
+            width: parent.width;
+            height: parent.height - Theme.title-bar-height;
+            leaving: !overlay-ov;
+        }
+
+        // —— 播放列表抽屉（遮罩 + 右上浮板；顶栏以下，让窗口钮始终可点）———
+        QueueDrawer {
+            x: 0;
+            y: Theme.title-bar-height;
+            width: parent.width;
+            height: parent.height - Theme.title-bar-height;
+        }
+
+        // —— ESC：先关播放页 overlay，再关队列抽屉 ———
+        esc-scope := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    if (Player.overlay_visible) {
+                        Player.hide-overlay();
+                        return accept;
+                    }
+                    if (Player.queue_visible) {
+                        Player.hide-queue();
+                        return accept;
+                    }
+                }
+                return reject;
+            }
+        }
+
+        // —— 自绘标题栏（无边框壳：拖动移窗/双击最大化 + Windows 窗口钮）———
+        // 窗口属性写在 Window 根元素上（minimized/maximized 双向）：写入由 winit
+        // 适配器落到系统窗口，系统态（任务栏还原、Win+方向键）变化也回写
+        // maximized 驱动 glyph 切换。
+        TitleBar {
             x: 0;
             y: 0;
             width: parent.width;
-            height: parent.height;
-
-            if Nav.route == Route.library: LibraryPage {
-                width: parent.width;
+            height: Theme.title-bar-height;
+            maximized: root.maximized;
+            minimize-request => {
+                root.minimized = true;
             }
-
-            if Nav.route == Route.recent: RecentPage {
-                width: parent.width;
+            toggle-maximize-request => {
+                root.maximized = !root.maximized;
             }
-
-            if Nav.route == Route.local: MusicLibraryPage {
-                width: parent.width;
+            close-request => {
+                root.close();
             }
-
-            if Nav.route == Route.downloads: DownloadsPage {
-                width: parent.width;
-            }
-
-            if Nav.route == Route.purchased: PurchasedPage {
-                width: parent.width;
-            }
-
-            if Nav.route == Route.playlist: PlaylistPage {
-                width: parent.width;
-            }
-
-            if Nav.route == Route.album: AlbumPage {
-                width: parent.width;
-            }
-
-            if Nav.route == Route.artist: ArtistPage {
-                width: parent.width;
-            }
-
-            if Nav.route == Route.settings: SettingsPage {
-                width: parent.width;
-            }
-
-            if Nav.route == Route.settings-general: SettingsGeneralPage {
-                width: parent.width;
-            }
-
-            if Nav.route == Route.settings-playback: SettingsPlaybackPage {
-                width: parent.width;
-            }
-
-            if Nav.route == Route.settings-account: SettingsAccountPage {
-                width: parent.width;
-            }
-
-            if Nav.route == Route.search: SearchPage {
-                width: parent.width;
-            }
-
-            // 未移植模块（M4 在线内容页）：诚实占位——推荐/榜单内容读接口
-            // 尚未排期（搜索已接 daemon Search IPC，docs/AUDIT.md §8.2）。
-            if Nav.route == Route.home || Nav.route == Route.discover || Nav.route == Route.top
-                || Nav.route == Route.top-detail: Rectangle {
-                width: parent.width;
-                height: 240px;
-
-                Text {
-                    y: 96px;
-                    width: parent.width;
-                    text: "在线内容页依赖 QQ 内容接口（推荐/榜单），后续版本接入";
-                    color: Theme.muted-foreground;
-                    font-size: 14px;
-                    horizontal-alignment: center;
-                }
-            }
-        }
-    }
-
-    // —— 播放条 ———
-    PlayerBar {
-        x: content.x;
-        y: content.y + content.height + pad;
-        width: content.width;
-        height: Theme.player-bar-height;
-    }
-
-    // —— 操作反馈条（命令被拒/离线/装载失败；Rust 写入、4s 自动清空）——
-    // 深胡桃实底 pill，亮暗两主题同读法；位于内容区底部内缘、播放条上方。
-    if Player.feedback != "": Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: content.y + content.height - self.height - Theme.space-3;
-        height: 36px;
-        width: min(feedback-text.preferred-width + 40px, parent.width - Theme.space-6 * 2);
-        border-radius: Theme.pill(self.height);
-        background: Theme.track-deep;
-        drop-shadow-blur: 16px;
-        drop-shadow-color: #241F1B.transparentize(0.82);
-        drop-shadow-offset-y: 4px;
-
-        feedback-text := Text {
-            x: 20px;
-            width: parent.width - 40px;
-            text: Player.feedback;
-            color: Theme.track-deep-fg;
-            font-size: 13px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-    }
-
-    // —— 播放页 overlay（M6：首屏=封面+歌词，上滑=评论；条件挂载=隐藏即卸载）———
-    if Player.overlay-visible: NowPlayingOverlay {
-        x: 0;
-        y: 0;
-        width: parent.width;
-        height: parent.height;
-    }
-
-    // —— 播放列表抽屉（遮罩 + 右上浮板）———
-    QueueDrawer {
-        x: 0;
-        y: 0;
-        width: parent.width;
-        height: parent.height;
-    }
-
-    // —— ESC：先关播放页 overlay，再关队列抽屉 ———
-    esc-scope := FocusScope {
-        key-pressed(event) => {
-            if (event.text == Key.Escape) {
-                if (Player.overlay_visible) {
-                    Player.hide-overlay();
-                    return accept;
-                }
-                if (Player.queue_visible) {
-                    Player.hide-queue();
-                    return accept;
-                }
-            }
-            return reject;
         }
     }
 }

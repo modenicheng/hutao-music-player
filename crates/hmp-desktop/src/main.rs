@@ -28,5 +28,25 @@ fn main() -> Result<(), slint::PlatformError> {
     // （Player 全空、命令 no-op），UI 照常打开。
     player_bridge::bind(&ui, Arc::clone(&runtime), Arc::clone(&prefs));
 
+    // 顶栏拖动桥（title-bar.slint）：Slint 语言层没有窗口移动原语，经 winit
+    // 句柄发起系统级移动循环（拖到屏缘的贴靠/半屏分列由系统原生处理）。
+    // testing/非 winit 后端拿不到 winit 句柄 → with_winit_window 返回 None，
+    // 回调退化为空操作。SC_MOVE 模态循环会吞掉 pointer release，返回后补发
+    // 合成抬起复位 TouchArea 抓取态（落点 (0,0) 在顶栏命中区内，无副作用）。
+    {
+        use slint::winit_030::WinitWindowAccessor;
+        let ui_weak = ui.as_weak();
+        hmp_desktop::WinChrome::get(&ui).on_drag(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let _ = ui.window().with_winit_window(|w| w.drag_window());
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                        position: slint::LogicalPosition::new(0.0, 0.0),
+                        button: slint::platform::PointerEventButton::Left,
+                    });
+            }
+        });
+    }
+
     ui.run()
 }

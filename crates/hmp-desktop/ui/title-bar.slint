@@ -1,0 +1,132 @@
+// 自绘标题栏（无边框窗口壳；桌面端新增——Vue 版跑在浏览器里没有对应物）：
+// 左侧窗口标题 + 右侧 Windows 风格最小化/最大化(还原)/关闭钮；
+// 空白区按住拖动移窗、双击切换最大化（Windows 惯例）。
+//
+// 拖动本体走 WinChrome.drag()：Slint 语言层没有窗口移动原语（1.17 已无
+// WindowDragArea），由 Rust 经 winit 句柄发起系统级移动循环——拖到屏缘
+// 的贴靠/半屏分列也由系统原生处理；testing/非 winit 后端未接线时空操作。
+import { Theme } from "theme.slint";
+
+/** Rust 侧接线的窗口操作桥（main.rs：WinitWindowAccessor::with_winit_window） */
+export global WinChrome {
+    /** 发起系统级窗口移动（按住顶栏位移超阈值时调用一次） */
+    callback drag();
+}
+
+// Windows 标题栏钮：46×32（关闭钮加宽到 48 好点按），glyph 10×10、1px 线；
+// hover 满高底色（关闭钮 Win11 红 #C42B1C + glyph 转白），无圆角无过渡。
+component CaptionButton inherits Rectangle {
+    /** 关闭钮标记：hover 红底白 glyph */
+    in property <bool> danger;
+    /** glyph 路径（viewbox 10×10，坐标带 0.5 偏移让 1px 线落在像素网格上） */
+    in property <string> glyph;
+    callback clicked;
+
+    width: danger ? 48px : 46px;
+    background: btn.has-hover
+        ? (danger ? #C42B1C : Theme.foreground.transparentize(0.93))
+        : transparent;
+
+    btn := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Path {
+        width: 10px;
+        height: 10px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: root.glyph;
+        stroke: root.danger && btn.has-hover ? #FFFFFF : Theme.foreground;
+        stroke-width: 1px;
+        fill: transparent;
+    }
+}
+
+export component TitleBar inherits Rectangle {
+    /** 当前最大化态（AppWindow 从 root.window.maximized 单向喂入，驱动 glyph 切换） */
+    in property <bool> maximized: false;
+    callback minimize-request();
+    callback toggle-maximize-request();
+    callback close-request();
+
+    height: Theme.title-bar-height;
+    background: transparent;
+
+    // 窗口标题（Windows 惯例在左；没有小尺寸品牌图标资产，只放文字）
+    Text {
+        x: Theme.space-3;
+        y: (parent.height - self.height) / 2;
+        text: "胡桃音乐";
+        font-size: 12px;
+        color: Theme.muted-foreground;
+    }
+
+    // 拖拽/双击命中区（右侧按钮列除外）。阈值起拖：4px 内的纯点击不打扰
+    // 双击判定；起拖后系统的 SC_MOVE 模态循环会吞掉 release，TouchArea
+    // 卡在按住态——下次按下 pointer-event(down) 重置 drag-armed 即恢复。
+    title-hit := TouchArea {
+        x: 0;
+        y: 0;
+        width: parent.width - caption-row.width;
+        height: parent.height;
+        property <bool> drag-armed: false;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                drag-armed = false;
+            }
+        }
+        moved => {
+            if (!drag-armed
+                && (Math.abs(self.mouse-x - self.pressed-x) > 4px
+                    || Math.abs(self.mouse-y - self.pressed-y) > 4px)) {
+                drag-armed = true;
+                WinChrome.drag();
+            }
+        }
+        double-clicked => {
+            root.toggle-maximize-request();
+        }
+    }
+
+    caption-row := Rectangle {
+        x: parent.width - self.width;
+        y: 0;
+        width: 140px; // 46 + 46 + 48
+        height: parent.height;
+
+        CaptionButton {
+            x: 0px;
+            height: parent.height;
+            glyph: "M 0 5 L 10 5";
+            clicked => {
+                root.minimize-request();
+            }
+        }
+
+        CaptionButton {
+            x: 46px;
+            height: parent.height;
+            glyph: root.maximized
+                ? "M 0.5 2.5 L 7.5 2.5 L 7.5 9.5 L 0.5 9.5 Z M 2.5 2.5 L 2.5 0.5 L 9.5 0.5 L 9.5 7.5 L 7.5 7.5"
+                : "M 0.5 0.5 L 9.5 0.5 L 9.5 9.5 L 0.5 9.5 Z";
+            clicked => {
+                root.toggle-maximize-request();
+            }
+        }
+
+        CaptionButton {
+            x: 92px;
+            height: parent.height;
+            danger: true;
+            glyph: "M 0.5 0.5 L 9.5 9.5 M 9.5 0.5 L 0.5 9.5";
+            clicked => {
+                root.close-request();
+            }
+        }
+    }
+}

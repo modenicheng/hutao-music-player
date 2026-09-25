@@ -10,6 +10,11 @@ export global Theme {
     callback cycle-mode();
     /** 直接设档（设置页三选：0=跟随系统 1=浅色 2=深色），Rust 侧持久化 */
     callback set-mode(int);
+    /** 深浅判定变化（含跟随系统时系统偏好漂移）→ Rust 重取曲目层调色 */
+    callback retheme();
+    changed dark => {
+        retheme();
+    }
 
     // 窗口宽度（AppWindow 双向绑定），驱动 sidebar-width 的 clamp(14rem, 17vw, 18rem)
     in-out property <length> win-width: 1280px;
@@ -113,6 +118,9 @@ export global Theme {
     out property <length> control-height-sm: 32px;
     out property <length> control-height-md: 40px;
     out property <length> control-height-lg: 48px;
+    // 无边框窗口自绘标题栏（title-bar.slint，桌面壳新增无 Vue 对应物）：
+    // Windows 标题栏 32px 惯例；页面顶栏 top-bar-height 是另一回事（80px）
+    out property <length> title-bar-height: 32px;
     out property <length> top-bar-height: 80px;
     out property <length> player-bar-height: 96px;
     out property <length> np-console-clearance: 120px;

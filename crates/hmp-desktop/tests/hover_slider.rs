@@ -116,31 +116,31 @@ fn hover_slider_chain_reports_and_clears() {
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
     }
 
-    // 悬停主导航第一行（首页，y=60..100；Button 覆盖整行）：
+    // 悬停主导航第一行（首页，顶栏下移后窗口 y=92..132；Button 覆盖整行）：
     // 祖先 TouchArea 必须仍感知并按行几何上报
-    move_to(&ui, 120.0, 80.0);
+    move_to(&ui, 120.0, 112.0);
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
     assert!(bus.get_active(), "满行 Button 之下行级 hover 应激活总线");
     assert!(
-        (bus.get_item_pos().y - 60.0).abs() < 0.5,
-        "第一行 y 应为 60，实际 {}",
+        (bus.get_item_pos().y - 92.0).abs() < 0.5,
+        "第一行 y 应为 92，实际 {}",
         bus.get_item_pos().y
     );
     assert!((bus.get_item_pos().x - 8.0).abs() < 0.5);
     assert!((bus.get_item_height() - 40.0).abs() < 0.5);
 
-    // 滑到第三行（排行榜，y=148..188）：几何随行更新
-    move_to(&ui, 120.0, 168.0);
+    // 滑到第三行（排行榜，y=180..220）：几何随行更新
+    move_to(&ui, 120.0, 200.0);
     assert!(bus.get_active());
     assert!(
-        (bus.get_item_pos().y - 148.0).abs() < 0.5,
-        "第三行 y 应为 148，实际 {}",
+        (bus.get_item_pos().y - 180.0).abs() < 0.5,
+        "第三行 y 应为 180，实际 {}",
         bus.get_item_pos().y
     );
 
     // 歌单条目行（36px 纯内容行，自建歌单第一项）：同样上报
-    // （主导航含搜索项共 9 行；歌单区在其下，首行 y=548）
-    move_to(&ui, 120.0, 548.0);
+    // （主导航含搜索项共 9 行；歌单区在其下，顶栏下移后首行 y=580）
+    move_to(&ui, 120.0, 580.0);
     assert!(bus.get_active(), "歌单条目行应上报");
     assert!(
         (bus.get_item_height() - 36.0).abs() < 0.5,
@@ -153,11 +153,11 @@ fn hover_slider_chain_reports_and_clears() {
     assert!(!bus.get_active(), "离开所有行后总线应收起");
 
     // 回到行上重新点亮
-    move_to(&ui, 120.0, 80.0);
+    move_to(&ui, 120.0, 112.0);
     assert!(bus.get_active());
 
     // 行内按钮点击不被行级 TouchArea 截获：点排行榜行 → navigate(top)
-    press_release(&ui, 120.0, 168.0);
+    press_release(&ui, 120.0, 200.0);
     assert_eq!(*nav_route.lock().unwrap(), hmp_desktop::Route::Top);
 
     // —— 内容页滚动后的对齐不变量 ——

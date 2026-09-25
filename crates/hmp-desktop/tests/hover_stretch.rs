@@ -36,18 +36,21 @@ fn hover_stretch_transient_deformation() {
 
     let bus = hmp_desktop::HoverBus::get(&ui);
 
-    // 首次进入主导航第一行（y=60..100）：只定位跳位淡入，不触发形变
-    move_to(&ui, 120.0, 80.0);
+    // 首次进入主导航第一行（顶栏下移后窗口 y=92..132）：只定位跳位淡入，不触发形变
+    move_to(&ui, 120.0, 112.0);
     advance(16);
     assert!(bus.get_active(), "首次进入应激活总线");
-    assert!(!bus.get_flying(), "首次进入只定位不做形变（Vue placed 语义）");
+    assert!(
+        !bus.get_flying(),
+        "首次进入只定位不做形变（Vue placed 语义）"
+    );
     assert!(
         (bus.get_fly_parallel() - 1.0).abs() < 1e-6,
         "静止倍率恒为 1"
     );
 
-    // 行 1 → 行 3（y=148..188，dy=+88 向下）：瞬态拉伸，前缘=下缘
-    move_to(&ui, 120.0, 168.0);
+    // 行 1 → 行 3（y=180..220，dy=+88 向下）：瞬态拉伸，前缘=下缘
+    move_to(&ui, 120.0, 200.0);
     assert!(
         (bus.get_fly_peak() - 1.6).abs() < 0.01,
         "峰值应为 1+min(88/110, 0.6)=1.6，实际 {}",
@@ -84,8 +87,8 @@ fn hover_stretch_transient_deformation() {
     assert!(!bus.get_active(), "离开所有行后总线应收起");
     assert!(!bus.get_flying(), "收起时应取消形变");
 
-    // 冻结几何重入（上次停在行 3 y=148，重入行 1 y=60，dy=-88 向上）：前缘=上缘
-    move_to(&ui, 120.0, 80.0);
+    // 冻结几何重入（上次停在行 3 y=180，重入行 1 y=92，dy=-88 向上）：前缘=上缘
+    move_to(&ui, 120.0, 112.0);
     assert!(bus.get_active());
     assert!(
         (bus.get_fly_peak() - 1.6).abs() < 0.01,

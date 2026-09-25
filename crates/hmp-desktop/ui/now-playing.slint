@@ -1,28 +1,209 @@
 // 播放页 overlay（NowPlayingBody.vue + PlayerOverlay.vue，M6 移植）：
-// 环境层（渐变 + 封面低透明放大）→ 首屏舞台定高一屏（左封面+信息随其下 |
-// 右整列歌词）→ 上滑抵达评论区；底部控制台常驻（刻度进度条 + 控制排）。
+// 环境层（取色渐变 + Rust 预烘焙模糊封面等比 cover 铺底 + tint 遮罩）→
+// 首屏舞台定高一屏（左封面+信息随其下 | 右整列歌词）→ 上滑抵达评论区；
+// 底部控制台常驻（刻度进度条 + 控制排）。
+// 曲目层调色：TrackPalette global（src/track_theme.rs 的 OKLab 取色管线
+// 随封面+明暗覆写整族），本页全页消费——主界面不受影响（见 stores.slint）。
 // 歌词跟随：原型 LyricsPane 的临界阻尼弹簧（ω=12，半隐式欧拉）以 16ms
 // Timer 在 Slint 层复刻——几何全在页内，active-line 由 Rust 按推送折算。
+// 行盒自适应：行高 = 按激活态样式测得的折行排版高度（LyricLine），长行
+// 完整呈现不裁切；弹簧目标不用「行号×固定行高」折算，而是消费激活行
+// 上报的真实几何中心（report-center），与渲染布局逐帧一致。
 // 与原型的已知偏差（数据/引擎差异，AUDIT §14 追加）：无逐字扫色（QRC 词级
 // 时间轴未投影，行级 LRC）；景深无 blur（Slint 无滤镜），焦点行以字号强调；
+// 环境层/控制台无 backdrop-filter（模糊预烘焙进底图，控制台用半透明底代）；
 // 评论为扁平投影（无楼中楼/吸顶头）；头像用首字占位（UI 禁网）。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon, Scroll } from "primitives.slint";
+import { AppIcon, Scroll, TextLink } from "primitives.slint";
 import { QualityBadge } from "quality-badge.slint";
 import { VolumeControl } from "volume-control.slint";
-import { Player, NowPlaying } from "stores.slint";
+import { Player, NowPlaying, TrackPalette } from "stores.slint";
+import { Nav, Route } from "nav.slint";
+
+// ——— 歌词行（LyricsPane.vue 的 .lyric-line）———
+// 行盒模型：行高 = 行内排版本体（正文槽位 + 翻译行 + 统一 padding/间距），
+// 正文槽位钉在「激活态样式（26px/700）的折行排版高度」上——任何状态下的
+// 实际排版都不会超出它（更小字号/更轻字重只会更少折行），于是：
+//   1) 长行 word-wrap 折行后完整呈现，永不裁切（行无 clip、文本无 elide）；
+//   2) 激活切换的字号动画（23↔26px）纯视觉、不改行盒 → 行高是词表代际的
+//      常量，字号过渡期间布局零位移，弹簧目标不会抖；
+//   3) 激活行把自己在内容坐标系的真实中心上报给舞台（report-center），
+//      弹簧目标 = 上报中心 − 半视口高，与真实渲染行高天然一致。
+component LyricLine inherits Rectangle {
+    in property <int> index: 0;
+    in property <string> line-text: "";
+    in property <string> translation: "";
+    /** 行起始时间（毫秒），点击行 seek 用 */
+    in property <int> timestamp-ms: 0;
+    in property <bool> is-active: false;
+    /** 视口中心在内容坐标系的 y（跟随位置 + 半视口高），景深衰减用 */
+    in property <float> view-center-y: 0.0;
+    /** 本代平均行距：景深衰减长度（对齐 Vue 的 pitch = 行中心距） */
+    in property <float> avg-row-h: 88.0;
+    /** 激活行几何上报（行下标 + 行中心内容系 y）；舞台据此算弹簧目标 */
+    callback report-center(int, float);
+    /** 用户按下（拖拽歌词的前兆）：暂停跟随 3s */
+    callback took-over();
+    /** 点击行 seek（对齐 Vue：点击不暂停跟随） */
+    callback seek-to(int);
+
+    height: content-col.preferred-height;
+
+    /** 行中心在歌词内容坐标系的 y：rows-col 就是内容坐标系，布局分配的
+        self.y 即行在其中的偏移（滚动动的是视口，不改行内 y） */
+    property <float> center-y: self.y / 1px + self.height / 2px;
+
+    // 景深：亮度按「行中心 ↔ 视口中心」距离衰减（指数衰减的线性近似；
+    // blur Slint 无对应物，略）
+    property <float> dist:
+        Math.abs(center-y - view-center-y) / Math.max(avg-row-h, 1.0);
+    property <float> depth-o: Math.max(0.34, 1 - 0.132 * dist);
+    // hover 快速提亮找行、移出慢速沉回景深（Vue :hover → max(--line-o, 0.85)）
+    opacity: row-touch.has-hover ? Math.max(depth-o, 0.85) : depth-o;
+    animate opacity {
+        duration: row-touch.has-hover ? Theme.duration-fast : 150ms;
+        easing: linear;
+    }
+
+    function maybe-report() {
+        if (is-active) {
+            report-center(index, center-y);
+        }
+    }
+
+    // 几何三事件覆盖所有行高/位置变化（词表重建、改宽重排、换行激活）；
+    // 滚动不改行内几何（动的是视口 y），不会在这里刷屏
+    changed height => { maybe-report(); }
+    changed y => { maybe-report(); }
+    changed is-active => { maybe-report(); }
+
+    row-touch := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        mouse-cursor: pointer;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                took-over();
+            }
+        }
+        scroll-event(event) => {
+            took-over();
+            return reject;
+        }
+        clicked => {
+            seek-to(root.timestamp-ms);
+        }
+    }
+
+    // 行内节奏统一：水平 16px（Vue var(--space-4)）、垂直 0.6rem、
+    // 翻译行间距 4px（Vue .lyric-trans margin-top 0.3em ≈ 12.5px × 0.3）
+    content-col := VerticalLayout {
+        padding-left: Theme.space-4;
+        padding-right: Theme.space-4;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 4px;
+
+        // 正文槽位：高度钉在激活态折行排版高度上（见组件头注释）
+        Rectangle {
+            height: measure-text.preferred-height;
+
+            lyric-text := Text {
+                x: 0;
+                y: (parent.height - self.height) / 2;
+                width: parent.width;
+                text: line-text;
+                wrap: word-wrap;
+                horizontal-alignment: center;
+                color: is-active ? Theme.track-accent : Theme.foreground;
+                font-size: is-active ? 26px : 23px;
+                font-weight: is-active ? 700 : 600;
+                animate font-size {
+                    duration: 150ms;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
+                }
+                animate color {
+                    duration: Theme.duration-normal;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
+                }
+            }
+
+            // 测量文本：0 高裁剪容器内（combine_clip 空区域 → 不绘制），
+            // 以激活态样式测真实排版高度（Text preferred-height 在给定
+            // 宽度 + wrap 下就是折行后的排版高度）
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: 0px;
+                clip: true;
+
+                measure-text := Text {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    text: line-text;
+                    wrap: word-wrap;
+                    font-size: 26px;
+                    font-weight: 700;
+                }
+            }
+        }
+
+        if translation != "": Text {
+            text: translation;
+            wrap: word-wrap;
+            horizontal-alignment: center;
+            color: Theme.muted-foreground;
+            // Vue .lyric-trans：0.78em（16px 根字号）/ 500 / muted
+            font-size: 12.5px;
+            font-weight: 500;
+        }
+    }
+}
 
 export component NowPlayingOverlay inherits Rectangle {
-    background: @linear-gradient(180deg, Theme.track-grad-from, Theme.track-grad-to);
-    clip: true;
+    background: transparent;
+
+    // —— slide-bottom 入/退场（Vue MainLayout 的 Transition）———
+    // 整层（含环境层）自窗口底滑入 / 滑出；挂载站 app.slint 负责软卸载
+    // （退场播完再 visible=false）。entered 由 16ms Timer 翻转起跳——
+    // animate 只在绑定值变化时启动，挂载初值直达不算变化（PORTING 坑位）。
+    /** 退场中（仍挂载，见 app.slint overlay-hold）：y 目标回到窗口底 */
+    in property <bool> leaving: false;
+    property <bool> entered: false;
+    enter-timer := Timer {
+        interval: 16ms;
+        running: true;
+        triggered => {
+            root.entered = true;
+            enter-timer.stop();
+        }
+    }
 
     // —— 排序 tab 数据（下标即 NowPlaying.comment-sort）———
     property <[string]> sort-tabs: ["最热", "最新"];
 
+    slide := Rectangle {
+        x: 0;
+        y: root.entered && !root.leaving ? 0px : parent.height;
+        width: parent.width;
+        height: parent.height;
+        clip: true;
+        background: @linear-gradient(180deg, TrackPalette.grad-from, TrackPalette.grad-to);
+        animate y {
+            duration: Theme.duration-slow;
+            easing: cubic-bezier(0.2, 0, 0, 1);
+        }
 
-    // —— 环境层：封面放大低透明铺底（Slint 无 blur 滤镜，靠低透明度融入渐变）———
-    if Player.has-track && Player.cover.width > 0: Rectangle {
+
+    // —— 环境层（Vue .ambient）：Rust 预烘焙模糊封面等比 cover 铺底
+    //    （Slint 无滤镜，blur(80px)+saturate(1.2) 烘焙进 ambient-cover：
+    //    降采样+盒滤波+增饱和，GPU 双线性放大补足柔化）；overlay 放大 124%
+    //    盖满四角。ambient-tint 渐变遮罩（透明 40% → 渐变端色）压住下半，
+    //    评论/控制台的可读面从舞台氛围里浮出 ——
+    if Player.has-track && Player.ambient-cover.width > 0: Rectangle {
         x: -parent.width * 0.12;
         y: -parent.height * 0.12;
         width: parent.width * 1.24;
@@ -31,9 +212,13 @@ export component NowPlayingOverlay inherits Rectangle {
         Image {
             width: parent.width;
             height: parent.height;
-            source: Player.cover;
-            opacity: 0.1;
+            source: Player.ambient-cover;
+            image-fit: ImageFit.cover;
+            opacity: 0.25;
         }
+    }
+    Rectangle {
+        background: @linear-gradient(180deg, transparent 0.4, TrackPalette.grad-to 1.0);
     }
 
     // —— 收起键：裸 chevron 向下，墨色随环境对比度 ——
@@ -49,7 +234,7 @@ export component NowPlayingOverlay inherits Rectangle {
         AppIcon {
             source: Icons.expand_more;
             icon-color: collapse-touch.has-hover
-                ? Theme.track-on-ambient : Theme.track-on-ambient.transparentize(0.25);
+                ? TrackPalette.on-ambient : TrackPalette.on-ambient.transparentize(0.25);
             width: 22px;
             height: 22px;
             x: (parent.width - self.width) / 2;
@@ -91,31 +276,63 @@ export component NowPlayingOverlay inherits Rectangle {
                 height: page.view-height;
 
                 // —— 歌词跟随弹簧（原型 LyricsPane 的临界阻尼弹簧，Slint 层复刻：
-                //    ω=12 半隐式欧拉 dt=16ms；几何全在舞台作用域内）———
-                property <int> row-h: 88;
+                //    ω=12 半隐式欧拉 dt=16ms）。目标位置不用「行号×固定行高」
+                //    折算：行高可变后无法在 Slint 里对模型求前缀和，改为消费
+                //    激活行上报的真实几何中心（LyricLine.report-center，绝对
+                //    定位差值算内容系坐标），目标与渲染布局逐帧一致 ———
                 property <float> follow-x: 0;
                 property <float> follow-v: 0;
                 /** 用户接管歌词滚动期间弹簧静默（3s 后恢复跟随） */
                 property <bool> following: true;
                 /** 换词表/进页后免动画直达当前行 */
                 property <bool> snap-pending: true;
+                /** snap 已等待时长：active-line 的推送（10Hz）晚于词表落地，
+                    等上报到位再 snap 直达；超时兜底防止前奏曲停在旧位置 */
+                property <duration> snap-wait: 0ms;
                 property <int> last-generation: -1;
+                /** 激活行几何上报（-1 = 尚无可信上报；带代际戳，旧词表的
+                    上报不允许喂给新词表的弹簧） */
+                property <int> reported-index: -1;
+                property <int> reported-generation: -1;
+                property <float> reported-center: 0.0;
                 property <float> lyr-view-h: lyrics-scroll.view-height / 1px;
                 property <float> lyr-content-h: lyrics-scroll.content-height / 1px;
                 /** 首尾留白：首行/末行也能滚到视口中心（Apple Music 式） */
                 property <float> lyr-pad-top: lyr-view-h * 0.45;
                 property <float> lyr-pad-bottom: lyr-view-h * 0.52;
+                /** 平均行距（景深衰减长度归一；行高可变后取代际均值） */
+                property <float> avg-row-h: Math.max(1.0,
+                    (lyr-content-h - lyr-pad-top - lyr-pad-bottom)
+                        / Math.max(NowPlaying.lyrics.length, 1));
+
+                function report-center(index: int, center-y: float) {
+                    reported-index = index;
+                    reported-center = center-y;
+                    reported-generation = NowPlaying.lyrics-generation;
+                }
 
                 function lyr-target() -> float {
-                    return (NowPlaying.active-line < 0 || NowPlaying.lyrics.length <= 0)
-                        ? 0
-                        : clamp(lyr-pad-top + NowPlaying.active-line * row-h + row-h / 2 - lyr-view-h / 2,
-                            0, Math.max(0, lyr-content-h - lyr-view-h));
+                    if (NowPlaying.active-line < 0 || NowPlaying.lyrics.length <= 0) {
+                        return 0;
+                    }
+                    // 活动行的真实几何未上报（换词表/换行的间隙）→ 原地驻留，
+                    // 不用旧几何也不凭空折算，恢复上报后弹簧从当前位置续追
+                    if (reported-index != NowPlaying.active-line
+                        || reported-generation != NowPlaying.lyrics-generation) {
+                        return follow-x;
+                    }
+                    return clamp(reported-center - lyr-view-h / 2,
+                        0, Math.max(0, lyr-content-h - lyr-view-h));
                 }
 
                 function user-took-over() {
                     following = false;
                     take-over-timer.restart();
+                }
+
+                function resume-following() {
+                    take-over-timer.stop();
+                    following = true;
                 }
 
                 follow-tick := Timer {
@@ -125,16 +342,30 @@ export component NowPlayingOverlay inherits Rectangle {
                         if (NowPlaying.lyrics-generation != stage-rect.last-generation) {
                             stage-rect.last-generation = NowPlaying.lyrics-generation;
                             stage-rect.snap-pending = true;
+                            stage-rect.snap-wait = 0ms;
+                            // 不在此重置上报：行组件只在几何变化时上报，新词表
+                            // 的上报往往先于本 tick 到达，重置会把唯一的上报
+                            // 擦掉；陈旧上报由 report/guard 里的代际戳排除
                         }
                         if (!stage-rect.following) {
                             // 接管期间弹簧贴住实际位置，恢复跟随时不跳变
                             stage-rect.follow-x = -lyrics-scroll.scroll-offset / 1px;
                             stage-rect.follow-v = 0;
                         } else if (stage-rect.snap-pending) {
-                            stage-rect.snap-pending = false;
-                            stage-rect.follow-x = stage-rect.lyr-target();
-                            stage-rect.follow-v = 0;
-                            lyrics-scroll.scroll-offset = -stage-rect.follow-x * 1px;
+                            stage-rect.snap-wait += 16ms;
+                            // snap 直达的两种就绪态：激活行几何已上报（换歌表
+                            // 常态，active-line 推送晚 ~100ms 也不怕）；或确认
+                            // 无焦点行（前奏/空表）且等待已超时 → 归顶
+                            if ((NowPlaying.active-line >= 0
+                                    && stage-rect.reported-index == NowPlaying.active-line
+                                    && stage-rect.reported-generation == NowPlaying.lyrics-generation)
+                                || (NowPlaying.active-line < 0
+                                    && stage-rect.snap-wait >= 250ms)) {
+                                stage-rect.snap-pending = false;
+                                stage-rect.follow-x = stage-rect.lyr-target();
+                                stage-rect.follow-v = 0;
+                                lyrics-scroll.scroll-offset = -stage-rect.follow-x * 1px;
+                            }
                         } else {
                             stage-rect.follow-v = stage-rect.follow-v
                                 + (144 * (stage-rect.lyr-target() - stage-rect.follow-x)
@@ -154,174 +385,174 @@ export component NowPlayingOverlay inherits Rectangle {
                     interval: 3s;
                     running: false;
                     triggered => {
-                        stage-rect.following = true;
+                        stage-rect.resume-following();
                     }
                 }
 
-                HorizontalLayout {
-                    padding-left: Theme.space-10;
-                    padding-right: Theme.space-10;
-                    padding-top: Theme.space-8;
-                    padding-bottom: Theme.space-6;
-                    spacing: Theme.space-8;
+                // 舞台阅读列最大宽 68rem（1088px）水平居中（Vue .np-stage
+                // max-width + margin: 0 auto）——宽窗两侧留给环境层呼吸
+                stage-box := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: 0;
+                    width: min(parent.width, 1088px);
+                    height: parent.height;
 
-                    // —— 左列：封面 + 信息随其下 ——
-                    Rectangle {
-                        width: min(parent.height * 0.52, 336px);
-                        horizontal-stretch: 0;
+                    HorizontalLayout {
+                        padding-left: Theme.space-10;
+                        padding-right: Theme.space-10;
+                        padding-top: Theme.space-8;
+                        padding-bottom: Theme.space-6;
+                        spacing: Theme.space-8;
 
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: Theme.space-5;
-
-                            Image {
-                                height: parent.width;
-                                source: Player.cover;
-                            }
+                        // —— 左列：封面 + 信息随其下 ——
+                        Rectangle {
+                            // Vue width: min(36vh, 40%, 21rem)——vh 取舞台高
+                            width: min(parent.height * 0.36, parent.width * 0.4, 336px);
+                            horizontal-stretch: 0;
+                            // Vue --title-size: clamp(1.8rem, 4vw, 2.6rem)
+                            property <length> title-size:
+                                min(max(28.8px, Theme.win-width * 0.04), 41.6px);
 
                             VerticalLayout {
-                                spacing: 6px;
+                                alignment: center;
+                                spacing: Theme.space-5;
 
-                                HorizontalLayout {
-                                    spacing: Theme.space-2;
-                                    vertical-stretch: 0;
-
-                                    Text {
-                                        horizontal-stretch: 1;
-                                        text: Player.title;
-                                        color: Theme.foreground;
-                                        font-size: 28px;
-                                        font-weight: 700;
-                                        wrap: word-wrap;
-                                        overflow: elide;
-                                        max-height: 76px;
-                                    }
-                                    like-touch := TouchArea {
-                                        width: 32px;
-                                        height: 32px;
-                                        y: (parent.height - self.height) / 2;
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            NowPlaying.liked = !NowPlaying.liked;
-                                        }
-                                        AppIcon {
-                                            source: NowPlaying.liked
-                                                ? Icons.favorite_filled : Icons.favorite_outline;
-                                            // 裸心形 = 标题字号 × 0.8，与字形视觉对齐
-                                            width: 22.4px;
-                                            height: 22.4px;
-                                            icon-color: NowPlaying.liked ? #E5484D : Theme.foreground;
-                                            x: (parent.width - self.width) / 2;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-                                }
-                                Text {
-                                    text: Player.artists;
-                                    color: Theme.muted-foreground;
-                                    font-size: 16px;
-                                    overflow: elide;
-                                }
-                                if Player.album != "": Text {
-                                    text: Player.album;
-                                    color: Theme.muted-foreground;
-                                    font-size: 14px;
-                                    overflow: elide;
-                                }
-                            }
-                        }
-                    }
-
-                    // —— 右列：整列歌词（内部自滚，无滚动条）———
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-
-                        lyrics-scroll := Scroll {
-                            hide-scrollbar: true;
-
-                            Rectangle {
-                                width: parent.width;
-                                height: stage-rect.lyr-pad-top * 1px;
-                            }
-
-                            for line[i] in NowPlaying.lyrics: Rectangle {
-                                width: parent.width;
-                                height: stage-rect.row-h * 1px;
-                                clip: true;
-
-                                // 景深：亮度按「行中心 ↔ 视口中心」距离衰减
-                                //（指数衰减的线性近似；blur Slint 无对应物，略）
-                                property <float> dist: abs(
-                                        stage-rect.lyr-pad-top + i * stage-rect.row-h + stage-rect.row-h / 2
-                                        + lyrics-scroll.scroll-offset / 1px
-                                        - stage-rect.lyr-view-h / 2) / stage-rect.row-h;
-                                opacity: max(0.34, 1 - 0.132 * dist);
-
-                                row-touch := TouchArea {
+                                // 封面：等比 cover 裁切 + radius-lg + 深投影（Vue box-shadow-lg）
+                                Rectangle {
                                     width: parent.width;
-                                    height: parent.height;
-                                    mouse-cursor: pointer;
-                                    pointer-event(event) => {
-                                        if (event.kind == PointerEventKind.down) {
-                                            stage-rect.user-took-over();
-                                        }
-                                    }
-                                    scroll-event(event) => {
-                                        stage-rect.user-took-over();
-                                        return reject;
-                                    }
-                                    clicked => {
-                                        Player.seek-ms(line.timestamp-ms);
+                                    height: parent.width;
+                                    border-radius: Theme.radius-lg;
+                                    clip: true;
+                                    drop-shadow-blur: 32px;
+                                    drop-shadow-color: #241F1B.transparentize(0.82);
+                                    drop-shadow-offset-y: 10px;
+
+                                    Image {
+                                        x: 0;
+                                        y: 0;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        source: Player.cover;
+                                        image-fit: ImageFit.cover;
                                     }
                                 }
 
                                 VerticalLayout {
-                                    alignment: center;
-                                    spacing: 4px;
-                                    padding-left: Theme.space-4;
-                                    padding-right: Theme.space-4;
+                                    spacing: 6px;
 
-                                    Text {
-                                        text: line.text;
-                                        wrap: word-wrap;
-                                        overflow: elide;
-                                        horizontal-alignment: center;
-                                        color: i == NowPlaying.active-line
-                                            ? Theme.track-accent : Theme.foreground;
-                                        font-size: i == NowPlaying.active-line ? 26px : 23px;
-                                        font-weight: i == NowPlaying.active-line ? 700 : 600;
-                                        animate font-size {
-                                            duration: 150ms;
-                                            easing: cubic-bezier(0.2, 0, 0, 1);
+                                    HorizontalLayout {
+                                        spacing: Theme.space-2;
+                                        vertical-stretch: 0;
+
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: Player.title;
+                                            color: Theme.foreground;
+                                            font-size: title-size;
+                                            font-weight: 700;
+                                            wrap: word-wrap;
+                                            overflow: elide;
+                                            // 两行截断（Vue -webkit-line-clamp: 2，行高 1.25）
+                                            max-height: title-size * 2.5;
+                                        }
+                                        like-touch := TouchArea {
+                                            width: 32px;
+                                            height: 32px;
+                                            y: (parent.height - self.height) / 2;
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                NowPlaying.liked = !NowPlaying.liked;
+                                            }
+                                            AppIcon {
+                                                source: NowPlaying.liked
+                                                    ? Icons.favorite_filled : Icons.favorite_outline;
+                                                // 裸心形 = 标题字号 × 0.8，与字形视觉对齐
+                                                width: title-size * 0.8;
+                                                height: title-size * 0.8;
+                                                icon-color: NowPlaying.liked
+                                                    ? Theme.like-red : Theme.foreground;
+                                                x: (parent.width - self.width) / 2;
+                                                y: (parent.height - self.height) / 2;
+                                            }
                                         }
                                     }
-                                    if line.translation != "": Text {
-                                        text: line.translation;
-                                        overflow: elide;
-                                        horizontal-alignment: center;
-                                        color: Theme.muted-foreground;
-                                        font-size: 15px;
-                                        font-weight: 500;
+                                    // 歌手/专辑 → 详情页链接：参数 = 展示名（M4.5 本地投影
+                                    // 约定，与 TrackTable 歌手列一致）；点击同时收起
+                                    // overlay——Vue 不收起，但主视口被全屏层遮住，
+                                    // 不收起则看不到落点（桌面侧有意收口）
+                                    TextLink {
+                                        font-size: 16px;
+                                        text: Player.artists;
+                                        clicked => {
+                                            Nav.go(Route.artist, Player.artists);
+                                            Player.hide-overlay();
+                                        }
+                                    }
+                                    if Player.album != "": TextLink {
+                                        font-size: 14px;
+                                        text: Player.album;
+                                        clicked => {
+                                            Nav.go(Route.album, Player.album);
+                                            Player.hide-overlay();
+                                        }
                                     }
                                 }
                             }
+                        }
 
-                            Rectangle {
-                                width: parent.width;
-                                height: stage-rect.lyr-pad-bottom * 1px;
-                            }
+                        // —— 右列：整列歌词（内部自滚，无滚动条）———
+                        VerticalLayout {
+                            horizontal-stretch: 1;
 
-                            if NowPlaying.lyrics.length == 0 && !NowPlaying.lyrics-loading: Rectangle {
-                                width: parent.width;
-                                height: page.view-height;
+                            lyrics-scroll := Scroll {
+                                hide-scrollbar: true;
 
-                                Text {
-                                    y: parent.height / 2 - self.height / 2;
+                                // 行 + 首尾留白收进同一布局：行中心的内容系坐标
+                                // （绝对定位差值）与 content-height 同一基准
+                                rows-col := VerticalLayout {
+                                    Rectangle {
+                                        height: stage-rect.lyr-pad-top * 1px;
+                                    }
+
+                                    for line[i] in NowPlaying.lyrics: LyricLine {
+                                        index: i;
+                                        line-text: line.text;
+                                        translation: line.translation;
+                                        timestamp-ms: line.timestamp-ms;
+                                        is-active: i == NowPlaying.active-line;
+                                        view-center-y: stage-rect.follow-x + stage-rect.lyr-view-h / 2;
+                                        avg-row-h: stage-rect.avg-row-h;
+                                        report-center(idx, cy) => {
+                                            stage-rect.report-center(idx, cy);
+                                        }
+                                        took-over => {
+                                            stage-rect.user-took-over();
+                                        }
+                                        seek-to(ms) => {
+                                            Player.seek-ms(ms);
+                                            // 点击 seek 不暂停跟随（对齐 Vue）：
+                                            // 立即恢复，弹簧从当前实际位置追新目标，无跳变
+                                            stage-rect.resume-following();
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: stage-rect.lyr-pad-bottom * 1px;
+                                    }
+                                }
+
+                                if NowPlaying.lyrics.length == 0 && !NowPlaying.lyrics-loading: Rectangle {
                                     width: parent.width;
-                                    text: NowPlaying.lyrics-loading ? "歌词加载中…" : "暂无歌词";
-                                    color: Theme.muted-foreground;
-                                    font-size: 15px;
-                                    horizontal-alignment: center;
+                                    height: page.view-height;
+
+                                    Text {
+                                        y: parent.height / 2 - self.height / 2;
+                                        width: parent.width;
+                                        text: NowPlaying.lyrics-loading ? "歌词加载中…" : "暂无歌词";
+                                        color: Theme.muted-foreground;
+                                        font-size: 15px;
+                                        horizontal-alignment: center;
+                                    }
                                 }
                             }
                         }
@@ -329,11 +560,19 @@ export component NowPlayingOverlay inherits Rectangle {
                 }
             }
 
-            // —— 评论区（继续上滑自然抵达；顶部透明→端色过渡带消接缝）———
+            // —— 评论区（继续上滑自然抵达）———
+            // 顶端固定 112px（Vue 7rem）透明→端色过渡带：环境层固定在视口而
+            // 本节随内容滚动，实心底会撞出移动的硬接缝；固定长度渐变带让阅读
+            // 面从舞台氛围里浮现（比例渐变会随内容高度伸缩，读作位置不定的"带"）
             if Player.has-track: Rectangle {
                 width: parent.width;
-                min-height: page.view-height * 0.75;
-                background: @linear-gradient(180deg, transparent 0.0, Theme.track-grad-to 0.12);
+                height: 112px;
+                background: @linear-gradient(180deg, transparent, TrackPalette.grad-to);
+            }
+            if Player.has-track: Rectangle {
+                width: parent.width;
+                min-height: page.view-height * 0.75 - 112px;
+                background: TrackPalette.grad-to;
 
                 VerticalLayout {
                     padding-left: Theme.space-8;
@@ -567,9 +806,10 @@ export component NowPlayingOverlay inherits Rectangle {
         }
 
         // —— 底部控制台：常驻，不随内容滚动 ——
+        // Vue backdrop-filter blur(18px) 无对应物，半透明端色底 + 发丝线近似
         Rectangle {
             height: 116px;
-            background: Theme.track-grad-to.transparentize(0.22);
+            background: TrackPalette.grad-to.transparentize(0.22);
             Rectangle {
                 x: 0;
                 y: 0;
@@ -577,6 +817,14 @@ export component NowPlayingOverlay inherits Rectangle {
                 height: 1px;
                 background: Theme.hairline;
             }
+
+            // 控制台阅读列最大宽 72rem（1152px）水平居中（Vue .np-ruler /
+            // .np-console-row max-width + margin auto）
+            console-box := Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: 0;
+                width: min(parent.width, 1152px);
+                height: parent.height;
 
             VerticalLayout {
                 padding-left: Theme.space-6;
@@ -610,7 +858,7 @@ export component NowPlayingOverlay inherits Rectangle {
                             width: parent.width * ruler.shown;
                             height: parent.height;
                             border-radius: parent.border-radius;
-                            background: Theme.track-accent;
+                            background: TrackPalette.accent;
                         }
                     }
                     for t in [10, 20, 30, 40, 60, 70, 80, 90]: Rectangle {
@@ -635,7 +883,7 @@ export component NowPlayingOverlay inherits Rectangle {
                         width: ruler-touch.has-hover || ruler-touch.pressed ? 12px : 0px;
                         height: self.width;
                         border-radius: Theme.pill(self.height);
-                        background: Theme.track-accent;
+                        background: TrackPalette.accent;
                         animate width {
                             duration: Theme.duration-fast;
                             easing: cubic-bezier(0.2, 0, 0, 1);
@@ -647,14 +895,14 @@ export component NowPlayingOverlay inherits Rectangle {
                         width: 64px;
                         height: 24px;
                         border-radius: Theme.radius-md;
-                        background: Theme.track-deep;
+                        background: TrackPalette.deep;
 
                         property <int> shown-secs: Math.floor(ruler.shown * Player.duration-ms / 1000);
                         Text {
                             width: parent.width;
                             y: (parent.height - self.height) / 2;
                             text: "\{Math.floor(parent.shown-secs / 60)}:\{Math.mod(parent.shown-secs, 60) < 10 ? "0" : ""}\{Math.mod(parent.shown-secs, 60)}";
-                            color: Theme.track-deep-fg;
+                            color: TrackPalette.deep-fg;
                             font-size: 12px;
                             horizontal-alignment: center;
                         }
@@ -685,7 +933,8 @@ export component NowPlayingOverlay inherits Rectangle {
                     height: 44px;
                     spacing: Theme.space-2;
 
-                    // 左簇：音质徽章 + 音量（复用 PlayerBar 同款）
+                    // 左簇：音质徽章 + 音量（复用 PlayerBar 同款；overlay 上下文
+                    // 下两组件经 TrackPalette.ctx-* 自动跟专辑色）
                     HorizontalLayout {
                         horizontal-stretch: 1;
                         spacing: Theme.space-2;
@@ -699,44 +948,73 @@ export component NowPlayingOverlay inherits Rectangle {
                         }
                     }
 
-                    // 中簇：随机 / 上一曲 / 主播放键 / 下一曲 / 循环
+                    // 中簇：随机 / 上一曲 / 主播放键 / 下一曲 / 循环。
+                    // 尺寸对齐 Vue：模式键 2.25rem、控制键 2.5rem、主键 3rem；
+                    // hover 一律曲目层强调色软底圆（--track-accent-soft）
                     HorizontalLayout {
                         spacing: Theme.space-4;
                         alignment: center;
 
+                        // 随机：高亮绑 Player.shuffle 真实状态（daemon playback.shuffle）
                         shuffle-touch := TouchArea {
-                            property <bool> on: false;
                             width: 36px;
                             height: 36px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
                             clicked => {
-                                shuffle-touch.on = !shuffle-touch.on;
+                                Player.toggle-shuffle();
                             }
-                            AppIcon {
-                                source: Icons.shuffle;
-                                icon-color: shuffle-touch.on ? Theme.track-accent : Theme.muted-foreground;
-                                width: 18px;
-                                height: 18px;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
+                            Rectangle {
+                                width: parent.width;
+                                height: parent.height;
+                                border-radius: Theme.pill(self.height);
+                                background: shuffle-touch.has-hover ? TrackPalette.accent-soft : transparent;
+                                animate background {
+                                    duration: Theme.duration-fast;
+                                    easing: cubic-bezier(0.2, 0, 0, 1);
+                                }
+
+                                AppIcon {
+                                    source: Icons.shuffle;
+                                    icon-color: Player.shuffle ? TrackPalette.accent
+                                        : shuffle-touch.has-hover ? Theme.foreground : Theme.muted-foreground;
+                                    animate icon-color {
+                                        duration: Theme.duration-fast;
+                                        easing: cubic-bezier(0.2, 0, 0, 1);
+                                    }
+                                    width: 18px;
+                                    height: 18px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
                             }
                         }
                         prev-touch := TouchArea {
-                            width: 36px;
-                            height: 36px;
+                            width: 40px;
+                            height: 40px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
                             clicked => {
                                 Player.previous();
                             }
-                            AppIcon {
-                                source: Icons.skip_previous;
-                                icon-color: Theme.foreground;
-                                width: 22px;
-                                height: 22px;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
+                            Rectangle {
+                                width: parent.width;
+                                height: parent.height;
+                                border-radius: Theme.pill(self.height);
+                                background: prev-touch.has-hover ? TrackPalette.accent-soft : transparent;
+                                animate background {
+                                    duration: Theme.duration-fast;
+                                    easing: cubic-bezier(0.2, 0, 0, 1);
+                                }
+
+                                AppIcon {
+                                    source: Icons.skip_previous;
+                                    icon-color: Theme.foreground;
+                                    width: 22px;
+                                    height: 22px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
                             }
                         }
                         // 主播放键：48px 圆，曲目层强调色——最大但不过分高出邻键
@@ -752,12 +1030,15 @@ export component NowPlayingOverlay inherits Rectangle {
                                 width: parent.width;
                                 height: parent.height;
                                 border-radius: Theme.pill(self.height);
-                                background: Theme.track-accent;
+                                background: TrackPalette.accent;
                                 opacity: Player.loading ? 0.55 : 1;
+                                drop-shadow-blur: 16px;
+                                drop-shadow-color: #241F1B.transparentize(0.72);
+                                drop-shadow-offset-y: 4px;
 
                                 AppIcon {
                                     source: Player.playing ? Icons.pause : Icons.play_arrow;
-                                    icon-color: Theme.track-on-accent;
+                                    icon-color: TrackPalette.on-accent;
                                     width: 24px;
                                     height: 24px;
                                     x: (parent.width - self.width) / 2;
@@ -766,38 +1047,66 @@ export component NowPlayingOverlay inherits Rectangle {
                             }
                         }
                         next-touch := TouchArea {
-                            width: 36px;
-                            height: 36px;
+                            width: 40px;
+                            height: 40px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
                             clicked => {
                                 Player.next();
                             }
-                            AppIcon {
-                                source: Icons.skip_next;
-                                icon-color: Theme.foreground;
-                                width: 22px;
-                                height: 22px;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
+                            Rectangle {
+                                width: parent.width;
+                                height: parent.height;
+                                border-radius: Theme.pill(self.height);
+                                background: next-touch.has-hover ? TrackPalette.accent-soft : transparent;
+                                animate background {
+                                    duration: Theme.duration-fast;
+                                    easing: cubic-bezier(0.2, 0, 0, 1);
+                                }
+
+                                AppIcon {
+                                    source: Icons.skip_next;
+                                    icon-color: Theme.foreground;
+                                    width: 22px;
+                                    height: 22px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
                             }
                         }
+                        // 循环：点击循环切换三态（0=顺序 1=单曲 2=列表），
+                        // 图标/高亮按 Player.loop-mode 真实状态
                         repeat-touch := TouchArea {
-                            property <bool> on: false;
                             width: 36px;
                             height: 36px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
                             clicked => {
-                                repeat-touch.on = !repeat-touch.on;
+                                Player.cycle-loop-mode();
                             }
-                            AppIcon {
-                                source: Icons.repeat;
-                                icon-color: repeat-touch.on ? Theme.track-accent : Theme.muted-foreground;
-                                width: 18px;
-                                height: 18px;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
+                            Rectangle {
+                                width: parent.width;
+                                height: parent.height;
+                                border-radius: Theme.pill(self.height);
+                                background: repeat-touch.has-hover ? TrackPalette.accent-soft : transparent;
+                                animate background {
+                                    duration: Theme.duration-fast;
+                                    easing: cubic-bezier(0.2, 0, 0, 1);
+                                }
+
+                                AppIcon {
+                                    source: Player.loop-mode == 1 ? Icons.repeat_one : Icons.repeat;
+                                    icon-color: Player.loop-mode != 0 ? TrackPalette.accent
+                                        : repeat-touch.has-hover ? Theme.foreground : Theme.muted-foreground;
+                                    animate icon-color {
+                                        duration: Theme.duration-fast;
+                                        easing: cubic-bezier(0.2, 0, 0, 1);
+                                    }
+                                    width: 18px;
+                                    height: 18px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
                             }
                         }
                     }
@@ -817,14 +1126,25 @@ export component NowPlayingOverlay inherits Rectangle {
                                 page.scroll-offset = -min(page.view-height,
                                     Math.max(0px, page.content-height - page.view-height));
                             }
-                            AppIcon {
-                                source: Icons.comment_outline;
-                                icon-color: jump-comments.has-hover
-                                    ? Theme.foreground : Theme.muted-foreground;
-                                width: 20px;
-                                height: 20px;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
+                            Rectangle {
+                                width: parent.width;
+                                height: parent.height;
+                                border-radius: Theme.pill(self.height);
+                                background: jump-comments.has-hover ? TrackPalette.accent-soft : transparent;
+                                animate background {
+                                    duration: Theme.duration-fast;
+                                    easing: cubic-bezier(0.2, 0, 0, 1);
+                                }
+
+                                AppIcon {
+                                    source: Icons.comment_outline;
+                                    icon-color: jump-comments.has-hover
+                                        ? Theme.foreground : Theme.muted-foreground;
+                                    width: 20px;
+                                    height: 20px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
                             }
                         }
                         jump-queue := TouchArea {
@@ -835,19 +1155,32 @@ export component NowPlayingOverlay inherits Rectangle {
                             clicked => {
                                 Player.toggle-queue();
                             }
-                            AppIcon {
-                                source: Icons.queue_music;
-                                icon-color: jump-queue.has-hover
-                                    ? Theme.foreground : Theme.muted-foreground;
-                                width: 22px;
-                                height: 22px;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
+                            Rectangle {
+                                width: parent.width;
+                                height: parent.height;
+                                border-radius: Theme.pill(self.height);
+                                background: jump-queue.has-hover ? TrackPalette.accent-soft : transparent;
+                                animate background {
+                                    duration: Theme.duration-fast;
+                                    easing: cubic-bezier(0.2, 0, 0, 1);
+                                }
+
+                                AppIcon {
+                                    source: Icons.queue_music;
+                                    icon-color: jump-queue.has-hover
+                                        ? Theme.foreground : Theme.muted-foreground;
+                                    width: 22px;
+                                    height: 22px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
                             }
                         }
                     }
                 }
+                }
             }
         }
     }
+    } // slide
 }

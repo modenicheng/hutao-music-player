@@ -1,6 +1,7 @@
 // 应用状态 globals（player.ts / qualityStore.ts 的 Slint 对应物）。
 // 状态属性由 Rust 权威写入；回调发命令给 Rust（模拟播放桥，M8 换真实后端）。
 import { TrackRow, CoverCardData, FolderRow, PlaylistCover, LyricRow, CommentRow } from "data.slint";
+import { Theme } from "theme.slint";
 
 export global Player {
     // —— 播放状态快照（PlayerStateSnapshot）———
@@ -22,6 +23,9 @@ export global Player {
     /** 专辑名（播放页 meta 展示；无专辑数据为空串） */
     in-out property <string> album: "";
     in-out property <image> cover;
+    /** 环境层模糊底图（Rust 预烘焙：降采样+盒滤波+增饱和，等效 CSS blur+saturate；
+        空图 = 无环境层；随封面/换曲更新） */
+    in-out property <image> ambient-cover;
     in-out property <string> track-quality: "";
     /** 曲目最高音质档（0=标准 1=高清 2=无损 3=Hi-Res），Rust 从 quality 文案推导 */
     in-out property <int> track-max-tier: 0;
@@ -41,6 +45,16 @@ export global Player {
     in-out property <string> queue-current-mid: "";
     /** 抽屉元信息（Rust 侧格式化）："13 首 · 58 分钟" */
     in-out property <string> queue-meta: "";
+
+    // —— 播放模式（daemon 权威写入；切换命令经 daemon 推送回显，不做本地乐观态）———
+    /** 循环模式：0=顺序播放 1=单曲循环 2=列表循环。
+        注意：与 hmp_core::LoopMode 枚举序（None/List/Track）不同，映射见 player_bridge.rs */
+    in-out property <int> loop-mode: 0;
+    /** 循环模式三态切换：顺序 → 单曲循环 → 列表循环 → 顺序 */
+    callback cycle-loop-mode();
+    /** 随机播放（daemon playback.shuffle） */
+    in-out property <bool> shuffle: false;
+    callback toggle-shuffle();
 
     // —— 命令 ———
     callback toggle-play();
@@ -187,4 +201,31 @@ export global NowPlaying {
     // —— 喜欢（mock 态：换曲回落未点亮，与原型一致）———
     in-out property <bool> liked: false;
     callback toggle-liked();
+}
+
+// —— 曲目层动态调色（Vue trackTheme.ts + lib/color 取色管线的对应物，M6）——
+// Rust 取色模块（src/track_theme.rs）随当前曲封面 + 主题明暗权威写入整族；
+// 默认值 = 品牌胡桃木（与 Theme.track-* 同源同值）。
+// 作用域纪律对齐 Vue：--track-* 只注入播放页 overlay 子树，主界面永远消费
+// 品牌回退——双上下文组件（QualityBadge / VolumeControl / QueueDrawer 在主界面
+// 与 overlay 两处复用）经 ctx-* 按上下文取色；纯主界面组件继续读
+// Theme.track-*（静态品牌，永不被运行时覆写）。
+export global TrackPalette {
+    // —— 取色结果（Rust 写入；无封面 / 灰阶封面 = 品牌回退族）———
+    in-out property <color> accent: Theme.accent;
+    in-out property <color> on-accent: Theme.dark ? #12100D : #FFFFFF;
+    in-out property <color> accent-soft: Theme.dark ? Theme.accent.transparentize(0.8) : Theme.accent.transparentize(0.88);
+    in-out property <color> deep: Theme.dark ? #2B1A17 : #6B302A;
+    in-out property <color> deep-fg: #F7F0EA;
+    in-out property <color> grad-from: Theme.dark ? #241A19 : #F3E2DE;
+    in-out property <color> grad-to: Theme.dark ? #181412 : #FAF9F8;
+    in-out property <color> on-ambient: Theme.dark ? #FAF9F8 : #342827;
+    /** true = 当前为品牌回退（无专辑色） */
+    in-out property <bool> is-fallback: true;
+
+    // —— 双上下文解析：overlay 打开 → 跟专辑色；主界面 → 品牌胡桃木 ——
+    out property <color> ctx-accent: Player.overlay-visible ? accent : Theme.track-accent;
+    out property <brush> ctx-accent-soft: Player.overlay-visible ? accent-soft : Theme.track-accent-soft;
+    out property <color> ctx-deep: Player.overlay-visible ? deep : Theme.track-deep;
+    out property <color> ctx-deep-fg: Player.overlay-visible ? deep-fg : Theme.track-deep-fg;
 }

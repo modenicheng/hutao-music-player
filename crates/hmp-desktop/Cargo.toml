@@ -22,8 +22,9 @@ image = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 # SVG 图标经 slint-build 编译期栅格化（无需运行时 svg 特性）；
-# resvg 供 covers.rs 运行时栅格化程序化封面
-slint = "1.17"
+# resvg 供 covers.rs 运行时栅格化程序化封面；
+# unstable-winit-030 = winit 句柄访问器（title-bar 拖动走系统级移动循环）
+slint = { version = "1.17", features = ["unstable-winit-030"] }
 resvg = "0.47"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 tokio-util = { workspace = true }

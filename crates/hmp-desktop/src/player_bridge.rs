@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use slint::{ComponentHandle, Global, Model, ModelRc, TimerMode, VecModel, Weak};
 
 use hmp_core::ipc::{DaemonState, Request, Response};
-use hmp_core::{AudioQuality, PlaybackState, PlaybackStatus, PlayerCommand, TrackId};
+use hmp_core::{AudioQuality, LoopMode, PlaybackState, PlaybackStatus, PlayerCommand, TrackId};
 
 use crate::backend::{BackendRuntime, QueueRowMeta, UiStateEvent};
 use crate::{AppWindow, CommentRow, LyricRow, NowPlaying, Player, TrackRow};
@@ -49,7 +49,8 @@ struct EchoGuard {
 impl EchoGuard {
     /// daemon 音量推送是否可回写（本地回显窗口已过）。
     fn volume_echo_expired(&self) -> bool {
-        self.volume_echo_until.is_none_or(|until| Instant::now() >= until)
+        self.volume_echo_until
+            .is_none_or(|until| Instant::now() >= until)
     }
 }
 
@@ -121,11 +122,12 @@ fn show_feedback(ui_weak: &Weak<AppWindow>, message: String) {
         };
         Player::get(&ui).set_feedback(message.into());
         FEEDBACK_TIMER.with(|cell| {
-            cell.borrow().start(slint::TimerMode::SingleShot, FEEDBACK_DISMISS, || {
-                if let Some(ui) = FEEDBACK_UI.with(|cell| cell.borrow().upgrade()) {
-                    Player::get(&ui).set_feedback("".into());
-                }
-            });
+            cell.borrow()
+                .start(slint::TimerMode::SingleShot, FEEDBACK_DISMISS, || {
+                    if let Some(ui) = FEEDBACK_UI.with(|cell| cell.borrow().upgrade()) {
+                        Player::get(&ui).set_feedback("".into());
+                    }
+                });
         });
     });
 }
@@ -159,6 +161,45 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
     command_callback!(on_next, Request::Command(PlayerCommand::Next));
     command_callback!(on_previous, Request::Command(PlayerCommand::Previous));
     command_callback!(on_clear_queue, Request::QueueClear { all: true });
+    {
+        // 循环模式三态切换：闭包经 ui_weak.upgrade() 读实时档位算下一态
+        // （顺序 → 单曲循环 → 列表循环 → 顺序）。展示以 daemon 推送回写
+        // （与播放/暂停同路数，不本地乐观态）；离线命令被拒弹反馈条、图标不动。
+        let runtime = Arc::clone(&runtime);
+        let ui_weak = ui_weak.clone();
+        player.on_cycle_loop_mode(move || {
+            let current = ui_weak
+                .upgrade()
+                .map(|ui| Player::get(&ui).get_loop_mode())
+                .unwrap_or(0);
+            let next = match current {
+                1 => LoopMode::List,
+                2 => LoopMode::None,
+                _ => LoopMode::Track,
+            };
+            dispatch_command(
+                &runtime,
+                &ui_weak,
+                Request::Command(PlayerCommand::SetLoopMode(next)),
+            );
+        });
+    }
+    {
+        // 随机播放开关：同样读实时值取反。
+        let runtime = Arc::clone(&runtime);
+        let ui_weak = ui_weak.clone();
+        player.on_toggle_shuffle(move || {
+            let shuffle = ui_weak
+                .upgrade()
+                .map(|ui| Player::get(&ui).get_shuffle())
+                .unwrap_or(false);
+            dispatch_command(
+                &runtime,
+                &ui_weak,
+                Request::Command(PlayerCommand::SetShuffle(!shuffle)),
+            );
+        });
+    }
     {
         let runtime = Arc::clone(&runtime);
         let ui_weak = ui_weak.clone();
@@ -239,12 +280,15 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
             // IPC 节流：距上次发送不足间隔 → 记为待发并定尾随定时器，否则立即发
             *pending.borrow_mut() = Some(volume);
             let now = Instant::now();
-            let since_send =
-                last_sent.borrow().map(|t| now.saturating_duration_since(t));
+            let since_send = last_sent.borrow().map(|t| now.saturating_duration_since(t));
             match since_send {
                 Some(elapsed) if elapsed < VOLUME_IPC_INTERVAL => {
                     let callback = Rc::clone(&send_pending);
-                    ipc_timer.start(TimerMode::SingleShot, VOLUME_IPC_INTERVAL - elapsed, move || callback());
+                    ipc_timer.start(
+                        TimerMode::SingleShot,
+                        VOLUME_IPC_INTERVAL - elapsed,
+                        move || callback(),
+                    );
                 }
                 _ => {
                     send_pending();
@@ -360,7 +404,13 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
     let runtime_for_state = Arc::clone(&runtime);
     let echo_for_state = Arc::clone(&echo);
     let handler = Arc::new(move |event: UiStateEvent| {
-        apply_event(&ui_weak, &runtime_for_state, &queue_mids, &echo_for_state, event);
+        apply_event(
+            &ui_weak,
+            &runtime_for_state,
+            &queue_mids,
+            &echo_for_state,
+            event,
+        );
     });
     crate::backend::spawn_state_subscription(&runtime, handler);
 }
@@ -461,6 +511,9 @@ fn apply_offline(player: &Player, ui_weak: &Weak<AppWindow>) {
     player.set_can_previous(false);
     player.set_can_next(false);
     player.set_queue_current_mid("".into());
+    // 播放模式回到默认（顺序播放、非随机）；重连后由 daemon 推送恢复真值。
+    player.set_loop_mode(0);
+    player.set_shuffle(false);
     LAST_SHOWN_ERROR.with(|cell| *cell.borrow_mut() = None);
     clear_now_playing(player, ui_weak);
 }
@@ -520,6 +573,10 @@ fn apply_daemon_state(
     player.set_can_previous(state.caps.can_go_previous);
     player.set_can_next(state.caps.can_go_next);
     player.set_queue_current_mid(current_mid(state, queue_mids).into());
+    // 播放模式（循环/随机）跟随 daemon 推送（唯一状态出口；切换命令受理即
+    // 静默，新值随下一次推送回显，不做本地乐观态避免与推送打架）。
+    player.set_loop_mode(loop_mode_index(playback.loop_mode));
+    player.set_shuffle(playback.shuffle);
 
     let Some(track) = &playback.current else {
         echo.lock().expect("echo").pending_seek = None;
@@ -589,8 +646,24 @@ fn apply_daemon_state(
     }
     player.set_title(track.title.as_str().into());
     player.set_artists(track.artist_names().into());
-    player.set_album(track.album.as_ref().map(|a| a.name.as_str()).unwrap_or_default().into());
-    player.set_cover(cover_for_track(&track.id.0, track.cover.as_ref()));
+    player.set_album(
+        track
+            .album
+            .as_ref()
+            .map(|a| a.name.as_str())
+            .unwrap_or_default()
+            .into(),
+    );
+    let cover = cover_for_track(&track.id.0, track.cover.as_ref());
+    player.set_cover(cover.clone());
+    // 曲目层取色 + 环境层模糊底图随封面更新（apply_cover 内部按键去重，
+    // 10Hz 推送同曲零重算）；QQ 远程封面先吃程序化占位的取色，真图回包
+    // 后在 spawn_cover_fetch 落点按 mid|url 键重算
+    let cover_key = match track.cover.as_ref() {
+        Some(cover) => format!("{}|{}", track.id.0, cover.url),
+        None => format!("{}|prog", track.id.0),
+    };
+    crate::track_theme::apply_cover(ui_weak, &cover_key, &cover);
     // QQ 远程封面：UI 禁直连 HTTP → 经 daemon CoverGet 换本地产物
     // （先程序化占位，回包后按 mid 复核防串台；每 mid 每进程只请求一次，
     // daemon 侧 covers/ 目录按内容哈希持久去重）。
@@ -607,11 +680,7 @@ fn apply_daemon_state(
 /// 播放页歌词装载（QQ 曲目）：LyricGet → LRC 解析 → 模型落地。
 /// 每 mid 每进程只请求一次（失败不重试，换曲再回来时自然重试）；
 /// 回包时当前曲已换 → 丢弃（串台守卫，同封面取回路径）。
-fn spawn_lyric_fetch(
-    ui_weak: &Weak<AppWindow>,
-    runtime: &Arc<BackendRuntime>,
-    mid: String,
-) {
+fn spawn_lyric_fetch(ui_weak: &Weak<AppWindow>, runtime: &Arc<BackendRuntime>, mid: String) {
     thread_local! {
         static REQUESTED: RefCell<std::collections::HashSet<String>> = RefCell::new(HashSet::new());
     }
@@ -622,9 +691,7 @@ fn spawn_lyric_fetch(
     let runtime = Arc::clone(runtime);
     runtime.spawn(async move {
         let lines = match crate::backend::request(Request::LyricGet { mid: mid.clone() }).await {
-            Ok(Response::Lyric(page)) => {
-                crate::lyrics::parse_lrc(&page.lyric, &page.translation)
-            }
+            Ok(Response::Lyric(page)) => crate::lyrics::parse_lrc(&page.lyric, &page.translation),
             _ => Vec::new(),
         };
         let _ = slint::invoke_from_event_loop(move || {
@@ -728,9 +795,7 @@ fn spawn_comment_fetch(
                 return;
             };
             let np = NowPlaying::get(&ui);
-            if Player::get(&ui).get_current_mid() != mid.as_str()
-                || np.get_comment_sort() != sort
-            {
+            if Player::get(&ui).get_current_mid() != mid.as_str() || np.get_comment_sort() != sort {
                 return;
             }
             match result {
@@ -792,6 +857,8 @@ fn spawn_cover_fetch(
     let ui_weak = ui_weak.clone();
     let runtime = Arc::clone(runtime);
     runtime.spawn(async move {
+        // 取色键与同步路径一致（mid|url）：真图落地后下一帧推送同键零重算
+        let cover_key = format!("{mid}|{url}");
         let Ok(Response::Cover(uri)) = crate::backend::request(Request::CoverGet { url }).await
         else {
             return;
@@ -808,7 +875,9 @@ fn spawn_cover_fetch(
                 return; // 换曲竞态：迟到的封面不得串台
             }
             if let Some(image) = load_cover_cached(&path) {
-                player.set_cover(image);
+                player.set_cover(image.clone());
+                // 真图取色覆写程序化占位的取色
+                crate::track_theme::apply_cover(&ui_weak, &cover_key, &image);
             }
         });
     });
@@ -833,6 +902,8 @@ fn clear_now_playing(player: &Player, ui_weak: &Weak<AppWindow>) {
     LYRIC_STAMPS.with(|cell| cell.borrow_mut().clear());
     COMMENT_KEY.with(|cell| *cell.borrow_mut() = None);
     if let Some(ui) = ui_weak.upgrade() {
+        // 无曲 → 曲目层调色整族回落品牌胡桃木、环境层清空
+        crate::track_theme::apply_fallback(&ui);
         let np = NowPlaying::get(&ui);
         np.set_liked(false);
         np.set_active_line(-1);
@@ -859,6 +930,17 @@ fn current_mid(state: &DaemonState, queue_mids: &[String]) -> String {
 /// Duration → 毫秒 i32（UI 契约为 int；超过 i32 的时长不存在，直接截断）。
 fn duration_ms_i32(d: &Duration) -> i32 {
     d.as_millis() as i32
+}
+
+/// `hmp_core::LoopMode` → UI 档位（0=顺序播放 1=单曲循环 2=列表循环）。
+/// daemon 枚举序是 None/List/Track；UI 三态循环序刻意为 None→Track→List
+/// （顺序播放居首，与主流播放器一致），见 stores.slint 的 loop-mode 契约。
+fn loop_mode_index(mode: LoopMode) -> i32 {
+    match mode {
+        LoopMode::None => 0,
+        LoopMode::Track => 1,
+        LoopMode::List => 2,
+    }
 }
 
 /// 播放进度 0..1（时长未知/为 0 → 0；越界钳制）。
@@ -1041,6 +1123,14 @@ mod tests {
     fn duration_ms_truncates_to_i32() {
         assert_eq!(duration_ms_i32(&Duration::from_millis(215_123)), 215_123);
         assert_eq!(duration_ms_i32(&Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn loop_mode_index_matches_ui_cycle_order() {
+        // UI 三态循环序：0=顺序播放 1=单曲循环 2=列表循环（非 daemon 枚举序）。
+        assert_eq!(loop_mode_index(LoopMode::None), 0);
+        assert_eq!(loop_mode_index(LoopMode::Track), 1);
+        assert_eq!(loop_mode_index(LoopMode::List), 2);
     }
 
     #[test]

@@ -12,7 +12,7 @@
 | player.ts `PlayerController`（provide/inject） | `Player` global：状态属性 + 命令回调，Rust 侧权威写入（模拟桥，M8 换真实后端） |
 | qualityStore / themeStore | `Quality` / `AppTheme` global（持久化见下） |
 | index.css 设计 token（亮/暗两套 CSS 变量） | `theme.slint` 的 `Theme` global（亮暗双值三元绑定；`Palette.color-scheme` 作系统偏好代理） |
-| `--track-*` 曲目层（v0.3 只注入播放页 overlay） | `TrackPalette` global：`in-out` 默认绑定品牌回退值，播放页取色模块（M6）运行时覆写 |
+| `--track-*` 曲目层（v0.3 只注入播放页 overlay） | `TrackPalette` global（stores.slint）：默认值=品牌胡桃木（与 Theme.track-* 同源），`src/track_theme.rs` OKLab 取色运行时覆写；`ctx-*` 按上下文解析（overlay=专辑色/主界面=品牌），`Theme.track-*` 恒为静态品牌 |
 | AppIcon（currentColor 内联 SVG） | `AppIcon`：`Image { colorize: }`，SVG 资产拷贝到 `ui/assets/icons/`（slint 需 `features=["svg"]`） |
 | HoverGroup 滑动高亮 | `HoverGroup`/`HoverItem`：元素 `absolute-position`（窗口系）差值 → 组内坐标，`HoverBus` global 中转；animate x/y/width/height 140ms cubic-bezier(0.22,1,0.36,1) + opacity 240ms；indicator 层同几何滑动 |
 | Scroll 自绘滚动条（900ms 自动隐藏） | `Flickable` + 覆盖层 thumb + `Timer` 自动隐藏 + `hide-scrollbar`（thumb 不渲染） |
@@ -31,7 +31,7 @@
 - [x] **M3 库页**：TrackTable / CoverCard / SectionHeader / PageHeader / FactRow / 我喜欢页（hero 卡+喜欢列表+最近预览+歌单网格）/ 最近播放 / 音乐库（监视文件夹点击过滤）/ 下载（落盘明细）/ 已购（单曲表+专辑网格+页头金额聚合）
 - [x] **M4 内容页（本地投影轮，2026-09-07）**：歌单详情（playlist_tracks + 本地/QQ 元数据补全，头部 N 首+总时长）/ 专辑详情（library_albums 组行 + local_tracks_by_album，show-album=false）/ 歌手详情（track_artists 命中 + 展示串最长包含归一 + 曲目专辑聚合网格）；CoverCardGrid 换行网格；TrackTable 歌手/专辑链接接通（本地投影参数=展示名，空参禁用）。首页/发现/榜单/搜索仍为诚实占位（等 daemon 内容读接口，AUDIT §8.2）
 - [x] **M5 设置**：总览三分类卡 + 常规（主题三选真实生效，Theme.set-mode）/ 播放（音质四档 Quality.select + 默认音量 HSlider→Player.set-volume 双写）/ 账号（账号读接口未接入 AUDIT §8.6：资料卡诚实占位 + 退出登录禁用 + FactRow "—"）
-- [ ] **M6 播放页**：全屏 overlay（slide-bottom）、RulerProgress 刻度条、控制台、OKLab 取色（TrackPalette 覆写）、歌词（弹簧跟随+景深+逐字扫色+无滚动条）、评论区（编辑部式重排）、队列抽屉 themed 态
+- [x] **M6 播放页（2026-09-09 收口，余一项后端阻塞）**：全屏 overlay（slide-bottom 入/退场 + 软卸载）、RulerProgress 刻度条、控制台、OKLab 取色（TrackPalette global 覆写，见下方 M6 收口记录）、歌词（弹簧跟随+景深+无滚动条）、评论区（编辑部式重排 + 112px 固定过渡带）、队列抽屉 themed 态；**未做**：逐字扫色（QRC 词级时间轴未投影，AUDIT §14）
 - [ ] **M7 收尾**：ESC/键盘语义、焦点可达、reduced-motion 免动画、窄窗（⅓ 宽 683px）断点核对
 - [~] **M8 数据接线**：mock → daemon IPC（2026-09-07 完成首轮：播放/队列/收藏歌单/最近/本地库/侧栏歌单真数据，详见下方 M8 接线记录）；内容页（M4 余量）与歌词（M6）等待后端补接口（docs/AUDIT.md §8）
 
@@ -44,6 +44,7 @@
 5. **TrackTable 歌手列简化**：歌手串整体一个链接（→ 主歌手页）；多人合唱逐人分链留到 M4 歌手页落地时评估（Slint struct 无嵌套数组，逐人分链需拆模型）。
 6. **横向滚动**（direction=all）暂缺，内容页封面横排用到时补。
 7. 旧 UI 的字符串页面标识（`current-page: "library"`）废弃，新 Nav 用枚举 + param（专辑/歌单/榜单 mid）。
+8. **无边框窗口自绘标题栏（title-bar.slint，桌面壳新增无 Vue 对应物）**：`no-frame` 后窗口操作全靠自绘——顶栏空白区按住位移超 4px 阈值 → `WinChrome.drag()`（Rust 经 `slint::winit_030::WinitWindowAccessor` 拿 winit 句柄 `drag_window()`，系统级移动循环=贴靠/半屏分列原生；testing 后端无 winit 句柄自动空操作）；双击顶栏=最大化切换；右侧 46×32 三钮（关闭 48 宽、hover 红 `#C42B1C` 白 glyph）写 Window 根元素的 `minimized`/`maximized` 双向属性 + `close()`（Slint 1.17 无 WindowDragArea，窗口属性直接挂在 Window 根上，没有 `root.window.*` 语法）。`resize-border-width: 8px`（=layout-gap）补边缘拖拽改尺寸。**坑**：组件根元素不能访问 `parent`；组件实例不设 x 时首个实例会与后继实例重叠（必须在使用站点钉 x/y/w/h——本项目所有组件几何一律在使用站点声明的惯例由此来）；`viewbox-width/height` 是无单位数值；Path 1px 描边居中于路径，0.5 偏移坐标在 1x 下最锐。SC_MOVE 模态循环吞 release，drag 返回后补发合成 PointerReleased 复位 TouchArea。
 
 ## M8 接线记录（2026-09-07，首轮）
 
@@ -97,9 +98,59 @@
   真结果、歌词 LRC、账号、音质写读还原、QQMusicDownloads 三曲队列
   QueuePlayAt(2) 跳播不换队、LibraryChanged 推送、封面下载 file://）。
 
+## M6 播放页收口（2026-09-09）
+
+**曲目层取色（OKLab 管线移植）**：`src/track_theme.rs`（994 行，11 测试，数值与
+TS 版零偏差）——oklab/binary-split/score 逐函数忠实移植（kmeans 不移：Vue 默认
+refine:"none"）。UI 契约：新 `TrackPalette` global（stores.slint），Rust 随
+封面+明暗权威写入整族；**作用域纪律对齐 Vue 的"只注入 overlay 子树"**：
+`Theme.track-*` 保持静态品牌胡桃木永不被覆写（主界面消费），播放页/取色层消费
+`TrackPalette.*`，双上下文复用组件（QualityBadge/VolumeControl/QueueDrawer）
+经 `TrackPalette.ctx-*` 按 `Player.overlay-visible` 切换。接线点：
+`apply_playback` 每帧推送按 `mid|url`/`mid|prog` 键去重（10Hz 零重算）；
+QQ 真图回包同键重算；`clear_now_playing` → 品牌回退；主题循环/设档 +
+`Theme.changed dark`（系统偏好漂移）→ `reapply_for_theme` 用缓存封面整族重算。
+
+**环境层（背景）**：Vue `blur(80px) saturate(1.2)` 无 Slint 滤镜对应物 →
+Rust 预烘焙：封面等比降采样（≤480）+ 3 趟盒滤波（半径随源宽 ~5%）+ 增饱和 ×1.2
+进 `Player.ambient-cover`，UI 侧 `image-fit: cover` 等比铺满（**修掉旧 stretch
+拉伸**）、opacity 0.25、124% 外扩；`ambient-tint` 渐变遮罩（透明 40%→端色）
+对齐 Vue。控制台 backdrop-blur 无对应物，半透明端色底 + 发丝线近似。
+
+**布局对齐 Vue**：舞台阅读列 68rem（1088px）居中；封面
+`min(36%舞台高, 40%舞台宽, 336px)` + radius-lg + clip 圆角 + 深投影；标题
+`clamp(28.8px, 4vw, 41.6px)`、喜欢图标随标题 ×0.8；控制台 72rem（1152px）
+居中，控制键 40px/模式键 36px/主键 48px，hover 一律 accent-soft 圆底；
+评论区顶端固定 112px（7rem）透明→端色过渡带（比例渐变会随内容高伸缩，
+读作位置不定的"带"）。歌手/专辑行 → 详情页 TextLink（参数=展示名，M4.5
+本地投影约定；点击同时收起 overlay——Vue 不收起但主视口被全屏层遮住，
+桌面侧有意收口）。
+
+**slide-bottom 入/退场**：内容收进 `slide := Rectangle`（y 自窗口底 0），
+`entered` 由 16ms Timer 翻转起跳（挂载初值直达不触发 animate）；app.slint
+挂载站 `overlay-ov || overlay-hold` 软卸载（同 QueueDrawer fade-hold 模式），
+`leaving` 属性驱动滑出。
+
+**队列抽屉 themed 态**：`Player.overlay-visible` → 贴右缘通高、底边停
+`np-console-clearance`（120px）、右侧直角（四角独立 border-radius）；
+底=专辑色渐变（亮 accent-soft→surface-2 60% / 暗 deep→surface-1 70%，
+叠在面板中性底上、**圆角需同步重申**——方角兄弟会盖掉面板圆角）；hover 底
+与当前行高亮走 accent/ctx；暗色下标题/正文换 deep-fg。
+
+**视觉验收（headless 软件 renderer 的三不渲染，勿误诊为 bug）**：
+`i-slint-renderer-software` 的 `draw_box_shadow` 是 TODO（阴影不画）、
+`combine_clip` 忽略 radius（clip 圆角不生效）、纹理采样是定点步进=**最近邻**
+（放大图呈块状）。圆角 clip/阴影/drop-shadow 在 femtovg（真机）都正常；
+环境层烘焙源图给到 480 也是为把最近邻块压小（128 源 12px 块 → 1.67% 跳变）。
+截图：`.shots/m6/`（light/dark/queue/comments 四视角，`--overlay --seed
+[--theme dark] [--queue] [--wheel ...]`）。
+
 ## 已知偏差（相对 Vue 版）
 
 - 数字等宽（tabular-nums）暂无 Slint 内建开关，接受默认字形；
+- 播放页环境层/控制台无 backdrop-filter：模糊预烘焙进 ambient-cover（降采样+盒滤波+增饱和），控制台半透明底近似；
+- 播放页歌手/专辑链接点击后收起 overlay（Vue 不收起；主视口被全屏层遮住，不收起看不到落点）；
+- 播放页喜欢键仍为 mock 态（换曲回落未点亮，与原型一致）；
 - 歌手列整体一个链接（→ 主歌手页），多人合唱逐人分链待 M4 评估；
 - 文件大小公式修正了 TS 版的量纲 bug（`(kbps*1000*ms)/8` → `kbps*ms/8`，旧式单曲显示 ~26 GB）；
 - 窗口标题栏 CJK 方框是 niri 装饰条字体问题，与应用无关；
@@ -128,6 +179,7 @@
 - **CLI 双轨坑（QA 数据准备）**：`hmp scan` 直读/直写 sqlite（跟随 XDG_DATA_HOME），`hmp playlist create/add` 走 daemon IPC（写 daemon 自己的库，与 shell 里的 XDG_DATA_HOME 无关）——沙箱库扫描 + CLI 建歌单会脑裂。沙箱 QA 要么全直读（歌单行手工 SQL），要么对真库验收（本轮 dshot3.sh 取消 XDG 隔离）。**dshot3.sh 只截图不编译**：cargo build 失败时它拍的是旧二进制，"改了没生效"先确认 build 真的成功。
 - **逐行 stretch 列宽会漂移**：Slint 没有跨行共享的 CSS grid fr，每行自己的布局按"该行内容首选宽"分配 stretch 余量 → 短文本行的列位置肉眼可见地左右跳动（曲目表专辑列）。修法：按根宽算定宽（TrackTable 的 `grid-available × 1.4/2.2 / 0.8/2.2`；封面卡网格 `Theme.grid-card-width` 对应 Vue `repeat(auto-fill, minmax(9rem,1fr))`）。
 - **舍入对齐**：TS `Math.round` 在 slint 侧用 `Math.round`、Rust 侧用 `f64::round`；别顺手写成 floor/div_ceil（时长"2 小时 5/6 分钟"、"m:ss" 都栽过）。
+- **`absolute-position` 在 repeater 行 + 嵌套 layout 下双重累计 self.y**（2026-09-09 播放页实测，i-slint 1.17.1 headless）：行 abs-y − 容器 abs-y = 2×self.y（布局 y 被沿祖先链重复累计）——HoverGroup 式「差值法」在歌词页这种嵌套布局里会踩雷；歌词弹簧改用行组件直接上报 `self.y + self.height/2`（布局分配的 y 即内容系偏移，滚动不改它）绕开。做窗口系几何换算前先在 headless 下实测。
 - 视觉 QA 基建：`examples/shot.rs`（`cargo run --release -p hmp-desktop --example shot -- <route> [--theme dark] [--playing] [--queue] [--hover X,Y] [--bus-hover X,Y,W,H]`，playing 走 `invoke_play_tracks` 让 PlayerHost 接管快照）+ `/tmp/hmp-qa2/dshot.sh`（niri 按 PID 找窗口 → focus-workspace/focus-window → `screenshot-window`，焦点校验+尺寸校验+重试）；Vue 对照用 `/tmp/hmp-qa/vshot2.mjs`（1420，视口 1018×1228 dpr=1.25，走真实主题循环切暗色）。winit 下 `dispatch_event(PointerMoved)` 不驱动 hover（testing backend 才行），hover 视觉用 `--bus-hover` 或真实指针。
 
 ## 构建与启动（M8 起）
@@ -139,3 +191,15 @@
   - 库页数据 = 启动时直读 `$XDG_DATA_HOME/hmp/library.sqlite3` 的静态快照：先 `hmp scan ~/Music` 入库本地曲目，QQ 侧 `hmp login` + `hmp library sync`。
   - 播放/收藏/歌单写全走 daemon（与 CLI/MPRIS 同一状态源）；`hmp quit` 后 UI 呈离线空态，不自动复活后端。
 - 视觉 QA：`cargo run --release -p hmp-desktop --example shot -- <route> [--param <值>] [--theme dark] [--queue] [--playing]`（真实应用宿主，route 如 library/recent/local/downloads/purchased/playlist/album/artist/settings*）+ `/tmp/hmp-qa2/dshot3.sh <name> <args…>`（niri 截图；**不隔离 XDG_DATA_HOME**，直读真实用户库；daemon 需已在跑，播放态用 `hmp play` 预置）。
+
+## Windows 适配（2026-09-09 落地）
+
+- **IPC 传输**：`hmp-daemon/src/transport.rs` 平台抽象——Unix = domain socket，Windows = 命名管道 `\\.\pipe\hmp`（tokio `named_pipe`）。帧协议不变；端点统一 `PathBuf` 表示。服务端 `first_pipe_instance` 兼作单实例守卫（已绑定 → `ERROR_ACCESS_DENIED` → "already running" 退出）；accept 后立即补建下一实例，客户端 connect 对 `ERROR_PIPE_BUSY` 短重试兜底。并发读共用 `tokio::io::split`（NamedPipe 无内建 into_split）。
+- **路径键规范化**：Windows `fs::canonicalize` 产出 `\\?\` verbatim 前缀，与用户拼写/事件路径/UI 展示全部失配（前缀匹配、查询、去重失灵）。统一走 `hmp_storage::{canonical_display_path, strip_verbatim}`——`begin_scan`/`scan_root_for`/`canonical_local_key`/v5 迁移/local `canonical_id`/`resolve_local` 全部收口。**新代码凡 canonicalize 结果要进库键或展示，必须过 strip**。测试构造期望键同样用该助手（TEMP 环境变量大小写与盘上真实大小写可能不一致）。
+- **daemon**：`spawn_detached` Windows 走 `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`（无 setsid）；信号 = `tokio::signal::ctrl_c()`；socket 文件清理/权限位（0600/0700）仅 Unix。MPRIS feature 不参与 Windows 构建（zbus 编译不过，勿开 `--all-features`）；SMTC 由 `#[cfg(windows)]` 无条件接入。
+- **桌面端**：后端二进制解析带 `EXE_SUFFIX`（`hmp.exe`）；`xdg` 路径 Windows 走 Known Folders（见下方"数据目录"条，忽略 msys HOME）。
+- **构建/启动**：`cargo build --release -p hmp-desktop -p hmp-cli`（`hmp.exe` 与 `hmp-desktop.exe` 同目录，桌面启动自动拉起 daemon）；CLI 全命令（status/play/pause/…）与 Linux 同语义。本地播放需先 `hmp scan <目录>` 入库。
+- **测试口径**：进程级集成测试（`tests/daemon_cli.rs` ×2）用 Unix socket + SIGTERM，`#![cfg(unix)]` 门控；Windows 靠 lib 级 transport/server 测试 + 真机冒烟覆盖。
+- **坑：无音频设备曾让"桌面拉不起 daemon"（2026-09-09 排查闭合）**：RDP 断开/VM/无声卡机器上，daemon 启动时 `open_default_output` 失败曾是致命错——进程秒死；桌面端表现即 SpawnTimeout → UI 离线，CLI `serve --background` 同样无声失败（中间进程 exit 0、孙进程即死）。且 detached 子进程 stdio 全 null、tracing WARN 落黑洞，零痕迹。修复在 `hmp-player/src/core.rs`：`PlayerCore::new()` 失败回退无设备静默 sink + 泵线程（时钟/EOS/自动切歌/SMTC 照常，仅无声；真机验证续播/暂停状态机正常）。排查口诀：**别盯着 spawn 链路猜，先前台跑 `hmp serve` 看真实错误**；另一坑——直接执行 `target/debug/hmp.exe` 不触发 cargo 重建，改完源码必须显式 `cargo build`，否则跑的是陈旧二进制（本次 debug 二进制恰早于修复、release 晚于修复，行为分裂一度误导排查方向）。链路诊断工具：`cargo run -p hmp-desktop --example spawn_probe`（无 GUI 逐步打印二进制解析/spawn/就绪探测）。
+- **音频输出设备策略已平台分叉（2026-09-09）**：`hmp-player/src/core.rs` `collect_output_candidates`——Unix 保留 server-routed PCM 白名单（default/pipewire/pulse，防 ALSA plughw 直通独占，DAWN PRO2 事故回归守护，相关测试 `#[cfg(unix)]`）；Windows 走 WASAPI 共享模式全接纳：默认 render endpoint 优先、其余端点兜底，**不做设备名字面匹配**（Windows 设备名是本地化的，如"耳机 (DAWN PRO2)""扬声器 (Realtek(R) Audio)"——此前"无音频设备"是误诊，实为 Linux 名单过滤掉全部 Windows 设备，真机永远无声；本机实有 5 个输出端点）。诊断：`cargo run -p hmp-player --example probe_output`（列设备 + 按生产策略开流）。已知限制：流绑定开机时端点，播放中拔插/切换默认设备不自动迁移（需引擎级重建流，未做）。
+- **数据目录 Windows Known Folders（2026-09-09 双数据目录事故）**：`hmp-storage/src/xdg.rs` 平台分叉——Windows：config=`%APPDATA%\hmp`、data=`%LOCALAPPDATA%\hmp`、cache=`%LOCALAPPDATA%\hmp\cache`；**有意忽略 HOME**（msys/git-bash 终端给子进程注入 Linux 形态 HOME，曾致终端拉起的 daemon 用 `~/.local/share` 而 GUI 线用 `AppData\Local`——同一用户两套库/两套播放状态，连 loop 模式都各有一份，表现为"EOS 后诡异重播"）。`XDG_*_HOME` 显式覆盖两平台均保留（测试依赖）。桌面偏好 `prefs.rs` 同步收口复用 `hmp_storage::config_dir()`（旧版读 HOME，GUI 拉起无 HOME 时静默不持久化）。遗留分裂目录 `C:\Users\<u>\.local\share\hmp`（tone 测试数据）确认无用后可手动清理。

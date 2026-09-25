@@ -8,14 +8,15 @@
 //!    与"点轨道跳转"的位移映射一致（此前 thumb TouchArea 在移动参考系内，
 //!    稳态半速跟随、越拖越脱节）。
 //!
-//! 几何（1280×800、layout-gap=8、player-bar-height=96、sidebar 展开宽 224）：
-//! - 内容浮板 x=240..1272、y=8..688 → 滚动条命中条 x=1262..1272；
+//! 几何（1280×800、title-bar-height=32、layout-gap=8、player-bar-height=96、
+//! sidebar 展开宽 224）：
+//! - 内容浮板 x=240..1272、y=40..688（顶栏下方）→ 滚动条命中条 x=1262..1272；
 //! - PlayerBar 与内容列同宽（x=240、宽 1032），进度条行在最上
 //!   （y=696..702，命中区 y=692..706）→ 百分比 = (x-240)/1032。
 
 use std::sync::{Arc, Mutex};
 
-use slint::{platform::WindowEvent, ComponentHandle, Global, LogicalPosition};
+use slint::{ComponentHandle, Global, LogicalPosition, platform::WindowEvent};
 
 /// 进度条（内容列）原点 x 与宽度
 const BAR_X: f32 = 240.0;
@@ -31,8 +32,9 @@ fn press_bar(ui: &hmp_desktop::AppWindow, percent: f32) {
 
 fn move_bar(ui: &hmp_desktop::AppWindow, percent: f32) {
     let x = BAR_X + BAR_W * percent;
-    ui.window()
-        .dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(x, 699.0) });
+    ui.window().dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(x, 699.0),
+    });
 }
 
 fn release_bar(ui: &hmp_desktop::AppWindow, percent: f32) {
@@ -44,8 +46,9 @@ fn release_bar(ui: &hmp_desktop::AppWindow, percent: f32) {
 }
 
 fn move_to(ui: &hmp_desktop::AppWindow, x: f32, y: f32) {
-    ui.window()
-        .dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(x, y) });
+    ui.window().dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(x, y),
+    });
 }
 
 fn press(ui: &hmp_desktop::AppWindow, x: f32, y: f32) {
@@ -102,7 +105,10 @@ fn drag_progress_and_scroll_thumb() {
     move_bar(&ui, 0.75);
     assert!(player.get_seeking());
     let dp = player.get_drag_progress();
-    assert!((dp - 0.75).abs() < 0.01, "drag-progress 应为 0.75，实际 {dp}");
+    assert!(
+        (dp - 0.75).abs() < 0.01,
+        "drag-progress 应为 0.75，实际 {dp}"
+    );
     assert!(seeks.lock().unwrap().is_empty(), "移动事件不得发 seek");
 
     // 松手：恰好一次 seek，拖拽态退出
@@ -120,7 +126,7 @@ fn drag_progress_and_scroll_thumb() {
     assert_eq!(seeks.lock().unwrap().len(), 1, "取消不得发 seek");
 
     // —— 2. Scroll thumb：1:1 拖拽 ———
-    // 播种足够多曲目使内容高度 ≫ 视口（400 行 ≥ 8×680px），thumb 必然存在
+    // 播种足够多曲目使内容高度 ≫ 视口（400 行 ≥ 8×648px），thumb 必然存在
     {
         let data = hmp_desktop::Data::get(&ui);
         let rows: Vec<hmp_desktop::TrackRow> = (0..400)
@@ -154,33 +160,37 @@ fn drag_progress_and_scroll_thumb() {
             plays.lock().unwrap().push(start);
         });
     }
-    fn row_index_at_pointer(
-        ui: &hmp_desktop::AppWindow,
-        plays: &Arc<Mutex<Vec<i32>>>,
-    ) -> i32 {
-        move_to(ui, 640.0, 300.0);
-        press(ui, 640.0, 300.0);
-        release(ui, 640.0, 300.0);
-        *plays.lock().unwrap().last().expect("行点击应触发 play-tracks")
+    fn row_index_at_pointer(ui: &hmp_desktop::AppWindow, plays: &Arc<Mutex<Vec<i32>>>) -> i32 {
+        move_to(ui, 640.0, 332.0);
+        press(ui, 640.0, 332.0);
+        release(ui, 640.0, 332.0);
+        *plays
+            .lock()
+            .unwrap()
+            .last()
+            .expect("行点击应触发 play-tracks")
     }
 
     // 点轨道跳转：按下即吸附（thumb 中心到指针），两次落点相距 200px
     // → 内容位移 = 200px × 放大率（thumb ≪ 轨道，必然 > 1）
-    press(&ui, thumb_x, 208.0);
-    release(&ui, thumb_x, 208.0);
+    press(&ui, thumb_x, 240.0);
+    release(&ui, thumb_x, 240.0);
     let i1 = row_index_at_pointer(&ui, &plays);
-    press(&ui, thumb_x, 408.0);
-    release(&ui, thumb_x, 408.0);
+    press(&ui, thumb_x, 440.0);
+    release(&ui, thumb_x, 440.0);
     let i2 = row_index_at_pointer(&ui, &plays);
     let jump_rows = i2 - i1;
-    assert!(jump_rows > 20, "点轨道跳转应大幅下移（200px×放大率），实际 {jump_rows} 行");
+    assert!(
+        jump_rows > 20,
+        "点轨道跳转应大幅下移（200px×放大率），实际 {jump_rows} 行"
+    );
 
-    // 回到 408 落点，再按住拖动 +100px：内容位移应为 100px × 同一放大率
+    // 回到 440 落点，再按住拖动 +100px：内容位移应为 100px × 同一放大率
     // ⇔ 行数增量 = jump_rows / 2（1:1 拖拽；半速 bug 时 ≈ 1/4）
-    press(&ui, thumb_x, 408.0);
-    move_to(&ui, thumb_x, 468.0);
-    move_to(&ui, thumb_x, 508.0);
-    release(&ui, thumb_x, 508.0);
+    press(&ui, thumb_x, 440.0);
+    move_to(&ui, thumb_x, 500.0);
+    move_to(&ui, thumb_x, 540.0);
+    release(&ui, thumb_x, 540.0);
     let i3 = row_index_at_pointer(&ui, &plays);
     let drag_rows = i3 - i2;
     let ratio = drag_rows as f32 / jump_rows as f32;

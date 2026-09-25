@@ -343,7 +343,10 @@ fn load_detail(route: crate::Route, param: &str) -> DetailData {
     match route {
         crate::Route::Playlist => DetailData::Playlist(
             param.to_string(),
-            param.parse::<i64>().ok().and_then(library_view::playlist_detail),
+            param
+                .parse::<i64>()
+                .ok()
+                .and_then(library_view::playlist_detail),
         ),
         crate::Route::Album => DetailData::Album(library_view::album_detail(param)),
         crate::Route::Artist => DetailData::Artist(library_view::artist_detail(param)),
@@ -490,6 +493,8 @@ pub fn bind(
             let theme = Theme::get(&ui);
             let next = (theme.get_mode() + 1) % 3;
             theme.set_mode(next);
+            // 曲目层取色的亮暗目标窗不同，整族随模式重算（无取色时空操作）
+            crate::track_theme::reapply_for_theme(&ui);
             prefs.lock().expect("prefs").theme_mode = next;
             crate::prefs::store(&prefs.lock().expect("prefs").clone());
         });
@@ -504,8 +509,21 @@ pub fn bind(
                 return;
             };
             Theme::get(&ui).set_mode(mode);
+            crate::track_theme::reapply_for_theme(&ui);
             prefs.lock().expect("prefs").theme_mode = mode;
             crate::prefs::store(&prefs.lock().expect("prefs").clone());
+        });
+    }
+
+    // ——— 系统偏好漂移（mode=跟随系统时 Palette.color-scheme 变化）———
+    // Theme.dark 的 changed 回调进 Rust 重取曲目层调色；用户显式切档走上面
+    // 两条路径，这里只兜系统侧变化（无取色时空操作）
+    {
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        Theme::get(ui).on_retheme(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                crate::track_theme::reapply_for_theme(&ui);
+            }
         });
     }
 

@@ -1,15 +1,24 @@
-// 播放列表抽屉（QueueDrawer.vue，DESIGN.md v0.7/v0.8 主界面态）：
-// 全屏遮罩压暗（点击关闭）+ 右上浮板（radius-lg 全圆角 + 全边框），
-// 底边停在 PlayerBar 上方（layout-gap×2 + player-bar-height）。
-// themed 态（播放页 overlay 内的专辑色抽屉）随 M6 落地。
+// 播放列表抽屉（QueueDrawer.vue，DESIGN.md v0.7/v0.8）：
+// - 主界面态：全屏遮罩压暗（点击关闭）+ 右上浮板（radius-lg 全圆角 + 全边框），
+//   底边停在 PlayerBar 上方（layout-gap×2 + player-bar-height）。
+// - themed 态（播放页 overlay 打开中，M6）：抽屉属于播放页上下文，整只
+//   跟随专辑色——贴 overlay 右缘通高、底边停在底部控制台上方
+//   （np-console-clearance），右侧直角；hover 底与当前行高亮用
+//   TrackPalette（ctx-* / accent-soft），暗色下底为 track-deep→surface-1
+//   渐变、面板前景换 deep-fg（对齐 Vue .queue-drawer.themed）。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, Button, Equalizer, HoverGroup, HoverItem, Scroll } from "primitives.slint";
-import { Player } from "stores.slint";
+import { Player, TrackPalette } from "stores.slint";
 
 export component QueueDrawer inherits Rectangle {
     background: transparent;
     clip: false;
+
+    /** themed = overlay 打开中：抽屉跟随播放页上下文 */
+    property <bool> themed: Player.overlay-visible;
+    /** themed 暗色下的面板前景（Vue .queue-drawer.themed 的 color 覆写） */
+    property <color> panel-fg: themed && Theme.dark ? TrackPalette.deep-fg : Theme.foreground;
 
     // 面板软卸载：隐藏后保持挂载一个动画周期（淡出播完），随后 visible=false。
     // opacity 0 不参与命中剔除——面板若常驻挂载，其内部 TouchArea/滚动条会
@@ -61,20 +70,52 @@ export component QueueDrawer inherits Rectangle {
         }
     }
 
-    // —— 右上浮板：底边停在 PlayerBar 上方 ——
+    // —— 浮板：主界面=右上圆角卡；themed=贴右缘通高、停在控制台上方 ——
     panel := Rectangle {
         visible: root.panel-mounted;
-        x: parent.width - self.width - Theme.layout-gap;
-        y: Theme.layout-gap;
+        x: root.themed ? parent.width - self.width
+            : parent.width - self.width - Theme.layout-gap;
+        y: root.themed ? 0px : Theme.layout-gap;
         width: min(380px, parent.width - Theme.layout-gap * 2);
-        height: parent.height - Theme.layout-gap * 3 - Theme.player-bar-height;
-        border-radius: Theme.radius-lg;
+        height: root.themed
+            ? parent.height - Theme.np-console-clearance
+            : parent.height - Theme.layout-gap * 3 - Theme.player-bar-height;
+        border-top-left-radius: Theme.radius-lg;
+        border-bottom-left-radius: Theme.radius-lg;
+        border-top-right-radius: root.themed ? 0px : Theme.radius-lg;
+        border-bottom-right-radius: root.themed ? 0px : Theme.radius-lg;
         background: Theme.surface-2;
         border-width: 1px;
         border-color: Theme.border;
         drop-shadow-blur: 32px;
         drop-shadow-color: #241F1B.transparentize(0.78);
         drop-shadow-offset-y: 8px;
+        animate x {
+            duration: Theme.duration-normal;
+            easing: cubic-bezier(0.2, 0, 0, 1);
+        }
+        animate y {
+            duration: Theme.duration-normal;
+            easing: cubic-bezier(0.2, 0, 0, 1);
+        }
+        animate height {
+            duration: Theme.duration-normal;
+            easing: cubic-bezier(0.2, 0, 0, 1);
+        }
+
+        // themed 态底：整只跟随专辑色（亮=accent-soft→surface-2 60%，
+        // 暗=deep→surface-1 70%）；叠在面板中性底之上、内容之下。
+        // 圆角与面板同步（themed 右侧直角），否则方角底盖掉面板圆角
+        if root.themed: Rectangle {
+            border-top-left-radius: Theme.radius-lg;
+            border-bottom-left-radius: Theme.radius-lg;
+            border-top-right-radius: 0px;
+            border-bottom-right-radius: 0px;
+            background: Theme.dark
+                ? @linear-gradient(180deg, TrackPalette.deep, Theme.surface-1 0.7)
+                : @linear-gradient(180deg, TrackPalette.accent-soft, Theme.surface-2 0.6);
+        }
+
         opacity: Player.queue-visible ? 1 : 0;
         animate opacity {
             duration: Theme.duration-normal;
@@ -104,7 +145,7 @@ export component QueueDrawer inherits Rectangle {
 
                         Text {
                             text: "播放列表";
-                            color: Theme.foreground;
+                            color: root.panel-fg;
                             font-size: 15.2px;
                             font-weight: 650;
                         }
@@ -151,7 +192,7 @@ export component QueueDrawer inherits Rectangle {
 
                 // Vue --queue-hover: var(--muted) @ opacity 1；行 radius-md 复制到滑块
                 hg := HoverGroup {
-                    highlight-color: Theme.muted;
+                    highlight-color: root.themed ? TrackPalette.accent-soft : Theme.muted;
                     highlight-opacity: 1.0;
                     item-radius: Theme.radius-md;
 
@@ -177,6 +218,7 @@ export component QueueDrawer inherits Rectangle {
 
                                     Equalizer {
                                         paused: !Player.playing;
+                                        bar-color: TrackPalette.ctx-accent;
                                         x: 0;
                                         y: (parent.height - self.height) / 2;
                                         visible: Player.queue-current-mid == row.mid;
@@ -215,7 +257,7 @@ export component QueueDrawer inherits Rectangle {
 
                                     Text {
                                         text: row.title;
-                                        color: Player.queue-current-mid == row.mid ? Theme.track-accent : Theme.foreground;
+                                        color: Player.queue-current-mid == row.mid ? TrackPalette.ctx-accent : root.panel-fg;
                                         font-size: 14.4px;
                                         font-weight: Player.queue-current-mid == row.mid ? 650 : 400;
                                         overflow: elide;

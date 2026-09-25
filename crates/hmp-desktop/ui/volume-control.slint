@@ -7,7 +7,7 @@
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, EqClock } from "primitives.slint";
-import { Player } from "stores.slint";
+import { Player, TrackPalette } from "stores.slint";
 
 export component VolumeControl inherits Rectangle {
     width: 36px;
@@ -39,6 +39,15 @@ export component VolumeControl inherits Rectangle {
         self.leave-at = self.pop-hover ? 0ms : EqClock.t;
     }
 
+    // —— 滚轮调音量：上滚 +0.05 / 下滚 −0.05（clamp 0..1），accept 防止冒泡
+    // 滚动页面。set-volume 在 Rust 侧立即本地回显 + 500ms daemon 回写抑制窗
+    // （player_bridge.rs on_set_volume），手感即时且不与推送打架；弹层打开时
+    // 在面板/滑轨上滚动同样生效。———
+    function wheel-volume(delta-y: length) -> EventResult {
+        Player.set-volume(clamp(Player.volume + (delta-y > 0 ? 0.05 : -0.05), 0.0, 1.0));
+        return accept;
+    }
+
     icon-touch := TouchArea {
         mouse-cursor: pointer;
         clicked => {
@@ -48,6 +57,9 @@ export component VolumeControl inherits Rectangle {
                 last-volume = Player.volume;
                 Player.set-volume(0.0);
             }
+        }
+        scroll-event(event) => {
+            return root.wheel-volume(event.delta-y);
         }
     }
 
@@ -84,6 +96,9 @@ export component VolumeControl inherits Rectangle {
 
             // 垫底 hover 传感：接住面板空白区（滑块 TouchArea 在上层优先命中）
             pop-cover := TouchArea {
+                scroll-event(event) => {
+                    return root.wheel-volume(event.delta-y);
+                }
             }
 
             VerticalLayout {
@@ -117,7 +132,7 @@ export component VolumeControl inherits Rectangle {
                             width: parent.width;
                             height: parent.height - self.y;
                             border-radius: 2px;
-                            background: Theme.track-accent;
+                            background: TrackPalette.ctx-accent;
                         }
                     }
 
@@ -128,7 +143,7 @@ export component VolumeControl inherits Rectangle {
                         border-radius: Theme.pill(self.height);
                         background: Theme.surface-3;
                         border-width: 2px;
-                        border-color: Theme.track-accent;
+                        border-color: TrackPalette.ctx-accent;
                         x: (parent.width - self.width) / 2;
                         y: clamp((1 - Player.volume) * parent.height - self.height / 2, 0px, parent.height - self.height);
                     }
@@ -141,6 +156,9 @@ export component VolumeControl inherits Rectangle {
                         }
                         moved => {
                             Player.set-volume(1.0 - clamp(self.mouse-y / self.height, 0.0, 1.0));
+                        }
+                        scroll-event(event) => {
+                            return root.wheel-volume(event.delta-y);
                         }
                     }
                 }

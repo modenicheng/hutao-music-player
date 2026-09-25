@@ -1,7 +1,10 @@
 // 播放条（PlayerBar.vue 完整重写）：长进度条横贯全宽（静息 4px/hover 6px，
-// 点击/拖拽实时 seek）；状态卡 = 左簇（封面+歌名 → 音质徽章贴随信息排）/
-// 居中控制排（上一曲·主播放键·下一曲）/ 右簇（音量 + 播放列表）。
-// 布局用绝对定位三簇 + 文本 preferred-width 测量，避免 stretch 拉扯。
+// 点击/拖拽实时 seek）；状态卡 = 左簇（封面+曲名，贴左）/ 居中控制排（上一曲·
+// 主播放键·下一曲）/ 右簇（音质徽章 + 循环模式 + 音量 + 播放列表，贴右）。
+// 与 Vue 的"光学补偿居中"刻意不同（用户需求）：控制排按纯几何居中
+// x = (卡宽 - 排宽)/2，不随曲名长短漂移；左簇曲名宽度上限按"不与居中排
+// 重叠"随窗宽收紧（elide 截断）。布局用绝对定位三簇 + preferred-width 测量，
+// 避免 stretch 拉扯。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon } from "primitives.slint";
@@ -16,13 +19,18 @@ export component PlayerBar inherits Rectangle {
     property <length> ctl: 36px;
     property <length> play-ctl: 41.6px;
     property <length> cover-size: 44px;
-    property <length> np-cap: 288px; // now-playing max-width 18rem
+    // 居中控制排总宽（上一曲 + 主播放键 + 下一曲 + 两个 space-2 间距）
+    property <length> cluster-w: ctl + Theme.space-2 + play-ctl + Theme.space-2 + ctl;
+    // 曲名簇总宽上限：Vue now-playing max-width 18rem = 288px；窄窗下再按
+    // "不与居中控制排重叠" 收紧——控制排左缘 - space-4 页边距 - 封面 - 两个
+    // space-3（封面文本内距 + 与控制排的间隙），下限 64px。超出 elide，
+    // 曲名再长也不与控制排重叠、不推动控制排。
+    property <length> np-cap: min(288px, Math.max(
+        (root.width - cluster-w) / 2 - Theme.space-4 - cover-size - Theme.space-3 * 2,
+        64px));
     property <length> np-text-w: Player.has-track
         ? min(Math.max(title.preferred-width, artists.preferred-width), np-cap - cover-size - Theme.space-3)
         : 64px;
-    // Vue 弹性布局：track-tools / side-controls 两侧 flex:1 等宽 → 控制排中心
-    // = 卡片中心 + 左簇(now-playing)宽的一半 + 一个 gap 补偿（非纯居中）
-    property <length> left-w: cover-size + Theme.space-3 + np-text-w;
 
     VerticalLayout {
         spacing: Theme.space-2;
@@ -86,15 +94,17 @@ export component PlayerBar inherits Rectangle {
             border-radius: Theme.radius-lg;
             background: Theme.surface-2;
 
-            // 布局常量挂卡片层，兄弟簇可互引
-            property <length> cluster-w: 36px + Theme.space-2 + 41.6px + Theme.space-2 + 36px;
-            property <length> right-w: 36px + (Player.queue.length > 0 ? Theme.space-3 + 36px : 0px);
+            // 右簇宽：音质徽章（动态宽，取自实例）+ 循环模式 + 音量 +（队列），
+            // 内部 space-3 间距
+            property <length> right-w:
+                badge.width + Theme.space-3 + root.ctl + Theme.space-3 + root.ctl
+                + (Player.queue.length > 0 ? Theme.space-3 + root.ctl : 0px);
 
-            // ── 左簇：封面 + 歌名/歌手（可点开播放页）──
+            // ── 左簇：封面 + 歌名/歌手（可点开播放页；宽度上限见 root.np-cap）──
             Rectangle {
                 x: Theme.space-4;
                 y: 0;
-                width: 44px + Theme.space-3 + root.np-text-w;
+                width: root.cover-size + Theme.space-3 + root.np-text-w;
                 height: parent.height;
 
                 Rectangle {
@@ -160,18 +170,12 @@ export component PlayerBar inherits Rectangle {
                 }
             }
 
-            // ── 音质徽章：贴随曲目信息（Vue flex-1 左对齐语言）──
-            QualityBadge {
-                x: Theme.space-4 + 44px + Theme.space-3 + root.np-text-w + Theme.space-4;
-                y: (parent.height - self.height) / 2;
-            }
-
-            // ── 居中控制排：上一曲 / 主播放键 / 下一曲（Vue 弹性光学居中）──
+            // ── 居中控制排：上一曲 / 主播放键 / 下一曲（真窗口中心，几何居中）──
             Rectangle {
-                x: (parent.width + root.left-w) / 2 + Theme.space-4 / 2 - parent.cluster-w / 2;
-                y: (parent.height - 41.6px) / 2;
-                width: parent.cluster-w;
-                height: 41.6px;
+                x: (parent.width - root.cluster-w) / 2;
+                y: (parent.height - root.play-ctl) / 2;
+                width: root.cluster-w;
+                height: root.play-ctl;
 
                 // 上一曲
                 Rectangle {
@@ -265,7 +269,10 @@ export component PlayerBar inherits Rectangle {
                 }
             }
 
-            // ── 右簇：音量 + 播放列表（实心，队列空时隐藏）──
+            // ── 右簇：音质徽章 + 循环模式 + 音量 + 播放列表（实心，贴右；队列空
+            // 时隐藏队列键）。徽章 22px 高与 36px 键混排 → 交叉轴居中；
+            // alignment: end 让定宽子元素取首选宽（显式 alignment 杀 stretch，
+            // 见 PORTING.md 坑位）———
             HorizontalLayout {
                 x: parent.width - parent.right-w - Theme.space-4;
                 y: (parent.height - 36px) / 2;
@@ -273,6 +280,37 @@ export component PlayerBar inherits Rectangle {
                 height: 36px;
                 spacing: Theme.space-3;
                 alignment: LayoutAlignment.end;
+                cross-axis-alignment: center;
+
+                badge := QualityBadge { }
+
+                // 循环模式三态：0=顺序播放（repeat，muted）/ 1=单曲循环
+                // （repeat_one，高亮）/ 2=列表循环（repeat，高亮）
+                Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    border-radius: Theme.pill(self.height);
+                    background: mode-touch.has-hover ? Theme.muted : transparent;
+                    animate background {
+                        duration: Theme.duration-fast;
+                        easing: cubic-bezier(0.2, 0, 0, 1);
+                    }
+
+                    mode-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            Player.cycle-loop-mode();
+                        }
+                    }
+                    AppIcon {
+                        source: Player.loop-mode == 1 ? Icons.repeat_one : Icons.repeat;
+                        icon-color: Player.loop-mode == 0 ? Theme.muted-foreground : Theme.track-accent;
+                        width: 20.8px;
+                        height: 20.8px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
 
                 VolumeControl {
                     width: 36px;

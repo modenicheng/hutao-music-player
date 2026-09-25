@@ -997,18 +997,35 @@ mod tests {
         let snap = read_snapshot(&mut db).expect("projection ok");
         assert_eq!(snap.local_tracks.len(), 3);
         assert_eq!(snap.folders.len(), 2, "两个注册根各成一行");
-        assert_eq!(snap.folders[0].path, root.display().to_string());
+        // begin_scan 存 canonical 路径；期望值同口径（Windows TEMP 环境变量
+        // 拼写与盘上真实大小写可能不同）。
+        assert_eq!(
+            snap.folders[0].path,
+            hmp_storage::canonical_display_path(&root)
+                .display()
+                .to_string()
+        );
         assert_eq!(snap.folders[0].track_count, 1);
         assert_eq!(snap.folders[0].size_bytes, 1000);
         assert_eq!(snap.folders[0].last_scan, "—");
-        assert_eq!(snap.folders[1].path, sub.display().to_string());
+        assert_eq!(
+            snap.folders[1].path,
+            hmp_storage::canonical_display_path(&sub)
+                .display()
+                .to_string()
+        );
         assert_eq!(snap.folders[1].track_count, 1);
         assert_eq!(snap.folders[1].size_bytes, 2000);
         // 行级归属：b 命中最长前缀 sub；a 命中 root；c 无归属。
         let row_b = snap.local_tracks.iter().find(|r| r.title == "B").unwrap();
         assert_eq!(
             row_b.folder.as_deref(),
-            Some(sub.display().to_string()).as_deref()
+            Some(
+                hmp_storage::canonical_display_path(&sub)
+                    .display()
+                    .to_string()
+            )
+            .as_deref()
         );
         assert_eq!(row_b.quality, "FLAC");
         let row_c = snap.local_tracks.iter().find(|r| r.title == "c").unwrap();
