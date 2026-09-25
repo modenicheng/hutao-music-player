@@ -51,7 +51,10 @@ fn daemon_status() -> hmp_core::ipc::DaemonState {
 }
 
 /// 在 UI 线程执行闭包并取回结果（invoke_from_event_loop 无返回值 → channel 中转）。
-fn on_ui<T: Send + 'static>(ui: &Weak<AppWindow>, f: impl FnOnce(&AppWindow) -> T + Send + 'static) -> Option<T> {
+fn on_ui<T: Send + 'static>(
+    ui: &Weak<AppWindow>,
+    f: impl FnOnce(&AppWindow) -> T + Send + 'static,
+) -> Option<T> {
     let (tx, rx) = std::sync::mpsc::channel();
     let ui = ui.clone();
     slint::invoke_from_event_loop(move || {
@@ -87,18 +90,28 @@ fn live_daemon_playback_operations() {
         // 1. 订阅状态落地：标题/能力/队列与 daemon 一致。
         let st = daemon_status();
         if st.queue.len <= 1 {
-            fail(&failures, "前置失败：队列应有多首（先跑 playlist_smoke）".into());
+            fail(
+                &failures,
+                "前置失败：队列应有多首（先跑 playlist_smoke）".into(),
+            );
             slint::quit_event_loop().unwrap();
             return;
         }
         let daemon_title = st.playback.current.as_ref().unwrap().title.clone();
-        let ok = wait_for("订阅首帧（标题落地）", Duration::from_secs(8), || {
-            on_ui(&ui_weak, |ui| Player::get(ui).get_title().to_string())
-                .map(|t| t == daemon_title)
-                .unwrap_or(false)
-        });
+        let ok = wait_for(
+            "订阅首帧（标题落地）",
+            Duration::from_secs(8),
+            || {
+                on_ui(&ui_weak, |ui| Player::get(ui).get_title().to_string())
+                    .map(|t| t == daemon_title)
+                    .unwrap_or(false)
+            },
+        );
         if !ok {
-            fail(&failures, format!("订阅标题未落地（期望 {daemon_title:?}）"));
+            fail(
+                &failures,
+                format!("订阅标题未落地（期望 {daemon_title:?}）"),
+            );
         }
         let (has_track, can_prev, can_next, queue_len) = on_ui(&ui_weak, |ui| {
             let p = Player::get(ui);
@@ -117,7 +130,10 @@ fn live_daemon_playback_operations() {
             fail(&failures, "多曲队列：上一曲/下一曲能力应为 true".into());
         }
         if queue_len != st.queue.len {
-            fail(&failures, format!("队列投影 {queue_len} != daemon {}", st.queue.len));
+            fail(
+                &failures,
+                format!("队列投影 {queue_len} != daemon {}", st.queue.len),
+            );
         }
 
         // 2. toggle-play → daemon 翻转 → Player.playing 回写。
@@ -128,13 +144,16 @@ fn live_daemon_playback_operations() {
         if !ok {
             fail(&failures, "toggle-play 未生效（daemon 态未翻转）".into());
         } else {
-            let now_playing =
-                daemon_status().playback.status == hmp_core::PlaybackStatus::Playing;
-            let ok = wait_for("推送回写 Player.playing", Duration::from_secs(5), || {
-                on_ui(&ui_weak, |ui| Player::get(ui).get_playing())
-                    .map(|p| p == now_playing)
-                    .unwrap_or(false)
-            });
+            let now_playing = daemon_status().playback.status == hmp_core::PlaybackStatus::Playing;
+            let ok = wait_for(
+                "推送回写 Player.playing",
+                Duration::from_secs(5),
+                || {
+                    on_ui(&ui_weak, |ui| Player::get(ui).get_playing())
+                        .map(|p| p == now_playing)
+                        .unwrap_or(false)
+                },
+            );
             if !ok {
                 fail(&failures, "Player.playing 未随推送回写".into());
             }
@@ -154,8 +173,7 @@ fn live_daemon_playback_operations() {
                 .unwrap_or(false)
         });
         if ok {
-            let ui_title =
-                on_ui(&ui_weak, |ui| Player::get(ui).get_title().to_string()).unwrap();
+            let ui_title = on_ui(&ui_weak, |ui| Player::get(ui).get_title().to_string()).unwrap();
             let daemon_title = daemon_status()
                 .playback
                 .current
@@ -164,7 +182,10 @@ fn live_daemon_playback_operations() {
                 .title
                 .clone();
             if ui_title != daemon_title {
-                fail(&failures, format!("标题不一致 UI={ui_title:?} daemon={daemon_title:?}"));
+                fail(
+                    &failures,
+                    format!("标题不一致 UI={ui_title:?} daemon={daemon_title:?}"),
+                );
             }
         } else {
             fail(&failures, "next 后标题未推送更新".into());
@@ -195,11 +216,16 @@ fn live_daemon_playback_operations() {
             let count = planned;
             // 注意不能等 len==count：上一队列也是同曲数（瞬时相等）；直接等
             // 游标落到起播下标——PlayList 生效的确定性标志。
-            let ok = wait_for("PlayList 整表入队（游标落位）", Duration::from_secs(8), || {
-                daemon_status().queue.current == Some(count / 2)
-            });
+            let ok = wait_for(
+                "PlayList 整表入队（游标落位）",
+                Duration::from_secs(8),
+                || daemon_status().queue.current == Some(count / 2),
+            );
             if !ok {
-                fail(&failures, format!("PlayList 后游标未落到起播下标 {}", count / 2));
+                fail(
+                    &failures,
+                    format!("PlayList 后游标未落到起播下标 {}", count / 2),
+                );
             } else {
                 let ok = wait_for("队列投影落地", Duration::from_secs(6), || {
                     on_ui(&ui_weak, |ui| Player::get(ui).get_queue().row_count())

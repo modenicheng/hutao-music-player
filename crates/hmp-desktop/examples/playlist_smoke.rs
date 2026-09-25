@@ -53,7 +53,11 @@ fn main() {
         );
         let pos1 = state.playback.position;
         assert!(pos1 > Duration::ZERO, "起播曲进度非零（音频管线在走）");
-        println!("当前曲: {:?} @ {:?}", state.playback.current.map(|t| t.title), pos1);
+        println!(
+            "当前曲: {:?} @ {:?}",
+            state.playback.current.map(|t| t.title),
+            pos1
+        );
 
         tokio::time::sleep(Duration::from_secs(3)).await;
         let state2 = status().await.expect("取状态失败");

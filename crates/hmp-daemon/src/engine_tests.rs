@@ -2614,11 +2614,7 @@ async fn play_list_replaces_queue_and_starts_at_index() {
     let (handle, _st) = start_engine(driver.clone(), resolver).await;
     handle
         .cmd(Request::PlayList {
-            ids: vec![
-                TrackId::new("a"),
-                TrackId::new("b"),
-                TrackId::new("c"),
-            ],
+            ids: vec![TrackId::new("a"), TrackId::new("b"), TrackId::new("c")],
             start: 2,
         })
         .await
@@ -2626,11 +2622,21 @@ async fn play_list_replaces_queue_and_starts_at_index() {
     wait_idle().await;
     let state = handle.state_rx.borrow().clone();
     assert_eq!(state.queue.current, Some(2), "起播下标生效");
-    assert_eq!(handle.queue_rx.borrow().tracks.len(), 3, "整表入队（非单曲）");
+    assert_eq!(
+        handle.queue_rx.borrow().tracks.len(),
+        3,
+        "整表入队（非单曲）"
+    );
     assert_eq!(driver.load_uris(), vec!["fake://c"]);
     assert!(state.caps.can_go_previous, "多曲队列 → 上一曲可用");
     // 空列表：确定性拒绝，不 panic、不动队列。
-    handle.cmd(Request::PlayList { ids: vec![], start: 0 }).await.unwrap();
+    handle
+        .cmd(Request::PlayList {
+            ids: vec![],
+            start: 0,
+        })
+        .await
+        .unwrap();
     wait_idle().await;
     assert!(handle.state_rx.borrow().last_error.is_some());
     assert_eq!(handle.queue_rx.borrow().tracks.len(), 3);
@@ -2666,10 +2672,7 @@ async fn play_list_library_fast_path_skips_resolver() {
     let (handle, _st) = start_engine_with_library(driver.clone(), resolver, library).await;
     handle
         .cmd(Request::PlayList {
-            ids: vec![
-                TrackId::new("local:/a.flac"),
-                TrackId::new("local:/b.flac"),
-            ],
+            ids: vec![TrackId::new("local:/a.flac"), TrackId::new("local:/b.flac")],
             start: 0,
         })
         .await
