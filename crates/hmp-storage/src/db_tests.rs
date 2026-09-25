@@ -320,7 +320,9 @@ fn recent_tracks_is_lru_dedup_view() {
     play(&mut db, id_b, 4_000, 5_000);
     let lru = db.recent_tracks(10).unwrap();
     assert_eq!(
-        lru.iter().map(|p| p.source_key.as_str()).collect::<Vec<_>>(),
+        lru.iter()
+            .map(|p| p.source_key.as_str())
+            .collect::<Vec<_>>(),
         ["mid456", "mid123"]
     );
     // limit 截断 = 缓存容量。
@@ -1094,11 +1096,14 @@ fn upsert_intent_title_does_not_stomp_metadata() {
         ..Default::default()
     })
     .unwrap();
+    // upsert 侧 canonical_local_key 归一（Windows TEMP 环境变量拼写与盘上
+    // 真实大小写可能不同），查询按归一化后的键取行。
+    let canon_key = format!("local:{}", crate::canonical_display_path(&path).display());
     let title: String = db
         .conn
         .query_row(
             "SELECT title FROM tracks WHERE source='local' AND source_key=?1",
-            params![key],
+            params![canon_key],
             |r| r.get(0),
         )
         .unwrap();
@@ -1120,13 +1125,17 @@ fn merge_ghost_local_tracks_remaps_relations_and_playlists() {
     let tid = db.add_local_file(&real, Some(&meta)).unwrap();
     let canon_key = format!("local:{}", real.display());
 
-    // 直接造 pre-fix 形态的幽灵（API 现已归一化，只能 raw SQL 造）
+    // 直接造 pre-fix 形态的幽灵（API 现已归一化，只能 raw SQL 造）：
+    // Unix = symlink 别名拼写；Windows = verbatim \?\ 前缀拼写。
     #[cfg(unix)]
     std::os::unix::fs::symlink(dir.path(), dir.path().join("alias")).unwrap();
+    #[cfg(unix)]
     let ghost_key = format!(
         "local:{}",
         dir.path().join("alias").join("song.wav").display()
     );
+    #[cfg(windows)]
+    let ghost_key = format!("local:{}", std::fs::canonicalize(&real).unwrap().display());
     db.conn
         .execute(
             "INSERT INTO tracks (source, source_key, title) VALUES ('local', ?1, ?1)",

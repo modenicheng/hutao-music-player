@@ -595,6 +595,14 @@ impl LibraryDb {
                  format = COALESCE(excluded.format, local_files.format),
                  bitrate = COALESCE(excluded.bitrate, local_files.bitrate),
                  sample_rate = COALESCE(excluded.sample_rate, local_files.sample_rate),
+                 missing = 0
+               ON CONFLICT(track_id) DO UPDATE SET
+                 path = excluded.path,
+                 file_size = excluded.file_size,
+                 mtime = excluded.mtime,
+                 format = COALESCE(excluded.format, local_files.format),
+                 bitrate = COALESCE(excluded.bitrate, local_files.bitrate),
+                 sample_rate = COALESCE(excluded.sample_rate, local_files.sample_rate),
                  missing = 0"#,
             params![
                 id,
@@ -626,7 +634,7 @@ impl LibraryDb {
     /// 注册扫描根并推进 generation，返回 (root_id, generation)。
     /// 首次扫描 generation=1，之后每次 +1（增量/缺失判定的代际基准）。
     pub fn begin_scan(&mut self, root: &Path) -> rusqlite::Result<(i64, i64)> {
-        let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let canonical = crate::canonical_display_path(root);
         let path_str = canonical.display().to_string();
         self.conn.execute(
             "INSERT INTO scan_roots (path, generation) VALUES (?1, 1)
@@ -1104,7 +1112,7 @@ impl LibraryDb {
     /// 路径所属扫描根（canonical 前缀匹配）→ (root_id, 当前 generation)。
     /// 供 watcher 事件处理：单文件入库用 root 当前代际，不推进 generation。
     pub fn scan_root_for(&mut self, path: &Path) -> rusqlite::Result<Option<(i64, i64)>> {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canonical = crate::canonical_display_path(path);
         let roots: Vec<(i64, String, i64)> = {
             let mut stmt = self
                 .conn
@@ -1963,10 +1971,10 @@ fn canonical_local_key(provider: &str, key: &str) -> String {
         return key.to_owned();
     }
     match key.strip_prefix("local:") {
-        Some(path) => match std::fs::canonicalize(path) {
-            Ok(c) => format!("local:{}", c.display()),
-            Err(_) => key.to_owned(),
-        },
+        Some(path) => format!(
+            "local:{}",
+            crate::canonical_display_path(std::path::Path::new(path)).display()
+        ),
         None => key.to_owned(),
     }
 }
@@ -2026,10 +2034,11 @@ pub(crate) fn merge_ghost_local_tracks(conn: &Connection) -> rusqlite::Result<()
         let Some(path) = key.strip_prefix("local:") else {
             continue;
         };
-        let Ok(c) = std::fs::canonicalize(path) else {
-            continue;
+        // canonicalize 失败（离线盘/已删除）→ 无法收敛，保留幽灵等下次扫描。
+        let canon = match std::fs::canonicalize(path) {
+            Ok(c) => format!("local:{}", crate::strip_verbatim(&c).display()),
+            Err(_) => continue,
         };
-        let canon = format!("local:{}", c.display());
         if canon == key {
             continue;
         }
