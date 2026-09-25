@@ -1,5 +1,7 @@
 //! UI 偏好持久化（localStorage 对应物）：主题模式 / 音质偏好 / 音量。
-//! 存 `~/.config/hmp/desktop-ui.json`（XDG_CONFIG_HOME 优先）。损坏文件按缺省处理。
+//! 存 `config_dir()/desktop-ui.json`（与 storage 同一 XDG/Known-Folder 解析，
+//! 勿重复实现；Windows 上 = `%APPDATA%\hmp`——此前读 HOME 的版本在 GUI
+//! 拉起（无 HOME）时静默不持久化）。损坏文件按缺省处理。
 
 use std::path::PathBuf;
 
@@ -38,11 +40,7 @@ impl Prefs {
 }
 
 fn config_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("hmp").join("desktop-ui.json"))
+    Some(hmp_storage::config_dir().join("desktop-ui.json"))
 }
 
 pub fn load() -> Prefs {

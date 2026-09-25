@@ -164,8 +164,12 @@ mod tests {
         assert_eq!(report.added, 3);
         // 每个文件都能以 canonical 路径查到（相对 key 会失配）。
         for name in ["a.mp3", "b.flac"] {
-            let canonical = std::fs::canonicalize(dir.path().join(name)).unwrap();
-            let key = format!("local:{}", canonical.display());
+            // 库键统一口径：canonical + verbatim 剥离（Windows canonicalize
+            // 产出 \?\ 前缀，入库时会被 canonical_local_key 归一掉）。
+            let key = format!(
+                "local:{}",
+                hmp_storage::canonical_display_path(&dir.path().join(name)).display()
+            );
             assert!(
                 db.track_id("local", &key).unwrap().is_some(),
                 "入库 key 应为 canonical 绝对路径: {key}"

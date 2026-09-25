@@ -9,39 +9,41 @@ use hmp_core::ipc::{
     Event, IpcErrorCode, MAX_FRAME, Request, Response, decode_frame, encode_frame,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 use crate::engine::EngineHandle;
+use crate::transport::{IpcListener, IpcStream};
 
-/// socket 路径：`$XDG_RUNTIME_DIR/hmp.sock`，回退 `/tmp/hmp-{uid}/hmp.sock`
-/// （owner-only 目录，final review Finding 5；与 serve.rs 一致，勿重复实现）。
+/// 端点：`$XDG_RUNTIME_DIR/hmp.sock`，回退 `/tmp/hmp-{uid}/hmp.sock`
+/// （owner-only 目录，final review Finding 5）；Windows 为命名管道
+/// `\\.\pipe\hmp`（实例不落盘，进程退出即消失）。与 serve.rs 一致，勿重复实现。
 pub fn socket_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir).join("hmp.sock");
-        }
+    // 平台块作尾表达式：Windows 只剩管道名分支，Unix 只剩 socket 路径分支。
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"\\.\pipe\hmp")
     }
     #[cfg(unix)]
     {
+        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir).join("hmp.sock");
+            }
+        }
         let uid = unsafe { libc::getuid() };
         PathBuf::from(format!("/tmp/hmp-{uid}/hmp.sock"))
-    }
-    #[cfg(not(unix))]
-    {
-        PathBuf::from("/tmp/hmp.sock")
     }
 }
 
 /// 启动服务器（accept 循环；由 daemon 编排退出时机）。
-pub async fn serve(listener: UnixListener, handle: EngineHandle) {
+pub async fn serve(mut listener: IpcListener, handle: EngineHandle) {
     loop {
         match listener.accept().await {
-            Ok((stream, _addr)) => {
+            Ok(stream) => {
                 let handle = handle.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, handle).await {
-                        tracing::debug!(%e, "连接处理结束");
+                        tracing::debug!(%e, "connection handler ended");
                     }
                 });
             }
@@ -88,8 +90,8 @@ fn quality_alias_valid(mode: &str) -> bool {
 /// 仍能收到推送事件（不再有 100ms 轮询窗口停滞），请求也能即时应答
 /// （无需等待轮询窗口兜底）。直接对 `read_frame` 做 `select!` 会取消进行中的
 /// 读取并破坏帧边界，故采用 channel 中转。
-async fn handle_connection(stream: UnixStream, mut handle: EngineHandle) -> std::io::Result<()> {
-    let (mut rd, mut wr) = stream.into_split();
+async fn handle_connection(stream: IpcStream, mut handle: EngineHandle) -> std::io::Result<()> {
+    let (mut rd, mut wr) = tokio::io::split(stream);
     let (frame_tx, mut frame_rx) = mpsc::channel::<std::io::Result<Option<Vec<u8>>>>(8);
     // reader 任务：阻塞读帧，逐帧投递；EOF/错误后退出（channel 关闭触发主循环收尾）。
     let reader = tokio::spawn(async move {
@@ -728,19 +730,19 @@ mod tests {
         PlaybackEngine::start(driver, Arc::new(SResolver), Arc::new(move || cred_ok))
     }
 
-    async fn temp_socket() -> (PathBuf, UnixListener) {
+    async fn temp_socket() -> (PathBuf, IpcListener) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hmp-test.sock");
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = IpcListener::bind(&path).unwrap();
         // TempDir 必须保持存活到测试结束：drop 会删除 socket 文件，
-        // 使后续 `UnixStream::connect` 失败（ENOENT）。
+        // 使后续 connect 失败（ENOENT）。Windows 管道名映射在传输层内做。
         std::mem::forget(dir);
         (path, listener)
     }
 
     /// 连接 → 发送一帧 → 读一帧响应（每次新建连接）。
-    async fn request(sock: &PathBuf, req: &Request) -> Response {
-        let mut stream = UnixStream::connect(sock).await.unwrap();
+    async fn request(sock: &std::path::Path, req: &Request) -> Response {
+        let mut stream = IpcStream::connect(sock).await.unwrap();
         stream.write_all(&encode_frame(req).unwrap()).await.unwrap();
         let mut buf = vec![0u8; 65536];
         let n = stream.read(&mut buf).await.unwrap();
@@ -838,7 +840,7 @@ mod tests {
         });
         let handle = PlaybackEngine::start(driver.clone(), Arc::new(SResolver), Arc::new(|| true));
         tokio::spawn(async move { serve(listener, handle).await });
-        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        let mut stream = IpcStream::connect(&sock).await.unwrap();
         stream
             .write_all(&encode_frame(&Request::Subscribe).unwrap())
             .await
@@ -869,7 +871,7 @@ mod tests {
         });
         let handle = PlaybackEngine::start(driver.clone(), Arc::new(SResolver), Arc::new(|| true));
         tokio::spawn(async move { serve(listener, handle).await });
-        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        let mut stream = IpcStream::connect(&sock).await.unwrap();
         stream
             .write_all(&encode_frame(&Request::Subscribe).unwrap())
             .await
@@ -904,7 +906,7 @@ mod tests {
         });
         let handle = PlaybackEngine::start(driver.clone(), Arc::new(SResolver), Arc::new(|| true));
         tokio::spawn(async move { serve(listener, handle).await });
-        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        let mut stream = IpcStream::connect(&sock).await.unwrap();
         stream
             .write_all(&encode_frame(&Request::Subscribe).unwrap())
             .await
@@ -930,7 +932,7 @@ mod tests {
         let (sock, listener) = temp_socket().await;
         let handle = test_engine(true).await;
         tokio::spawn(async move { serve(listener, handle).await });
-        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        let mut stream = IpcStream::connect(&sock).await.unwrap();
         // 长度 4 + 非法 JSON（非 Request）→ decode 失败 → BadRequest
         stream
             .write_all(&[4, 0, 0, 0, b'j', b'u', b'n', b'k'])
@@ -997,7 +999,7 @@ mod tests {
         tokio::spawn(async move { serve(listener, handle).await });
 
         // 连接 A 订阅；连接 B 写收藏 → A 收到 LibraryChanged。
-        let mut sub = UnixStream::connect(&sock).await.unwrap();
+        let mut sub = IpcStream::connect(&sock).await.unwrap();
         sub.write_all(&encode_frame(&Request::Subscribe).unwrap())
             .await
             .unwrap();

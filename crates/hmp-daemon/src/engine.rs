@@ -428,10 +428,23 @@ impl PlaybackEngine {
                         }
                         Request::OpenUri(uri) => {
                             // MPRIS OpenUri：仅接受 file://（URL 解码后转本地播放）；其余 → 错误。
-                            match url::Url::parse(&uri)
+                            // to_file_path 在 Windows 上要求带盘符的 file path；无盘符的
+                            // Unix 风格路径（file:///tmp/x.mp3，测试/跨端客户端）回退为
+                            // 百分号解码后的 url.path() 原样本地路径。
+                            let file_path = url::Url::parse(&uri)
                                 .ok()
-                                .and_then(|u| u.to_file_path().ok())
-                            {
+                                .filter(|u| u.scheme() == "file")
+                                .and_then(|u| {
+                                    u.to_file_path().ok().or_else(|| {
+                                        percent_encoding::percent_decode_str(u.path())
+                                            .decode_utf8()
+                                            .ok()
+                                            .map(|decoded| {
+                                                std::path::PathBuf::from(decoded.into_owned())
+                                            })
+                                    })
+                                });
+                            match file_path {
                                 Some(path) => {
                                     let src = PlayRequest::Local(TrackId::new(format!(
                                         "local:{}",
@@ -817,9 +830,10 @@ impl PlaybackEngine {
                 // 会话恢复续播（与 play_source 同语义）：起播曲命中恢复曲 → seek。
                 if let Some(r) = self.restored.take() {
                     if first_id == r.current {
-                        self.driver.command(PlayerCommand::Seek(
-                            std::time::Duration::from_millis(r.position_ms),
-                        ));
+                        self.driver
+                            .command(PlayerCommand::Seek(std::time::Duration::from_millis(
+                                r.position_ms,
+                            )));
                     }
                 }
                 self.seq += 1;
@@ -847,9 +861,7 @@ impl PlaybackEngine {
             let mut qq_keys = Vec::new();
             let mut local_keys = Vec::new();
             for id in ids {
-                if hmp_core::TrackProvider::from_id(id.as_ref())
-                    == hmp_core::TrackProvider::Local
-                {
+                if hmp_core::TrackProvider::from_id(id.as_ref()) == hmp_core::TrackProvider::Local {
                     local_keys.push(id.to_string());
                 } else {
                     qq_keys.push(id.to_string());

@@ -1,11 +1,13 @@
 //! `hmp serve` 入口（spec §4.2 `serve.rs`）。
 //!
-//! 组装 daemon（引擎 + Rust 音频驱动 + QQ 解析器）并接入 Task 3 的
-//! Unix socket 控制服务器；SIGINT/SIGTERM → 引擎 Quit → 引擎退出
-//! （sticky watch）→ 停服务器 → 清理 socket 后退出。
-//! 单实例由 flock 锁文件保证（final review Finding 6）。
+//! 组装顺序：单实例裁决 + 端点绑定（flock / connect 探测 /
+//! first_pipe_instance）→ daemon（引擎 + Rust 音频驱动 + QQ 解析器）→
+//! Unix socket 控制服务器 + tray/MPRIS/SMTC；SIGINT/SIGTERM → 引擎 Quit
+//! → 引擎退出（sticky watch）→ 停服务器 → 清理 socket → 关桌面集成后退出。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use crate::daemon::{Daemon, DaemonConfig};
 use crate::server;
@@ -28,11 +30,12 @@ pub fn spawn_detached(args: &[&str]) -> std::io::Result<()> {
     spawn_detached_exe(&exe, args)
 }
 
-/// 以 `setsid` 脱离会话启动指定可执行文件（单一 detach 点）。
+/// 脱离会话启动指定可执行文件（单一 detach 点）。
 ///
 /// CLI 以 current_exe（即 `hmp` 自身）调用；桌面端进程是 hmp-desktop，
 /// 解析出 `hmp` 二进制路径后也经此拉起后端。stdio 置空避免后端输出
 /// 干扰调用方终端。
+#[cfg(unix)]
 pub fn spawn_detached_exe(exe: &Path, args: &[&str]) -> std::io::Result<()> {
     std::process::Command::new("setsid")
         .arg(exe)
@@ -44,6 +47,23 @@ pub fn spawn_detached_exe(exe: &Path, args: &[&str]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Windows 脱离会话：无 setsid，用 creation_flags 隐藏控制台 +
+/// 独立进程组（Ctrl+C 不沿进程组传播给 daemon）。
+#[cfg(windows)]
+pub fn spawn_detached_exe(exe: &Path, args: &[&str]) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    std::process::Command::new(exe)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
+        .spawn()?;
+    Ok(())
+}
+
 /// `serve --background` 的子进程参数。
 fn background_args() -> Vec<&'static str> {
     vec!["serve"]
@@ -51,50 +71,79 @@ fn background_args() -> Vec<&'static str> {
 
 async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
     let path = server::socket_path();
-    // 父目录（XDG_RUNTIME_DIR 已存在；/tmp/hmp-{uid} 回退目录须创建且仅属本用户，
-    // final review Finding 5）。
+    // Unix：父目录须创建且仅属本用户（XDG_RUNTIME_DIR 已存在时跳过创建，
+    // final review Finding 5）。Windows 端点是命名管道（\\.\pipe\hmp），
+    // 不落盘、无需目录。
+    #[cfg(unix)]
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
     }
-    // 单实例：先于任何 socket 操作获取 flock（final review Finding 6）。
+    // 单实例（Unix）：先于任何 socket 操作获取 flock（final review Finding 6）。
     // 只有持锁者才进入 stale-socket 清理/绑定流程；锁文件留在原地（flock
     // 随进程死亡自动释放，残留文件无害——flock 才是真正的守卫）。
-    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
+    // Windows：无 flock，由 connect 探测 + bind 的 first_pipe_instance
+    // （已绑定→ERROR_ACCESS_DENIED）双道裁决。
+    #[cfg(unix)]
     {
-        use std::os::unix::io::AsRawFd;
-        if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            eprintln!("daemon already running; exiting");
-            return Ok(());
+        let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        {
+            use std::os::unix::io::AsRawFd;
+            if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                eprintln!("daemon already running; exiting");
+                return Ok(());
+            }
         }
     }
-    let daemon = Daemon::start(cfg)?;
-    // 清理残留（上次异常退出可能留下）；持锁者才执行，无 TOCTOU 竞争。
-    if path.exists() {
-        // 尝试连接：能连说明有活 daemon，本实例退出；不能连则删残留
-        if tokio::net::UnixStream::connect(&path).await.is_ok() {
-            eprintln!("daemon already running; exiting");
-            return Ok(());
-        }
+    // 单例裁决 + 端点绑定（先于 Daemon::start）：Windows 无 flock，第二实例
+    // 必须在启动引擎（开库、close_stale_sessions、恢复播放态）之前出局，
+    // 否则会干扰运行中 daemon 的数据库与会话。探测能连 → 有活 daemon，退出。
+    // Unix 另清理残留 socket 文件（上次异常退出可能留下；持锁者才执行，
+    // 无 TOCTOU 竞争）；Windows 管道随进程消失，无残留可清。
+    if crate::transport::IpcStream::connect(&path).await.is_ok() {
+        eprintln!("daemon already running; exiting");
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
         let _ = std::fs::remove_file(&path);
     }
-    let listener = tokio::net::UnixListener::bind(&path)?;
+    let listener = match crate::transport::IpcListener::bind(&path) {
+        Ok(listener) => listener,
+        #[cfg(windows)]
+        Err(e) if e.raw_os_error() == Some(5) => {
+            // ERROR_ACCESS_DENIED：first_pipe_instance 撞上运行中的 daemon。
+            eprintln!("daemon already running; exiting");
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
     // 强制 socket 0600（trust boundary，final review Finding 5）；失败仅告警不中止。
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
             tracing::warn!(%e, "failed to set socket permissions 0600");
         }
     }
+    // 端点就绪后才启动引擎；失败须先撤销已绑定的端点（Unix 残留 socket 文件
+    // 会挡住下一次启动的残留探测；Windows 管道随进程消失无需清理）。
+    let daemon = match Daemon::start(cfg) {
+        Ok(daemon) => daemon,
+        Err(e) => {
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(&path);
+            return Err(e.into());
+        }
+    };
     tracing::info!(?path, "daemon ready");
     // 优雅退出：SIGINT/SIGTERM → 只发 Request::Quit（引擎处理完 Quit 才退出
     // 并置位 terminated；不再有并行的 quit_tx，避免清理先于 driver.shutdown）。
@@ -112,13 +161,21 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
                     _ = sigterm.recv() => {}
                 }
             }
+            // Windows 无 SIGTERM；Ctrl+C（含 taskkill 无 /F 的 WM_CLOSE 路径）
+            // 经控制台处理器送达。
+            #[cfg(windows)]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+            }
             let _ = handle.command_tx.send(hmp_core::Request::Quit);
         });
     }
     let server_handle = tokio::spawn(server::serve(listener, handle.clone()));
     // 桌面集成（spec §4.2）：系统托盘 + MPRIS（feature 门控；无会话时跳过不 panic）。
+    // 托盘为 RAII 守卫：提前 return / 正常收尾两条路径都经 Drop 优雅关停
+    // （移除图标、回收属主线程）。
     #[cfg(feature = "tray")]
-    let tray = crate::tray::spawn_tray(&handle);
+    let _tray = crate::tray::spawn_tray(&handle);
     #[cfg(feature = "mpris")]
     let mpris = crate::mpris::start_mpris(
         handle.command_tx.clone(),
@@ -145,11 +202,12 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
     term_wait.await;
     // 停服务器（监听关闭）+ 清理 + 关 tray / 释放 MPRIS bus 名（优雅退出，spec §6）。
     server_handle.abort();
-    let _ = tokio::fs::remove_file(&path).await;
-    #[cfg(feature = "tray")]
-    if let Some(tray) = tray {
-        tray.shutdown();
+    #[cfg(unix)]
+    {
+        let _ = tokio::fs::remove_file(&path).await;
     }
+    #[cfg(feature = "tray")]
+    drop(_tray);
     #[cfg(feature = "mpris")]
     drop(mpris);
     #[cfg(windows)]

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+//! （平台门控：进程级测试用 Unix socket + SIGTERM，Windows 冒烟走真机验证。）
 //! `serve.rs` 编排集成测试（真实音频设备环境，CI 默认跳过）。
 //!
 //! 协议层（帧编解码 / socket 服务器 / 引擎仲裁）已由 hmp-daemon 内 lib 级单测

@@ -1,11 +1,11 @@
 //! CLI → daemon 客户端（spec §4.3 `client.rs`）。
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
 use hmp_core::ipc::{Request, Response, decode_frame, encode_frame};
+use hmp_daemon::transport::IpcStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 
 /// CLI 错误。
 #[derive(Debug, thiserror::Error)]
@@ -25,7 +25,7 @@ pub enum CliError {
 
 /// 与后端的一条连接。
 pub struct DaemonClient {
-    stream: UnixStream,
+    stream: IpcStream,
 }
 
 impl DaemonClient {
@@ -48,8 +48,8 @@ impl DaemonClient {
         Self::try_connect(&path).await
     }
 
-    async fn try_connect(path: &PathBuf) -> Result<Self, CliError> {
-        let stream = UnixStream::connect(path).await?;
+    async fn try_connect(path: &Path) -> Result<Self, CliError> {
+        let stream = IpcStream::connect(path).await?;
         Ok(Self { stream })
     }
 
@@ -72,19 +72,19 @@ impl DaemonClient {
     }
 }
 
-/// spawn `hmp serve --background`：经 `hmp_daemon::serve::spawn_detached` 以
-/// `setsid` 脱离会话 + 丢弃 stdio（final review Finding 8，单一 detach 点）。
+/// spawn `hmp serve --background`：脱离会话 + 丢弃 stdio（final review
+/// Finding 8，单一 detach 点；Unix=setsid，Windows=CREATE_NO_WINDOW）。
 fn spawn_daemon() -> Result<(), CliError> {
     hmp_daemon::serve::spawn_detached(&["serve", "--background"])
         .map_err(|e| CliError::Connect(format!("failed to spawn daemon: {e}")))?;
     Ok(())
 }
 
-/// 轮询 socket 就绪。
-async fn wait_for_socket(path: &PathBuf, timeout: Duration) -> Result<(), CliError> {
+/// 轮询端点就绪（Windows 管道不落盘，不做 exists 前置，直接探测连接）。
+async fn wait_for_socket(path: &Path, timeout: Duration) -> Result<(), CliError> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if path.exists() && UnixStream::connect(path).await.is_ok() {
+        if IpcStream::connect(path).await.is_ok() {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {

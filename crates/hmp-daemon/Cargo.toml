@@ -20,23 +20,28 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 libc = "0.2"
 url = "2"
+percent-encoding = "2"
 notify = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 hmp-smtc = { path = "../hmp-smtc" }
+# 托盘（feature `tray`）：Win32 原生实现；windows-sys 提供创建线程的
+# 消息泵（tray-icon 的图标/菜单事件都经 Win32 消息送达）。
+tray-icon = { version = "0.24", optional = true }
+windows-sys = { version = "0.60", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(unix)'.dependencies]
+# 托盘（feature `tray`）：D-Bus StatusNotifierItem 实现。
+ksni = { version = "0.2", optional = true }
 
 [features]
 default = []
-tray = ["dep:ksni"]
+tray = ["dep:ksni", "dep:tray-icon"]
 mpris = ["dep:hmp-mpris"]
 
 [dev-dependencies]
 tempfile = "3"
 wiremock.workspace = true
-
-[dependencies.ksni]
-version = "0.2"
-optional = true
 
 [dependencies.hmp-mpris]
 path = "../hmp-mpris"

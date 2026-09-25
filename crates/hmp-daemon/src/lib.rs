@@ -13,6 +13,7 @@ pub mod server; // Task 3 // Task 5
 #[cfg(windows)]
 pub mod smtc;
 pub mod sync;
+pub mod transport;
 #[cfg(feature = "tray")]
 pub mod tray; // Task 6
 pub mod watcher;

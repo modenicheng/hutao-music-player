@@ -44,8 +44,12 @@ impl LocalSourceResolver {
     /// 保证 `local:<path>` 身份稳定：同一文件不因相对/绝对/symlink 生成多条记录（P1）。
     fn canonical_id(id: TrackId) -> TrackId {
         match id.0.strip_prefix("local:") {
+            // strip_verbatim：Windows canonicalize 产出 \?\ 前缀，须与库键统一拼写
             Some(p) if !p.is_empty() => match std::fs::canonicalize(p) {
-                Ok(c) => TrackId::new(format!("local:{}", c.display())),
+                Ok(c) => TrackId::new(format!(
+                    "local:{}",
+                    hmp_storage::strip_verbatim(&c).display()
+                )),
                 Err(_) => id, // 不存在/不可达：保持原样，由 resolve_track 报 TrackNotFound
             },
             _ => id,
@@ -99,6 +103,9 @@ impl LocalSourceResolver {
         let id = Self::canonical_id(id);
         let path = Self::path_of(&id)?;
         let path = std::fs::canonicalize(path).map_err(|_| EngineError::TrackNotFound)?;
+        // Windows canonicalize 产出 \?\ verbatim 前缀；入库/封面键/URI 同一
+        // 规范拼写（strip 后仍是绝对真实路径，语义不变）。
+        let path = hmp_storage::strip_verbatim(&path);
         // 目录/设备节点：Linux 上 File::open(dir) 成功而解码挂死，错误只会在
         // 引擎 5s 超时才浮出；源头拒绝 + 不入库（垃圾行防御）。
         if !path.is_file() {
@@ -409,9 +416,14 @@ mod tests {
         let stubs = resolver.resolve_source_ids(&source).await.unwrap();
 
         assert_eq!(stubs.len(), 1);
+        // 库键统一走 canonicalize + verbatim 剥离（Windows 上 canonicalize
+        // 产出 \?\ 前缀，不能直接进键）。
         assert_eq!(
             stubs[0].id,
-            TrackId::new(format!("local:{}", std::fs::canonicalize(&path).unwrap().display()))
+            TrackId::new(format!(
+                "local:{}",
+                hmp_storage::canonical_display_path(&path).display()
+            ))
         );
     }
 
@@ -422,7 +434,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // 目录：Linux File::open 能成功、解码挂死——解析期即拒（不入库）。
         let dir_src = PlayRequest::Local(TrackId::new(format!("local:{}", dir.path().display())));
-        assert!(resolver.resolve_source_ids(&dir_src).await.unwrap().is_empty());
+        assert!(
+            resolver
+                .resolve_source_ids(&dir_src)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // 不存在路径：空列表（确定性失败，而非装载超时）。
         let missing_src = PlayRequest::Local(TrackId::new("local:/nonexistent/hmp-audit/x.flac"));
         assert!(
@@ -444,7 +462,9 @@ mod tests {
         let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
         let resolver = LocalSourceResolver::new(lib.clone());
         let canonical = std::fs::canonicalize(&path).unwrap();
-        let id = TrackId::new(format!("local:{}", canonical.display()));
+        // 库键走统一规范化（Windows canonicalize 的 \?\ 前缀不进键）。
+        let key_path = hmp_storage::strip_verbatim(&canonical);
+        let id = TrackId::new(format!("local:{}", key_path.display()));
         let resolved = resolver.resolve_track(&id).await.unwrap();
 
         // URL 编码的 file URI（url crate）。
@@ -458,7 +478,7 @@ mod tests {
         let db_id = lib.track_id("local", id.as_ref()).unwrap().unwrap();
         assert_eq!(
             lib.local_path(db_id).unwrap().unwrap(),
-            canonical.display().to_string()
+            key_path.display().to_string()
         );
     }
 

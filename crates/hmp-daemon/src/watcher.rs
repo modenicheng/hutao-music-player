@@ -250,9 +250,13 @@ mod tests {
             return;
         };
         // 写入音频文件 → 事件 → 自动入库（轮询等待，超时 5s）。
-        let f = music.path().join("new-song.mp3");
+        // 路径统一从 canonical 根构造：Windows 上 TEMP 环境变量拼写与盘上
+        // 真实大小写可能不一；文件删除后无法 canonicalize，校验查询必须与
+        // 事件拼写（监听根 = DB canonical 拼写）同源。
+        let root = hmp_storage::canonical_display_path(music.path());
+        let f = root.join("new-song.mp3");
         std::fs::write(&f, b"abc").unwrap();
-        let key = format!("local:{}", f.canonicalize().unwrap().display());
+        let key = format!("local:{}", f.display());
         let mut found = false;
         for _ in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;

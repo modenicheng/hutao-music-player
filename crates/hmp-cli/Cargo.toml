@@ -17,7 +17,9 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 hmp-core = { path = "../hmp-core" }
-hmp-daemon = { path = "../hmp-daemon" }
+# tray：`hmp serve`（桌面端/CLI 共同的后端宿主）默认带系统托盘——
+# detached 后台进程无控制台，托盘是主要的手动控制/退出入口。
+hmp-daemon = { path = "../hmp-daemon", features = ["tray"] }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
 hmp-storage = { path = "../hmp-storage" }
 rusqlite = { workspace = true }

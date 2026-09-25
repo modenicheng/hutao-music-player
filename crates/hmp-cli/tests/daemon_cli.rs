@@ -1,3 +1,5 @@
+#![cfg(unix)]
+//! （平台门控：进程级测试用 Unix socket + SIGTERM，Windows 冒烟走真机验证。）
 //! CLI 进程级集成测试（真机验收：需要真实音频设备，默认 `#[ignore]`）。
 //!
 //! 协议层已由 hmp-daemon lib 级测试覆盖（`server.rs` / `engine.rs`）；

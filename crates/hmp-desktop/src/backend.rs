@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use hmp_core::ipc::{DaemonState, Event, MAX_FRAME, Request, Response, decode_frame, encode_frame};
 use hmp_core::{QueueEntry, TrackProvider};
+use hmp_daemon::transport::IpcStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 
 /// spawn 后等待 daemon 就绪：~10 次 × 300ms（CLI `wait_for_socket` 同量级）。
 const SPAWN_RETRIES: u32 = 10;
@@ -92,16 +92,16 @@ impl BackendRuntime {
     }
 }
 
-/// 连接 daemon socket（短连接；路径与 daemon/CLI 同一实现，勿重复实现）。
-async fn connect() -> Result<UnixStream, BackendError> {
-    Ok(UnixStream::connect(hmp_daemon::server::socket_path()).await?)
+/// 连接 daemon 端点（短连接；路径与 daemon/CLI 同一实现，勿重复实现）。
+async fn connect() -> Result<IpcStream, BackendError> {
+    Ok(IpcStream::connect(&hmp_daemon::server::socket_path()).await?)
 }
 
 /// 连接或拉起后端（镜像 CLI `connect_or_spawn` 语义）：
 /// ENOENT / ECONNREFUSED → 解析 `hmp` 二进制（current_exe 同目录 → PATH），
 /// 经 `serve::spawn_detached_exe` 拉起 `hmp serve --background`，退避重试；
 /// 找不到二进制或重试耗尽 → Err（调用方降级离线模式）。
-pub async fn connect_or_spawn() -> Result<UnixStream, BackendError> {
+pub async fn connect_or_spawn() -> Result<IpcStream, BackendError> {
     match connect().await {
         Ok(stream) => Ok(stream),
         Err(BackendError::Io(e))
@@ -109,7 +109,8 @@ pub async fn connect_or_spawn() -> Result<UnixStream, BackendError> {
                 || e.kind() == std::io::ErrorKind::ConnectionRefused =>
         {
             if e.kind() == std::io::ErrorKind::ConnectionRefused {
-                // 残留 socket（daemon 自身持 flock 也会再清理，双保险同 CLI）。
+                // 残留 socket（daemon 自身持锁也会再清理，双保险同 CLI）；
+                // Windows 管道不落盘，remove 失败无碍。
                 let _ = std::fs::remove_file(hmp_daemon::server::socket_path());
             }
             let exe = resolve_backend_binary().ok_or(BackendError::NoBackendBinary)?;
@@ -135,7 +136,7 @@ pub fn resolve_backend_binary() -> Option<PathBuf> {
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
     {
-        let candidate = dir.join("hmp");
+        let candidate = dir.join(backend_binary_name());
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -144,10 +145,15 @@ pub fn resolve_backend_binary() -> Option<PathBuf> {
     find_hmp_in_dirs(std::env::split_paths(&path))
 }
 
+/// 平台后端二进制名（Windows 上是 hmp.exe）。
+fn backend_binary_name() -> String {
+    format!("hmp{}", std::env::consts::EXE_SUFFIX)
+}
+
 /// 在候选目录序列中找 `hmp` 可执行文件（纯逻辑；与 PATH 扫描同惯例，
 /// 不再校验 x 位）。
 fn find_hmp_in_dirs<I: Iterator<Item = PathBuf>>(dirs: I) -> Option<PathBuf> {
-    dirs.map(|dir| dir.join("hmp"))
+    dirs.map(|dir| dir.join(backend_binary_name()))
         .find(|candidate| candidate.is_file())
 }
 
@@ -189,7 +195,8 @@ pub async fn request(req: Request) -> Result<Response, BackendError> {
     let Some(frame) = read_frame(&mut stream).await? else {
         return Err(BackendError::Protocol("daemon closed connection".into()));
     };
-    let response = decode_frame::<Response>(&frame).map_err(|e| BackendError::Protocol(e.to_string()));
+    let response =
+        decode_frame::<Response>(&frame).map_err(|e| BackendError::Protocol(e.to_string()));
     if let Ok(Response::Err { code, message }) = &response {
         // 拒绝型响应（未登录/越界等）此前被 `let _ =` 静默吞掉——UI「点了
         // 没反应」的主要来源之一；至少留一条 warn 级日志可查。
@@ -432,13 +439,13 @@ fn query_library_meta(ids: &[String]) -> HashMap<String, ProjectedMeta> {
 
 /// 写一帧请求（长度前缀 JSON；与 daemon server 同契约）。
 /// 只服务 `Request`：不引入 serde 直依赖（serde_json 对具体类型即可编码）。
-async fn write_frame(stream: &mut UnixStream, req: &Request) -> std::io::Result<()> {
+async fn write_frame(stream: &mut IpcStream, req: &Request) -> std::io::Result<()> {
     let frame = encode_frame(req).map_err(|e| std::io::Error::other(e.to_string()))?;
     stream.write_all(&frame).await
 }
 
 /// 读一帧（含 4 字节长度前缀）；EOF 返回 `None`。
-async fn read_frame(stream: &mut UnixStream) -> std::io::Result<Option<Vec<u8>>> {
+async fn read_frame(stream: &mut IpcStream) -> std::io::Result<Option<Vec<u8>>> {
     let mut len_buf = [0u8; 4];
     match stream.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -468,9 +475,11 @@ mod tests {
     fn find_hmp_in_dirs_picks_existing_file() {
         let dir = std::env::temp_dir().join(format!("hmp-desktop-bin-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("hmp"), b"").unwrap();
+        // 平台二进制名（Windows 上是 hmp.exe），与 find_hmp_in_dirs 同一约定。
+        let bin_name = format!("hmp{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(dir.join(&bin_name), b"").unwrap();
         let found = find_hmp_in_dirs([dir.clone(), std::env::temp_dir()].into_iter());
-        assert_eq!(found, Some(dir.join("hmp")));
+        assert_eq!(found, Some(dir.join(&bin_name)));
         let _ = std::fs::remove_dir_all(dir);
     }
 

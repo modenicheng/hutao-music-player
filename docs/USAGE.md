@@ -23,7 +23,7 @@ cargo build --release
 # 二进制位于 target/release/hmp
 ```
 
-依赖：Rust 1.85+。音频由 Rodio/CPAL 提供；Windows 无需安装额外媒体 SDK，Linux 需要发行版的 ALSA 开发库。tray/MPRIS 需要 D-Bus session bus；无桌面会话时后端仍可运行。
+依赖：Rust 1.85+。音频由 Rodio/CPAL 提供；Windows 无需安装额外媒体 SDK，Linux 需要发行版的 ALSA 开发库。MPRIS 需要 D-Bus session bus（托盘在 Linux 走 D-Bus StatusNotifierItem，Windows 走 Win32 原生）；无桌面会话时后端仍可运行（托盘自动跳过）。
 
 ## 2. 登录
 
@@ -167,7 +167,9 @@ MPRIS `OpenUri`（`playerctl open file:///...`）经同一路径播放。
   playerctl -p hmp metadata      # 曲目元数据
   ```
   `CanGoNext`/`CanGoPrevious` 按队列位置与循环模式实时上报；`xesam:url` 为本地解密代理 URI。
-- **托盘**：KDE 等桌面显示图标，菜单 = 播放/暂停、上一首、下一首、停止、退出（GNOME 需 AppIndicator 扩展；无桌面会话时自动跳过，不影响播放）。
+- **托盘**：菜单 = 播放/暂停、上一首、下一首、停止、退出，与 CLI/MPRIS 同源生效。图标随播放态切换（暂停=双竖条，播放=音符），tooltip 显示当前曲目。
+  - Windows：Win32 原生（explorer 通知区）。左键单击 = 播放/暂停，右键 = 菜单。
+  - Linux：D-Bus StatusNotifierItem（KDE 等原生支持；GNOME 需 AppIndicator 扩展）。无桌面会话时自动跳过，不影响播放。
 
 ### 桌面 UI（Slint，M8 起接真实后端）
 
@@ -190,7 +192,7 @@ cargo run --release -p hmp-desktop --bin hmp-desktop
 | `后端启动超时` | daemon 拉起失败（见下）；可先手动 `hmp serve` 看前台错误 |
 | 端口/socket 冲突或残留 | 删除 `$XDG_RUNTIME_DIR/hmp.sock*` 与 `/tmp/hmp-<uid>/` 后重试（flock 锁保证不会双实例） |
 | 无声音 | 确认系统存在默认音频输出设备；Linux 同时检查 ALSA/PipeWire 兼容层 |
-| 托盘不显示 | 桌面需支持 StatusNotifierItem（GNOME 装 AppIndicator 扩展）；无碍播放 |
+| 托盘不显示 | Linux：桌面需支持 StatusNotifierItem（GNOME 装 AppIndicator 扩展）；Windows：确认 explorer 通知区可见。无碍播放，`hmp quit` 等价退出 |
 | `playerctl` 无响应 | `playerctl -p hmp` 前缀必须带 `-p hmp`；确认 daemon 在运行（`hmp status`） |
 
 ## 9. 测试指南
@@ -234,7 +236,7 @@ hmp queue shuffle on && hmp next  # 随机
 # 6) 音质验证：hmp play 后 hmp status 无报错即解密播放成功（日志可看音质档位）
 # 7) MPRIS
 playerctl -p hmp play-pause && playerctl -p hmp status
-# 8) 托盘：KDE 桌面可见图标，菜单五项可用（Play/Pause、Previous、Next、Stop、Quit）；点 Quit 后 hmp status 应报无法连接
+# 8) 托盘：可见图标（Windows 通知区 / KDE）；右键菜单五项可用（Play/Pause、Previous、Next、Stop、Quit），播放中 Play 项变 Pause、图标切换；Windows 左键单击 = 播放/暂停；点 Quit 后 hmp status 应报无法连接
 # 9) 退出干净
 hmp quit && ls $XDG_RUNTIME_DIR/hmp.sock   # 应不存在
 
