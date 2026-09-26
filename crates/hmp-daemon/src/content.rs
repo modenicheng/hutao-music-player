@@ -205,6 +205,127 @@ impl ContentService {
         }
         hmp_storage::scan::persist_cover(&bytes).map_err(|e| e.to_string())
     }
+
+    /// 发现页聚合（AUDIT §8.2 同源）：推荐歌单广场 + 新歌，免登录。
+    pub async fn discover(
+        &self,
+        songlist_page: u32,
+        new_song_type: u32,
+    ) -> Result<hmp_core::DiscoverPage, String> {
+        let api = hmp_qqmusic_api::recommend::RecommendApi::new(&self.client);
+        let playlists = api
+            .get_recommend_songlist(songlist_page.max(1) as i64, 30)
+            .await
+            .map_err(|e| e.to_string())?;
+        let newsong = api
+            .get_recommend_newsong(new_song_type as i64)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(hmp_core::DiscoverPage {
+            playlists: playlists
+                .songlists
+                .into_iter()
+                .map(|p| hmp_core::DiscoverPlaylist {
+                    id: p.id,
+                    title: p.title,
+                    picurl: p.picurl,
+                    creator: p.creator_nick,
+                    songnum: p.songnum,
+                    listennum: p.listennum,
+                })
+                .collect(),
+            has_more_playlists: playlists.has_more,
+            new_songs: newsong.songs.iter().map(project_song).collect(),
+        })
+    }
+
+    /// 排行榜分类（免登录）：分组 + 各榜预览前 3 首。
+    pub async fn top_category(&self) -> Result<hmp_core::TopCategoryPage, String> {
+        let resp = hmp_qqmusic_api::top::TopApi::new(&self.client)
+            .get_category()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(hmp_core::TopCategoryPage {
+            groups: resp
+                .group
+                .into_iter()
+                .map(|g| hmp_core::TopGroupDto {
+                    id: g.id,
+                    name: g.name,
+                    tops: g
+                        .toplist
+                        .into_iter()
+                        .map(|t| hmp_core::TopSummaryDto {
+                            id: t.id,
+                            name: t.name,
+                            title_sub: t.title_sub,
+                            update_time: t.update_time,
+                            listen_num: t.listen_num,
+                            picurl: t.front_pic_url,
+                            preview: t
+                                .songs
+                                .iter()
+                                .take(3)
+                                .map(|s| format!("{}. {} - {}", s.rank, s.name, s.singer_name))
+                                .collect(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+    }
+
+    /// 排行榜详情（免登录）：完整曲目列表分页。
+    pub async fn top_detail(
+        &self,
+        top_id: i64,
+        num: i64,
+        page: i64,
+    ) -> Result<hmp_core::TopDetailPage, String> {
+        let resp = hmp_qqmusic_api::top::TopApi::new(&self.client)
+            .get_detail(top_id, num, page.max(1), false)
+            .await
+            .map_err(|e| e.to_string())?;
+        let total = resp.info.total_num;
+        let fetched = (num * page.max(1)).max(0);
+        Ok(hmp_core::TopDetailPage {
+            name: resp.info.name,
+            title_sub: resp.info.title_sub,
+            update_time: resp.info.update_time,
+            songs: resp
+                .songs
+                .iter()
+                .map(|s| {
+                    let p = project_song(s);
+                    hmp_core::TopSongDto {
+                        mid: p.mid,
+                        name: p.name,
+                        singer: p.singer,
+                        album: p.album,
+                        interval: p.interval,
+                        picurl: p.picurl,
+                    }
+                })
+                .collect(),
+            total,
+            has_more: fetched < total,
+        })
+    }
+
+    /// 猜你喜欢（需登录；非安卓匿名返回 1000，由上层转 NotLoggedIn；
+    /// 上游接口当前无分页参数，页号仅预留）。
+    pub async fn guess(&self, _page: u32) -> Result<hmp_core::GuessPage, String> {
+        let Some(cred) = self.credential().map_err(|e| e.to_string())? else {
+            return Err("not logged in".into());
+        };
+        let resp = hmp_qqmusic_api::recommend::RecommendApi::new(&self.client)
+            .get_guess_recommend(&cred)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(hmp_core::GuessPage {
+            songs: resp.songs.iter().map(project_song).collect(),
+        })
+    }
 }
 
 /// 展示型字段提取：从 JSON 任意层级找第一个指定 key 的字符串值
@@ -239,6 +360,29 @@ fn find_flag(v: &serde_json::Value, key: &str) -> Option<bool> {
         _ => None,
     }
 }
+
+/// `Song` → 发现页/榜单/猜你喜欢共用窄投影。
+fn project_song(s: &hmp_qqmusic_api::models::Song) -> hmp_core::DiscoverNewSong {
+    let singer = if s.singer.is_empty() {
+        String::new()
+    } else {
+        s.singer
+            .iter()
+            .map(|g| g.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
+    hmp_core::DiscoverNewSong {
+        mid: s.mid.clone(),
+        name: s.name.clone(),
+        singer,
+        album: s.album.name.clone(),
+        interval: s.interval,
+        picurl: s.album.pmid.clone(),
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {

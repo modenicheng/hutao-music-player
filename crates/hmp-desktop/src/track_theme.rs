@@ -707,8 +707,8 @@ fn box_blur_pass(data: &mut [f64], w: usize, h: usize, radius: usize, vertical: 
 fn saturate_gamma(data: &mut [f64], amount: f64) {
     for px in data.chunks_exact_mut(4) {
         let luma = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
-        for c in 0..3 {
-            px[c] = (px[c] + (px[c] - luma) * amount).clamp(0.0, 255.0);
+        for c in &mut px[..3] {
+            *c = (*c + (*c - luma) * amount).clamp(0.0, 255.0);
         }
     }
 }

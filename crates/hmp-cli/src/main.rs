@@ -16,7 +16,9 @@ mod auth;
 mod client;
 mod commands;
 mod comment;
+mod discover;
 mod favorite;
+mod guess;
 mod history;
 mod library;
 mod login;
@@ -25,6 +27,7 @@ mod quality;
 mod scan;
 mod search;
 mod timefmt;
+mod top;
 
 use hmp_core::{LoopMode, Request};
 
@@ -74,6 +77,25 @@ enum Command {
     },
     /// Search songs.
     Search { keyword: String },
+    /// Discover page (recommend playlists + new songs; no login needed).
+    Discover {
+        /// Songlist square page (1-based).
+        #[arg(long, default_value_t = 1)]
+        page: u32,
+        /// New-song area (内地|欧美|日本|韩国|最新|港台).
+        #[arg(long, default_value = "最新")]
+        area: String,
+    },
+    /// Toplist (categories with preview / detail by id; no login needed).
+    Top {
+        /// Toplist id (omit for category view).
+        top_id: Option<i64>,
+        /// Detail page number (1-based).
+        #[arg(long, default_value_t = 1)]
+        page: i64,
+    },
+    /// Guess-you-like songs (login required).
+    Guess,
     /// Log in via QQ QR code (ASCII art in the terminal).
     Login,
     /// Show login status (local credential check).
@@ -330,6 +352,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Search { keyword } => search::run(&keyword).await,
+        Command::Discover { page, area } => discover::run(page, &area).await,
+        Command::Top { top_id, page } => match top_id {
+            Some(id) => top::detail(id, page).await,
+            None => top::category().await,
+        },
+        Command::Guess => guess::run().await,
         Command::Login => login::run().await,
         Command::Auth => auth::run().await,
         Command::Scan { dir } => scan::run(&dir).await,

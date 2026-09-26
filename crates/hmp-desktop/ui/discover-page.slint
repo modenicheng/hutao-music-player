@@ -1,0 +1,132 @@
+// 发现页（M4 在线内容页）：推荐歌单广场 + 新歌速递——daemon
+// DiscoverGet IPC（免登录；AUDIT §8.2 内容读服务同源）。
+import { Theme } from "theme.slint";
+import { AppIcon, Button, ButtonVariant } from "primitives.slint";
+import { PageHeader, SectionHeader, CoverCardGrid } from "page-parts.slint";
+import { Nav, Route } from "nav.slint";
+import { Data } from "stores.slint";
+import { CoverCardData } from "data.slint";
+
+export component DiscoverPage inherits Rectangle {
+
+    VerticalLayout {
+        y: Theme.space-4;
+        height: parent.height - 2 * Theme.space-4;
+        width: parent.width - 2 * Theme.space-4;
+        x: Theme.space-4;
+        spacing: Theme.space-4;
+
+        // 页头：标题 + 刷新
+        HorizontalLayout {
+            height: 56px;
+            spacing: Theme.space-4;
+
+            Rectangle {
+                width: parent.width - 120px;
+
+                Text {
+                    text: "发现";
+                    color: Theme.foreground;
+                    font-size: 22px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+
+            Rectangle {
+                Button {
+                    text: Data.discover-state == 1 ? "加载中…" : "刷新";
+                    variant: ButtonVariant.outline;
+                    width: 96px;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        Data.refresh-discover();
+                    }
+                }
+            }
+        }
+
+        // 状态机：0=初始(触发加载) 1=加载中 2=有内容 3=空 4=失败
+        if Data.discover-state == 1 || Data.discover-state == 0: Rectangle {
+            height: 160px;
+
+            Text {
+                width: parent.width;
+                y: 64px;
+                text: Data.discover-state == 1 ? "正在加载发现页…" : "即将加载…";
+                color: Theme.muted-foreground;
+                font-size: 14px;
+                horizontal-alignment: center;
+            }
+        }
+
+        if Data.discover-state == 3 || Data.discover-state == 4: Rectangle {
+            height: 160px;
+
+            Text {
+                width: parent.width;
+                y: 48px;
+                text: Data.discover-state == 4 ? "加载失败（离线或网络异常）" : "暂无内容";
+                color: Theme.muted-foreground;
+                font-size: 14px;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                width: parent.width;
+                y: 80px;
+                text: "点击右上角“刷新”重试";
+                color: Theme.muted-foreground;
+                font-size: 13px;
+                horizontal-alignment: center;
+            }
+        }
+
+        if Data.discover-state == 2: Flickable {
+            VerticalLayout {
+                spacing: Theme.space-4;
+
+                // —— 推荐歌单（点击进入歌单详情页）——
+                if Data.discover-playlists.length > 0: Rectangle {
+                    height: 340px;
+
+                    SectionHeader {
+                        title: "推荐歌单";
+                        more-to: Data.discover-has-more ? "发现页更多" : "";
+                        more-clicked => {
+                            Nav.navigate(Route.discover, "");
+                        }
+                    }
+
+                    CoverCardGrid {
+                        y: 40px;
+                        width: parent.width;
+                        height: parent.height - 40px;
+                        cards: Data.discover-playlists;
+                        card-clicked(mid) => {
+                            Nav.navigate(Route.playlist, mid);
+                        }
+                    }
+                }
+
+                // —— 新歌速递（点击播放）——
+                if Data.discover-new-songs.length > 0: Rectangle {
+                    height: 120px;
+
+                    SectionHeader {
+                        title: "新歌速递";
+                    }
+
+                    Text {
+                        y: 48px;
+                        width: parent.width;
+                        text: "新歌播放请从右键菜单或 CLI：hmp play <songmid>";
+                        color: Theme.muted-foreground;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}

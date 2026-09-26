@@ -1,0 +1,135 @@
+// 首页（M4 在线内容页）：登录后猜你喜欢 + 免登录推荐内容快捷入口。
+// GuessGet（需登录）+ DiscoverGet 数据复用（发现页加载后同源展示）。
+import { Theme } from "theme.slint";
+import { AppIcon, Button, ButtonVariant } from "primitives.slint";
+import { SectionHeader, CoverCardGrid } from "page-parts.slint";
+import { Nav, Route } from "nav.slint";
+import { Data, Player } from "stores.slint";
+import { CoverCardData } from "data.slint";
+
+export component HomePage inherits Rectangle {
+
+    VerticalLayout {
+        y: Theme.space-4;
+        height: parent.height - 2 * Theme.space-4;
+        width: parent.width - 2 * Theme.space-4;
+        x: Theme.space-4;
+        spacing: Theme.space-4;
+
+        // 页头
+        HorizontalLayout {
+            height: 56px;
+            spacing: Theme.space-4;
+
+            Rectangle {
+                width: parent.width - 240px;
+
+                Text {
+                    text: "首页";
+                    color: Theme.foreground;
+                    font-size: 22px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+
+            // 快捷导航入口
+            Rectangle {
+                HorizontalLayout {
+                    spacing: Theme.space-4;
+
+                    Button {
+                        text: "去发现";
+                        variant: ButtonVariant.outline;
+                        clicked => {
+                            Nav.navigate(Route.discover, "");
+                        }
+                    }
+
+                    Button {
+                        text: "看榜单";
+                        variant: ButtonVariant.outline;
+                        clicked => {
+                            Nav.navigate(Route.top, "");
+                        }
+                    }
+                }
+            }
+        }
+
+        Flickable {
+            VerticalLayout {
+                spacing: Theme.space-4;
+
+                // —— 猜你喜欢（需登录；未登录显示登录引导）——
+                Rectangle {
+                    height: Data.guess-state == 2 && Data.guess-tracks.length > 0
+                        ? 320px : 140px;
+
+                    SectionHeader {
+                        title: "猜你喜欢";
+                    }
+
+                    if Data.guess-state == 1: Text {
+                        y: 48px;
+                        text: "正在加载…";
+                        color: Theme.muted-foreground;
+                        font-size: 13px;
+                    }
+
+                    if !Data.account-logged-in: Text {
+                        y: 48px;
+                        width: parent.width;
+                        text: "登录后可获取个性化推荐（hmp login / 设置-账号）";
+                        color: Theme.muted-foreground;
+                        font-size: 13px;
+                    }
+
+                    if Data.guess-state == 4: Text {
+                        y: 48px;
+                        text: "加载失败";
+                        color: Theme.muted-foreground;
+                        font-size: 13px;
+                    }
+
+                    if Data.guess-state == 2 && Data.guess-tracks.length > 0: CoverCardGrid {
+                        y: 40px;
+                        width: parent.width;
+                        height: parent.height - 40px;
+                        cards: Data.guess-cards;
+                        card-clicked(mid) => {
+                            // 歌单/专辑卡片语义是导航；猜你喜欢卡片直接播首处匹配
+                            Player.play-mid(mid);
+                        }
+                    }
+                }
+
+                // —— 为你推荐（复用发现页歌单数据）——
+                if Data.discover-state == 2 && Data.discover-playlists.length > 0: Rectangle {
+                    height: 340px;
+
+                    SectionHeader {
+                        title: "为你推荐";
+                    }
+
+                    CoverCardGrid {
+                        y: 40px;
+                        width: parent.width;
+                        height: parent.height - 40px;
+                        cards: Data.discover-playlists;
+                        card-clicked(mid) => {
+                            Nav.navigate(Route.playlist, mid);
+                        }
+                    }
+                }
+
+                // 发现页尚未加载时的提示（首页惰性触发）
+                if Data.discover-state == 0: Text {
+                    text: "正在获取推荐内容…";
+                    color: Theme.muted-foreground;
+                    font-size: 13px;
+                }
+            }
+        }
+    }
+}

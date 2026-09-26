@@ -21,13 +21,17 @@ import { SettingsGeneralPage } from "settings-general-page.slint";
 import { SettingsPlaybackPage } from "settings-playback-page.slint";
 import { SettingsAccountPage } from "settings-account-page.slint";
 import { SearchPage } from "search-page.slint";
+import { HomePage } from "home-page.slint";
+import { DiscoverPage } from "discover-page.slint";
+import { TopPage } from "top-page.slint";
+import { TopDetailPage } from "top-detail-page.slint";
 import { Nav, Route } from "nav.slint";
 import { Player, Data, Quality, NowPlaying, TrackPalette } from "stores.slint";
 import { Theme } from "theme.slint";
-import { TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow } from "data.slint";
+import { TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData } from "data.slint";
 
 // 供生成代码（Rust 侧）访问的 global 与数据结构（HoverBus/EqClock 供集成测试探针）
-export { Theme, Nav, Player, Quality, Data, NowPlaying, TrackPalette, Route, TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, HoverBus, EqClock, WinChrome }
+export { Theme, Nav, Player, Quality, Data, NowPlaying, TrackPalette, Route, TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData, HoverBus, EqClock, WinChrome }
 
 export component AppWindow inherits Window {
     title: "胡桃音乐";
@@ -170,21 +174,19 @@ export component AppWindow inherits Window {
                     width: parent.width;
                 }
 
-                // 未移植模块（M4 在线内容页）：诚实占位——推荐/榜单内容读接口
-                // 尚未排期（搜索已接 daemon Search IPC，docs/AUDIT.md §8.2）。
-                if Nav.route == Route.home || Nav.route == Route.discover || Nav.route == Route.top
-                    || Nav.route == Route.top-detail: Rectangle {
+                // M4 在线内容页（首页/发现/榜单/榜单详情）：daemon 统一出网
+                // （DiscoverGet/TopCategoryGet/TopDetailGet/GuessGet，AUDIT §8.2）。
+                if Nav.route == Route.home: HomePage {
                     width: parent.width;
-                    height: 240px;
-
-                    Text {
-                        y: 96px;
-                        width: parent.width;
-                        text: "在线内容页依赖 QQ 内容接口（推荐/榜单），后续版本接入";
-                        color: Theme.muted-foreground;
-                        font-size: 14px;
-                        horizontal-alignment: center;
-                    }
+                }
+                if Nav.route == Route.discover: DiscoverPage {
+                    width: parent.width;
+                }
+                if Nav.route == Route.top: TopPage {
+                    width: parent.width;
+                }
+                if Nav.route == Route.top-detail: TopDetailPage {
+                    width: parent.width;
                 }
             }
         }

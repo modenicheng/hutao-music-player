@@ -216,6 +216,29 @@ pub enum Request {
         /// 远程封面 URL。
         url: String,
     },
+    /// 发现页聚合：推荐歌单 + 新歌（免登录；daemon 出网，首页内容的基础）。
+    DiscoverGet {
+        /// 歌单广场页号（1 基）。
+        songlist_page: u32,
+        /// 新歌地区类型（1=内地 2=欧美 3=日本 4=韩国 5=最新 6=港台）。
+        new_song_type: u32,
+    },
+    /// 排行榜分类（免登录；分组 + 各榜预览前 3 首）。
+    TopCategoryGet,
+    /// 排行榜详情（免登录；含完整曲目列表）。
+    TopDetailGet {
+        /// 榜单 ID（来自分类响应）。
+        top_id: i64,
+        /// 每页数量。
+        num: i64,
+        /// 页号（1 基）。
+        page: i64,
+    },
+    /// 猜你喜欢（需登录；非安卓平台匿名返回 1000）。
+    GuessGet {
+        /// 页号（1 基）。
+        page: u32,
+    },
     /// 优雅退出后端。
     Quit,
 }
@@ -251,6 +274,14 @@ pub enum Response {
     Quality(QualityPrefDto),
     /// `CoverGet` 的响应（`file://` 本地路径）。
     Cover(String),
+    /// `DiscoverGet` 的响应（推荐歌单 + 新歌）。
+    Discover(DiscoverPage),
+    /// `TopCategoryGet` 的响应。
+    TopCategory(TopCategoryPage),
+    /// `TopDetailGet` 的响应。
+    TopDetail(TopDetailPage),
+    /// `GuessGet` 的响应。
+    Guess(GuessPage),
 }
 
 /// 订阅后的事件推送。
@@ -385,6 +416,128 @@ pub struct SearchPage {
     pub songs: Vec<SearchSong>,
     pub albums: Vec<SearchAlbum>,
     pub singers: Vec<SearchSinger>,
+}
+
+/// 发现页歌单卡片（推荐歌单广场项的窄投影）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DiscoverPlaylist {
+    /// 歌单数字 ID（播放入口 `hmp play playlist:<id>`）。
+    pub id: i64,
+    /// 标题。
+    pub title: String,
+    /// 封面 URL（UI 经 CoverGet 换本地产物）。
+    pub picurl: String,
+    /// 创建者昵称。
+    pub creator: String,
+    /// 歌曲数。
+    pub songnum: i64,
+    /// 播放数。
+    pub listennum: i64,
+}
+
+/// 发现页新歌项（窄投影：播放所需最小集）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DiscoverNewSong {
+    /// songmid。
+    pub mid: String,
+    /// 歌曲名。
+    pub name: String,
+    /// 歌手名（单一展示串）。
+    pub singer: String,
+    /// 专辑名。
+    pub album: String,
+    /// 时长秒。
+    pub interval: i64,
+    /// 封面 URL。
+    pub picurl: String,
+}
+
+/// 发现页（推荐歌单 + 新歌两大区块）。
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct DiscoverPage {
+    /// 推荐歌单（歌单广场）。
+    pub playlists: Vec<DiscoverPlaylist>,
+    /// 是否还有更多歌单。
+    pub has_more_playlists: bool,
+    /// 新歌违（按地区类型）。
+    pub new_songs: Vec<DiscoverNewSong>,
+}
+
+/// 排行榜分组内的榜单摘要（含预览前 3 首）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TopSummaryDto {
+    /// 榜单 ID。
+    pub id: i64,
+    /// 榜名。
+    pub name: String,
+    /// 副标题（如期号）。
+    pub title_sub: String,
+    /// 更新时间。
+    pub update_time: String,
+    /// 播放数。
+    pub listen_num: i64,
+    /// 封面 URL。
+    pub picurl: String,
+    /// 预览前 3 首名次列表（“1. 歌名 - 歌手”）。
+    pub preview: Vec<String>,
+}
+
+/// 排行榜分组。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TopGroupDto {
+    /// 分组 ID。
+    pub id: i64,
+    /// 分组名（如“热门榜单”）。
+    pub name: String,
+    /// 组内榜单。
+    pub tops: Vec<TopSummaryDto>,
+}
+
+/// 排行榜分类页。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TopCategoryPage {
+    pub groups: Vec<TopGroupDto>,
+}
+
+/// 排行榜详情页曲目。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TopSongDto {
+    /// songmid。
+    pub mid: String,
+    /// 歌曲名。
+    pub name: String,
+    /// 歌手名（单一展示串）。
+    pub singer: String,
+    /// 专辑名。
+    pub album: String,
+    /// 时长秒。
+    pub interval: i64,
+    /// 封面 URL。
+    pub picurl: String,
+}
+
+/// 排行榜详情页。
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct TopDetailPage {
+    /// 榜名。
+    pub name: String,
+    /// 副标题/期号。
+    pub title_sub: String,
+    /// 更新时间。
+    pub update_time: String,
+    /// 曲目（当前页）。
+    pub songs: Vec<TopSongDto>,
+    /// 总曲目数。
+    pub total: i64,
+    /// 是否还有更多页。
+    pub has_more: bool,
+}
+
+/// 猜你喜欢页（需登录）。
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct GuessPage {
+    /// 曲目（窄投影同发现页新歌）。
+    pub songs: Vec<DiscoverNewSong>,
 }
 
 /// 歌词页（原始 LRC 文本；解析在客户端——桌面 lyrics.rs 复用）。

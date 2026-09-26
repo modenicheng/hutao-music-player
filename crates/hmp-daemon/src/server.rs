@@ -529,6 +529,83 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             };
             write_frame(wr, &resp).await?;
         }
+        // —— 发现页/榜单/猜你喜欢（daemon 统一出网，AUDIT §8.2 同源）———
+        Ok(Request::DiscoverGet {
+            songlist_page,
+            new_song_type,
+        }) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.discover(songlist_page, new_song_type).await {
+                    Ok(page) => Response::Discover(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::TopCategoryGet) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.top_category().await {
+                    Ok(page) => Response::TopCategory(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::TopDetailGet { top_id, num, page }) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.top_detail(top_id, num, page).await {
+                    Ok(page) => Response::TopDetail(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::GuessGet { page }) => {
+            let resp = match &handle.content {
+                Some(svc) => {
+                    if !(handle.credential_ok)() {
+                        Response::Err {
+                            code: IpcErrorCode::NotLoggedIn,
+                            message: "猜你喜欢需登录".into(),
+                        }
+                    } else {
+                        match svc.guess(page).await {
+                            Ok(page) => Response::Guess(page),
+                            Err(message) => Response::Err {
+                                code: IpcErrorCode::Internal,
+                                message,
+                            },
+                        }
+                    }
+                }
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
         // —— 音质偏好（AUDIT §8.7：daemon 落 config.toml，UI 只发意图）———
         Ok(Request::QualityGet) => {
             let q = hmp_storage::Config::load().quality;

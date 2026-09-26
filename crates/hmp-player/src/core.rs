@@ -80,7 +80,7 @@ type OutputCandidates = Vec<(usize, rodio::cpal::Device)>;
 /// case.
 #[cfg(unix)]
 fn collect_output_candidates() -> OutputCandidates {
-    use rodio::cpal::traits::HostTrait;
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
 
     let host = rodio::cpal::default_host();
     let mut candidates: Vec<(usize, rodio::cpal::Device)> = Vec::new();

@@ -63,3 +63,20 @@ export struct CommentRow {
     time-text: string,
     like-text: string,
 }
+
+/** 排行榜卡片（TopSummaryDto 展示投影；preview 为预览前 3 首文案） */
+export struct TopCardData {
+    id: string,
+    name: string,
+    title-sub: string,
+    update-time: string,
+    listen-num: int,
+    preview: [string],
+}
+
+/** 排行榜分组（TopGroupDto 展示投影） */
+export struct TopGroupData {
+    id: string,
+    name: string,
+    tops: [TopCardData],
+}

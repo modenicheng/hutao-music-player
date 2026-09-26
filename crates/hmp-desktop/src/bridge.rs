@@ -14,7 +14,8 @@ use crate::library_view::{self, PlaylistEntry, SongRow, local_cover_image};
 use crate::mock;
 use crate::prefs::Prefs;
 use crate::{
-    AppWindow, CoverCardData, Data, FolderRow, Nav, PlaylistCover, Quality, Theme, TrackRow,
+    AppWindow, CoverCardData, Data, FolderRow, Nav, PlaylistCover, Quality, Theme, TopCardData,
+    TopGroupData, TrackRow,
 };
 
 const NAV_HISTORY_CAP: usize = 50;
@@ -112,6 +113,205 @@ fn search_track_row(song: &hmp_core::SearchSong) -> TrackRow {
         quality: "".into(),
         cover: crate::covers::cover_image(&format!("album:{}", song.mid)),
     }
+}
+
+/// 发现页/榜单/猜你喜欢共用曲目行（DiscoverNewSong 投影；有专辑与时长）。
+fn discover_track_row(s: &hmp_core::DiscoverNewSong) -> TrackRow {
+    TrackRow {
+        mid: s.mid.as_str().into(),
+        source: 0,
+        title: s.name.as_str().into(),
+        artists: s.singer.as_str().into(),
+        artist_mid: "".into(),
+        album: s.album.as_str().into(),
+        album_mid: "".into(),
+        duration_ms: (s.interval * 1000) as i32,
+        quality: "".into(),
+        cover: crate::covers::cover_image(&format!("album:{}", s.mid)),
+    }
+}
+
+/// 发现页歌单卡片（DiscoverPlaylist → CoverCardData；封面经 covers 程序化占位，
+/// 真实封面 URL 交给 CoverGet 异步补齐的成本后续评估，先保导航可用）。
+fn discover_playlist_card(p: &hmp_core::DiscoverPlaylist) -> CoverCardData {
+    let subtitle = if p.creator.is_empty() {
+        format!("{} 首", p.songnum)
+    } else {
+        format!("{} 首 · {}", p.songnum, p.creator)
+    };
+    CoverCardData {
+        mid: p.id.to_string().into(),
+        title: p.title.as_str().into(),
+        subtitle: subtitle.into(),
+        cover: crate::covers::cover_image(&format!("playlist:{}", p.id)),
+    }
+}
+
+/// 拉取发现页（免登录）；失败/离线 → 专属失败态（同搜索页码位约定）。
+fn spawn_discover_load(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::BackendRuntime>) {
+    let weak = ui_weak.clone();
+    slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            Data::get(&ui).set_discover_state(1);
+        }
+    })
+    .ok();
+    let weak = ui_weak;
+    runtime.spawn(async move {
+        let result = crate::backend::request(hmp_core::Request::DiscoverGet {
+            songlist_page: 1,
+            new_song_type: 5,
+        })
+        .await;
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let data = Data::get(&ui);
+            match result {
+                Ok(hmp_core::Response::Discover(page)) => {
+                    let cards: Vec<CoverCardData> =
+                        page.playlists.iter().map(discover_playlist_card).collect();
+                    let tracks: Vec<TrackRow> =
+                        page.new_songs.iter().map(discover_track_row).collect();
+                    let has_more = page.has_more_playlists;
+                    let empty = cards.is_empty() && tracks.is_empty();
+                    data.set_discover_playlists(model(cards));
+                    data.set_discover_new_songs(model(tracks));
+                    data.set_discover_has_more(has_more);
+                    data.set_discover_state(if empty { 3 } else { 2 });
+                }
+                _ => {
+                    data.set_discover_state(4);
+                }
+            }
+        });
+    });
+}
+
+/// 拉取排行榜详情（免登录；Nav.param 为 top id 字符串）。
+fn spawn_top_detail_load(
+    ui_weak: Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    param: SharedString,
+) {
+    let Ok(top_id) = param.as_str().parse::<i64>() else {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                Data::get(&ui).set_top_detail_state(4);
+            }
+        });
+        return;
+    };
+    let weak = ui_weak.clone();
+    slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            Data::get(&ui).set_top_detail_state(1);
+        }
+    })
+    .ok();
+    let weak = ui_weak;
+    runtime.spawn(async move {
+        let result = crate::backend::request(hmp_core::Request::TopDetailGet {
+            top_id,
+            num: 100,
+            page: 1,
+        })
+        .await;
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let data = Data::get(&ui);
+            match result {
+                Ok(hmp_core::Response::TopDetail(page)) if !page.songs.is_empty() => {
+                    let tracks: Vec<TrackRow> = page
+                        .songs
+                        .iter()
+                        .map(|s| {
+                            let p = hmp_core::DiscoverNewSong {
+                                mid: s.mid.clone(),
+                                name: s.name.clone(),
+                                singer: s.singer.clone(),
+                                album: s.album.clone(),
+                                interval: s.interval,
+                                picurl: s.picurl.clone(),
+                            };
+                            discover_track_row(&p)
+                        })
+                        .collect();
+                    let name = page.name.as_str().into();
+                    let update = page.update_time.as_str().into();
+                    let total = page.total as i32;
+                    data.set_top_detail_tracks(model(tracks));
+                    data.set_top_detail_name(name);
+                    data.set_top_detail_update(update);
+                    data.set_top_detail_total(total);
+                    data.set_top_detail_found(true);
+                    data.set_top_detail_state(2);
+                }
+                Ok(hmp_core::Response::TopDetail(_)) => {
+                    data.set_top_detail_state(3);
+                }
+                _ => {
+                    data.set_top_detail_state(4);
+                }
+            }
+        });
+    });
+}
+
+/// 拉取排行榜分类（免登录）。
+fn spawn_top_category_load(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::BackendRuntime>) {
+    let weak = ui_weak.clone();
+    slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            Data::get(&ui).set_top_state(1);
+        }
+    })
+    .ok();
+    let weak = ui_weak;
+    runtime.spawn(async move {
+        let result = crate::backend::request(hmp_core::Request::TopCategoryGet).await;
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let data = Data::get(&ui);
+            match result {
+                Ok(hmp_core::Response::TopCategory(page)) if !page.groups.is_empty() => {
+                    let groups: Vec<TopGroupData> = page
+                        .groups
+                        .iter()
+                        .map(|g| TopGroupData {
+                            id: g.id.to_string().into(),
+                            name: g.name.as_str().into(),
+                            tops: model(
+                                g.tops
+                                    .iter()
+                                    .map(|t| TopCardData {
+                                        id: t.id.to_string().into(),
+                                        name: t.name.as_str().into(),
+                                        title_sub: t.title_sub.as_str().into(),
+                                        update_time: t.update_time.as_str().into(),
+                                        listen_num: t.listen_num as i32,
+                                        preview: model(
+                                            t.preview
+                                                .iter()
+                                                .map(|s| s.as_str().into())
+                                                .collect::<Vec<slint::SharedString>>(),
+                                        ),
+                                    })
+                                    .collect::<Vec<TopCardData>>(),
+                            ),
+                        })
+                        .collect();
+                    data.set_top_groups(model(groups));
+                    data.set_top_state(2);
+                }
+                Ok(hmp_core::Response::TopCategory(_)) => {
+                    data.set_top_state(3);
+                }
+                _ => {
+                    data.set_top_state(4);
+                }
+            }
+        });
+    });
 }
 
 /// 把媒体库快照（直读 library.sqlite3，离线降级为空）装载进 Data global：
@@ -439,9 +639,16 @@ pub fn bind(
     // ——— 导航历史栈 ———
     let nav = Nav::get(ui);
     let history: Arc<Mutex<Vec<(crate::Route, SharedString)>>> = Arc::new(Mutex::new(Vec::new()));
+    // 导航时在线内容页懒加载所需 runtime（克隆进闭包）。
+    let nav_rt = Arc::clone(&runtime);
+    // 猜你喜欢触发器（在 on_refresh_guess 绑定后填充，避免闭包循环依赖）。
+    type GuessTrigger = Box<dyn Fn(Weak<AppWindow>) + Send>;
+    let guess_trigger: Arc<Mutex<GuessTrigger>> = Arc::new(Mutex::new(Box::new(|_| {})));
     {
         let history = Arc::clone(&history);
         let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let rt = Arc::clone(&nav_rt);
+        let guess_trigger = Arc::clone(&guess_trigger);
         nav.on_navigate(move |route, param| {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -459,9 +666,26 @@ pub fn bind(
                 }
             }
             nav.set_route(route);
-            nav.set_param(param);
+            nav.set_param(param.clone());
             nav.set_can_go_back(!history.lock().expect("nav history").is_empty());
             apply_route(&ui, nav.get_route(), nav.get_param());
+            // M4 在线内容页进入时懒加载（免登录页自动拉，猜你喜欢需登录）
+            match route {
+                crate::Route::Home => {
+                    spawn_discover_load(ui.as_weak(), &rt);
+                    guess_trigger.lock().expect("guess trigger")(ui.as_weak());
+                }
+                crate::Route::Discover => {
+                    spawn_discover_load(ui.as_weak(), &rt);
+                }
+                crate::Route::Top => {
+                    spawn_top_category_load(ui.as_weak(), &rt);
+                }
+                crate::Route::TopDetail => {
+                    spawn_top_detail_load(ui.as_weak(), &rt, param);
+                }
+                _ => {}
+            }
         });
     }
     {
@@ -643,6 +867,127 @@ pub fn bind(
             let _ = slint::invoke_from_event_loop(apply);
         });
     }
+
+    // ——— M4 在线内容页（DiscoverGet/TopCategoryGet/TopDetailGet/GuessGet）———
+    // 发现页：免登录；进入页面或点刷新时拉取。runtime 供后台出网。
+    {
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let rt = Arc::clone(&runtime);
+        Data::get(ui).on_refresh_discover(move || {
+            spawn_discover_load(ui_weak.clone(), &rt);
+        });
+    }
+    // 排行榜分类：免登录。
+    {
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let rt = Arc::clone(&runtime);
+        Data::get(ui).on_refresh_top(move || {
+            spawn_top_category_load(ui_weak.clone(), &rt);
+        });
+    }
+    // 猜你喜欢：需登录；未登录直接置提示态，不发请求。
+    {
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let rt = Arc::clone(&runtime);
+        let logged_in = {
+            let ui = ui_weak.upgrade().expect("bind holds ui");
+            Data::get(&ui).get_account_logged_in()
+        };
+        Data::get(ui).on_refresh_guess(move || {
+            let apply_state = move |state: i32, weak: Weak<AppWindow>| {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        Data::get(&ui).set_guess_state(state);
+                    }
+                });
+            };
+            if !logged_in {
+                apply_state(3, ui_weak.clone());
+                return;
+            }
+            apply_state(1, ui_weak.clone());
+            let weak = ui_weak.clone();
+            rt.spawn(async move {
+                let result =
+                    crate::backend::request(hmp_core::Request::GuessGet { page: 1 }).await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let data = Data::get(&ui);
+                    match result {
+                        Ok(hmp_core::Response::Guess(page)) if !page.songs.is_empty() => {
+                            let tracks: Vec<TrackRow> = page
+                                .songs
+                                .iter()
+                                .map(discover_track_row)
+                                .collect();
+                            let cards: Vec<CoverCardData> = page
+                                .songs
+                                .iter()
+                                .map(|s| CoverCardData {
+                                    mid: s.mid.clone().into(),
+                                    title: s.name.clone().into(),
+                                    subtitle: s.singer.clone().into(),
+                                    cover: slint::Image::default(),
+                                })
+                                .collect();
+                            data.set_guess_tracks(model(tracks));
+                            data.set_guess_cards(model(cards));
+                            data.set_guess_state(2);
+                        }
+                        Ok(hmp_core::Response::Guess(_)) => {
+                            data.set_guess_state(3);
+                        }
+                        _ => {
+                            data.set_guess_state(4);
+                        }
+                    }
+                });
+            });
+        });
+    }
+    // 填充猜你喜欢触发器：导航到首页时若已登录则触发一次拉取
+    // （复用 on_refresh_guess 闭包太重，这里直接发 GuessGet）。
+    {
+        let rt_guess = Arc::clone(&nav_rt);
+        *guess_trigger.lock().expect("guess trigger") = Box::new(move |weak: Weak<AppWindow>| {
+            let weak_state = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak_state.upgrade() {
+                    if !Data::get(&ui).get_account_logged_in() {
+                        Data::get(&ui).set_guess_state(3);
+                    }
+                }
+            });
+            let rt = Arc::clone(&rt_guess);
+            rt.spawn(async move {
+                let result =
+                    crate::backend::request(hmp_core::Request::GuessGet { page: 1 }).await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let data = Data::get(&ui);
+                    if !data.get_account_logged_in() {
+                        return;
+                    }
+                    match result {
+                        Ok(hmp_core::Response::Guess(page)) if !page.songs.is_empty() => {
+                            let tracks: Vec<TrackRow> =
+                                page.songs.iter().map(discover_track_row).collect();
+                            data.set_guess_tracks(model(tracks));
+                            data.set_guess_state(2);
+                        }
+                        Ok(hmp_core::Response::Guess(_)) => {
+                            data.set_guess_state(3);
+                        }
+                        _ => {
+                            data.set_guess_state(4);
+                        }
+                    }
+                });
+            });
+        });
+    }
+    // 首次进入时预加载发现页（首页“为你推荐”同源复用）。
+    spawn_discover_load(ui.as_weak(), &runtime);
 }
 
 #[cfg(test)]

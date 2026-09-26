@@ -1,6 +1,6 @@
 // 应用状态 globals（player.ts / qualityStore.ts 的 Slint 对应物）。
 // 状态属性由 Rust 权威写入；回调发命令给 Rust（模拟播放桥，M8 换真实后端）。
-import { TrackRow, CoverCardData, FolderRow, PlaylistCover, LyricRow, CommentRow } from "data.slint";
+import { TrackRow, CoverCardData, FolderRow, PlaylistCover, LyricRow, CommentRow, TopCardData, TopGroupData } from "data.slint";
 import { Theme } from "theme.slint";
 
 export global Player {
@@ -63,6 +63,8 @@ export global Player {
     /** 用传入曲目替换队列并从 startIndex 播（playTracks） */
     callback play-tracks([TrackRow], int);
     callback play-at(int);
+    /** 按曲目 mid 直接播（在线内容卡片点击；Rust 侧解析为 Play 请求） */
+    callback play-mid(string);
     callback remove-at(int);
     callback clear-queue();
     callback seek-percent(float);
@@ -175,6 +177,33 @@ export global Data {
     in-out property <string> account-nickname: "";
     in-out property <string> account-uin: "";
     in-out property <string> account-vip: "";
+
+    // —— M4 在线内容页（daemon DiscoverGet/TopCategoryGet/TopDetailGet/GuessGet）———
+    /** 发现页状态：0=初始 1=加载中 2=有内容 3=空 4=失败 */
+    in-out property <int> discover-state: 0;
+    in-out property <[CoverCardData]> discover-playlists;
+    in-out property <bool> discover-has-more: false;
+    in-out property <[TrackRow]> discover-new-songs;
+    callback refresh-discover();
+
+    /** 排行榜分类状态：0=初始 1=加载中 2=有内容 3=空 4=失败 */
+    in-out property <int> top-state: 0;
+    in-out property <[TopGroupData]> top-groups;
+    callback refresh-top();
+
+    /** 排行榜详情状态（Nav.param 携带 top id）：0=初始 1=加载中 2=有内容 3=空 4=失败 */
+    in-out property <int> top-detail-state: 0;
+    in-out property <bool> top-detail-found: false;
+    in-out property <string> top-detail-name: "";
+    in-out property <string> top-detail-update: "";
+    in-out property <int> top-detail-total: 0;
+    in-out property <[TrackRow]> top-detail-tracks;
+
+    /** 猜你喜欢状态（需登录）：0=初始 1=加载中 2=有内容 3=空 4=失败 */
+    in-out property <int> guess-state: 0;
+    in-out property <[TrackRow]> guess-tracks;
+    in-out property <[CoverCardData]> guess-cards;
+    callback refresh-guess();
 }
 
 // 播放页 overlay 数据（NowPlayingBody.vue 的对应物；Rust 权威写入）。

@@ -76,6 +76,9 @@ playerctl -p hmp ...  │        (127.0.0.1 本机)          │
 | `hmp login` | QQ 扫码登录（终端 ASCII 二维码） |
 | `hmp auth` | 显示登录状况（用户/过期/凭证后端，本地检查） |
 | `hmp search <关键词>` | 搜索歌曲，输出 track-id |
+| `hmp discover [--page N] [--area 地区]` | 发现页：推荐歌单广场 + 新歌速递（免登录；地区：内地/欧美/日本/韩国/最新/港台） |
+| `hmp top [榜单ID] [--page N]` | 排行榜：无 ID 列分组榜单（含预览前 3 首）；带 ID 出完整曲目（免登录） |
+| `hmp guess` | 猜你喜欢（需登录） |
 | `hmp playnext <id>` | 把 `<id>` 插到当前曲之后并**立即播放**（同三种源语法，多曲源取第一首） |
 | `hmp queue add <id>` | 追加到队尾（不打断当前播放） |
 | `hmp queue show` | 列出队列（`▶` 标记当前曲） |
