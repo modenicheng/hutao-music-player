@@ -63,11 +63,13 @@ fn hover_slider_chain_reports_and_clears() {
         let color = slint::Color::from_rgb_u8(0x1e, 0x38, 0x5f);
         data.set_sidebar_created(slint::ModelRc::new(slint::VecModel::from(vec![
             hmp_desktop::PlaylistCover {
+                id: "901".into(),
                 name: "测试歌单甲".into(),
                 c1: color,
                 c2: color,
             },
             hmp_desktop::PlaylistCover {
+                id: "902".into(),
                 name: "测试歌单乙".into(),
                 c1: color,
                 c2: color,
@@ -75,6 +77,7 @@ fn hover_slider_chain_reports_and_clears() {
         ])));
         data.set_sidebar_favorited(slint::ModelRc::new(slint::VecModel::from(vec![
             hmp_desktop::PlaylistCover {
+                id: "903".into(),
                 name: "收藏歌单".into(),
                 c1: color,
                 c2: color,

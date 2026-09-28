@@ -78,6 +78,9 @@ export component SettingsGeneralPage inherits Rectangle {
                 PillOption {
                     text: "首页";
                     active: true;
+                    // 无第二档位可切：诚实禁用，避免假可点
+                    enabled: false;
+                    tool-tip: "当前唯一档位";
                 }
                 PillOption {
                     text: "上次页面";
@@ -94,6 +97,9 @@ export component SettingsGeneralPage inherits Rectangle {
                 PillOption {
                     text: "简体中文";
                     active: true;
+                    // 无第二档位可切：诚实禁用，避免假可点
+                    enabled: false;
+                    tool-tip: "当前唯一档位";
                 }
                 PillOption {
                     text: "English";

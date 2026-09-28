@@ -71,20 +71,28 @@ export component QueueDrawer inherits Rectangle {
     }
 
     // —— 浮板：主界面=右上圆角卡；themed=贴右缘通高、停在控制台上方 ——
+    // 挂载层覆盖全窗（含标题栏带）：窗口锚定整体 +title-bar-height 补偿，
+    // 面板顶/底边与顶栏以下挂载时逐像素一致（遮罩多盖顶部 32px）
     panel := Rectangle {
         visible: root.panel-mounted;
         x: root.themed ? parent.width - self.width
             : parent.width - self.width - Theme.layout-gap;
-        y: root.themed ? 0px : Theme.layout-gap;
+        y: root.themed ? Theme.title-bar-height
+            : Theme.title-bar-height + Theme.layout-gap;
         width: min(380px, parent.width - Theme.layout-gap * 2);
         height: root.themed
-            ? parent.height - Theme.np-console-clearance
-            : parent.height - Theme.layout-gap * 3 - Theme.player-bar-height;
+            ? parent.height - Theme.title-bar-height - Theme.np-console-clearance
+            : parent.height - Theme.title-bar-height - Theme.layout-gap * 3 - Theme.player-bar-height;
         border-top-left-radius: Theme.radius-lg;
         border-bottom-left-radius: Theme.radius-lg;
         border-top-right-radius: root.themed ? 0px : Theme.radius-lg;
         border-bottom-right-radius: root.themed ? 0px : Theme.radius-lg;
-        background: Theme.surface-2;
+        // 非 themed 底：Vue 渐变（亮=surface-3→surface-2 60%，暗=surface-2→surface-1 70%）；
+        // themed 态整面被下方专辑色渐变层盖住，保持原平涂即可
+        background: root.themed ? Theme.surface-2
+            : Theme.dark
+                ? @linear-gradient(180deg, Theme.surface-2, Theme.surface-1 0.7)
+                : @linear-gradient(180deg, Theme.surface-3, Theme.surface-2 0.6);
         border-width: 1px;
         border-color: Theme.border;
         drop-shadow-blur: 32px;
@@ -277,7 +285,8 @@ export component QueueDrawer inherits Rectangle {
                                     font-size: 13px;
                                     horizontal-alignment: right;
                                     vertical-alignment: center;
-                                    visible: !drawer-item.hovered;
+                                    // hover 交叉淡出（opacity 渐隐，非 visible 瞬切）
+                                    opacity: drawer-item.hovered ? 0 : 1;
                                     animate opacity {
                                         duration: Theme.duration-fast;
                                         easing: cubic-bezier(0.2, 0, 0, 1);
@@ -315,17 +324,30 @@ export component QueueDrawer inherits Rectangle {
                             }
                         }
 
-                        // —— 空态 ——
+                        // —— 空态（主/副文案居中成组，间距对齐 Vue .drawer-empty）———
                         if Player.queue.length == 0: Rectangle {
                             height: 160px;
 
-                            Text {
-                                text: "播放列表是空的";
-                                color: Theme.muted-foreground;
-                                font-size: 14px;
-                                horizontal-alignment: center;
+                            VerticalLayout {
+                                x: 0;
+                                y: 0;
                                 width: parent.width;
-                                y: 64px;
+                                height: parent.height;
+                                alignment: LayoutAlignment.center;
+                                spacing: Theme.space-1;
+
+                                Text {
+                                    text: "播放列表是空的";
+                                    color: Theme.muted-foreground;
+                                    font-size: 14px;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: "从发现、搜索或歌单里挑几首吧";
+                                    color: Theme.muted-foreground;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                }
                             }
                         }
                     }

@@ -22,8 +22,12 @@ export component TrackTable inherits Rectangle {
     property <length> row-height: 39px;
 
     // Vue 网格一次定列（2.5rem | 1.4fr | 0.8fr | 4rem，gap 16px，行内距 12px）：
-    // Slint 每行是独立布局，stretch 会按各行内容首选宽漂移，必须按根宽算定宽
-    property <length> grid-available: self.width - 24px - 40px - 64px - Theme.space-4 * 3;
+    // Slint 每行是独立布局，stretch 会按各行内容首选宽漂移，必须按根宽算定宽。
+    // 收起的列连带少一个 gap，按实际可见列数算（与下方列定义同一开关），
+    // 死减满配 gap 会把标题列挤窄出死区
+    property <length> grid-available: self.width - 24px - 40px
+        - (root.show-duration ? 64px : 0px)
+        - Theme.space-4 * (1 + (root.show-album ? 1 : 0) + (root.show-duration ? 1 : 0));
     property <length> title-w: root.show-album ? grid-available * 1.4 / 2.2 : grid-available;
     property <length> album-w: grid-available * 0.8 / 2.2;
 
@@ -193,9 +197,12 @@ export component TrackTable inherits Rectangle {
                             overflow: elide;
                         }
 
-                        Text {
+                        // 时长列与表头同一开关：数据源无时长（如 smartbox 搜索）整列收起，
+                        // 不再渲染右缘 64px 的 "—"；条件元素在布局里须显式给几何
+                        if root.show-duration: Text {
                             width: 64px;
-                            text: root.show-duration ? root.format-duration(row.duration-ms) : "—";
+                            height: root.row-height;
+                            text: root.format-duration(row.duration-ms);
                             color: Theme.muted-foreground;
                             font-size: 13.4px;
                             horizontal-alignment: right;

@@ -226,6 +226,7 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
             let duration_ms = player.get_duration_ms().max(0) as f32;
             let position_ms = (duration_ms * percent).round() as u64;
             player.set_position_ms(position_ms as i32);
+            push_time_text(&player, position_ms as i32, duration_ms as i32);
             player.set_progress(if duration_ms > 0.0 { percent } else { 0.0 });
             echo.lock().expect("echo").pending_seek = Some(PendingSeek {
                 target_ms: position_ms,
@@ -585,7 +586,9 @@ fn apply_daemon_state(
     };
     player.set_has_track(true);
     player.set_current_mid(track.id.0.as_str().into());
-    player.set_duration_ms(playback.duration.as_ref().map(duration_ms_i32).unwrap_or(0));
+    let duration = playback.duration.as_ref().map(duration_ms_i32).unwrap_or(0);
+    player.set_duration_ms(duration);
+    push_time_text(player, player.get_position_ms(), duration);
 
     // 换曲检测：重置播放页 mock 态（喜欢回落）并重拉歌词/评论。
     let mid = track.id.0.clone();
@@ -640,9 +643,11 @@ fn apply_daemon_state(
         }
     }
     if !progress_pinned {
-        player.set_position_ms(duration_ms_i32(&playback.position));
+        let position = duration_ms_i32(&playback.position);
+        player.set_position_ms(position);
+        push_time_text(player, position, player.get_duration_ms());
         player.set_progress(progress_of(playback));
-        update_active_line(ui_weak, duration_ms_i32(&playback.position));
+        update_active_line(ui_weak, position);
     }
     player.set_title(track.title.as_str().into());
     player.set_artists(track.artist_names().into());
@@ -883,12 +888,30 @@ fn spawn_cover_fetch(
     });
 }
 
+/// 控制台两端时间标签（DESIGN「两端时间 tabular-nums，剩余以 -m:ss」）：
+/// 随位置/时长每次推送同步刷新；无时长（未知）时剩余侧留空。
+fn push_time_text(player: &Player, position_ms: i32, duration_ms: i32) {
+    player.set_elapsed_text(crate::format::format_duration(position_ms.max(0) as u64).into());
+    player.set_remaining_text(
+        if duration_ms > 0 {
+            format!(
+                "-{}",
+                crate::format::format_duration((duration_ms - position_ms).max(0) as u64)
+            )
+        } else {
+            String::new()
+        }
+        .into(),
+    );
+}
+
 /// 无当前曲（含 daemon 推送空态）：曲目区归零。
 fn clear_now_playing(player: &Player, ui_weak: &Weak<AppWindow>) {
     player.set_has_track(false);
     player.set_current_mid("".into());
     player.set_position_ms(0);
     player.set_duration_ms(0);
+    push_time_text(player, 0, 0);
     player.set_progress(0.0);
     player.set_title("".into());
     player.set_artists("".into());

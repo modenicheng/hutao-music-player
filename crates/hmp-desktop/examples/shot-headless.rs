@@ -103,6 +103,7 @@ fn seed_demo(ui: &hmp_desktop::AppWindow) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut route_str = String::from("library");
     let mut out = String::from("/tmp/hmp-qa2/hover-headless.png");
+    let mut param = String::new();
     let mut hover: Option<(f32, f32)> = None;
     let mut bus_hover: Option<(i32, f32, f32, f32, f32, bool)> = None;
     let mut then_hover: Option<(f32, f32)> = None;
@@ -169,6 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     parts[3].parse().unwrap(),
                 ));
             }
+            "--param" => param = args.next().unwrap_or_default(),
             other => route_str = other.to_owned(),
         }
     }
@@ -192,7 +194,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let nav = hmp_desktop::Nav::get(&ui);
-        nav.invoke_go(parse_route(&route_str).expect("valid route"), "".into());
+        nav.invoke_go(
+            parse_route(&route_str).expect("valid route"),
+            param.clone().into(),
+        );
     }
     // 暗色验收：直接设档（不走 set-mode 回调，免落 prefs）
     if theme_dark {
@@ -205,11 +210,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let color = slint::Color::from_rgb_u8(0x1e, 0x38, 0x5f);
         data.set_sidebar_created(slint::ModelRc::new(slint::VecModel::from(vec![
             hmp_desktop::PlaylistCover {
+                id: "1".into(),
                 name: "测试歌单甲".into(),
                 c1: color,
                 c2: color,
             },
             hmp_desktop::PlaylistCover {
+                id: "2".into(),
                 name: "测试歌单乙".into(),
                 c1: color,
                 c2: color,

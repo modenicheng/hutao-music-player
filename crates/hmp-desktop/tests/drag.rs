@@ -172,12 +172,18 @@ fn drag_progress_and_scroll_thumb() {
     }
 
     // 点轨道跳转：按下即吸附（thumb 中心到指针），两次落点相距 200px
-    // → 内容位移 = 200px × 放大率（thumb ≪ 轨道，必然 > 1）
+    // → 内容位移 = 200px × 放大率（thumb ≪ 轨道，必然 > 1）。
+    // 跳转后必须推进时间线：真实用户从松开滚动条到点下行 ≥100ms，期间
+    // 事件循环完成视口重排并冲洗 Flickable 的 DelayForwarding（100ms）；
+    // testing backend 只有 mock_elapsed_time 推进才跑布局，零间隔合成序列
+    // 会在陈旧几何上命中（行高绑定容器宽/模型长度后，跳转帧内几何不稳定）
     press(&ui, thumb_x, 240.0);
     release(&ui, thumb_x, 240.0);
+    settle();
     let i1 = row_index_at_pointer(&ui, &plays);
     press(&ui, thumb_x, 440.0);
     release(&ui, thumb_x, 440.0);
+    settle();
     let i2 = row_index_at_pointer(&ui, &plays);
     let jump_rows = i2 - i1;
     assert!(
@@ -191,6 +197,7 @@ fn drag_progress_and_scroll_thumb() {
     move_to(&ui, thumb_x, 500.0);
     move_to(&ui, thumb_x, 540.0);
     release(&ui, thumb_x, 540.0);
+    settle();
     let i3 = row_index_at_pointer(&ui, &plays);
     let drag_rows = i3 - i2;
     let ratio = drag_rows as f32 / jump_rows as f32;

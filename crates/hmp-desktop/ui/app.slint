@@ -199,8 +199,47 @@ export component AppWindow inherits Window {
             height: Theme.player-bar-height;
         }
 
+        // —— 播放页 overlay（M6：首屏=封面+歌词，上滑=评论）———
+        // slide-bottom 入/退场：挂载保持 = 可见或退场动画未播完（软卸载，
+        // 同 QueueDrawer 的 fade-hold 模式）；leaving 驱动滑出方向
+        property <bool> overlay-ov <=> Player.overlay-visible;
+        property <bool> overlay-hold: false;
+        changed overlay-ov => {
+            if (self.overlay-ov) {
+                overlay-unmount-timer.stop();
+            } else {
+                overlay-unmount-timer.restart();
+            }
+            self.overlay-hold = true;
+        }
+        overlay-unmount-timer := Timer {
+            interval: Theme.duration-slow + 60ms;
+            running: false;
+            triggered => {
+                space-scope.overlay-hold = false;
+            }
+        }
+        // 挂载覆盖全窗（含标题栏带）：播放页成为整窗沉浸层，TitleBar 仍压其上
+        if overlay-ov || overlay-hold: NowPlayingOverlay {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            leaving: !overlay-ov;
+        }
+
+        // —— 播放列表抽屉（全窗遮罩 + 右上浮板；TitleBar 仍在其上，窗口钮可点）———
+        // 面板窗口锚定在组件内 +title-bar-height 补偿，视觉位置不变
+        QueueDrawer {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+        }
+
         // —— 操作反馈条（命令被拒/离线/装载失败；Rust 写入、4s 自动清空）——
         // 深胡桃实底 pill，亮暗两主题同读法；位于内容区底部内缘、播放条上方。
+        // 声明在 overlay/抽屉之后：不被全窗层盖住，仍低于 TitleBar
         if Player.feedback != "": Rectangle {
             x: (parent.width - self.width) / 2;
             y: content.y + content.height - self.height - Theme.space-3;
@@ -223,46 +262,15 @@ export component AppWindow inherits Window {
             }
         }
 
-        // —— 播放页 overlay（M6：首屏=封面+歌词，上滑=评论）———
-        // slide-bottom 入/退场：挂载保持 = 可见或退场动画未播完（软卸载，
-        // 同 QueueDrawer 的 fade-hold 模式）；leaving 驱动滑出方向
-        property <bool> overlay-ov <=> Player.overlay-visible;
-        property <bool> overlay-hold: false;
-        changed overlay-ov => {
-            if (self.overlay-ov) {
-                overlay-unmount-timer.stop();
-            } else {
-                overlay-unmount-timer.restart();
-            }
-            self.overlay-hold = true;
-        }
-        overlay-unmount-timer := Timer {
-            interval: Theme.duration-slow + 60ms;
-            running: false;
-            triggered => {
-                space-scope.overlay-hold = false;
-            }
-        }
-        if overlay-ov || overlay-hold: NowPlayingOverlay {
-            x: 0;
-            y: Theme.title-bar-height;
-            width: parent.width;
-            height: parent.height - Theme.title-bar-height;
-            leaving: !overlay-ov;
-        }
-
-        // —— 播放列表抽屉（遮罩 + 右上浮板；顶栏以下，让窗口钮始终可点）———
-        QueueDrawer {
-            x: 0;
-            y: Theme.title-bar-height;
-            width: parent.width;
-            height: parent.height - Theme.title-bar-height;
-        }
-
-        // —— ESC：先关播放页 overlay，再关队列抽屉 ———
+        // —— ESC：双层同开时一次全关，单开只关对应层 ———
         esc-scope := FocusScope {
             key-pressed(event) => {
                 if (event.text == Key.Escape) {
+                    if (Player.overlay_visible && Player.queue_visible) {
+                        Player.hide-overlay();
+                        Player.hide-queue();
+                        return accept;
+                    }
                     if (Player.overlay_visible) {
                         Player.hide-overlay();
                         return accept;
@@ -286,6 +294,7 @@ export component AppWindow inherits Window {
             width: parent.width;
             height: Theme.title-bar-height;
             maximized: root.maximized;
+            immersive: Player.overlay-visible;
             minimize-request => {
                 root.minimized = true;
             }

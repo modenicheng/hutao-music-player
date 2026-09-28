@@ -1,7 +1,7 @@
 // 已购音乐（PurchasedView.vue，v0.13）：页头 meta 聚合（单曲/专辑/合计金额）
 // → 已购单曲曲目表（购买日期归页头、不进行内列）→ 已购专辑封面卡网格。
 import { Theme } from "theme.slint";
-import { CoverCard, PageHeader, SectionHeader } from "page-parts.slint";
+import { CoverCardGrid, PageHeader, SectionHeader } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
 import { Nav, Route } from "nav.slint";
 import { Data } from "stores.slint";
@@ -49,17 +49,13 @@ export component PurchasedPage inherits Rectangle {
             SectionHeader {
                 title: "已购专辑";
             }
-            album-grid := HorizontalLayout {
-                spacing: Theme.space-4;
-
-                for card in Data.purchased-albums: CoverCard {
-                    width: Theme.grid-card-width(album-grid.width);
-                    cover: card.cover;
-                    title: card.title;
-                    subtitle: card.subtitle;
-                    clicked => {
-                        Nav.navigate(Route.album, card.mid);
-                    }
+            // 封面卡换行网格（Slint 布局不能 wrap，由 CoverCardGrid 按容器宽算列数）
+            CoverCardGrid {
+                width: parent.width;
+                cards: Data.purchased-albums;
+                row-count: Data.purchased-albums.length;
+                card-clicked(mid) => {
+                    Nav.navigate(Route.album, mid);
                 }
             }
         }

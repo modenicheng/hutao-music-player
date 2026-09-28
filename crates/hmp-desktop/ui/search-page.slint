@@ -11,6 +11,11 @@ import { Data } from "stores.slint";
 export component SearchPage inherits Rectangle {
     background: transparent;
 
+    init => {
+        // 进入页面自动聚焦搜索框（DESIGN §3.2；Vue onMounted focus）
+        input.focus();
+    }
+
     VerticalLayout {
         padding-top: Theme.space-6;
         padding-left: Theme.space-8;
@@ -24,70 +29,84 @@ export component SearchPage inherits Rectangle {
         }
 
         // —— 搜索框（回车或按钮触发；不做即时搜索）
-        // （Vue .search-box：radius-full 胶囊 + --input 底 + 聚焦描边 --ring）———
+        // （Vue .search-box：radius-full 胶囊 + --input 底 + 聚焦描边 --ring；
+        //   max-width 34rem=544px 通栏居中，外层 Rectangle 定位胶囊）———
         Rectangle {
             height: 50px;
-            border-radius: Theme.pill(self.height);
-            border-width: 1px;
-            border-color: input.has-focus ? Theme.ring : transparent;
-            background: Theme.input-bg;
-            animate border-color {
-                duration: Theme.duration-fast;
-                easing: cubic-bezier(0.2, 0, 0, 1);
-            }
+            background: transparent;
 
-            HorizontalLayout {
-                padding-left: Theme.space-4;
-                padding-right: 6px;
-                spacing: Theme.space-3;
-                // 默认 stretch：图标/按钮定宽、TextInput(stretch 1) 撑满 → 按钮贴右
-                //（显式设 alignment 会连 stretch 一起关掉，整组塌成首选宽）
-                // 显式定高的图标/按钮默认顶对齐，必须显式居中
-                cross-axis-alignment: center;
-
-                AppIcon {
-                    source: Icons.search;
-                    icon-color: Theme.muted-foreground;
-                    width: 19px;
-                    height: 19px;
-                }
-
-                input := TextInput {
-                    text: Data.search-query;
-                    font-size: 14.5px;
-                    color: Theme.foreground;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    accepted => {
-                        Data.search(self.text);
-                    }
-                    edited => {
-                        // 输入同步到全局（切页回来保留关键词）
-                        Data.search-query = self.text;
-                    }
-                }
-
-                Button {
-                    variant: ButtonVariant.default;
-                    text: "搜索";
-                    small: true;
-                    enabled: Data.search-state != 1 && input.text != "";
-                    clicked => {
-                        Data.search(input.text);
-                    }
-                }
-            }
-
-            // 占位文案（基座 TextInput 无 placeholder 属性；Vue input placeholder）
-            if input.text == "": Text {
-                x: Theme.space-4 + 19px + Theme.space-3;
-                width: parent.width - self.x - 96px;
+            search-box := Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: 0;
+                width: min(parent.width, 544px);
                 height: parent.height;
-                text: "搜索歌曲、专辑、歌手";
-                color: Theme.muted-foreground;
-                font-size: 14.5px;
-                vertical-alignment: center;
-                overflow: elide;
+                border-radius: Theme.pill(self.height);
+                border-width: 1px;
+                border-color: input.has-focus ? Theme.ring : transparent;
+                background: Theme.input-bg;
+                animate border-color {
+                    duration: Theme.duration-fast;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
+                }
+
+                HorizontalLayout {
+                    padding-left: Theme.space-4;
+                    padding-right: 6px;
+                    spacing: Theme.space-3;
+                    // 默认 stretch：图标/按钮定宽、TextInput(stretch 1) 撑满 → 按钮贴右
+                    //（显式设 alignment 会连 stretch 一起关掉，整组塌成首选宽）
+                    // 显式定高的图标/按钮默认顶对齐，必须显式居中
+                    cross-axis-alignment: center;
+
+                    AppIcon {
+                        source: Icons.search;
+                        icon-color: Theme.muted-foreground;
+                        width: 19px;
+                        height: 19px;
+                    }
+
+                    input := TextInput {
+                        text: Data.search-query;
+                        font-size: 14.5px;
+                        color: Theme.foreground;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        accepted => {
+                            // 空关键词：Rust 侧早退不重置状态，前端直接回初始态清掉旧结果
+                            if (self.text == "") {
+                                Data.search-state = 0;
+                            } else {
+                                Data.search(self.text);
+                            }
+                        }
+                        edited => {
+                            // 输入同步到全局（切页回来保留关键词）
+                            Data.search-query = self.text;
+                        }
+                    }
+
+                    Button {
+                        variant: ButtonVariant.default;
+                        text: "搜索";
+                        small: true;
+                        enabled: Data.search-state != 1 && input.text != "";
+                        clicked => {
+                            Data.search(input.text);
+                        }
+                    }
+                }
+
+                // 占位文案（基座 TextInput 无 placeholder 属性；Vue input placeholder）
+                if input.text == "": Text {
+                    x: Theme.space-4 + 19px + Theme.space-3;
+                    width: parent.width - self.x - 96px;
+                    height: parent.height;
+                    text: "搜索歌曲、专辑、歌手";
+                    color: Theme.muted-foreground;
+                    font-size: 14.5px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
             }
         }
 
@@ -125,11 +144,28 @@ export component SearchPage inherits Rectangle {
             vertical-alignment: center;
         }
 
-        if Data.search-state == 2: TrackTable {
-            tracks: Data.search-results;
-            show-header: true;
-            show-album: false;
-            show-duration: false;
+        // —— 结果（对齐 Vue：搜索中保留旧结果弱化显示，不整块卸载）———
+        if Data.search-state == 2 || (Data.search-state == 1 && Data.search-results.length > 0): VerticalLayout {
+            spacing: Theme.space-2;
+
+            Text {
+                text: "共 \{Data.search-count} 条";
+                color: Theme.muted-foreground;
+                font-size: 13px;
+            }
+
+            TrackTable {
+                tracks: Data.search-results;
+                show-header: true;
+                show-album: false;
+                show-duration: false;
+                // 搜索中（state==1）旧结果整体弱化
+                opacity: Data.search-state == 1 ? 0.5 : 1;
+                animate opacity {
+                    duration: Theme.duration-fast;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
+                }
+            }
         }
     }
 }

@@ -8,6 +8,18 @@ import { Nav, Route } from "nav.slint";
 import { PlaylistCover } from "data.slint";
 import { Data } from "stores.slint";
 
+// 页脚图标钮（收起/设置/主题三钮共用规格；横竖两形态容器各自取用）
+component FooterButton inherits Button {
+    in property <image> glyph;
+    in property <string> tip;
+    icon: glyph;
+    icon-only: true;
+    icon-size: 20px;
+    tool-tip: tip;
+    width: 36px;
+    height: 36px;
+}
+
 export component Sidebar inherits Rectangle {
     /** 窄窗图标栏形态（MainLayout 计算：手动切换优先，跨断点回自动） */
     in property <bool> collapsed: false;
@@ -227,6 +239,10 @@ export component Sidebar inherits Rectangle {
                                     for playlist in root.playlists-of(group.group): HoverItem {
                                         group-id: hg.group-id;
                                         height: 36px;
+                                        // 行点击进歌单详情（参数与库页歌单卡同一 id 串）
+                                        clicked => {
+                                            Nav.navigate(Route.playlist, playlist.id);
+                                        }
 
                                         HorizontalLayout {
                                             padding-left: 8px;
@@ -330,6 +346,10 @@ export component Sidebar inherits Rectangle {
                                     width: parent.width;
                                     height: 40px;
                                     tool-tip: playlist.name;
+                                    // 按钮铺满行、接管点击：跳转挂按钮（hover 归 HoverItem 不变）
+                                    clicked => {
+                                        Nav.navigate(Route.playlist, playlist.id);
+                                    }
 
                                     Rectangle {
                                         width: 28px;
@@ -348,45 +368,68 @@ export component Sidebar inherits Rectangle {
         }
 
         // —— 页脚：收起 / 设置 / 主题循环 ———
-        HorizontalLayout {
-            height: 52px;
+        // 窄栏（64px）横排放不下三个 36px 钮，收起态竖排居中（Vue 基准
+        // .sidebar.is-collapsed .sidebar-footer 同款 flex-direction: column）
+        if collapsed: VerticalLayout {
+            height: 140px;
             padding: 8px;
             spacing: 8px;
-            alignment: collapsed ? LayoutAlignment.center : LayoutAlignment.end;
+            cross-axis-alignment: center;
 
-            Button {
-                icon: Icons.left_panel_close;
-                icon-only: true;
-                icon-size: 20px;
-                tool-tip: collapsed ? "展开侧栏" : "收起侧栏";
-                width: 36px;
-                height: 36px;
+            FooterButton {
+                glyph: Icons.left_panel_close;
+                tip: "展开侧栏";
                 clicked => {
                     root.toggle-collapsed();
                 }
             }
 
-            Button {
-                icon: Icons.settings;
-                icon-only: true;
-                icon-size: 20px;
-                tool-tip: "设置";
-                width: 36px;
-                height: 36px;
+            FooterButton {
+                glyph: Icons.settings;
+                tip: "设置";
                 clicked => {
                     Nav.navigate(Route.settings, "");
                 }
             }
 
-            Button {
-                icon: Theme.mode == 2 ? Icons.dark_mode : Theme.mode == 1 ? Icons.light_mode : Icons.brightness_auto;
-                icon-only: true;
-                icon-size: 20px;
-                tool-tip: Theme.mode == 2 ? "主题（当前：深色，点击切换）"
+            FooterButton {
+                glyph: Theme.mode == 2 ? Icons.dark_mode : Theme.mode == 1 ? Icons.light_mode : Icons.brightness_auto;
+                tip: Theme.mode == 2 ? "主题（当前：深色，点击切换）"
                     : Theme.mode == 1 ? "主题（当前：浅色，点击切换）"
                     : "主题（当前：跟随系统，点击切换）";
-                width: 36px;
-                height: 36px;
+                clicked => {
+                    Theme.cycle-mode();
+                }
+            }
+        }
+
+        if !collapsed: HorizontalLayout {
+            height: 52px;
+            padding: 8px;
+            spacing: 8px;
+            alignment: LayoutAlignment.end;
+
+            FooterButton {
+                glyph: Icons.left_panel_close;
+                tip: "收起侧栏";
+                clicked => {
+                    root.toggle-collapsed();
+                }
+            }
+
+            FooterButton {
+                glyph: Icons.settings;
+                tip: "设置";
+                clicked => {
+                    Nav.navigate(Route.settings, "");
+                }
+            }
+
+            FooterButton {
+                glyph: Theme.mode == 2 ? Icons.dark_mode : Theme.mode == 1 ? Icons.light_mode : Icons.brightness_auto;
+                tip: Theme.mode == 2 ? "主题（当前：深色，点击切换）"
+                    : Theme.mode == 1 ? "主题（当前：浅色，点击切换）"
+                    : "主题（当前：跟随系统，点击切换）";
                 clicked => {
                     Theme.cycle-mode();
                 }

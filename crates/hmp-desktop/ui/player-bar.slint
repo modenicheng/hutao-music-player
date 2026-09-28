@@ -1,6 +1,7 @@
 // 播放条（PlayerBar.vue 完整重写）：长进度条横贯全宽（静息 4px/hover 6px，
-// 点击/拖拽实时 seek）；状态卡 = 左簇（封面+曲名，贴左）/ 居中控制排（上一曲·
-// 主播放键·下一曲）/ 右簇（音质徽章 + 循环模式 + 音量 + 播放列表，贴右）。
+// 点击/拖拽实时 seek）；状态卡 = 左簇（封面+曲名+音质徽章，贴左；DESIGN.md
+// v0.12：徽章随曲目信息）/ 居中控制排（上一曲·主播放键·下一曲）/ 右簇
+// （音量 + 播放列表，贴右）。
 // 与 Vue 的"光学补偿居中"刻意不同（用户需求）：控制排按纯几何居中
 // x = (卡宽 - 排宽)/2，不随曲名长短漂移；左簇曲名宽度上限按"不与居中排
 // 重叠"随窗宽收紧（elide 截断）。布局用绝对定位三簇 + preferred-width 测量，
@@ -22,11 +23,13 @@ export component PlayerBar inherits Rectangle {
     // 居中控制排总宽（上一曲 + 主播放键 + 下一曲 + 两个 space-2 间距）
     property <length> cluster-w: ctl + Theme.space-2 + play-ctl + Theme.space-2 + ctl;
     // 曲名簇总宽上限：Vue now-playing max-width 18rem = 288px；窄窗下再按
-    // "不与居中控制排重叠" 收紧——控制排左缘 - space-4 页边距 - 封面 - 两个
-    // space-3（封面文本内距 + 与控制排的间隙），下限 64px。超出 elide，
-    // 曲名再长也不与控制排重叠、不推动控制排。
+    // "不与居中控制排重叠" 收紧——控制排左缘 - space-4 页边距 - 封面 -
+    // space-3（封面文本内距）- space-4（曲名→音质徽章间距，Vue 卡片缝）-
+    // 徽章宽（动态，取自实例）- space-3（与控制排的间隙），下限 64px。
+    // 超出 elide，曲名再长也不与控制排重叠、不推动控制排。
     property <length> np-cap: min(288px, Math.max(
-        (root.width - cluster-w) / 2 - Theme.space-4 - cover-size - Theme.space-3 * 2,
+        (root.width - cluster-w) / 2 - Theme.space-4 - cover-size - Theme.space-3
+            - Theme.space-4 - badge.width - Theme.space-3,
         64px));
     property <length> np-text-w: Player.has-track
         ? min(Math.max(title.preferred-width, artists.preferred-width), np-cap - cover-size - Theme.space-3)
@@ -94,17 +97,18 @@ export component PlayerBar inherits Rectangle {
             border-radius: Theme.radius-lg;
             background: Theme.surface-2;
 
-            // 右簇宽：音质徽章（动态宽，取自实例）+ 循环模式 + 音量 +（队列），
-            // 内部 space-3 间距
+            // 右簇宽：音量 +（队列），内部 space-3 间距（DESIGN.md v0.12：
+            // 右簇只音量+播放列表；徽章归左簇，循环键只在播放页控制台）
             property <length> right-w:
-                badge.width + Theme.space-3 + root.ctl + Theme.space-3 + root.ctl
-                + (Player.queue.length > 0 ? Theme.space-3 + root.ctl : 0px);
+                root.ctl + (Player.queue.length > 0 ? Theme.space-3 + root.ctl : 0px);
 
-            // ── 左簇：封面 + 歌名/歌手（可点开播放页；宽度上限见 root.np-cap）──
+            // ── 左簇：封面 + 歌名/歌手 + 音质徽章（可点开播放页；宽度上限见
+            // root.np-cap）──
             Rectangle {
                 x: Theme.space-4;
                 y: 0;
-                width: root.cover-size + Theme.space-3 + root.np-text-w;
+                width: root.cover-size + Theme.space-3 + root.np-text-w
+                    + Theme.space-4 + badge.width;
                 height: parent.height;
 
                 Rectangle {
@@ -162,11 +166,20 @@ export component PlayerBar inherits Rectangle {
                 }
 
                 now-touch := TouchArea {
+                    // 只盖封面+曲名（徽章在右侧自管命中，声明序压在本区之上）
+                    width: root.cover-size + Theme.space-3 + root.np-text-w;
                     enabled: Player.has-track;
                     mouse-cursor: pointer;
                     clicked => {
                         Player.show-overlay();
                     }
+                }
+
+                // 音质徽章随曲目信息（DESIGN.md v0.12：左簇、曲名之后；间距取
+                // Vue 卡片缝 space-4，交叉轴居中对齐 44px 封面）
+                badge := QualityBadge {
+                    x: 44px + Theme.space-3 + root.np-text-w + Theme.space-4;
+                    y: (parent.height - self.height) / 2;
                 }
             }
 
@@ -198,6 +211,8 @@ export component PlayerBar inherits Rectangle {
                             Player.previous();
                         }
                     }
+                    // tool-tip 对齐 Vue title（primitives.slint Button 同款）
+                    Tooltip { text: @markdown("上一曲"); }
                     AppIcon {
                         source: Icons.skip_previous;
                         icon-color: Theme.foreground;
@@ -227,6 +242,7 @@ export component PlayerBar inherits Rectangle {
                             Player.toggle-play();
                         }
                     }
+                    Tooltip { text: @markdown("\{Player.playing ? "暂停" : "播放"}"); }
                     AppIcon {
                         source: Player.playing ? Icons.pause : Icons.play_arrow;
                         icon-color: Theme.primary-foreground;
@@ -258,6 +274,7 @@ export component PlayerBar inherits Rectangle {
                             Player.next();
                         }
                     }
+                    Tooltip { text: @markdown("下一曲"); }
                     AppIcon {
                         source: Icons.skip_next;
                         icon-color: Theme.foreground;
@@ -269,10 +286,9 @@ export component PlayerBar inherits Rectangle {
                 }
             }
 
-            // ── 右簇：音质徽章 + 循环模式 + 音量 + 播放列表（实心，贴右；队列空
-            // 时隐藏队列键）。徽章 22px 高与 36px 键混排 → 交叉轴居中；
-            // alignment: end 让定宽子元素取首选宽（显式 alignment 杀 stretch，
-            // 见 PORTING.md 坑位）———
+            // ── 右簇：音量 + 播放列表（实心，贴右；队列空时隐藏队列键）。
+            // 36px 键混排 → 交叉轴居中；alignment: end 让定宽子元素取首选宽
+            // （显式 alignment 杀 stretch，见 PORTING.md 坑位）———
             HorizontalLayout {
                 x: parent.width - parent.right-w - Theme.space-4;
                 y: (parent.height - 36px) / 2;
@@ -281,36 +297,6 @@ export component PlayerBar inherits Rectangle {
                 spacing: Theme.space-3;
                 alignment: LayoutAlignment.end;
                 cross-axis-alignment: center;
-
-                badge := QualityBadge { }
-
-                // 循环模式三态：0=顺序播放（repeat，muted）/ 1=单曲循环
-                // （repeat_one，高亮）/ 2=列表循环（repeat，高亮）
-                Rectangle {
-                    width: 36px;
-                    height: 36px;
-                    border-radius: Theme.pill(self.height);
-                    background: mode-touch.has-hover ? Theme.muted : transparent;
-                    animate background {
-                        duration: Theme.duration-fast;
-                        easing: cubic-bezier(0.2, 0, 0, 1);
-                    }
-
-                    mode-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            Player.cycle-loop-mode();
-                        }
-                    }
-                    AppIcon {
-                        source: Player.loop-mode == 1 ? Icons.repeat_one : Icons.repeat;
-                        icon-color: Player.loop-mode == 0 ? Theme.muted-foreground : Theme.track-accent;
-                        width: 20.8px;
-                        height: 20.8px;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                }
 
                 VolumeControl {
                     width: 36px;
@@ -333,6 +319,7 @@ export component PlayerBar inherits Rectangle {
                             Player.toggle-queue();
                         }
                     }
+                    Tooltip { text: @markdown("播放列表"); }
                     AppIcon {
                         source: Icons.queue_music;
                         icon-color: Theme.foreground;

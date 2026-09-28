@@ -50,6 +50,8 @@ component CaptionButton inherits Rectangle {
 export component TitleBar inherits Rectangle {
     /** 当前最大化态（AppWindow 从 root.window.maximized 单向喂入，驱动 glyph 切换） */
     in property <bool> maximized: false;
+    /** 沉浸态（播放页 overlay 覆盖全窗时）：隐藏左侧标题文字，窗口钮/拖拽保留 */
+    in property <bool> immersive: false;
     callback minimize-request();
     callback toggle-maximize-request();
     callback close-request();
@@ -64,6 +66,7 @@ export component TitleBar inherits Rectangle {
         text: "胡桃音乐";
         font-size: 12px;
         color: Theme.muted-foreground;
+        visible: !root.immersive;
     }
 
     // 拖拽/双击命中区（右侧按钮列除外）。阈值起拖：4px 内的纯点击不打扰

@@ -300,13 +300,17 @@ export component CoverCard inherits Rectangle {
 // 公式），行数撑起容器高度。点击回调带卡 mid（歌单 id / 专辑名等页面自解释）。
 export component CoverCardGrid inherits Rectangle {
     in property <[CoverCardData]> cards;
+    /** 行数：调用方以纯整数传入（<模型>.length）。height 依赖链不得直接读
+     * cards——模型读取会把 repeater 拖进 Flickable 滚动钳制 handler 的重算，
+     * 程序化跳滚后立即点击会被吞（tests/drag.rs 守护，审计 R1 根因） */
+    in property <int> row-count;
     callback card-clicked(string);
 
     background: transparent;
     height: rows > 0 ? rows * card-h + (rows - 1) * 16px : 0px;
 
     property <int> cols: Math.max(1, Math.floor((self.width + 16px) / 160px));
-    property <int> rows: Math.ceil(cards.length / cols);
+    property <int> rows: Math.ceil(row-count / cols);
     property <length> card-w: (self.width - (cols - 1) * 16px) / cols;
     // 封面(宽+4 hover 余量) + spacing 8×2 + 标题/副标题行高
     property <length> card-h: card-w + 4px + 16px + 22px + 19px;

@@ -39,6 +39,8 @@ export struct FolderRow {
 
 /** 侧栏歌单条目（名称 + 确定性渐变取色，Rust 侧派生） */
 export struct PlaylistCover {
+    /** 歌单 id：行点击跳歌单详情的导航参数（与库页歌单卡 mid 同一字符串形式） */
+    id: string,
     name: string,
     c1: color,
     c2: color,

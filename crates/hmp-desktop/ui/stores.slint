@@ -15,6 +15,9 @@ export global Player {
     in-out property <float> drag-progress: 0.0;
     in-out property <int> position-ms: 0;
     in-out property <int> duration-ms: 0;
+    /** 控制台两端时间标签（Rust 随位置推送格式化；剩余以 "-m:ss"，无曲为空） */
+    in-out property <string> elapsed-text: "";
+    in-out property <string> remaining-text: "";
     in-out property <float> volume: 1.0;
     in-out property <bool> can-previous: false;
     in-out property <bool> can-next: false;
@@ -63,8 +66,6 @@ export global Player {
     /** 用传入曲目替换队列并从 startIndex 播（playTracks） */
     callback play-tracks([TrackRow], int);
     callback play-at(int);
-    /** 按曲目 mid 直接播（在线内容卡片点击；Rust 侧解析为 Play 请求） */
-    callback play-mid(string);
     callback remove-at(int);
     callback clear-queue();
     callback seek-percent(float);
@@ -227,9 +228,8 @@ export global NowPlaying {
     in-out property <int> comment-sort: 0;
     callback request-comments();
 
-    // —— 喜欢（mock 态：换曲回落未点亮，与原型一致）———
+    // —— 喜欢（mock 态：换曲回落未点亮，与原型一致；播放页直接写 liked）———
     in-out property <bool> liked: false;
-    callback toggle-liked();
 }
 
 // —— 曲目层动态调色（Vue trackTheme.ts + lib/color 取色管线的对应物，M6）——

@@ -108,6 +108,9 @@ export component SettingsPlaybackPage inherits Rectangle {
                     }
 
                     quality-hover := TouchArea {
+                        // 与 PillOption/SettingsNav 同纪律：裸可点行补可访问性
+                        accessible-role: button;
+                        accessible-label: Quality.tier-label(tier);
                         mouse-cursor: pointer;
                         clicked => {
                             Quality.select(tier);

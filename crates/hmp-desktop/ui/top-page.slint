@@ -11,14 +11,29 @@ import { TopCardData } from "data.slint";
 // 单个榜单卡：名称 + 期号 + 预览前 3 首（悬停浮起）。
 component TopCard inherits Rectangle {
     in property <TopCardData> card;
+    // 列宽由网格容器按窗口宽算好传入（280px 为最大卡宽，窄窗按比例缩）
+    in property <length> card-width: 280px;
     callback clicked();
 
-    width: 280px;
+    width: root.card-width;
     height: 156px;
     border-radius: Theme.radius-lg;
     drop-shadow-blur: touch.has-hover ? 8px : 2px;
     drop-shadow-color: #241F1B.transparentize(touch.has-hover ? 0.86 : 0.92);
     drop-shadow-offset-y: touch.has-hover ? 2px : 1px;
+    // 悬停阴影缓动过渡，避免 2px→8px 突跳
+    animate drop-shadow-blur {
+        duration: Theme.duration-fast;
+        easing: cubic-bezier(0.2, 0, 0, 1);
+    }
+    animate drop-shadow-offset-y {
+        duration: Theme.duration-fast;
+        easing: cubic-bezier(0.2, 0, 0, 1);
+    }
+    animate drop-shadow-color {
+        duration: Theme.duration-fast;
+        easing: cubic-bezier(0.2, 0, 0, 1);
+    }
     background: Theme.surface-3;
 
     touch := TouchArea {
@@ -86,15 +101,10 @@ export component TopPage inherits Rectangle {
             title: "排行榜";
         }
 
-        // 页头动作区（独立行）
+        // 页头动作区（独立行；加载中不显示文案，避免与下方加载块双文案）
         HorizontalLayout {
             alignment: end;
 
-            if Data.top-state == 1: Text {
-                text: "正在加载…";
-                color: Theme.muted-foreground;
-                font-size: 13px;
-            }
             if Data.top-state != 1: Button {
                 text: "刷新";
                 variant: ButtonVariant.outline;
@@ -104,7 +114,8 @@ export component TopPage inherits Rectangle {
             }
         }
 
-        if Data.top-state == 0 || Data.top-state == 1: Rectangle {
+        // 加载块仅在无内容可保留时显示：刷新已有内容时旧榜单原地保留不闪加载
+        if Data.top-state == 0 || (Data.top-state == 1 && Data.top-groups.length == 0): Rectangle {
             height: 200px;
 
             Text {
@@ -138,9 +149,9 @@ export component TopPage inherits Rectangle {
             }
         }
 
-        // 分组渲染：组标题 + 榜单卡片流（HorizontalLayout 自动换行不可用，
-        // 每组一行多卡，超出屏宽可由页面整体滚动承载）
-        if Data.top-state == 2: VerticalLayout {
+        // 分组渲染：组标题 + 榜单卡换行网格（HorizontalLayout 不换行会溢出
+        // 裁掉，照 CoverCardGrid 的「按容器宽算列数 + 绝对定位」模式摆卡）
+        if Data.top-state == 2 || (Data.top-state == 1 && Data.top-groups.length > 0): VerticalLayout {
             spacing: Theme.space-8;
 
             for group in Data.top-groups: VerticalLayout {
@@ -150,11 +161,22 @@ export component TopPage inherits Rectangle {
                     title: group.name;
                 }
 
-                HorizontalLayout {
-                    spacing: Theme.space-4;
+                Rectangle {
+                    background: transparent;
+                    // 行数自撑容器高度（Scroll content VerticalLayout preferred-height 生效）
+                    height: rows > 0 ? rows * card-h + (rows - 1) * 16px : 0px;
 
-                    for top-i in group.tops: TopCard {
+                    property <int> cols: Math.max(1, Math.ceil((self.width + 16px) / 296px));
+                    property <int> rows: Math.ceil(group.tops.length / cols);
+                    property <length> card-h: 156px;
+                    // 280px 为最大卡宽，窄窗按比例缩
+                    property <length> card-w: Math.min(280px, (self.width - (cols - 1) * 16px) / cols);
+
+                    for top-i[index] in group.tops: TopCard {
                         card: top-i;
+                        card-width: card-w;
+                        x: Math.mod(index, cols) * (card-w + 16px);
+                        y: Math.floor(index / cols) * (card-h + 16px);
                         clicked => {
                             Nav.navigate(Route.top-detail, top-i.id);
                         }

@@ -48,31 +48,44 @@ export component VolumeControl inherits Rectangle {
         return accept;
     }
 
-    icon-touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            if (muted) {
-                Player.set-volume(last-volume > 0.01 ? last-volume : 1.0);
-            } else {
-                last-volume = Player.volume;
-                Player.set-volume(0.0);
+    // 触发钮：36px 命中 + 图标 + tool-tip（对齐 Vue title）。Tooltip 挂在
+    // 触发钮而非组件根——弹层展开时悬停滑轨不该再冒「音量」提示。
+    trigger := Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+
+        icon-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                if (muted) {
+                    Player.set-volume(last-volume > 0.01 ? last-volume : 1.0);
+                } else {
+                    last-volume = Player.volume;
+                    Player.set-volume(0.0);
+                }
+            }
+            scroll-event(event) => {
+                return root.wheel-volume(event.delta-y);
             }
         }
-        scroll-event(event) => {
-            return root.wheel-volume(event.delta-y);
+
+        AppIcon {
+            source: muted ? Icons.volume_off : Icons.volume_up;
+            icon-color: Theme.foreground;
+            width: 21px;
+            height: 21px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
         }
+
+        Tooltip { text: @markdown("音量"); }
     }
 
-    AppIcon {
-        source: muted ? Icons.volume_off : Icons.volume_up;
-        icon-color: Theme.foreground;
-        width: 21px;
-        height: 21px;
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-    }
-
-    // —— 悬浮面板（图标上方 10px，宽 44 值 208 高）———
+    // —— 悬浮面板（图标上方 10px，宽 44 高 160；Vue POPOP_FULL_PX=160：
+    // pad 8.8 + 数值 11.5 + gap 4.8 + 轨 124 + pad 10.4，轨定高 124 余 0.5px
+    // 落底缝）———
     volume-pop := Rectangle {
         visible: root.pop-open;
         opacity: root.pop-open ? 1 : 0;
@@ -83,7 +96,7 @@ export component VolumeControl inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: -self.height - 10px;
         width: 44px;
-        height: 208px;
+        height: 160px;
 
         Rectangle {
             width: parent.width;
@@ -102,20 +115,22 @@ export component VolumeControl inherits Rectangle {
             }
 
             VerticalLayout {
-                padding-top: 10px;
-                padding-bottom: 12px;
-                spacing: 6px;
+                padding-top: 8.8px;
+                padding-bottom: 10.4px;
+                spacing: 4.8px;
 
                 Text {
-                    height: 16px;
-                    text: "\{Math.round(Player.volume * 100)}";
-                    color: Theme.foreground;
+                    height: 11.5px;
+                    text: "\{Math.round(Player.volume * 100)}%";
+                    color: Theme.muted-foreground;
                     font-size: 11px;
                     horizontal-alignment: center;
                 }
 
-                // 细轨：4px 竖轨 + 12px thumb，整列命中放宽拖拽
+                // 细轨：4px 竖轨 + 12px thumb，整列命中放宽拖拽（轨高 124px，
+                // Vue 7.75rem）
                 Rectangle {
+                    height: 124px;
                     horizontal-stretch: 1;
 
                     Rectangle {

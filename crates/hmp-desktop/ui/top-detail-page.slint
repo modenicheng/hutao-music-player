@@ -24,11 +24,11 @@ export component TopDetailPage inherits Rectangle {
             back => {
                 Nav.back();
             }
-            meta-items: [
-                Data.top-detail-found ? Data.top-detail-total + " 首" : "",
-                Data.top-detail-found && Data.top-detail-update != ""
-                    ? "更新 " + Data.top-detail-update : "",
-            ];
+            // meta 项按状态整组切换：PageHeader 会对 index>0 无条件渲染「·」
+            // 分隔符，传空串元素会渲染成孤立「·」，故只在值非空时才含该元素
+            meta-items: !Data.top-detail-found ? []
+                : Data.top-detail-update == "" ? [Data.top-detail-total + " 首"]
+                : [Data.top-detail-total + " 首", "更新 " + Data.top-detail-update];
         }
 
         // 页头动作区（独立行；仅有内容时显示）

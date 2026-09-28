@@ -1,7 +1,7 @@
 // 播放页 overlay（NowPlayingBody.vue + PlayerOverlay.vue，M6 移植）：
 // 环境层（取色渐变 + Rust 预烘焙模糊封面等比 cover 铺底 + tint 遮罩）→
 // 首屏舞台定高一屏（左封面+信息随其下 | 右整列歌词）→ 上滑抵达评论区；
-// 底部控制台常驻（刻度进度条 + 控制排）。
+// 底部控制台常驻（进度条 + 控制排）。
 // 曲目层调色：TrackPalette global（src/track_theme.rs 的 OKLab 取色管线
 // 随封面+明暗覆写整族），本页全页消费——主界面不受影响（见 stores.slint）。
 // 歌词跟随：原型 LyricsPane 的临界阻尼弹簧（ω=12，半隐式欧拉）以 16ms
@@ -221,27 +221,6 @@ export component NowPlayingOverlay inherits Rectangle {
         background: @linear-gradient(180deg, transparent 0.4, TrackPalette.grad-to 1.0);
     }
 
-    // —— 收起键：裸 chevron 向下，墨色随环境对比度 ——
-    collapse-touch := TouchArea {
-        x: Theme.space-4;
-        y: Theme.space-4;
-        width: 36px;
-        height: 36px;
-        mouse-cursor: pointer;
-        clicked => {
-            Player.hide-overlay();
-        }
-        AppIcon {
-            source: Icons.expand_more;
-            icon-color: collapse-touch.has-hover
-                ? TrackPalette.on-ambient : TrackPalette.on-ambient.transparentize(0.25);
-            width: 22px;
-            height: 22px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-        }
-    }
-
     VerticalLayout {
         // —— 内容滚动区：首屏舞台（定高一屏）+ 评论区 ——
         page := Scroll {
@@ -309,6 +288,8 @@ export component NowPlayingOverlay inherits Rectangle {
                     reported-index = index;
                     reported-center = center-y;
                     reported-generation = NowPlaying.lyrics-generation;
+                    // 上报即目标更新：拉起可能已收敛停表的弹簧
+                    follow-tick.restart();
                 }
 
                 function lyr-target() -> float {
@@ -328,11 +309,13 @@ export component NowPlayingOverlay inherits Rectangle {
                 function user-took-over() {
                     following = false;
                     take-over-timer.restart();
+                    follow-tick.restart();
                 }
 
                 function resume-following() {
                     take-over-timer.stop();
                     following = true;
+                    follow-tick.restart();
                 }
 
                 follow-tick := Timer {
@@ -375,6 +358,8 @@ export component NowPlayingOverlay inherits Rectangle {
                                 && abs(stage-rect.follow-v) < 8) {
                                 stage-rect.follow-x = stage-rect.lyr-target();
                                 stage-rect.follow-v = 0;
+                                // 到位即停表，重启面见上：任一变动路径都会拉起
+                                follow-tick.stop();
                             }
                             lyrics-scroll.scroll-offset = -stage-rect.follow-x * 1px;
                         }
@@ -388,6 +373,20 @@ export component NowPlayingOverlay inherits Rectangle {
                         stage-rect.resume-following();
                     }
                 }
+
+                // —— 收敛停表（follow-tick 到位即 stop）的完备重启面 ———
+                // 任何能改目标或状态的路径都必须拉表：激活行推送 / 词表换代 /
+                // 视口与内容几何（窗口缩放、行重排）/ 激活行几何上报（report-center
+                // 内）/ 接管与恢复（user-took-over、resume-following 内）/ 外部滚动。
+                // changed 只挂自身属性，global 一律走本组件映射哨兵
+                property <int> active-line-watch: NowPlaying.active-line;
+                changed active-line-watch => { follow-tick.restart(); }
+                property <int> lyrics-generation-watch: NowPlaying.lyrics-generation;
+                changed lyrics-generation-watch => { follow-tick.restart(); }
+                changed lyr-view-h => { follow-tick.restart(); }
+                changed lyr-content-h => { follow-tick.restart(); }
+                property <length> offset-watch: lyrics-scroll.scroll-offset;
+                changed offset-watch => { follow-tick.restart(); }
 
                 // 舞台阅读列最大宽 68rem（1088px）水平居中（Vue .np-stage
                 // max-width + margin: 0 auto）——宽窗两侧留给环境层呼吸
@@ -452,12 +451,14 @@ export component NowPlayingOverlay inherits Rectangle {
                                             font-weight: 700;
                                             wrap: word-wrap;
                                             overflow: elide;
-                                            // 两行截断（Vue -webkit-line-clamp: 2，行高 1.25）
-                                            max-height: title-size * 2.5;
+                                            // 两行截断（Vue -webkit-line-clamp: 2）；CJK 自然
+                                            // 行高 >1.25em，2.9 倍字号才容得下完整两行
+                                            max-height: title-size * 2.9;
                                         }
                                         like-touch := TouchArea {
-                                            width: 32px;
-                                            height: 32px;
+                                            // 命中区外扩到 40px，icon 居中不变
+                                            width: 40px;
+                                            height: 40px;
                                             y: (parent.height - self.height) / 2;
                                             mouse-cursor: pointer;
                                             clicked => {
@@ -501,15 +502,18 @@ export component NowPlayingOverlay inherits Rectangle {
                         }
 
                         // —— 右列：整列歌词（内部自滚，无滚动条）———
-                        VerticalLayout {
+                        Rectangle {
                             horizontal-stretch: 1;
 
                             lyrics-scroll := Scroll {
+                                width: parent.width;
+                                height: parent.height;
                                 hide-scrollbar: true;
 
                                 // 行 + 首尾留白收进同一布局：行中心的内容系坐标
-                                // （绝对定位差值）与 content-height 同一基准
-                                rows-col := VerticalLayout {
+                                // （绝对定位差值）与 content-height 同一基准；
+                                // 空词表不渲染——首尾留白会多出一屏可滚空白
+                                if NowPlaying.lyrics.length > 0: rows-col := VerticalLayout {
                                     Rectangle {
                                         height: stage-rect.lyr-pad-top * 1px;
                                     }
@@ -541,7 +545,7 @@ export component NowPlayingOverlay inherits Rectangle {
                                     }
                                 }
 
-                                if NowPlaying.lyrics.length == 0 && !NowPlaying.lyrics-loading: Rectangle {
+                                if NowPlaying.lyrics.length == 0: Rectangle {
                                     width: parent.width;
                                     height: page.view-height;
 
@@ -554,6 +558,22 @@ export component NowPlayingOverlay inherits Rectangle {
                                         horizontal-alignment: center;
                                     }
                                 }
+                            }
+
+                            // 上下缘软边：Slint 无 mask，以 40px 渐变叠层近似
+                            // Vue 的 mask-image 渐隐（端色→透明）；无 TouchArea
+                            // 不挡滚动/点击，放视口外层不随歌词内容滚走
+                            Rectangle {
+                                y: 0;
+                                width: parent.width;
+                                height: 40px;
+                                background: @linear-gradient(180deg, TrackPalette.grad-to, transparent);
+                            }
+                            Rectangle {
+                                y: parent.height - self.height;
+                                width: parent.width;
+                                height: 40px;
+                                background: @linear-gradient(180deg, transparent, TrackPalette.grad-to);
                             }
                         }
                     }
@@ -674,13 +694,15 @@ export component NowPlayingOverlay inherits Rectangle {
                                         width: 52px;
                                         height: 28px;
                                         border-radius: Theme.pill(self.height);
-                                        background: Theme.foreground.transparentize(0.9);
+                                        // mock 发送不接线：近透明板 + 45% accent 文字读作
+                                        // disabled（对齐 Vue disabled 0.45 语义），不可点
+                                        background: Theme.foreground.transparentize(0.94);
 
                                         Text {
                                             width: parent.width;
                                             y: (parent.height - self.height) / 2;
                                             text: "发送";
-                                            color: Theme.muted-foreground;
+                                            color: Theme.accent.transparentize(0.55);
                                             font-size: 12.5px;
                                             horizontal-alignment: center;
                                         }
@@ -707,12 +729,13 @@ export component NowPlayingOverlay inherits Rectangle {
                                 font-size: 13.5px;
                             }
 
-                            for comment in NowPlaying.comments: VerticalLayout {
+                            for comment[idx] in NowPlaying.comments: VerticalLayout {
                                 padding-top: Theme.space-3;
                                 padding-bottom: Theme.space-3;
 
-                                // 编辑部式发丝线分隔
-                                Rectangle {
+                                // 编辑部式发丝线分隔（首条无顶线：线只在条目之间）
+                                if idx > 0: Rectangle {
+                                    width: parent.width;
                                     height: 1px;
                                     background: Theme.hairline;
                                 }
@@ -723,8 +746,8 @@ export component NowPlayingOverlay inherits Rectangle {
 
                                     // 头像占位：首字圆板（UI 禁网不拉真头像）
                                     Rectangle {
-                                        width: 34px;
-                                        height: 34px;
+                                        width: 36px;
+                                        height: 36px;
                                         border-radius: Theme.pill(self.height);
                                         background: Theme.foreground.transparentize(0.92);
 
@@ -806,9 +829,10 @@ export component NowPlayingOverlay inherits Rectangle {
         }
 
         // —— 底部控制台：常驻，不随内容滚动 ——
-        // Vue backdrop-filter blur(18px) 无对应物，半透明端色底 + 发丝线近似
+        // Vue backdrop-filter blur(18px) 无对应物，半透明端色底 + 发丝线近似。
+        // 104px = 12 顶距 + 30 进度行 + 8 行距 + 44 控制排 + 10 底距，无死高
         Rectangle {
-            height: 116px;
+            height: 104px;
             background: TrackPalette.grad-to.transparentize(0.22);
             Rectangle {
                 x: 0;
@@ -830,102 +854,110 @@ export component NowPlayingOverlay inherits Rectangle {
                 padding-left: Theme.space-6;
                 padding-right: Theme.space-6;
                 padding-top: Theme.space-3;
+                padding-bottom: 10px;
                 spacing: Theme.space-2;
 
-                // —— 刻度进度条（RulerProgress.vue）：静息 3px/hover 6px，
-                // 每 10% 一根刻度、四分之一处加高；拖拽回显同 PlayerBar ——
-                ruler := Rectangle {
+                // —— 进度条（RulerProgress.vue）：静息 3px/hover 6px 中轴对称
+                // 增粗；两端定宽时间消费 Player 推送文本（剩余带 "-" 前缀，
+                // 等宽数字族主题缺省时回落默认）；拖拽回显同 PlayerBar ——
+                HorizontalLayout {
                     height: 30px;
+                    spacing: Theme.space-3;
 
-                    property <float> shown: Player.seeking
-                        ? clamp(Player.drag-progress, 0.0, 1.0)
-                        : clamp(Player.progress, 0.0, 1.0);
+                    Text {
+                        width: 56px;
+                        text: Player.elapsed-text;
+                        color: Theme.muted-foreground;
+                        font-size: 13px;
+                        horizontal-alignment: left;
+                        vertical-alignment: center;
+                    }
+                    ruler := Rectangle {
+                        height: 30px;
+                        horizontal-stretch: 1;
 
-                    Rectangle {
-                        y: (parent.height - 6px) / 2;
-                        width: parent.width;
-                        height: ruler-touch.has-hover || ruler-touch.pressed ? 6px : 3px;
-                        border-radius: self.height / 2;
-                        background: Theme.track;
-                        animate height {
-                            duration: Theme.duration-fast;
-                            easing: cubic-bezier(0.2, 0, 0, 1);
-                        }
+                        property <float> shown: Player.seeking
+                            ? clamp(Player.drag-progress, 0.0, 1.0)
+                            : clamp(Player.progress, 0.0, 1.0);
 
                         Rectangle {
-                            x: 0;
-                            y: 0;
-                            width: parent.width * ruler.shown;
-                            height: parent.height;
-                            border-radius: parent.border-radius;
-                            background: TrackPalette.accent;
-                        }
-                    }
-                    for t in [10, 20, 30, 40, 60, 70, 80, 90]: Rectangle {
-                        x: parent.width * t / 100 - self.width / 2;
-                        y: (parent.height - 12px) / 2;
-                        width: 1px;
-                        height: 12px;
-                        background: Theme.track;
-                        opacity: parent.width * t / 100 <= parent.width * ruler.shown ? 0.55 : 1;
-                    }
-                    for t in [25, 50, 75]: Rectangle {
-                        x: parent.width * t / 100 - self.width / 2;
-                        y: (parent.height - 18px) / 2;
-                        width: 1.5px;
-                        height: 18px;
-                        background: Theme.track;
-                        opacity: parent.width * t / 100 <= parent.width * ruler.shown ? 0.55 : 1;
-                    }
-                    Rectangle {
-                        x: parent.width * ruler.shown - self.width / 2;
-                        y: (parent.height - self.height) / 2;
-                        width: ruler-touch.has-hover || ruler-touch.pressed ? 12px : 0px;
-                        height: self.width;
-                        border-radius: Theme.pill(self.height);
-                        background: TrackPalette.accent;
-                        animate width {
-                            duration: Theme.duration-fast;
-                            easing: cubic-bezier(0.2, 0, 0, 1);
-                        }
-                    }
-                    if ruler-touch.pressed: Rectangle {
-                        x: clamp(parent.width * ruler.shown - self.width / 2, 0px, parent.width - self.width);
-                        y: -26px;
-                        width: 64px;
-                        height: 24px;
-                        border-radius: Theme.radius-md;
-                        background: TrackPalette.deep;
-
-                        property <int> shown-secs: Math.floor(ruler.shown * Player.duration-ms / 1000);
-                        Text {
-                            width: parent.width;
                             y: (parent.height - self.height) / 2;
-                            text: "\{Math.floor(parent.shown-secs / 60)}:\{Math.mod(parent.shown-secs, 60) < 10 ? "0" : ""}\{Math.mod(parent.shown-secs, 60)}";
-                            color: TrackPalette.deep-fg;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                        }
-                    }
+                            width: parent.width;
+                            height: ruler-touch.has-hover || ruler-touch.pressed ? 6px : 3px;
+                            border-radius: self.height / 2;
+                            background: Theme.track;
+                            animate height {
+                                duration: Theme.duration-fast;
+                                easing: cubic-bezier(0.2, 0, 0, 1);
+                            }
 
-                    ruler-touch := TouchArea {
-                        width: parent.width;
-                        height: parent.height;
-                        mouse-cursor: pointer;
-                        pointer-event(event) => {
-                            if (event.kind == PointerEventKind.down) {
-                                Player.seeking = true;
-                                Player.drag-progress = clamp(self.mouse-x / parent.width, 0.0, 1.0);
-                            } else if (event.kind == PointerEventKind.up) {
-                                Player.seek-percent(Player.drag-progress);
-                                Player.seeking = false;
-                            } else if (event.kind == PointerEventKind.cancel) {
-                                Player.seeking = false;
+                            Rectangle {
+                                x: 0;
+                                y: 0;
+                                width: parent.width * ruler.shown;
+                                height: parent.height;
+                                border-radius: parent.border-radius;
+                                background: TrackPalette.accent;
                             }
                         }
-                        moved => {
-                            Player.drag-progress = clamp(self.mouse-x / parent.width, 0.0, 1.0);
+                        Rectangle {
+                            x: parent.width * ruler.shown - self.width / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: ruler-touch.has-hover || ruler-touch.pressed ? 12px : 0px;
+                            height: self.width;
+                            border-radius: Theme.pill(self.height);
+                            background: TrackPalette.accent;
+                            animate width {
+                                duration: Theme.duration-fast;
+                                easing: cubic-bezier(0.2, 0, 0, 1);
+                            }
                         }
+                        if ruler-touch.pressed: Rectangle {
+                            x: clamp(parent.width * ruler.shown - self.width / 2, 0px, parent.width - self.width);
+                            y: -26px;
+                            width: 64px;
+                            height: 24px;
+                            border-radius: Theme.radius-md;
+                            background: TrackPalette.deep;
+
+                            property <int> shown-secs: Math.floor(ruler.shown * Player.duration-ms / 1000);
+                            Text {
+                                width: parent.width;
+                                y: (parent.height - self.height) / 2;
+                                text: "\{Math.floor(parent.shown-secs / 60)}:\{Math.mod(parent.shown-secs, 60) < 10 ? "0" : ""}\{Math.mod(parent.shown-secs, 60)}";
+                                color: TrackPalette.deep-fg;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        ruler-touch := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            mouse-cursor: pointer;
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    Player.seeking = true;
+                                    Player.drag-progress = clamp(self.mouse-x / parent.width, 0.0, 1.0);
+                                } else if (event.kind == PointerEventKind.up) {
+                                    Player.seek-percent(Player.drag-progress);
+                                    Player.seeking = false;
+                                } else if (event.kind == PointerEventKind.cancel) {
+                                    Player.seeking = false;
+                                }
+                            }
+                            moved => {
+                                Player.drag-progress = clamp(self.mouse-x / parent.width, 0.0, 1.0);
+                            }
+                        }
+                    }
+                    Text {
+                        width: 56px;
+                        text: Player.remaining-text;
+                        color: Theme.muted-foreground;
+                        font-size: 13px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
                     }
                 }
 
@@ -1123,8 +1155,14 @@ export component NowPlayingOverlay inherits Rectangle {
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
                             clicked => {
-                                page.scroll-offset = -min(page.view-height,
+                                // 平滑滚往评论区：本处只登记起止并起表，插值在
+                                // slide 尾部 page-anim（16ms Timer）
+                                page-anim-from = page.scroll-offset;
+                                page-anim-to = -min(page.view-height,
                                     Math.max(0px, page.content-height - page.view-height));
+                                page-anim-last = page-anim-from;
+                                page-anim-t = 0ms;
+                                page-anim.restart();
                             }
                             Rectangle {
                                 width: parent.width;
@@ -1180,6 +1218,56 @@ export component NowPlayingOverlay inherits Rectangle {
                 }
                 }
             }
+        }
+    }
+
+    // —— 跳评论平滑滚动：16ms Timer 手动插值（320ms easeOutCubic）———
+    // 插值期间 scroll-offset 被外部改动（滚轮/拖拽/惯性）即让位中止；
+    // 起止点登记在 jump-comments，落点与旧瞬跳一致
+    property <length> page-anim-from: 0px;
+    property <length> page-anim-to: 0px;
+    property <length> page-anim-last: 0px;
+    property <duration> page-anim-t: 0ms;
+    page-anim := Timer {
+        interval: 16ms;
+        running: false;
+        triggered => {
+            if (page.scroll-offset != page-anim-last) {
+                page-anim.stop();
+            } else if (page-anim-t >= 320ms) {
+                page.scroll-offset = page-anim-to;
+                page-anim.stop();
+            } else {
+                page-anim-t = page-anim-t + 16ms;
+                page.scroll-offset = page-anim-from
+                    + (page-anim-to - page-anim-from)
+                        * (1 - Math.pow(1 - page-anim-t / 320ms, 3));
+                page-anim-last = page.scroll-offset;
+            }
+        }
+    }
+
+    // —— 收起键：裸 chevron 向下，墨色随环境对比度 ——
+    // 声明在 slide 末尾（最顶层）：page 的 Flickable 对按下无条件 GrabMouse，
+    // 排在其前点击永远到不了这里；y 让开顶部 32px 自绘标题栏命中带
+    //（overlay 覆盖全窗后标题栏在其下）
+    collapse-touch := TouchArea {
+        x: Theme.space-4;
+        y: Theme.title-bar-height + Theme.space-2;
+        width: 36px;
+        height: 36px;
+        mouse-cursor: pointer;
+        clicked => {
+            Player.hide-overlay();
+        }
+        AppIcon {
+            source: Icons.expand_more;
+            icon-color: collapse-touch.has-hover
+                ? TrackPalette.on-ambient : TrackPalette.on-ambient.transparentize(0.25);
+            width: 22px;
+            height: 22px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
         }
     }
     } // slide

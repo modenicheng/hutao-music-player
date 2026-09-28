@@ -4,7 +4,7 @@
 // preferred-height，页面禁止绑定 parent.height（会塌缩为 0）。
 import { Theme } from "theme.slint";
 import { Button, ButtonVariant } from "primitives.slint";
-import { PageHeader, SectionHeader, CoverCard } from "page-parts.slint";
+import { PageHeader, SectionHeader, CoverCardGrid } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
 import { Nav, Route } from "nav.slint";
 import { Data, Player } from "stores.slint";
@@ -50,8 +50,8 @@ export component DiscoverPage inherits Rectangle {
             Text {
                 y: 80px;
                 width: parent.width;
-                text: "LOADING BLOCK";
-                color: #ffffff;
+                text: "正在加载…";
+                color: Theme.muted-foreground;
                 font-size: 14px;
                 horizontal-alignment: center;
             }
@@ -86,17 +86,13 @@ export component DiscoverPage inherits Rectangle {
                 title: "推荐歌单";
             }
 
-            cards-grid := HorizontalLayout {
-                spacing: 16px;
-
-                for card[i] in Data.discover-playlists: CoverCard {
-                    width: Theme.grid-card-width(cards-grid.width);
-                    cover: card.cover;
-                    title: card.title;
-                    subtitle: card.subtitle;
-                    clicked => {
-                        Nav.navigate(Route.playlist, card.mid);
-                    }
+            // CoverCardGrid 按容器宽换行（HorizontalLayout 单行会溢出裁掉）
+            CoverCardGrid {
+                width: parent.width;
+                cards: Data.discover-playlists;
+                row-count: Data.discover-playlists.length;
+                card-clicked(mid) => {
+                    Nav.navigate(Route.playlist, mid);
                 }
             }
         }

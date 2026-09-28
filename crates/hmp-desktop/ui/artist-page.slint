@@ -87,6 +87,7 @@ export component ArtistPage inherits Rectangle {
             CoverCardGrid {
                 width: parent.width;
                 cards: Data.artist-albums;
+                row-count: Data.artist-albums.length;
                 card-clicked(name) => {
                     Nav.navigate(Route.album, name);
                 }

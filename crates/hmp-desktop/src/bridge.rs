@@ -2,7 +2,7 @@
 //! （旧版对接 AppCore 的桥随旧 UI 契约废弃，M8 数据接线时重写回来；
 //! 页面数据源 = [`library_view`] 直读 library.sqlite3，播放/命令桥另行接线。）
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,6 +22,14 @@ const NAV_HISTORY_CAP: usize = 50;
 /// 库变更刷新防抖：watcher 批处理每 ~1s bump 一次，扫描期连发——
 /// 静默 500ms 才触发一次重查，避免 UI 随扫描进度反复重载。
 const REFRESH_DEBOUNCE: Duration = Duration::from_millis(500);
+
+// 搜索请求代计数（app.rs NetworkRequestState 的轻量同思路）：上一请求未
+// 返回时再次搜索，两个响应到达顺序不保证——落结果前比对代次，过期即弃，
+// 防旧关键词结果覆盖新关键词。回调与结果落地都经事件循环线程（on_search
+// 本体 / invoke_from_event_loop），单线程计数即可，无需原子量。
+thread_local! {
+    static SEARCH_GENERATION: Cell<u64> = const { Cell::new(0) };
+}
 
 fn model<T: 'static + Clone>(items: Vec<T>) -> ModelRc<T> {
     ModelRc::new(VecModel::from(items))
@@ -64,6 +72,9 @@ fn sidebar_cover(entry: &PlaylistEntry) -> PlaylistCover {
     let hash = crate::covers::hash_seed(&format!("playlist:{}", entry.id)) as usize;
     let (r1, g1, b1, r2, g2, b2) = PAIRS[hash % PAIRS.len()];
     PlaylistCover {
+        // id 原样透传：与库页歌单卡（playlist_card → CoverCardData.mid）同一
+        // 字符串形式，歌单详情页按它 parse 成 i64 查库
+        id: entry.id.clone().into(),
         name: entry.name.clone().into(),
         c1: slint::Color::from_rgb_u8(r1, g1, b1),
         c2: slint::Color::from_rgb_u8(r2, g2, b2),
@@ -225,7 +236,11 @@ fn spawn_top_detail_load(
         let w0 = weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = w0.upgrade() {
-                Data::get(&ui).set_top_detail_state(1);
+                let data = Data::get(&ui);
+                data.set_top_detail_state(1);
+                // 换榜加载起点清残留：found=false 让页头退回占位文案，
+                // 不再显示上一榜的名字/条数
+                data.set_top_detail_found(false);
             }
         });
         let result = crate::backend::request(hmp_core::Request::TopDetailGet {
@@ -256,7 +271,9 @@ fn spawn_top_detail_load(
                         .collect();
                     let name = page.name.as_str().into();
                     let update = page.update_time.as_str().into();
-                    let total = page.total as i32;
+                    // meta 条数与实际装载行数一致：请求固定 num=100，daemon
+                    // total 是全榜总数（如热歌榜 300），表格并没有那么多行
+                    let total = tracks.len() as i32;
                     data.set_top_detail_tracks(model(tracks));
                     data.set_top_detail_name(name);
                     data.set_top_detail_update(update);
@@ -328,6 +345,42 @@ fn spawn_top_category_load(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backen
                     data.set_top_state(4);
                 }
             }
+        });
+    });
+}
+
+/// 账号状态查询（daemon AccountStatus IPC；设置页账号面板）。
+/// daemon 冷启动（连接失败）时重试：首次连接由订阅循环 connect_or_spawn
+/// 拉起 daemon 需 ~1-3s，这里的小重试覆盖该窗口；彻底离线 → 专属失败态
+/// （区别于"未登录"，不误导用户去重新登录）。
+/// 启动查一次 + on_navigate 命中 SettingsAccount 时重发（重进页面刷新，
+/// 覆盖 daemon 后启动 / 终端 `hmp login` 后的状态变化）。
+fn spawn_account_status_load(
+    ui_weak: Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+) {
+    runtime.spawn(async move {
+        let mut result = Err(crate::backend::BackendError::NoBackendBinary);
+        for _ in 0..4 {
+            result = crate::backend::request(hmp_core::Request::AccountStatus).await;
+            if matches!(result, Ok(hmp_core::Response::AccountStatus(_))) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        }
+        let online = matches!(result, Ok(hmp_core::Response::AccountStatus(_)));
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let data = Data::get(&ui);
+            if let Ok(hmp_core::Response::AccountStatus(info)) = result {
+                data.set_account_logged_in(info.logged_in);
+                data.set_account_nickname(info.nickname.clone().into());
+                data.set_account_uin(info.uin.clone().into());
+                data.set_account_vip(info.vip_summary.clone().into());
+            }
+            data.set_account_state(if online { 1 } else { 2 });
         });
     });
 }
@@ -702,6 +755,10 @@ pub fn bind(
                 crate::Route::TopDetail => {
                     spawn_top_detail_load(ui.as_weak(), &rt, param);
                 }
+                // 账号页重进即重查（daemon 后启动 / `hmp login` 后刷新状态）
+                crate::Route::SettingsAccount => {
+                    spawn_account_status_load(ui.as_weak(), &rt);
+                }
                 _ => {}
             }
         });
@@ -823,6 +880,11 @@ pub fn bind(
             if keyword.is_empty() {
                 return;
             }
+            // 每次真实搜索递增代次：空词早退不动计数，不打断在途请求
+            let generation = SEARCH_GENERATION.with(|g| {
+                g.set(g.get() + 1);
+                g.get()
+            });
             if let Some(ui) = ui_weak.upgrade() {
                 let data = Data::get(&ui);
                 data.set_search_query(SharedString::from(keyword.clone()));
@@ -835,6 +897,11 @@ pub fn bind(
                     let Some(ui) = ui_weak.upgrade() else {
                         return;
                     };
+                    // 非最新代次 = 更晚的搜索已发出，本次响应过期丢弃
+                    // （"搜索中"态由最新请求置位，此处不动状态）
+                    if SEARCH_GENERATION.with(|g| g.get()) != generation {
+                        return;
+                    }
                     let data = Data::get(&ui);
                     match result {
                         Ok(hmp_core::Response::Search(page)) => {
@@ -854,37 +921,8 @@ pub fn bind(
     }
 
     // ——— 账号状态（daemon AccountStatus IPC；设置页账号面板）———
-    // daemon 冷启动（连接失败）时重试：首次连接由订阅循环 connect_or_spawn
-    // 拉起 daemon 需 ~1-3s，这里的小重试覆盖该窗口；彻底离线 → 专属失败态
-    // （区别于"未登录"，不误导用户去重新登录）。
-    {
-        let ui_weak: Weak<AppWindow> = ui.as_weak();
-        runtime.spawn(async move {
-            let mut result = Err(crate::backend::BackendError::NoBackendBinary);
-            for _ in 0..4 {
-                result = crate::backend::request(hmp_core::Request::AccountStatus).await;
-                if matches!(result, Ok(hmp_core::Response::AccountStatus(_))) {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            }
-            let online = matches!(result, Ok(hmp_core::Response::AccountStatus(_)));
-            let apply = move || {
-                let Some(ui) = ui_weak.upgrade() else {
-                    return;
-                };
-                let data = Data::get(&ui);
-                if let Ok(hmp_core::Response::AccountStatus(info)) = result {
-                    data.set_account_logged_in(info.logged_in);
-                    data.set_account_nickname(info.nickname.clone().into());
-                    data.set_account_uin(info.uin.clone().into());
-                    data.set_account_vip(info.vip_summary.clone().into());
-                }
-                data.set_account_state(if online { 1 } else { 2 });
-            };
-            let _ = slint::invoke_from_event_loop(apply);
-        });
-    }
+    // 启动查一次；重进账号页时由 on_navigate 重发（见 spawn_account_status_load）
+    spawn_account_status_load(ui.as_weak(), &runtime);
 
     // ——— M4 在线内容页（DiscoverGet/TopCategoryGet/TopDetailGet/GuessGet）———
     // 发现页：免登录；进入页面或点刷新时拉取。runtime 供后台出网。

@@ -22,6 +22,7 @@ export component AppIcon inherits Rectangle {
         transform-origin: { x: self.width / 2, y: self.height / 2 };
         animate transform-rotation {
             duration: Theme.duration-normal;
+            easing: cubic-bezier(0.2, 0, 0, 1);
         }
     }
 }
@@ -145,6 +146,7 @@ export component TextLink inherits Rectangle {
         overflow: elide;
         animate color {
             duration: Theme.duration-fast;
+            easing: cubic-bezier(0.2, 0, 0, 1);
         }
     }
 }
