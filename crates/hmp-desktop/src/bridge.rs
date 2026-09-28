@@ -149,23 +149,28 @@ fn discover_playlist_card(p: &hmp_core::DiscoverPlaylist) -> CoverCardData {
 
 /// 拉取发现页（免登录）；失败/离线 → 专属失败态（同搜索页码位约定）。
 fn spawn_discover_load(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::BackendRuntime>) {
-    let weak = ui_weak.clone();
-    slint::invoke_from_event_loop(move || {
-        if let Some(ui) = weak.upgrade() {
-            Data::get(&ui).set_discover_state(1);
-        }
-    })
-    .ok();
     let weak = ui_weak;
-    runtime.spawn(async move {
+    let rt: Arc<crate::backend::BackendRuntime> = Arc::clone(runtime);
+    let rt_spawn = Arc::clone(&rt);
+    rt_spawn.spawn(async move {
+        // 置加载态也挪到 tokio 线程：事件循环线程内（如 on_navigate 栈）直接
+        // invoke_from_event_loop 在 TestingBackend 下会挂起整个 mock 泵。
+        let w0 = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = w0.upgrade() {
+                Data::get(&ui).set_discover_state(1);
+            }
+        });
         let result = crate::backend::request(hmp_core::Request::DiscoverGet {
             songlist_page: 1,
             new_song_type: 5,
         })
         .await;
+        let rt2 = Arc::clone(&rt);
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
             let data = Data::get(&ui);
+            let runtime = Arc::clone(&rt2);
             match result {
                 Ok(hmp_core::Response::Discover(page)) => {
                     let cards: Vec<CoverCardData> =
@@ -174,10 +179,23 @@ fn spawn_discover_load(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::B
                         page.new_songs.iter().map(discover_track_row).collect();
                     let has_more = page.has_more_playlists;
                     let empty = cards.is_empty() && tracks.is_empty();
+                    // 登记歌单封面 URL 旁路表并触发异步取图（daemon CoverGet）
+                    crate::online_covers::register_playlist_covers(
+                        page.playlists
+                            .iter()
+                            .filter(|p| !p.picurl.is_empty())
+                            .map(|p| (p.id.to_string(), p.picurl.clone()))
+                            .collect(),
+                    );
                     data.set_discover_playlists(model(cards));
                     data.set_discover_new_songs(model(tracks));
                     data.set_discover_has_more(has_more);
                     data.set_discover_state(if empty { 3 } else { 2 });
+                    // 模型落地后补真图（占位渐变 → 真实封面）
+                    crate::online_covers::refresh_discover_covers(
+                        ui.as_weak(),
+                        &runtime,
+                    );
                 }
                 _ => {
                     data.set_discover_state(4);
@@ -201,15 +219,15 @@ fn spawn_top_detail_load(
         });
         return;
     };
-    let weak = ui_weak.clone();
-    slint::invoke_from_event_loop(move || {
-        if let Some(ui) = weak.upgrade() {
-            Data::get(&ui).set_top_detail_state(1);
-        }
-    })
-    .ok();
     let weak = ui_weak;
     runtime.spawn(async move {
+        // 置加载态在 tokio 线程（同 discover：事件循环栈内 invoke 会挂 TestingBackend 泵）
+        let w0 = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = w0.upgrade() {
+                Data::get(&ui).set_top_detail_state(1);
+            }
+        });
         let result = crate::backend::request(hmp_core::Request::TopDetailGet {
             top_id,
             num: 100,
@@ -259,15 +277,15 @@ fn spawn_top_detail_load(
 
 /// 拉取排行榜分类（免登录）。
 fn spawn_top_category_load(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::BackendRuntime>) {
-    let weak = ui_weak.clone();
-    slint::invoke_from_event_loop(move || {
-        if let Some(ui) = weak.upgrade() {
-            Data::get(&ui).set_top_state(1);
-        }
-    })
-    .ok();
     let weak = ui_weak;
     runtime.spawn(async move {
+        // 置加载态在 tokio 线程（同 discover）
+        let w0 = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = w0.upgrade() {
+                Data::get(&ui).set_top_state(1);
+            }
+        });
         let result = crate::backend::request(hmp_core::Request::TopCategoryGet).await;
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -986,8 +1004,8 @@ pub fn bind(
             });
         });
     }
-    // 首次进入时预加载发现页（首页“为你推荐”同源复用）。
-    spawn_discover_load(ui.as_weak(), &runtime);
+    // 注：不再在此预载发现页——bind 时事件循环尚未迭代，TestingBackend 下首个
+    // invoke_from_event_loop 闭包会挂住加载任务；统一由导航懒加载（事件泵已运转）触发。
 }
 
 #[cfg(test)]

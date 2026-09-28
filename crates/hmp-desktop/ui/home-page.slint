@@ -1,135 +1,129 @@
-// 首页（M4 在线内容页）：登录后猜你喜欢 + 免登录推荐内容快捷入口。
-// GuessGet（需登录）+ DiscoverGet 数据复用（发现页加载后同源展示）。
+// 首页（M4 在线内容页）：问候 + 猜你喜欢（需登录）+ 为你推荐（免登录歌单）。
+// GuessGet/DiscoverGet 数据；发现页加载后同源展示。
+// 内容自撑高度（Scroll 约定，禁 parent.height）。
 import { Theme } from "theme.slint";
-import { AppIcon, Button, ButtonVariant } from "primitives.slint";
-import { SectionHeader, CoverCardGrid } from "page-parts.slint";
+import { Button, ButtonVariant } from "primitives.slint";
+import { SectionHeader, CoverCard } from "page-parts.slint";
+import { TrackTable } from "track-table.slint";
 import { Nav, Route } from "nav.slint";
 import { Data, Player } from "stores.slint";
-import { CoverCardData } from "data.slint";
 
 export component HomePage inherits Rectangle {
+    background: transparent;
 
     VerticalLayout {
-        y: Theme.space-4;
-        height: parent.height - 2 * Theme.space-4;
-        width: parent.width - 2 * Theme.space-4;
-        x: Theme.space-4;
-        spacing: Theme.space-4;
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-6;
 
-        // 页头
+        // 页头：标题 + 快捷入口
         HorizontalLayout {
             height: 56px;
             spacing: Theme.space-4;
 
-            Rectangle {
-                width: parent.width - 240px;
+            Text {
+                text: "首页";
+                color: Theme.foreground;
+                font-size: 22px;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
 
-                Text {
-                    text: "首页";
-                    color: Theme.foreground;
-                    font-size: 22px;
-                    font-weight: 700;
-                    vertical-alignment: center;
+            Button {
+                text: "去发现";
+                variant: ButtonVariant.outline;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    Nav.navigate(Route.discover, "");
                 }
             }
 
-            // 快捷导航入口
-            Rectangle {
-                HorizontalLayout {
-                    spacing: Theme.space-4;
+            Button {
+                text: "看榜单";
+                variant: ButtonVariant.outline;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    Nav.navigate(Route.top, "");
+                }
+            }
+        }
 
-                    Button {
-                        text: "去发现";
-                        variant: ButtonVariant.outline;
-                        clicked => {
-                            Nav.navigate(Route.discover, "");
-                        }
-                    }
+        // —— 猜你喜欢（需登录；未登录显示引导卡）——
+        VerticalLayout {
+            spacing: Theme.space-4;
 
-                    Button {
-                        text: "看榜单";
-                        variant: ButtonVariant.outline;
-                        clicked => {
-                            Nav.navigate(Route.top, "");
-                        }
+            SectionHeader {
+                title: "猜你喜欢";
+            }
+
+            if Data.guess-state == 1: Text {
+                text: "正在加载…";
+                color: Theme.muted-foreground;
+                font-size: 13px;
+            }
+
+            if !Data.account-logged-in && Data.guess-state != 2: Rectangle {
+                height: 88px;
+                border-radius: Theme.radius-lg;
+                background: Theme.surface-2;
+
+                Text {
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width;
+                    text: "登录后可获取个性化推荐（设置 → 账号，或 CLI：hmp login）";
+                    color: Theme.muted-foreground;
+                    font-size: 13.5px;
+                    horizontal-alignment: center;
+                }
+            }
+
+            if Data.guess-state == 4: Text {
+                text: "加载失败";
+                color: Theme.muted-foreground;
+                font-size: 13px;
+            }
+
+            if Data.guess-state == 2 && Data.guess-tracks.length > 0: TrackTable {
+                tracks: Data.guess-tracks;
+                show-duration: true;
+            }
+        }
+
+        // —— 为你推荐（复用发现页歌单数据；同源免登录）——
+        if Data.discover-state == 2 && Data.discover-playlists.length > 0: VerticalLayout {
+            spacing: Theme.space-4;
+
+            SectionHeader {
+                title: "为你推荐";
+                more-to: "更多";
+                more-clicked => {
+                    Nav.navigate(Route.discover, "");
+                }
+            }
+
+            cards-grid := HorizontalLayout {
+                spacing: 16px;
+
+                for card[i] in Data.discover-playlists: CoverCard {
+                    width: Theme.grid-card-width(cards-grid.width);
+                    cover: card.cover;
+                    title: card.title;
+                    subtitle: card.subtitle;
+                    clicked => {
+                        Nav.navigate(Route.playlist, card.mid);
                     }
                 }
             }
         }
 
-        Flickable {
-            VerticalLayout {
-                spacing: Theme.space-4;
-
-                // —— 猜你喜欢（需登录；未登录显示登录引导）——
-                Rectangle {
-                    height: Data.guess-state == 2 && Data.guess-tracks.length > 0
-                        ? 320px : 140px;
-
-                    SectionHeader {
-                        title: "猜你喜欢";
-                    }
-
-                    if Data.guess-state == 1: Text {
-                        y: 48px;
-                        text: "正在加载…";
-                        color: Theme.muted-foreground;
-                        font-size: 13px;
-                    }
-
-                    if !Data.account-logged-in: Text {
-                        y: 48px;
-                        width: parent.width;
-                        text: "登录后可获取个性化推荐（hmp login / 设置-账号）";
-                        color: Theme.muted-foreground;
-                        font-size: 13px;
-                    }
-
-                    if Data.guess-state == 4: Text {
-                        y: 48px;
-                        text: "加载失败";
-                        color: Theme.muted-foreground;
-                        font-size: 13px;
-                    }
-
-                    if Data.guess-state == 2 && Data.guess-tracks.length > 0: CoverCardGrid {
-                        y: 40px;
-                        width: parent.width;
-                        height: parent.height - 40px;
-                        cards: Data.guess-cards;
-                        card-clicked(mid) => {
-                            // 歌单/专辑卡片语义是导航；猜你喜欢卡片直接播首处匹配
-                            Player.play-mid(mid);
-                        }
-                    }
-                }
-
-                // —— 为你推荐（复用发现页歌单数据）——
-                if Data.discover-state == 2 && Data.discover-playlists.length > 0: Rectangle {
-                    height: 340px;
-
-                    SectionHeader {
-                        title: "为你推荐";
-                    }
-
-                    CoverCardGrid {
-                        y: 40px;
-                        width: parent.width;
-                        height: parent.height - 40px;
-                        cards: Data.discover-playlists;
-                        card-clicked(mid) => {
-                            Nav.navigate(Route.playlist, mid);
-                        }
-                    }
-                }
-
-                // 发现页尚未加载时的提示（首页惰性触发）
-                if Data.discover-state == 0: Text {
-                    text: "正在获取推荐内容…";
-                    color: Theme.muted-foreground;
-                    font-size: 13px;
-                }
-            }
+        // 发现页尚未加载时的占位（首页惰性触发会很快被替换）
+        if Data.discover-state == 0 || Data.discover-state == 1: Text {
+            text: "正在获取推荐内容…";
+            color: Theme.muted-foreground;
+            font-size: 13px;
         }
     }
 }

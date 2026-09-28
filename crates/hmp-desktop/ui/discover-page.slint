@@ -1,131 +1,121 @@
 // 发现页（M4 在线内容页）：推荐歌单广场 + 新歌速递——daemon
 // DiscoverGet IPC（免登录；AUDIT §8.2 内容读服务同源）。
+// 布局遵循上游内容自撑约定：Scroll 的 content VerticalLayout 会给子项
+// preferred-height，页面禁止绑定 parent.height（会塌缩为 0）。
 import { Theme } from "theme.slint";
-import { AppIcon, Button, ButtonVariant } from "primitives.slint";
-import { PageHeader, SectionHeader, CoverCardGrid } from "page-parts.slint";
+import { Button, ButtonVariant } from "primitives.slint";
+import { PageHeader, SectionHeader, CoverCard } from "page-parts.slint";
+import { TrackTable } from "track-table.slint";
 import { Nav, Route } from "nav.slint";
-import { Data } from "stores.slint";
-import { CoverCardData } from "data.slint";
+import { Data, Player } from "stores.slint";
 
 export component DiscoverPage inherits Rectangle {
+    background: transparent;
 
     VerticalLayout {
-        y: Theme.space-4;
-        height: parent.height - 2 * Theme.space-4;
-        width: parent.width - 2 * Theme.space-4;
-        x: Theme.space-4;
-        spacing: Theme.space-4;
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-6;
 
-        // 页头：标题 + 刷新
+        PageHeader {
+            title: "发现";
+            meta-items: Data.discover-playlists.length > 0
+                ? [Data.discover-playlists.length + " 个歌单"] : [];
+        }
+
+        // 页头动作区（独立行；不让条件组件进 PageHeader 布局）
         HorizontalLayout {
-            height: 56px;
-            spacing: Theme.space-4;
+            alignment: end;
 
-            Rectangle {
-                width: parent.width - 120px;
-
-                Text {
-                    text: "发现";
-                    color: Theme.foreground;
-                    font-size: 22px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                }
+            if Data.discover-state == 1: Text {
+                text: "正在加载…";
+                color: Theme.muted-foreground;
+                font-size: 13px;
             }
-
-            Rectangle {
-                Button {
-                    text: Data.discover-state == 1 ? "加载中…" : "刷新";
-                    variant: ButtonVariant.outline;
-                    width: 96px;
-                    y: (parent.height - self.height) / 2;
-                    clicked => {
-                        Data.refresh-discover();
-                    }
+            if Data.discover-state != 1: Button {
+                text: "刷新";
+                variant: ButtonVariant.outline;
+                clicked => {
+                    Data.refresh-discover();
                 }
             }
         }
 
-        // 状态机：0=初始(触发加载) 1=加载中 2=有内容 3=空 4=失败
-        if Data.discover-state == 1 || Data.discover-state == 0: Rectangle {
-            height: 160px;
+        // 状态机：0=初始 1=加载中 2=有内容 3=空 4=失败
+        if Data.discover-state == 0 || Data.discover-state == 1: Rectangle {
+            height: 200px;
 
             Text {
+                y: 80px;
                 width: parent.width;
-                y: 64px;
-                text: Data.discover-state == 1 ? "正在加载发现页…" : "即将加载…";
-                color: Theme.muted-foreground;
+                text: "LOADING BLOCK";
+                color: #ffffff;
                 font-size: 14px;
                 horizontal-alignment: center;
             }
         }
 
         if Data.discover-state == 3 || Data.discover-state == 4: Rectangle {
-            height: 160px;
+            height: 200px;
 
-            Text {
-                width: parent.width;
-                y: 48px;
-                text: Data.discover-state == 4 ? "加载失败（离线或网络异常）" : "暂无内容";
-                color: Theme.muted-foreground;
-                font-size: 14px;
-                horizontal-alignment: center;
-            }
+            VerticalLayout {
+                alignment: center;
 
-            Text {
-                width: parent.width;
-                y: 80px;
-                text: "点击右上角“刷新”重试";
-                color: Theme.muted-foreground;
-                font-size: 13px;
-                horizontal-alignment: center;
+                Text {
+                    text: Data.discover-state == 4 ? "加载失败" : "暂无内容";
+                    color: Theme.foreground;
+                    font-size: 15px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: Data.discover-state == 4 ? "离线或网络异常，点击右上角刷新重试" : "";
+                    color: Theme.muted-foreground;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
             }
         }
 
-        if Data.discover-state == 2: Flickable {
-            VerticalLayout {
-                spacing: Theme.space-4;
+        // —— 推荐歌单（响应式网格，同库页歌单网格写法）——
+        if Data.discover-state == 2 && Data.discover-playlists.length > 0: VerticalLayout {
+            spacing: Theme.space-4;
 
-                // —— 推荐歌单（点击进入歌单详情页）——
-                if Data.discover-playlists.length > 0: Rectangle {
-                    height: 340px;
+            SectionHeader {
+                title: "推荐歌单";
+            }
 
-                    SectionHeader {
-                        title: "推荐歌单";
-                        more-to: Data.discover-has-more ? "发现页更多" : "";
-                        more-clicked => {
-                            Nav.navigate(Route.discover, "");
-                        }
-                    }
+            cards-grid := HorizontalLayout {
+                spacing: 16px;
 
-                    CoverCardGrid {
-                        y: 40px;
-                        width: parent.width;
-                        height: parent.height - 40px;
-                        cards: Data.discover-playlists;
-                        card-clicked(mid) => {
-                            Nav.navigate(Route.playlist, mid);
-                        }
+                for card[i] in Data.discover-playlists: CoverCard {
+                    width: Theme.grid-card-width(cards-grid.width);
+                    cover: card.cover;
+                    title: card.title;
+                    subtitle: card.subtitle;
+                    clicked => {
+                        Nav.navigate(Route.playlist, card.mid);
                     }
                 }
+            }
+        }
 
-                // —— 新歌速递（点击播放）——
-                if Data.discover-new-songs.length > 0: Rectangle {
-                    height: 120px;
+        // —— 新歌速递（曲目表；点击行即播）——
+        if Data.discover-state == 2 && Data.discover-new-songs.length > 0: VerticalLayout {
+            spacing: Theme.space-4;
 
-                    SectionHeader {
-                        title: "新歌速递";
-                    }
-
-                    Text {
-                        y: 48px;
-                        width: parent.width;
-                        text: "新歌播放请从右键菜单或 CLI：hmp play <songmid>";
-                        color: Theme.muted-foreground;
-                        font-size: 13px;
-                        wrap: word-wrap;
-                    }
+            SectionHeader {
+                title: "新歌速递";
+                more-to: "播放全部";
+                more-clicked => {
+                    Player.play-tracks(Data.discover-new-songs, 0);
                 }
+            }
+
+            TrackTable {
+                tracks: Data.discover-new-songs;
+                show-duration: true;
             }
         }
     }

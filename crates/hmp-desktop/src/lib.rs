@@ -10,6 +10,7 @@ pub mod format;
 pub mod library_view;
 pub mod lyrics;
 pub mod mock;
+pub mod online_covers;
 pub mod player_bridge;
 pub mod prefs;
 pub mod track_theme;

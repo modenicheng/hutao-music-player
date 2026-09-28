@@ -183,7 +183,7 @@ export component CoverCard inherits Rectangle {
     /** 页头/网格动作（页面外置）——保留占位以兼容旧调用 */
     callback clicked;
 
-    border-radius: Theme.radius-lg;
+    border-radius: Theme.radius-cover;
     background: transparent;
 
     card-touch := TouchArea {
@@ -202,15 +202,16 @@ export component CoverCard inherits Rectangle {
             height: self.width + 4px;
 
             Rectangle {
-                y: card-touch.has-hover ? -2px : 0px;
+                y: card-touch.has-hover ? -4px : 0px;
                 width: parent.width;
                 height: parent.width;
-                border-radius: Theme.radius-lg;
+                border-radius: Theme.radius-cover;
                 clip: true;
                 background: Theme.muted;
-                drop-shadow-blur: card-touch.has-hover ? 12px : 2px;
-                drop-shadow-color: #241F1B.transparentize(card-touch.has-hover ? 0.72 : 0.88);
-                drop-shadow-offset-y: card-touch.has-hover ? 6px : 1px;
+                // Apple Music 风格：恒定柔和阴影 + 悬停加深（替代旧的 2px→12px 跳变）
+                drop-shadow-blur: card-touch.has-hover ? 20px : 8px;
+                drop-shadow-color: #241F1B.transparentize(card-touch.has-hover ? 0.68 : 0.82);
+                drop-shadow-offset-y: card-touch.has-hover ? 8px : 3px;
                 animate y {
                     duration: Theme.duration-normal;
                     easing: cubic-bezier(0.2, 0, 0, 1);

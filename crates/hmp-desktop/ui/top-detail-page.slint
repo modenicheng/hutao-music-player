@@ -1,19 +1,21 @@
 // 排行榜详情页（M4 在线内容页）：榜单曲目列表——daemon
 // TopDetailGet IPC（免登录）。Nav.param 携带 top id。
+// 内容自撑高度（Scroll 约定，禁 parent.height）。
 import { Theme } from "theme.slint";
 import { Button, ButtonVariant } from "primitives.slint";
 import { PageHeader } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
-import { Nav, Route } from "nav.slint";
+import { Nav } from "nav.slint";
 import { Data, Player } from "stores.slint";
 
 export component TopDetailPage inherits Rectangle {
+    background: transparent;
 
     VerticalLayout {
-        y: Theme.space-4;
-        height: parent.height - 2 * Theme.space-4;
-        width: parent.width - 2 * Theme.space-4;
-        x: Theme.space-4;
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
         spacing: Theme.space-4;
 
         PageHeader {
@@ -29,54 +31,49 @@ export component TopDetailPage inherits Rectangle {
             ];
         }
 
-        if Data.top-detail-state == 0 || Data.top-detail-state == 1: Rectangle {
-            height: 160px;
+        // 页头动作区（独立行；仅有内容时显示）
+        if Data.top-detail-found && Data.top-detail-tracks.length > 0: HorizontalLayout {
+            alignment: end;
 
-            Text {
-                width: parent.width;
-                y: 64px;
-                text: Data.top-detail-state == 1 ? "正在加载榜单详情…" : "即将加载…";
-                color: Theme.muted-foreground;
-                font-size: 14px;
-                horizontal-alignment: center;
-            }
-        }
-
-        if Data.top-detail-state == 4: Rectangle {
-            height: 160px;
-
-            Text {
-                width: parent.width;
-                y: 64px;
-                text: "加载失败（离线或网络异常）";
-                color: Theme.muted-foreground;
-                font-size: 14px;
-                horizontal-alignment: center;
-            }
-        }
-
-        if Data.top-detail-state == 2 && Data.top-detail-tracks.length > 0: Rectangle {
-            height: parent.height - 64px;
-
-            HorizontalLayout {
-                Button {
-                    text: "播放全部";
-                    variant: ButtonVariant.default;
-                    width: 96px;
-                    clicked => {
-                        Player.play-tracks(Data.top-detail-tracks, 0);
-                    }
+            Button {
+                text: "播放全部";
+                variant: ButtonVariant.default;
+                clicked => {
+                    Player.play-tracks(Data.top-detail-tracks, 0);
                 }
             }
+        }
 
-            TrackTable {
-                y: 44px;
+        // 状态机：0=初始 1=加载中 2=有内容 3=空 4=失败
+        if Data.top-detail-state == 0 || Data.top-detail-state == 1: Rectangle {
+            height: 200px;
+
+            Text {
+                y: 80px;
                 width: parent.width;
-                height: parent.height - 44px;
-                tracks: Data.top-detail-tracks;
-                show-album: true;
-                show-duration: true;
+                text: "正在加载…";
+                color: Theme.muted-foreground;
+                font-size: 14px;
+                horizontal-alignment: center;
             }
+        }
+
+        if Data.top-detail-state == 3 || Data.top-detail-state == 4: Rectangle {
+            height: 200px;
+
+            Text {
+                y: 76px;
+                width: parent.width;
+                text: Data.top-detail-state == 4 ? "加载失败（离线或网络异常）" : "暂无曲目";
+                color: Theme.muted-foreground;
+                font-size: 14px;
+                horizontal-alignment: center;
+            }
+        }
+
+        if Data.top-detail-state == 2 && Data.top-detail-tracks.length > 0: TrackTable {
+            tracks: Data.top-detail-tracks;
+            show-duration: true;
         }
     }
 }

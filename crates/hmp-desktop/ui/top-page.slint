@@ -1,22 +1,25 @@
 // 排行榜页（M4 在线内容页）：分组榜单卡片——daemon
-// TopCategoryGet IPC（免登录）。点击榜单进入 top-detail 详情。
+// TopCategoryGet IPC（免登录）。点击榜单卡片进入 top-detail 详情。
+// 内容自撑高度（Scroll 约定，禁 parent.height）。
 import { Theme } from "theme.slint";
 import { Button, ButtonVariant } from "primitives.slint";
-import { PageHeader } from "page-parts.slint";
+import { PageHeader, SectionHeader } from "page-parts.slint";
 import { Nav, Route } from "nav.slint";
 import { Data } from "stores.slint";
 import { TopCardData } from "data.slint";
 
-// 单个榜单卡片：名称 + 期号 + 预览前 3 首。
+// 单个榜单卡：名称 + 期号 + 预览前 3 首（悬停浮起）。
 component TopCard inherits Rectangle {
     in property <TopCardData> card;
     callback clicked();
 
-    width: 260px;
-    height: 148px;
-    border-radius: Theme.radius-md;
-    // 悬停底色（浅一层）
-    background: touch.has-hover ? Theme.surface-3 : Theme.surface-2;
+    width: 280px;
+    height: 156px;
+    border-radius: Theme.radius-lg;
+    drop-shadow-blur: touch.has-hover ? 8px : 2px;
+    drop-shadow-color: #241F1B.transparentize(touch.has-hover ? 0.86 : 0.92);
+    drop-shadow-offset-y: touch.has-hover ? 2px : 1px;
+    background: Theme.surface-3;
 
     touch := TouchArea {
         clicked => {
@@ -25,14 +28,14 @@ component TopCard inherits Rectangle {
     }
 
     VerticalLayout {
-        y: 12px;
-        height: parent.height - 24px;
-        width: parent.width - 24px;
-        x: 12px;
-        spacing: 2px;
+        padding-left: Theme.space-5;
+        padding-right: Theme.space-5;
+        padding-top: Theme.space-4;
+        padding-bottom: Theme.space-4;
+        spacing: 4px;
 
         Text {
-            text: card.name;
+            text: root.card.name;
             color: Theme.foreground;
             font-size: 15px;
             font-weight: 700;
@@ -40,28 +43,28 @@ component TopCard inherits Rectangle {
         }
 
         Text {
-            text: card.title-sub == "" ? card.update-time : card.title-sub + " · " + card.update-time;
+            text: root.card.update-time == "" ? "" : "更新 " + root.card.update-time;
             color: Theme.muted-foreground;
-            font-size: 12px;
+            font-size: 11.5px;
             overflow: elide;
         }
 
         Rectangle { height: 4px; }
 
         Text {
-            text: card.preview.length > 0 ? card.preview[0] : "";
+            text: root.card.preview.length > 0 ? root.card.preview[0] : "";
             color: Theme.muted-foreground;
             font-size: 12.5px;
             overflow: elide;
         }
         Text {
-            text: card.preview.length > 1 ? card.preview[1] : "";
+            text: root.card.preview.length > 1 ? root.card.preview[1] : "";
             color: Theme.muted-foreground;
             font-size: 12.5px;
             overflow: elide;
         }
         Text {
-            text: card.preview.length > 2 ? card.preview[2] : "";
+            text: root.card.preview.length > 2 ? root.card.preview[2] : "";
             color: Theme.muted-foreground;
             font-size: 12.5px;
             overflow: elide;
@@ -70,51 +73,44 @@ component TopCard inherits Rectangle {
 }
 
 export component TopPage inherits Rectangle {
+    background: transparent;
 
     VerticalLayout {
-        y: Theme.space-4;
-        height: parent.height - 2 * Theme.space-4;
-        width: parent.width - 2 * Theme.space-4;
-        x: Theme.space-4;
-        spacing: Theme.space-4;
+        padding-top: Theme.space-6;
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        padding-bottom: Theme.space-10;
+        spacing: Theme.space-6;
 
+        PageHeader {
+            title: "排行榜";
+        }
+
+        // 页头动作区（独立行）
         HorizontalLayout {
-            height: 56px;
-            spacing: Theme.space-4;
+            alignment: end;
 
-            Rectangle {
-                width: parent.width - 120px;
-
-                Text {
-                    text: "排行榜";
-                    color: Theme.foreground;
-                    font-size: 22px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                }
+            if Data.top-state == 1: Text {
+                text: "正在加载…";
+                color: Theme.muted-foreground;
+                font-size: 13px;
             }
-
-            Rectangle {
-                Button {
-                    text: Data.top-state == 1 ? "加载中…" : "刷新";
-                    variant: ButtonVariant.outline;
-                    width: 96px;
-                    y: (parent.height - self.height) / 2;
-                    clicked => {
-                        Data.refresh-top();
-                    }
+            if Data.top-state != 1: Button {
+                text: "刷新";
+                variant: ButtonVariant.outline;
+                clicked => {
+                    Data.refresh-top();
                 }
             }
         }
 
-        // 状态机同发现页：0=初始 1=加载中 2=有内容 3=空 4=失败
         if Data.top-state == 0 || Data.top-state == 1: Rectangle {
-            height: 160px;
+            height: 200px;
 
             Text {
+                y: 80px;
                 width: parent.width;
-                y: 64px;
-                text: Data.top-state == 1 ? "正在加载排行榜…" : "即将加载…";
+                text: "正在加载…";
                 color: Theme.muted-foreground;
                 font-size: 14px;
                 horizontal-alignment: center;
@@ -122,51 +118,45 @@ export component TopPage inherits Rectangle {
         }
 
         if Data.top-state == 3 || Data.top-state == 4: Rectangle {
-            height: 160px;
+            height: 200px;
 
-            Text {
-                width: parent.width;
-                y: 48px;
-                text: Data.top-state == 4 ? "加载失败（离线或网络异常）" : "暂无榜单";
-                color: Theme.muted-foreground;
-                font-size: 14px;
-                horizontal-alignment: center;
+            VerticalLayout {
+                alignment: center;
+
+                Text {
+                    text: Data.top-state == 4 ? "加载失败" : "暂无榜单";
+                    color: Theme.foreground;
+                    font-size: 15px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: Data.top-state == 4 ? "离线或网络异常，点击右上角刷新重试" : "";
+                    color: Theme.muted-foreground;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
             }
         }
 
-        if Data.top-state == 2: Flickable {
-            VerticalLayout {
+        // 分组渲染：组标题 + 榜单卡片流（HorizontalLayout 自动换行不可用，
+        // 每组一行多卡，超出屏宽可由页面整体滚动承载）
+        if Data.top-state == 2: VerticalLayout {
+            spacing: Theme.space-8;
+
+            for group in Data.top-groups: VerticalLayout {
                 spacing: Theme.space-4;
 
-                // 按分组渲染（水平滚动行内的榜单卡片）
-                for group in Data.top-groups: Rectangle {
-                    height: 232px;
+                SectionHeader {
+                    title: group.name;
+                }
 
-                    Text {
-                        y: 0;
-                        text: group.name;
-                        color: Theme.foreground;
-                        font-size: 16px;
-                        font-weight: 700;
-                    }
+                HorizontalLayout {
+                    spacing: Theme.space-4;
 
-                    // 横向滚动条：分组内卡片行
-                    Flickable {
-                        y: 32px;
-                        width: parent.width;
-                        height: parent.height - 32px;
-
-                        HorizontalLayout {
-                            x: 8px;
-                            spacing: Theme.space-4;
-
-                            for top-i in group.tops: TopCard {
-                                card: top-i;
-                                clicked => {
-                                    // top id 以字符串放进路由参数
-                                    Nav.navigate(Route.top-detail, top-i.id + "");
-                                }
-                            }
+                    for top-i in group.tops: TopCard {
+                        card: top-i;
+                        clicked => {
+                            Nav.navigate(Route.top-detail, top-i.id);
                         }
                     }
                 }
