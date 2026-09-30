@@ -17,7 +17,18 @@ use crate::transport::{IpcListener, IpcStream};
 /// 端点：`$XDG_RUNTIME_DIR/hmp.sock`，回退 `/tmp/hmp-{uid}/hmp.sock`
 /// （owner-only 目录，final review Finding 5）；Windows 为命名管道
 /// `\\.\pipe\hmp`（实例不落盘，进程退出即消失）。与 serve.rs 一致，勿重复实现。
+///
+/// `HMP_IPC_ENDPOINT` 显式覆盖（非空即生效，两平台同语义）：serve 端绑定
+/// 与 CLI/桌面客户端连接走同一函数，天然一致——用于测试隔离（真实 daemon
+/// 占用默认端点时，沙箱 daemon 指到独立管道/socket）与便携化场景。
+/// Windows 下任意路径会被 `transport::pipe_name` 确定性映射为
+/// `\\.\pipe\hmp-<sanitized>`；Unix 下须是 socket 文件路径。
 pub fn socket_path() -> PathBuf {
+    if let Ok(ep) = std::env::var("HMP_IPC_ENDPOINT") {
+        if !ep.is_empty() {
+            return PathBuf::from(ep);
+        }
+    }
     // 平台块作尾表达式：Windows 只剩管道名分支，Unix 只剩 socket 路径分支。
     #[cfg(windows)]
     {
@@ -1337,6 +1348,35 @@ mod tests {
             0,
             "本地行应被删除"
         );
+    }
+
+    /// `HMP_IPC_ENDPOINT` 显式覆盖（非空生效/空值忽略；回归守护：serve 与
+    /// CLI/桌面共用本函数，覆盖即两端一致，测试隔离依赖此行为）。
+    #[test]
+    fn socket_path_honors_hmp_ipc_endpoint_override() {
+        // SAFETY: 单线程测试进程内串行执行；用唯一值避免与其他测试互相干扰。
+        unsafe {
+            std::env::set_var("HMP_IPC_ENDPOINT", r"\\.\pipe\hmp-test-override");
+        }
+        assert_eq!(
+            socket_path(),
+            PathBuf::from(r"\\.\pipe\hmp-test-override"),
+            "非空覆盖必须生效"
+        );
+        unsafe {
+            std::env::set_var("HMP_IPC_ENDPOINT", "");
+        }
+        let fallback = socket_path();
+        #[cfg(windows)]
+        assert_eq!(fallback, PathBuf::from(r"\\.\pipe\hmp"), "空值回退默认管道");
+        #[cfg(unix)]
+        assert!(
+            fallback.ends_with("hmp.sock"),
+            "空值回退平台默认端点: {fallback:?}"
+        );
+        unsafe {
+            std::env::remove_var("HMP_IPC_ENDPOINT");
+        }
     }
 }
 
