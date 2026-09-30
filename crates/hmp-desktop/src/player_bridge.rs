@@ -883,7 +883,7 @@ fn spawn_cover_fetch(
         else {
             return;
         };
-        let path = uri.strip_prefix("file://").unwrap_or(&uri).to_string();
+        let path = crate::covers::file_uri_to_path(&uri).unwrap_or(uri);
         let ui_weak = ui_weak.clone();
         let mid = mid.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -891,16 +891,39 @@ fn spawn_cover_fetch(
                 return;
             };
             let player = Player::get(&ui);
+            let Some(image) = load_cover_cached(&path) else {
+                return;
+            };
+            // 队列抽屉行内原地换图：与当前曲无关——迟到的封面同样更新抽屉行
+            // （daemon 已回写 cover_uri，此后队列重建直接读盘，此处补本次会话）
+            update_queue_row_cover(&player, &mid, image.clone());
             if player.get_current_mid() != mid.as_str() {
-                return; // 换曲竞态：迟到的封面不得串台
+                return; // 换曲竞态：播放条/取色只认当前曲
             }
-            if let Some(image) = load_cover_cached(&path) {
-                player.set_cover(image.clone());
-                // 真图取色覆写程序化占位的取色
-                crate::track_theme::apply_cover(&ui_weak, &cover_key, &image);
-            }
+            player.set_cover(image.clone());
+            // 真图取色覆写程序化占位的取色
+            crate::track_theme::apply_cover(&ui_weak, &cover_key, &image);
         });
     });
+}
+
+/// 队列模型中同 mid 行的封面原地更新（抽屉渲染 TrackRow.cover）。
+fn update_queue_row_cover(player: &Player, mid: &str, image: slint::Image) {
+    let model = player.get_queue();
+    let Some(vec_model) = model.as_any().downcast_ref::<slint::VecModel<TrackRow>>() else {
+        return;
+    };
+    for i in 0..vec_model.iter().count() {
+        let mut row = match vec_model.row_data(i) {
+            Some(r) => r,
+            None => continue,
+        };
+        if row.mid.as_str() == mid {
+            row.cover = image;
+            vec_model.set_row_data(i, row);
+            return;
+        }
+    }
 }
 
 /// 控制台两端时间标签（DESIGN「两端时间 tabular-nums，剩余以 -m:ss」）：
@@ -1053,14 +1076,16 @@ fn row_from_meta(meta: &QueueRowMeta) -> TrackRow {
     row
 }
 
-/// 队列行封面：本地库 file:// 封面直接读盘（扩列投影带出）；QQ 远程 URL
-/// 程序化占位（列表行不做逐行网络取图，仅当前曲经 CoverGet 换真图）。
+/// 队列行封面：本地库 file:// 封面直接读盘（扩列投影带出；daemon 已把取到
+/// 的本地产物回写 cover_uri，播过的 QQ 曲同样命中）；远程 URL 程序化占位
+/// （逐行网络取图不做，当前曲取图回包另有原地换图补齐）。
 fn queue_cover(meta: &QueueRowMeta) -> slint::Image {
     if let Some(uri) = &meta.cover_uri {
         if !uri.starts_with("http://") && !uri.starts_with("https://") {
-            let path = uri.strip_prefix("file://").unwrap_or(uri);
-            if let Some(image) = load_cover_cached(path) {
-                return image;
+            if let Some(path) = crate::covers::file_uri_to_path(uri) {
+                if let Some(image) = load_cover_cached(&path) {
+                    return image;
+                }
             }
         }
     }

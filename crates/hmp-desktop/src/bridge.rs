@@ -53,25 +53,28 @@ fn cover_card(mid: &str, title: &str, subtitle: String, cover_seed: &str) -> Cov
     }
 }
 
-/// 歌单卡（副标题来自媒体库投影的 "N 首"——媒体库无播放计数，不伪造"X次播放"）
+/// 歌单卡（副标题来自媒体库投影的 "N 首"——媒体库无播放计数，不伪造"X次播放"；
+/// 封面：QQ 歌单封面本地产物优先，缺失回退中性占位）。
 fn playlist_card(entry: &PlaylistEntry) -> CoverCardData {
-    cover_card(
-        &entry.id,
-        &entry.name,
-        entry.subtitle.clone(),
-        &format!("playlist:{}", entry.id),
-    )
+    CoverCardData {
+        mid: entry.id.clone().into(),
+        title: entry.name.clone().into(),
+        subtitle: entry.subtitle.clone().into(),
+        cover: local_cover_image(entry.cover_uri.as_deref())
+            .unwrap_or_else(|| cover_image(&format!("playlist:{}", entry.id))),
+    }
 }
 
-/// 侧栏歌单占位封面：与库页歌单卡同 seed（playlist:{id}）同图——
-/// covers 中性底 + 歌单图标（2026-09-30 起不再用 UI 层彩色渐变对）。
+/// 侧栏歌单封面：QQ 歌单封面本地产物优先（与库页歌单卡同源），
+/// 缺失回退中性占位（playlist:{id} seed，covers 程序化生成）。
 fn sidebar_cover(entry: &PlaylistEntry) -> PlaylistCover {
     PlaylistCover {
         // id 原样透传：与库页歌单卡（playlist_card → CoverCardData.mid）同一
         // 字符串形式，歌单详情页按它 parse 成 i64 查库
         id: entry.id.clone().into(),
         name: entry.name.clone().into(),
-        image: cover_image(&format!("playlist:{}", entry.id)),
+        image: local_cover_image(entry.cover_uri.as_deref())
+            .unwrap_or_else(|| cover_image(&format!("playlist:{}", entry.id))),
     }
 }
 
@@ -671,8 +674,11 @@ fn apply_detail(ui: &AppWindow, detail: &DetailData) {
                 format!("{} 首", detail.tracks.len()).into(),
                 format!("总时长 {}", format_long_duration(detail.total_ms)).into(),
             ]));
-            // 与库页歌单卡同一 seed（playlist:{id}），实体身份一致
-            data.set_playlist_cover(cover_image(&format!("playlist:{param}")));
+            // 真封面优先（reconcile 回写的本地产物），缺失回退程序化占位
+            data.set_playlist_cover(
+                local_cover_image(detail.cover_uri.as_deref())
+                    .unwrap_or_else(|| cover_image(&format!("playlist:{param}"))),
+            );
             data.set_playlist_tracks(model(
                 detail.tracks.iter().map(SongRow::to_track_row).collect(),
             ));
@@ -1175,6 +1181,7 @@ mod tests {
             id: "3".into(),
             name: "深夜循环".into(),
             subtitle: "12 首".into(),
+            cover_uri: None,
         };
         let a = sidebar_cover(&entry);
         let b = sidebar_cover(&entry);

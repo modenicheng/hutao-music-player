@@ -160,14 +160,13 @@ fn svg_to_image(svg: &str) -> Image {
 /// Path::display 形态，无转义字符）。
 pub fn file_uri_to_path(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
-    if let Some(after_slash) = rest.strip_prefix('/') {
-        // 规范形态：file:///...
-        if after_slash.as_bytes().get(1) == Some(&b':') {
-            return Some(after_slash.replace('/', "\\"));
+    if let Some(win) = rest.strip_prefix('/') {
+        // 规范形态：file:///C:/... → C:\...（Windows 盘符才转义）
+        if win.as_bytes().get(1) == Some(&b':') {
+            return Some(win.replace('/', "\\"));
         }
-        // Unix 绝对路径
-        return Some(after_slash.to_string());
     }
+    // 宽容形态（file://C:\...）与 Unix 规范形态（/home/...）：剥前缀即路径
     Some(rest.to_string())
 }
 

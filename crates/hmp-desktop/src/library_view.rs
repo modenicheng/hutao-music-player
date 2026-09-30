@@ -80,6 +80,8 @@ pub struct PlaylistEntry {
     pub name: String,
     /// 副标题 "N 首"——媒体库无播放计数，不伪造"X次播放"。
     pub subtitle: String,
+    /// QQ 歌单封面本地产物（reconcile 取得后回写；None → 程序化占位）。
+    pub cover_uri: Option<String>,
 }
 
 /// 五个库页的一次性静态快照。
@@ -375,6 +377,7 @@ fn playlist_entries(db: &mut LibraryDb) -> Option<(Vec<PlaylistEntry>, Vec<Playl
             id: p.id.to_string(),
             name: p.name,
             subtitle: format!("{} 首", p.track_count),
+            cover_uri: p.cover_uri,
         };
         if p.relation == "subscribed" {
             favorited.push(entry);
@@ -397,6 +400,8 @@ pub struct PlaylistDetail {
     pub name: String,
     pub tracks: Vec<SongRow>,
     pub total_ms: u64,
+    /// 封面本地产物 URI（QQ 歌单 reconcile 回写；None → 程序化占位）。
+    pub cover_uri: Option<String>,
 }
 
 /// 专辑详情（AlbumView.vue 的本地投影：发行厂牌/简介/收藏计数无数据源）。
@@ -435,12 +440,12 @@ pub fn playlist_detail(id: i64) -> Option<PlaylistDetail> {
 }
 
 fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
-    let name = db
+    let (name, cover_uri) = db
         .list_playlists()
         .ok()?
         .into_iter()
         .find(|p| p.id == id)
-        .map(|p| p.name)?;
+        .map(|p| (p.name, p.cover_uri))?;
     let rows = db.playlist_tracks(id).ok()?;
     let local_by_key = local_track_map(db)?;
     let album_covers = album_cover_map(db)?;
@@ -474,6 +479,7 @@ fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
     let total_ms: u64 = tracks.iter().map(|r| r.duration_ms.max(0) as u64).sum();
     Some(PlaylistDetail {
         name,
+        cover_uri,
         tracks,
         total_ms,
     })
@@ -752,7 +758,8 @@ pub fn local_cover_image(uri: Option<&str>) -> Option<Image> {
         if let Some(hit) = cache.borrow().get(uri) {
             return Some(hit.clone());
         }
-        let image = Image::load_from_path(Path::new(uri.strip_prefix("file://")?)).ok()?;
+        let path = crate::covers::file_uri_to_path(uri)?;
+        let image = Image::load_from_path(Path::new(&path)).ok()?;
         cache.borrow_mut().insert(uri.to_owned(), image.clone());
         Some(image)
     })

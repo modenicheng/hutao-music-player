@@ -35,17 +35,25 @@ fn load_image(path: &str) -> Option<Image> {
 /// `kind` 用于区分来源（"discover" / "guess"），与 id、url 组成去重键。
 /// 定位方式：全模型线性扫描同 id 项（30 项规模可忽略）；无 id 匹配则丢弃
 /// （用户已离开页面/刷新重建模型——迟到图不重试，刷新会再次触发）。
-pub fn refresh_discover_covers(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::BackendRuntime>) {
+pub fn refresh_discover_covers(
+    ui_weak: Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+) {
     let Some(ui) = ui_weak.upgrade() else { return };
     let data = Data::get(&ui);
     let model = data.get_discover_playlists();
-    let Some(vec_model) = model.as_any().downcast_ref::<slint::VecModel<crate::CoverCardData>>() else {
+    let Some(vec_model) = model
+        .as_any()
+        .downcast_ref::<slint::VecModel<crate::CoverCardData>>()
+    else {
         return;
     };
     for i in 0..vec_model.iter().count() {
         let card = vec_model.row_data(i).unwrap_or_default();
         // 占位封面无真实图；mid 即歌单 id
-        let Some((id, url)) = playlist_cover_url(&ui, &card.mid) else { continue };
+        let Some((id, url)) = playlist_cover_url(&ui, &card.mid) else {
+            continue;
+        };
         let key = format!("discover|{id}|{url}");
         if REQUESTED.with(|set| !set.borrow_mut().insert(key)) {
             continue; // 已请求过（完成或失败均不重发）
@@ -58,7 +66,7 @@ pub fn refresh_discover_covers(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::ba
             else {
                 return;
             };
-            let path = uri.strip_prefix("file://").unwrap_or(&uri).to_string();
+            let path = crate::covers::file_uri_to_path(&uri).unwrap_or(uri);
             let ui_weak2 = ui_weak.clone();
             let id2 = id.clone();
             let _ = slint::invoke_from_event_loop(move || {
@@ -70,11 +78,16 @@ pub fn refresh_discover_covers(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::ba
 
 /// 应用到模型：找到同 id 卡片则更新封面（页面已切走则忽略）。
 fn apply_playlist_cover(ui_weak: Weak<AppWindow>, id: &str, path: &str) {
-    let Some(image) = load_image(path) else { return };
+    let Some(image) = load_image(path) else {
+        return;
+    };
     let Some(ui) = ui_weak.upgrade() else { return };
     let data = Data::get(&ui);
     let model = data.get_discover_playlists();
-    let Some(vec_model) = model.as_any().downcast_ref::<slint::VecModel<crate::CoverCardData>>() else {
+    let Some(vec_model) = model
+        .as_any()
+        .downcast_ref::<slint::VecModel<crate::CoverCardData>>()
+    else {
         return;
     };
     for i in 0..vec_model.iter().count() {
