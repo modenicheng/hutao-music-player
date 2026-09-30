@@ -249,10 +249,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 先推进一段 mock 时间，让初始过渡（侧栏宽度等）收敛，再注 hover；
     // 预热渲染一次：absolute-position 依赖布局求解，未渲染过就派发 hover 会让
-    // HoverGroup 的包含性判定拿到陈旧组边界（块不亮）
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(800));
+    // HoverGroup 的包含性判定拿到陈旧组边界（块不亮）。推进必须像下方 step_to
+    // 一样分步：单次大步进后合成指针的 has-hover 永不触发（hover 探针二分：
+    // 50×16ms 分步的进程内序列有效，一次 800ms 跳进后单动无效）
+    for _ in 0..50 {
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    }
+    if hover.is_some() || then_hover.is_some() || bus_hover.is_some() {
+        let warm = ui.window().take_snapshot()?;
+        drop(warm);
+    }
 
     if let Some((x, y)) = hover {
+        // 进程内首个 PointerMoved 会被吞（testing backend 鼠标状态未初始化；
+        // hover 探针二分确证：单动无效、序列中的后续动有效）。真实指针 arrivals
+        // 都带移动轨迹，这里先派发一次中性位（播放条，无 HoverItem）热身移动。
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(640.0, 760.0),
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(32));
         ui.window()
             .dispatch_event(slint::platform::WindowEvent::PointerMoved {
                 position: slint::LogicalPosition::new(x, y),

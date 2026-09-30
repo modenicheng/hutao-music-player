@@ -188,22 +188,25 @@ export component Sidebar inherits Rectangle {
                                         }
                                     }
 
-                                    // 新建（仅自建组有，mock 期无动作）
+                                    // 新建（仅自建组有，mock 期无动作）：行 hover 底归
+                                    // HoverGroup 滑块，本钮 hover 走本体提色
                                     if group.group == 0: Button {
                                         icon: Icons.add;
                                         icon-only: true;
                                         icon-size: 18px;
                                         tool-tip: "新建歌单";
+                                        suppress-hover: true;
+                                        hover-tint: true;
                                         width: 34px;
                                         height: 40px;
                                     }
 
-                                    // 展开/收起：chevron 随态旋转 -90°
+                                    // 展开/收起：chevron 随态旋转 -90°；hover 本体提色（同 + 钮）
                                     Rectangle {
                                         width: 34px;
                                         height: 40px;
 
-                                        TouchArea {
+                                        chev-touch := TouchArea {
                                             mouse-cursor: pointer;
                                             clicked => {
                                                 root.toggle-group(group.group);
@@ -211,12 +214,16 @@ export component Sidebar inherits Rectangle {
                                         }
                                         AppIcon {
                                             source: Icons.expand_more;
-                                            icon-color: Theme.muted-foreground;
+                                            icon-color: chev-touch.has-hover ? Theme.foreground : Theme.muted-foreground;
                                             width: 18px;
                                             height: 18px;
                                             rotation-angle: root.group-open(group.group) ? 0deg : -90deg;
                                             x: (parent.width - self.width) / 2;
                                             y: (parent.height - self.height) / 2;
+                                            animate icon-color {
+                                                duration: Theme.duration-fast;
+                                                easing: cubic-bezier(0.2, 0, 0, 1);
+                                            }
                                         }
                                     }
                                 }

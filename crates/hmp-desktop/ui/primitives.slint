@@ -46,6 +46,9 @@ export component Button inherits Rectangle {
     in property <bool> current: false;
     /** HoverGroup 已接管 hover 时抵消自身 hover 底（侧栏/曲目表） */
     in property <bool> suppress-hover: false;
+    /** hover 高亮走本体提色（图标/文字 hover 时 muted → foreground，暗色提亮
+        亮色加深）而非底色：滑块组内的小钮用，行 hover 底由 HoverGroup 统一承担 */
+    in property <bool> hover-tint: false;
     in property <bool> enabled: true;
     in property <string> tool-tip: "";
     callback clicked;
@@ -93,11 +96,23 @@ export component Button inherits Rectangle {
         spacing: 8px;
         alignment: icon-only ? LayoutAlignment.center : LayoutAlignment.start;
 
-        if icon-width > 0: AppIcon {
-            source: root.icon;
-            icon-color: content-color;
+        // 定高图标在布局交叉轴默认顶放（引擎行为，HoverItem 注同款坑）：包一层
+        // 撑满交叉轴的容器再手动居中，图标才与文本同轴线
+        if icon-width > 0: Rectangle {
             width: root.icon-size;
-            height: root.icon-size;
+
+            AppIcon {
+                source: root.icon;
+                icon-color: content-color;
+                width: root.icon-size;
+                height: root.icon-size;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                animate icon-color {
+                    duration: Theme.duration-fast;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
+                }
+            }
         }
 
         if text != "": Text {
@@ -108,12 +123,17 @@ export component Button inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
             horizontal-stretch: 1;
+            animate color {
+                duration: Theme.duration-fast;
+                easing: cubic-bezier(0.2, 0, 0, 1);
+            }
         }
     }
 
     property <color> content-color: variant == ButtonVariant.default ? Theme.primary-foreground
         : current ? Theme.foreground
         : variant == ButtonVariant.link ? Theme.primary
+        : hover-tint && touch.has-hover ? Theme.foreground
         : Theme.muted-foreground;
     property <length> icon-width: icon.width > 0 ? icon-size : 0px;
 }
