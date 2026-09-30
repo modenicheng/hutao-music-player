@@ -409,7 +409,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             commands::cmd_status(&mut c, cli.json).await?;
             Ok(())
         }
-        Command::Quit => run_remote(commands::quit_req()).await,
+        Command::Quit => run_quit(cli.json).await,
         Command::Serve { background } => {
             if background {
                 hmp_daemon::serve::run_background().await
@@ -552,6 +552,41 @@ async fn run_remote(command: impl Into<Request>) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+/// `hmp quit`：仅连接已在运行的 daemon（[`client::DaemonClient::connect_existing`]），
+/// 绝不自动拉起——quit 若走 `connect_or_spawn` 会先 spawn 再 kill；spawn 后
+/// 3s 就绪窗口内连不上时还会报 startup timed out 并留下刚拉起的 daemon。
+/// 端点上没有 daemon 在听 = daemon 未运行 = 目标态已达成：打印提示并以
+/// 退出码 0 结束（幂等语义）；其余错误照常上抛。
+async fn run_quit(json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = match client::DaemonClient::connect_existing().await {
+        Ok(c) => c,
+        Err(e) if endpoint_absent(&e) => {
+            if json {
+                output::print(&serde_json::json!({ "daemon": "not running" }))?;
+            } else {
+                println!("daemon not running");
+            }
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    commands::cmd_simple(&mut client, commands::quit_req()).await?;
+    Ok(())
+}
+
+/// 连接错误是否等于「端点上没有 daemon 在听」：NotFound = 端点不存在
+/// （Windows 管道未建 / Unix socket 文件缺失）；ConnectionRefused =
+/// Unix 残留 socket 文件但无监听进程（daemon 崩溃残留）。两者语义一致：
+/// daemon 未运行。
+fn endpoint_absent(e: &client::CliError) -> bool {
+    matches!(
+        e,
+        client::CliError::Io(err)
+            if err.kind() == std::io::ErrorKind::NotFound
+                || err.kind() == std::io::ErrorKind::ConnectionRefused
+    )
+}
+
 /// 解析循环模式字符串。
 fn parse_loop_mode(s: &str) -> Result<LoopMode, Box<dyn std::error::Error>> {
     match s {
@@ -568,5 +603,33 @@ fn parse_bool(s: &str) -> Result<bool, Box<dyn std::error::Error>> {
         "on" => Ok(true),
         "off" => Ok(false),
         _ => Err(format!("unknown value: {s} (on / off)").into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// quit 幂等分支映射：NotFound / ConnectionRefused = daemon 未运行；
+    /// 其余错误（协议/响应错）不吞。
+    #[test]
+    fn endpoint_absent_matches_only_no_listener_errors() {
+        let not_found = client::CliError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "pipe missing",
+        ));
+        let refused = client::CliError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "stale socket",
+        ));
+        assert!(endpoint_absent(&not_found));
+        assert!(endpoint_absent(&refused));
+
+        let permission_denied = client::CliError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ));
+        assert!(!endpoint_absent(&permission_denied));
+        assert!(!endpoint_absent(&client::CliError::Protocol("boom".into())));
     }
 }

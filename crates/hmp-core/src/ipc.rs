@@ -1,6 +1,9 @@
 //! 跨进程控制协议（Unix socket · 长度前缀 JSON 帧）。
 //!
 //! 消息类型与 `PlayerCommand` 同居（spec §4.1）；传输层在 hmp-daemon。
+//! wire 兼容：响应/事件结构体**新增字段一律带 `#[serde(default)]`**——
+//! daemon 是常驻单例，升级窗口内旧进程仍占用端点，其旧形状帧必须可被
+//! 新客户端解码（否则 CLI 全部命令报 `missing field …`，桌面订阅静默失联）。
 
 use serde::{Deserialize, Serialize};
 
@@ -334,13 +337,17 @@ pub struct DaemonState {
     pub caps: PlaybackCapabilities,
     /// 命令代际：换曲操作（Play/PlayNext/Next/Previous）执行前置位，
     /// CLI 据此建立「命令已处理」边界（spec §6；final review Finding 1）。
+    #[serde(default)]
     pub seq: u64,
     /// 最近一次命令的错误（解析失败等；成功操作时清空，Finding 2）。
+    #[serde(default)]
     pub last_error: Option<ErrorInfo>,
     /// 当前曲 ReplayGain 标签增益（dB，未 clamp 原值；无标签/QQ 曲目 → None）。
     /// 打磨：CLI status 展示用（MPRIS 无 RG 标准字段，不做非标扩展）。
+    #[serde(default)]
     pub replaygain_db: Option<f64>,
     /// 播放引擎阶段。
+    #[serde(default)]
     pub phase: EnginePhase,
 }
 
@@ -854,6 +861,52 @@ mod tests {
         let frame = encode_frame(&st).unwrap();
         let back: DaemonState = decode_frame(&frame).unwrap();
         assert_eq!(back, st);
+    }
+
+    /// wire 兼容回归：旧 daemon 存活时（升级窗口内旧进程仍占端点）推送的
+    /// 快照缺少后加的 `seq`/`last_error`/`replaygain_db`/`phase` 四字段，
+    /// 新客户端必须解码为默认值而非报 `missing field …`。
+    #[test]
+    fn daemon_state_tolerates_missing_fields_from_older_daemon() {
+        // 旧形状：仅 daemon 初版就有的 playback/queue/caps 三字段。
+        let old_shape = serde_json::json!({
+            "playback": serde_json::to_value(crate::player::PlaybackState::default()).unwrap(),
+            "queue": serde_json::to_value(crate::queue::QueueSummary::default()).unwrap(),
+            "caps": serde_json::to_value(crate::player::PlaybackCapabilities::default()).unwrap(),
+        });
+        // 包长度前缀，走真实帧解码路径。
+        let payload = serde_json::to_vec(&old_shape).unwrap();
+        let mut frame = Vec::with_capacity(4 + payload.len());
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&payload);
+
+        let st: DaemonState = decode_frame(&frame).unwrap();
+        assert_eq!(st, DaemonState::default());
+        assert_eq!(st.seq, 0);
+        assert_eq!(st.last_error, None);
+        assert_eq!(st.replaygain_db, None);
+        assert_eq!(st.phase, EnginePhase::Idle);
+    }
+
+    /// 订阅流主帧型 `Event::StateChanged` 完整往返（守护 wire 兼容改动
+    /// 不破坏正常快照的序列化）。
+    #[test]
+    fn event_state_changed_roundtrips_through_frame() {
+        let ev = Event::StateChanged(DaemonState {
+            playback: Default::default(),
+            queue: crate::queue::QueueSummary::default(),
+            caps: Default::default(),
+            seq: 42,
+            last_error: Some(ErrorInfo {
+                code: IpcErrorCode::Internal,
+                message: "boom".into(),
+            }),
+            replaygain_db: Some(-3.0),
+            phase: EnginePhase::Loading,
+        });
+        let frame = encode_frame(&ev).unwrap();
+        let back: Event = decode_frame(&frame).unwrap();
+        assert_eq!(back, ev);
     }
 
     /// 新响应变体（Created / CommentList）往返序列化。

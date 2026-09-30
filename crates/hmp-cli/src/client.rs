@@ -48,6 +48,14 @@ impl DaemonClient {
         Self::try_connect(&path).await
     }
 
+    /// 仅连接已在运行的 daemon，绝不自动拉起。`hmp quit` 专用：quit 走
+    /// `connect_or_spawn` 会在 daemon 未运行时先 spawn 再退出——若 spawn
+    /// 后 3s 就绪窗口内连接不上（慢盘/杀软扫描），报 startup timed out
+    /// 且留下刚拉起的 daemon 继续运行。
+    pub async fn connect_existing() -> Result<Self, CliError> {
+        Self::try_connect(&hmp_daemon::server::socket_path()).await
+    }
+
     async fn try_connect(path: &Path) -> Result<Self, CliError> {
         let stream = IpcStream::connect(path).await?;
         Ok(Self { stream })
@@ -68,7 +76,21 @@ impl DaemonClient {
         let mut frame = Vec::with_capacity(4 + len);
         frame.extend_from_slice(&len_buf);
         frame.extend_from_slice(&payload);
-        decode_frame::<Response>(&frame).map_err(|e| CliError::Protocol(e.to_string()))
+        decode_frame::<Response>(&frame).map_err(|e| protocol_error(&e.to_string()))
+    }
+}
+
+/// 响应帧解码失败（`protocol error: …`）：错误串呈 `missing field` /
+/// `unknown variant` 时附一条自愈提示——daemon 是常驻单例，升级窗口内
+/// 旧 daemon 仍占端点，其旧形状响应/事件在新客户端全部解不出来
+/// （`hmp quit` 不受影响，Response::Ok 无需新字段，退出后重试即自愈）。
+fn protocol_error(message: &str) -> CliError {
+    if message.contains("missing field") || message.contains("unknown variant") {
+        CliError::Protocol(format!(
+            "{message}\nnote: daemon may be an older build; run `hmp quit` then retry"
+        ))
+    } else {
+        CliError::Protocol(message.to_string())
     }
 }
 
@@ -91,5 +113,39 @@ async fn wait_for_socket(path: &Path, timeout: Duration) -> Result<(), CliError>
             return Err(CliError::Connect("daemon startup timed out".into()));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_error_hints_on_missing_field() {
+        let e = protocol_error("missing field `phase` at line 1 column 200");
+        let text = e.to_string();
+        assert!(text.starts_with("protocol error: missing field `phase`"));
+        assert!(
+            text.contains("daemon may be an older build; run `hmp quit` then retry"),
+            "missing field 应附旧 daemon 提示: {text}"
+        );
+    }
+
+    #[test]
+    fn protocol_error_hints_on_unknown_variant() {
+        let e = protocol_error("unknown variant `NewFrame`, expected one of …");
+        assert!(
+            e.to_string().contains("daemon may be an older build"),
+            "unknown variant 应附旧 daemon 提示: {e}"
+        );
+    }
+
+    #[test]
+    fn protocol_error_leaves_other_messages_untouched() {
+        let e = protocol_error("frame shorter than the 4-byte length prefix");
+        assert_eq!(
+            e.to_string(),
+            "protocol error: frame shorter than the 4-byte length prefix"
+        );
     }
 }

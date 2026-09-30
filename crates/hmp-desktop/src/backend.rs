@@ -237,6 +237,8 @@ pub struct QueueRowMeta {
 /// 普通连接——用户显式 `hmp quit` 后 UI 不得反复把 daemon 拉活。
 /// 每条 `Event::StateChanged` 投递一次回调（经 `invoke_from_event_loop` 在
 /// UI 线程执行）；连接失败周期性投递离线事件（状态翻转时一次，不重复刷写）。
+/// 事件帧解码失败：记 error 日志并断线走退避重连（协议版本错配/帧损坏
+/// 均不静默跳过，否则 UI 状态冻结且无从排查）。
 pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHandler) {
     runtime.spawn(async move {
         let handler = on_event;
@@ -277,9 +279,25 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
             }
             last_revision = None;
             while let Ok(Some(frame)) = read_frame(&mut stream).await {
-                let event = decode_frame::<Event>(&frame).ok();
+                // 解码失败一律断线重连（break 走循环尾的既有退避路径），不
+                // 静默跳过：单帧损坏无法界定损伤范围，而 `missing field` /
+                // `unknown variant` 意味着协议版本错配（升级窗口内旧 daemon
+                // 仍占端点），后续帧同样解不出来——跳过会让 UI 状态永久冻结
+                // 且无从排查。不区分「可恢复单帧损坏」与「版本错配」是取简
+                // 单方案：热循环重连与 daemon 不可达同路径（2s 退避），可接受。
+                let event = match decode_frame::<Event>(&frame) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            frame_len = frame.len(),
+                            "undecodable event frame from daemon; reconnecting"
+                        );
+                        break;
+                    }
+                };
                 match event {
-                    Some(Event::LibraryChanged) => {
+                    Event::LibraryChanged => {
                         // 库内容变更：轻量信号，不触发队列重建（队列结构由
                         // StateChanged.revision 驱动）。
                         dispatch_ui(
@@ -291,7 +309,7 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                             },
                         );
                     }
-                    Some(Event::StateChanged(state)) => {
+                    Event::StateChanged(state) => {
                         // 队列结构变化 → 重拉队列并投影（revision 不随 position tick 前进）。
                         let queue_rows = if last_revision != Some(state.queue.revision) {
                             last_revision = Some(state.queue.revision);
@@ -308,7 +326,6 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                             },
                         );
                     }
-                    _ => continue,
                 }
             }
             // EOF（daemon 退出）/ 读错误：断线，退避重连。
