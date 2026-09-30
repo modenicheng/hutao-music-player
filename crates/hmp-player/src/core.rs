@@ -512,10 +512,7 @@ async fn drive(
             }
             completion = async {
                 match load_done.as_mut() {
-                    Some(done_rx) => match done_rx.await {
-                        Ok(completion) => Some(completion),
-                        Err(_) => None,
-                    },
+                    Some(done_rx) => done_rx.await.ok(),
                     None => std::future::pending().await,
                 }
             } => {

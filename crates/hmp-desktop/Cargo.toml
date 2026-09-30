@@ -13,8 +13,6 @@ slint-build = "1.17"
 [dependencies]
 hmp-core = { path = "../hmp-core" }
 hmp-daemon = { path = "../hmp-daemon" }
-hmp-mpris = { path = "../hmp-mpris" }
-hmp-player = { path = "../hmp-player" }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
 hmp-storage = { path = "../hmp-storage" }
 image = { workspace = true }

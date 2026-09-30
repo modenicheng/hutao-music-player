@@ -2779,8 +2779,6 @@ version = "0.1.0"
 dependencies = [
  "hmp-core",
  "hmp-daemon",
- "hmp-mpris",
- "hmp-player",
  "hmp-qqmusic-api",
  "hmp-storage",
  "i-slint-backend-testing",
