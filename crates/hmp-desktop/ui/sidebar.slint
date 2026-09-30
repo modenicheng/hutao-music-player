@@ -75,27 +75,35 @@ export component Sidebar inherits Rectangle {
                 spacing: 1px;
 
                 Text {
-                    text: "Username";
+                    text: Data.account-state == 0 ? "读取账号状态中…"
+                        : Data.account-logged-in ? Data.account-nickname
+                        : "未登录";
                     color: Theme.foreground;
                     font-size: 15.2px;
                     font-weight: 600;
                     overflow: elide;
                 }
                 Text {
-                    text: "普通会员";
+                    text: !Data.account-logged-in ? "登录后同步云端歌单与收藏"
+                        : Data.account-vip == "" ? "QQ 音乐已登录"
+                        : Data.account-vip;
                     color: Theme.muted-foreground;
                     font-size: 12px;
                     overflow: elide;
                 }
             }
 
-            Button {
+            // 登出仅在已登录时出现；点击走 Data.logout（bridge → daemon Logout IPC）
+            if Data.account-logged-in: Button {
                 icon: Icons.logout;
                 icon-only: true;
                 icon-size: 20px;
-                tool-tip: "登出";
+                tool-tip: "退出登录";
                 width: 40px;
                 height: 40px;
+                clicked => {
+                    Data.logout();
+                }
             }
         }
 

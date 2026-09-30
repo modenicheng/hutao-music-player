@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use hmp_core::{AccountInfo, LyricPage, SearchPage};
 use hmp_qqmusic_api::credential::Credential;
 use hmp_qqmusic_api::protocol::search::QuickSong;
-use hmp_qqmusic_api::{LyricApi, QqMusicClient, UserApi, song::SongApi};
+use hmp_qqmusic_api::{LoginApi, LyricApi, QqMusicClient, UserApi, song::SongApi};
 use hmp_storage::credential::CredentialStore;
 
 /// 歌词缓存 TTL（同评论服务量级）。
@@ -271,46 +271,64 @@ impl ContentService {
             nickname: format!("QQ {}", credential.uin),
             vip_summary: String::new(),
         };
-        // 昵称：音乐基因用户名片（GetProfileReport，2026-09-29 实测可用）；
-        // 主页 GetHomepageHeader 当前服务端返回 10000 空壳，仅作兜底。
-        // 失败保持回退值。
-        if !credential.encrypt_uin.is_empty() {
-            let api = UserApi::new(&self.client);
-            let nick = match api
-                .get_music_gene(&credential.encrypt_uin, Some(&credential))
-                .await
-            {
-                Ok(gene) if !gene.userinfo_card.nick_name.is_empty() => {
-                    Some(gene.userinfo_card.nick_name)
-                }
-                _ => {
-                    let mut nick = None;
-                    if let Ok(data) = api
-                        .get_homepage(&credential.encrypt_uin, Some(&credential))
-                        .await
-                    {
-                        nick = find_str(&data, "nick")
-                            .or_else(|| find_str(&data, "nickname"))
-                            .or_else(|| find_str(&data, "name"))
-                            .map(String::from);
-                    }
-                    nick
-                }
-            };
-            if let Some(nick) = nick {
-                if !nick.is_empty() {
-                    info.nickname = nick;
+        // 昵称多通道（2026-09-30 重排）：QQ 扫码走三方接入（QQConnectLogin），
+        // 登录响应不含 encryptUin → 旧逻辑整段昵称拉取被 `encrypt_uin` 非空门禁
+        // 跳过，永远显示回退 "QQ {uin}"。通道按「不依赖加密 uin → 依赖」排序：
+        //   1) fcg_get_profile_homepage.fcg（数字 uin 即可，主通道）
+        //   2) 音乐基因 GetProfileReport（加密 uin；2026-09-29 实测可用）
+        //   3) 主页 GetHomepageHeader（加密 uin；当前服务端 10000 空壳，兜底）
+        //   4) vip_login_base 的 isVip（顺带兜底昵称/加密 uin）
+        // 全失败保持回退值；期间回捞到的加密 uin 回写凭证库（下次直接可用）。
+        let api = UserApi::new(&self.client);
+        let mut nick: Option<String> = None;
+        let mut euin = credential.encrypt_uin.clone();
+        if let Ok(data) = LoginApi::new(&self.client)
+            .get_profile_homepage(&credential)
+            .await
+        {
+            nick = find_any_str(&data, &["nick", "NickName", "nickName", "nick_name"]);
+            if euin.is_empty() {
+                euin = find_any_str(&data, &["encryptUin", "encrypt_uin", "ecuin"])
+                    .unwrap_or_default();
+            }
+        }
+        if nick.is_none() && !euin.is_empty() {
+            if let Ok(gene) = api.get_music_gene(&euin, Some(&credential)).await {
+                let card = gene.userinfo_card.nick_name;
+                if !card.is_empty() {
+                    nick = Some(card);
                 }
             }
         }
+        if nick.is_none() && !euin.is_empty() {
+            if let Ok(data) = api.get_homepage(&euin, Some(&credential)).await {
+                nick = find_any_str(&data, &["nick", "nickname", "name"]);
+            }
+        }
         // VIP 摘要：vip_login_base 的 isVip 标志。失败 → 空串（不猜测）。
-        if let Ok(data) = UserApi::new(&self.client).get_vip_info(&credential).await {
+        if let Ok(data) = api.get_vip_info(&credential).await {
             if let Some(is_vip) = find_flag(&data, "isVip") {
                 info.vip_summary = if is_vip {
                     "VIP 会员".into()
                 } else {
                     "非会员".into()
                 };
+            }
+            if nick.is_none() {
+                nick = find_any_str(&data, &["nick", "NickName", "nickName", "nick_name"]);
+            }
+            if euin.is_empty() {
+                euin = find_any_str(&data, &["encryptUin", "encrypt_uin", "ecuin"])
+                    .unwrap_or_default();
+            }
+        }
+        if let Some(patched) = patch_encrypt_uin(&credential, &euin) {
+            // 一次性补救，失败不影响本次展示（下次 AccountStatus 再试）
+            let _ = self.store.save(&patched);
+        }
+        if let Some(nick) = nick {
+            if !nick.is_empty() {
+                info.nickname = nick;
             }
         }
         *self.account_cache.lock().unwrap() = Some((Instant::now(), info.clone()));
@@ -532,6 +550,29 @@ fn find_str<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     }
 }
 
+/// 多键名依序提取：按 `keys` 顺序首个**非空**命中（服务端同一字段有
+/// camelCase/legacy 多种拼写，泛搜 `name` 之类宽键时放最后）。
+/// 注意空值豁免只在键之间——`find_str` 对单个键返回首个命中（含空），
+/// 不对同键的更深嵌套实例重试。
+fn find_any_str(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|k| find_str(v, k).filter(|s| !s.is_empty()).map(String::from))
+}
+
+/// 用响应里回捞的加密 uin 补全凭证（无变化/空值返回 None）。
+///
+/// QQ 三方接入登录响应不含 `encryptUin`，首次成功后回写凭证库，
+/// 之后依赖加密 uin 的接口（音乐基因名片等）即可直接工作。
+fn patch_encrypt_uin(credential: &Credential, euin: &str) -> Option<Credential> {
+    if !euin.is_empty() && euin != credential.encrypt_uin {
+        let mut patched = credential.clone();
+        patched.encrypt_uin = euin.to_owned();
+        Some(patched)
+    } else {
+        None
+    }
+}
+
 /// 布尔标志提取：任意层级找 key 的 bool/数值形态（isVip 等字段形态不定）。
 fn find_flag(v: &serde_json::Value, key: &str) -> Option<bool> {
     match v {
@@ -593,6 +634,35 @@ mod tests {
         let v = serde_json::json!({ "data": { "userinfo": { "nick": "胡桃" } } });
         assert_eq!(find_str(&v, "nick"), Some("胡桃"));
         assert_eq!(find_str(&v, "missing"), None);
+    }
+
+    #[test]
+    fn find_any_str_skips_empty_and_respects_order() {
+        // 首键命中为空 → 视为未命中，落到次键（键之间豁免空值）
+        let v = serde_json::json!({ "nick": "", "nickname": "胡桃" });
+        assert_eq!(find_any_str(&v, &["nick", "nickname"]), Some("胡桃".into()));
+        // 键名按序优先（camelCase 变体在前的先命中）
+        let v = serde_json::json!({ "NickName": "甲", "nick": "乙" });
+        assert_eq!(find_any_str(&v, &["nick", "NickName"]), Some("乙".into()));
+        assert_eq!(find_any_str(&v, &["NickName", "nick"]), Some("甲".into()));
+        // 全 miss → None
+        assert_eq!(find_any_str(&v, &["missing"]), None);
+    }
+
+    #[test]
+    fn patch_encrypt_uin_only_on_change() {
+        let cred = Credential {
+            uin: "42".into(),
+            encrypt_uin: String::new(),
+            ..Default::default()
+        };
+        // 回捞到新值 → 补全
+        let patched = patch_encrypt_uin(&cred, "e-abc").expect("should patch");
+        assert_eq!(patched.encrypt_uin, "e-abc");
+        assert_eq!(patched.uin, "42");
+        // 同值/空值 → 不动
+        assert!(patch_encrypt_uin(&patched, "e-abc").is_none());
+        assert!(patch_encrypt_uin(&cred, "").is_none());
     }
 
     #[test]

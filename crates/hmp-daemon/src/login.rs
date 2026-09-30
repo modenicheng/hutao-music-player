@@ -22,7 +22,6 @@ use hmp_storage::credential::Store;
 /// 总墙钟上限：二维码无限过期也不死循环（CLI `hmp login` 同值）。
 const OVERALL_LIMIT: Duration = Duration::from_secs(600);
 
-
 /// 进行中的登录会话。
 struct Session {
     qr: QR,
@@ -74,11 +73,15 @@ impl LoginService {
             .await
             .map_err(|e| e.to_string())?;
         let path = self.write_qr_png(&qr)?;
-        let old = self.session.lock().expect("login session").replace(Session {
-            qr,
-            qr_path: path.clone(),
-            deadline: Instant::now() + OVERALL_LIMIT,
-        });
+        let old = self
+            .session
+            .lock()
+            .expect("login session")
+            .replace(Session {
+                qr,
+                qr_path: path.clone(),
+                deadline: Instant::now() + OVERALL_LIMIT,
+            });
         if let Some(old) = old {
             let _ = std::fs::remove_file(&old.qr_path);
         }
