@@ -418,9 +418,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Search { keyword } => search::run(&keyword, cli.json).await,
-        Command::Lyric { id, title, artist } => {
-            lyric::run(&id, &title, &artist, cli.json).await
-        }
+        Command::Lyric { id, title, artist } => lyric::run(&id, &title, &artist, cli.json).await,
         Command::Discover { page, area } => discover::run(page, &area, cli.json).await,
         Command::Top { top_id, page, num } => match top_id {
             Some(id) => top::detail(id, page, num, cli.json).await,
@@ -434,9 +432,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Favorite(cmd) => match cmd {
             FavoriteCmd::Add { id } => favorite::add(&id).await,
             FavoriteCmd::Remove { id } => favorite::remove(&id).await,
-            FavoriteCmd::List { offset, limit } => {
-                favorite::list(offset, limit, cli.json).await
-            }
+            FavoriteCmd::List { offset, limit } => favorite::list(offset, limit, cli.json).await,
         },
 
         // —— 二级命令面 ——
@@ -485,11 +481,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
         Command::Playlist(cmd) => match cmd {
             PlaylistCmd::List { scope } => playlist::list(scope.as_deref(), cli.json).await,
-            PlaylistCmd::Show {
-                id,
-                offset,
-                limit,
-            } => playlist::show(id, offset, limit, cli.json).await,
+            PlaylistCmd::Show { id, offset, limit } => {
+                playlist::show(id, offset, limit, cli.json).await
+            }
             PlaylistCmd::Create { name } => playlist::create(&name).await,
             PlaylistCmd::Rename { id, name } => playlist::rename(id, &name).await,
             PlaylistCmd::Add { id, track } => playlist::add(id, &track).await,
@@ -545,9 +539,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 num,
             } => comment::list(&mid, &sort, page, num, cli.json).await,
             CommentCmd::Post { mid, text } => comment::post(&mid, &text).await,
-            CommentCmd::Reply { mid, cm_id, text } => {
-                comment::reply(&mid, &cm_id, &text).await
-            }
+            CommentCmd::Reply { mid, cm_id, text } => comment::reply(&mid, &cm_id, &text).await,
             CommentCmd::Delete { cm_id } => comment::delete(&cm_id).await,
         },
     }

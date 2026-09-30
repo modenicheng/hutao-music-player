@@ -86,7 +86,13 @@ pub async fn list(
         )?;
     } else {
         for (i, r) in rows[start..end].iter().enumerate() {
-            writeln!(stdout, "{:>2}. {}  {}", start + i + 1, r.title, r.source_key)?;
+            writeln!(
+                stdout,
+                "{:>2}. {}  {}",
+                start + i + 1,
+                r.title,
+                r.source_key
+            )?;
         }
         if end < rows.len() {
             writeln!(stdout, "（{end} / {} 首：--offset {end} 翻页）", rows.len())?;

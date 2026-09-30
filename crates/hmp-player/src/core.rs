@@ -386,7 +386,7 @@ async fn perform_load(sink: Arc<Sink>, request: Box<LoadRequest>) -> LoadComplet
                 return LoadCompletion {
                     request,
                     result: Err(error),
-                }
+                };
             }
         },
     };

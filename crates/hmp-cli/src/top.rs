@@ -80,7 +80,11 @@ fn print_category(page: &hmp_core::TopCategoryPage) -> Result<(), Box<dyn std::e
                 } else {
                     format!(" · {}", t.title_sub)
                 },
-                if t.update_time.is_empty() { "-" } else { &t.update_time },
+                if t.update_time.is_empty() {
+                    "-"
+                } else {
+                    &t.update_time
+                },
                 t.listen_num
             )?;
             for line in &t.preview {
@@ -106,7 +110,11 @@ fn print_detail(page: &hmp_core::TopDetailPage) -> Result<(), Box<dyn std::error
             format!(" · {}", page.title_sub)
         },
         page.total,
-        if page.update_time.is_empty() { "-" } else { &page.update_time }
+        if page.update_time.is_empty() {
+            "-"
+        } else {
+            &page.update_time
+        }
     )?;
     if page.songs.is_empty() {
         writeln!(out, "No songs (network offline?)")?;

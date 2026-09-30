@@ -200,7 +200,13 @@ pub async fn tracks_liked(
         )?;
     } else {
         for (i, r) in rows[start..end].iter().enumerate() {
-            writeln!(stdout, "{:>3}. {}  {}", start + i + 1, r.title, r.source_key)?;
+            writeln!(
+                stdout,
+                "{:>3}. {}  {}",
+                start + i + 1,
+                r.title,
+                r.source_key
+            )?;
         }
         if end < rows.len() {
             writeln!(stdout, "（{end} / {} 首：--offset {end} 翻页）", rows.len())?;
@@ -272,7 +278,10 @@ pub async fn tracks_local(
 }
 
 /// 本地专辑聚合（里程碑 E）。
-pub async fn albums_local(search: Option<&str>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn albums_local(
+    search: Option<&str>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;
     let rows = db.library_albums(search)?;
     if json {
