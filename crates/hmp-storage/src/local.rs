@@ -3,7 +3,7 @@
 //! 播放 URI 恒为 `file://<path>`，稳定身份 = 路径本身
 //! （`local:<path>`，见 hmp-core `PlayRequest::Local`）。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::PictureType;
@@ -114,6 +114,95 @@ pub fn read_meta(path: &Path) -> Option<LocalMeta> {
     })
 }
 
+/// 本地歌词候选路径（同目录，按优先级）：`<stem>.lrc`（主流约定，
+/// Windows/macOS 大小写不敏感文件系统上天然匹配任意大小写变体）→
+/// `<完整文件名>.lrc`（`song.mp3.lrc` 少数工具产物）。
+pub fn sidecar_lrc_candidates(audio: &Path) -> Vec<PathBuf> {
+    let dir = audio.parent().unwrap_or_else(|| Path::new("."));
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut push = |name: std::ffi::OsString| {
+        let candidate = dir.join(name);
+        if !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    };
+    for name in [
+        audio.file_stem().map(|s| {
+            let mut n = s.to_os_string();
+            n.push(".lrc");
+            n
+        }),
+        audio.file_name().map(|s| {
+            let mut n = s.to_os_string();
+            n.push(".lrc");
+            n
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        push(name);
+    }
+    out
+}
+
+/// 读取同名 sidecar 歌词（候选序取第一个存在且非空白的文件）。
+pub fn read_sidecar_lrc(audio: &Path) -> Option<String> {
+    let text = sidecar_lrc_candidates(audio)
+        .iter()
+        .find_map(|p| std::fs::read(p).ok().filter(|b| !b.is_empty()))?;
+    let text = decode_lrc_text(&text);
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// 读取内嵌歌词标签（ID3v2 USLT / MP4 ©lyr / APE LYRICS 等，经 lofty
+/// `ItemKey::Lyrics` 归一）；无标签或标签为空 → None。
+pub fn read_embedded_lyrics(path: &Path) -> Option<String> {
+    let tagged = Probe::open(path).ok()?.read().ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let text = tag.get_string(&ItemKey::Lyrics)?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// 歌词文本解码：BOM 识别 UTF-8/UTF-16LE/BE；无 BOM 但含 NUL 字节按
+/// UTF-16LE 兜底（部分中文播放器导出）；其余按 UTF-8（非法序列有损替换）。
+/// 剥除首部 BOM 残留（`\u{feff}` 非 whitespace，不剥会毒化首行标签解析）。
+pub fn decode_lrc_text(bytes: &[u8]) -> String {
+    let (payload, utf16le) = if bytes.starts_with(&[0xFF, 0xFE]) {
+        (&bytes[2..], Some(true))
+    } else if bytes.starts_with(&[0xFE, 0xFF]) {
+        (&bytes[2..], Some(false))
+    } else if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        (&bytes[3..], None)
+    } else if bytes.contains(&0) {
+        (bytes, Some(true))
+    } else {
+        (bytes, None)
+    };
+    let mut text = match utf16le {
+        Some(le) => {
+            let units: Vec<u16> = bytes_as_u16(payload, le).collect();
+            String::from_utf16_lossy(&units)
+        }
+        None => String::from_utf8_lossy(payload).into_owned(),
+    };
+    if let Some(stripped) = text.strip_prefix('\u{feff}') {
+        text = stripped.to_owned();
+    }
+    text
+}
+
+fn bytes_as_u16(bytes: &[u8], little_endian: bool) -> impl Iterator<Item = u16> + '_ {
+    bytes.chunks_exact(2).map(move |pair| {
+        if little_endian {
+            u16::from_le_bytes([pair[0], pair[1]])
+        } else {
+            u16::from_be_bytes([pair[0], pair[1]])
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +254,78 @@ mod tests {
         let p = dir.path().join("fake.mp3");
         std::fs::write(&p, b"not an audio file at all").unwrap();
         assert!(read_meta(&p).is_none());
+    }
+
+    /// sidecar 候选序：`<stem>.lrc` 优先，其次 `<完整文件名>.lrc`；去重。
+    #[test]
+    fn sidecar_candidates_order_and_dedup() {
+        let cands = sidecar_lrc_candidates(Path::new("/music/夜曲.mp3"));
+        assert_eq!(
+            cands,
+            vec![
+                PathBuf::from("/music/夜曲.lrc"),
+                PathBuf::from("/music/夜曲.mp3.lrc"),
+            ]
+        );
+        // 无扩展名文件：stem == 文件名 → 两候选合并为一个
+        let cands = sidecar_lrc_candidates(Path::new("track"));
+        assert_eq!(cands, vec![PathBuf::from("track.lrc")]);
+    }
+
+    /// sidecar 读取：命中 `<stem>.lrc`；空白文件视为无歌词。
+    #[test]
+    fn sidecar_lrc_reads_and_skips_blank() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("song.mp3");
+        std::fs::write(&audio, b"x").unwrap();
+        assert!(read_sidecar_lrc(&audio).is_none());
+
+        std::fs::write(dir.path().join("song.lrc"), "  \r\n").unwrap();
+        assert!(read_sidecar_lrc(&audio).is_none());
+
+        std::fs::write(dir.path().join("song.lrc"), "[00:01.00]hello\n").unwrap();
+        assert_eq!(
+            read_sidecar_lrc(&audio).as_deref(),
+            Some("[00:01.00]hello\n")
+        );
+    }
+
+    /// 歌词解码：UTF-8/UTF-16 BOM 与无 BOM UTF-16 兜底，剥 BOM 残留。
+    #[test]
+    fn decodes_lrc_encodings() {
+        // UTF-8 BOM
+        let mut bytes = b"\xEF\xBB\xBF".to_vec();
+        bytes.extend_from_slice("[00:01]utf8".as_bytes());
+        assert_eq!(decode_lrc_text(&bytes), "[00:01]utf8");
+        // 无 BOM UTF-8 原样
+        assert_eq!(decode_lrc_text(b"[00:01]plain"), "[00:01]plain");
+        // UTF-16LE BOM（中文）
+        let text = "[00:01]你好";
+        let units: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend_from_slice(&units);
+        assert_eq!(decode_lrc_text(&bytes), text);
+        // 无 BOM UTF-16LE（含 NUL 字节触发兜底）
+        let bytes: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        assert_eq!(decode_lrc_text(&bytes), text);
+        // UTF-16BE BOM
+        let units: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        let mut bytes = vec![0xFE, 0xFF];
+        bytes.extend_from_slice(&units);
+        assert_eq!(decode_lrc_text(&bytes), text);
+    }
+
+    /// 内嵌歌词：ItemKey::Lyrics 标签项映射可读取（USLT/©lyr 归一入口）。
+    #[test]
+    fn lyrics_tag_item_reads_back() {
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
+        tag.insert_text(ItemKey::Lyrics, "[00:01.00]embedded\n".into());
+        let got = tag.get_string(&ItemKey::Lyrics);
+        assert_eq!(got, Some("[00:01.00]embedded\n"));
+    }
+
+    #[test]
+    fn embedded_lyrics_missing_file_returns_none() {
+        assert!(read_embedded_lyrics(Path::new("/nonexistent/x.mp3")).is_none());
     }
 }

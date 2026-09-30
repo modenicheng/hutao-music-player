@@ -37,3 +37,5 @@ tokio = { workspace = true, features = [
     "net",
 ] }
 wiremock.workspace = true
+# 仅 live 探针示例用（examples 不随发布）：读取本地登录凭证
+hmp-storage = { path = "../hmp-storage" }

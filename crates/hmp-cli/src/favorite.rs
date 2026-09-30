@@ -53,10 +53,31 @@ pub async fn remove(id: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 列出收藏（本地事实视图，直读媒体库）。
-pub async fn list() -> Result<(), Box<dyn std::error::Error>> {
+/// 列出收藏（本地事实视图，直读媒体库；`offset` 0 基起始，`limit` 0 = 全量）。
+pub async fn list(
+    offset: usize,
+    limit: usize,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;
-    let rows = db.list_favorites(100)?;
+    let rows = db.list_favorites(10_000)?;
+    let (start, end) = super::library::window_bounds(rows.len(), offset, limit);
+    if json {
+        let items: Vec<serde_json::Value> = rows[start..end]
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "track_id": r.track_id,
+                    "source": r.source,
+                    "source_key": r.source_key,
+                    "title": r.title,
+                })
+            })
+            .collect();
+        return super::output::print(&serde_json::json!({
+            "total": rows.len(), "offset": start, "items": items,
+        }));
+    }
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
         writeln!(
@@ -64,8 +85,11 @@ pub async fn list() -> Result<(), Box<dyn std::error::Error>> {
             "No favorites yet (try `hmp favorite add <track-id>`)"
         )?;
     } else {
-        for (i, r) in rows.iter().enumerate() {
-            writeln!(stdout, "{:>2}. {}  {}", i + 1, r.title, r.source_key)?;
+        for (i, r) in rows[start..end].iter().enumerate() {
+            writeln!(stdout, "{:>2}. {}  {}", start + i + 1, r.title, r.source_key)?;
+        }
+        if end < rows.len() {
+            writeln!(stdout, "（{end} / {} 首：--offset {end} 翻页）", rows.len())?;
         }
     }
     stdout.flush()?;

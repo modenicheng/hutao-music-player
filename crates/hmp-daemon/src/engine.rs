@@ -127,6 +127,8 @@ pub struct EngineHandle {
     pub comment: Option<crate::comment::CommentService>,
     /// 内容读服务（daemon 层注入；未注入时搜索/歌词/账号/封面命令报不可用）。
     pub content: Option<crate::content::ContentService>,
+    /// 扫码登录服务（daemon 层注入；未注入时 LoginQr*/Logout 命令报不可用）。
+    pub login: Option<Arc<crate::login::LoginService>>,
     /// 媒体库变更代际（watcher/sync/写命令 bump；server 据此推
     /// `Event::LibraryChanged`，客户端重查 sqlite——直读契约的刷新信号）。
     pub library_tx: watch::Sender<u64>,
@@ -329,6 +331,7 @@ impl PlaybackEngine {
             sync_handle: None,
             comment: None,
             content: None,
+            login: None,
             library_tx,
             library_rx,
         }

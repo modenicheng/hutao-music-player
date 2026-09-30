@@ -167,6 +167,12 @@ pub enum Request {
         mid: String,
         /// 排序：hot | new | recommend。
         sort: String,
+        /// 页号（1 基；缺省 1）。
+        #[serde(default = "default_comment_page")]
+        page: u32,
+        /// 每页条数（1..=100，超出钳制；缺省 20）。
+        #[serde(default = "default_comment_num")]
+        num: u32,
     },
     /// 发表/回复评论（写；直发 QQ）。
     CommentPost {
@@ -194,13 +200,29 @@ pub enum Request {
         /// 关键词。
         keyword: String,
     },
-    /// 歌词读取（LRC 文本 + 翻译；daemon 出网并解析 song_type，AUDIT §8.3）。
+    /// 歌词读取（本地优先：`local:` 曲先读同目录 `.lrc`/内嵌标签，缺失时
+    /// 按标题+歌手检索 QQ 匹配曲目取词；QQ 曲按 mid 直取。daemon 出网，
+    /// AUDIT §8.3）。
     LyricGet {
-        /// 曲目 mid。
-        mid: String,
+        /// 曲目 ID（QQ mid 或 `local:<绝对路径>`）。
+        id: String,
+        /// 标题（仅本地曲 QQ 检索兜底用；QQ 曲忽略）。
+        title: String,
+        /// 歌手（`"A / B"` 拼接；仅本地曲 QQ 检索兜底用）。
+        artist: String,
     },
     /// 账号状态读（登录态 + 昵称/uin/VIP 摘要；AUDIT §8.6）。
     AccountStatus,
+    /// 发起 QQ 扫码登录：生成二维码落盘 `data_dir/`，返回图片路径。
+    /// 同一时刻至多一个进行中的会话（重复 Start 重开新会话）。
+    LoginQrStart,
+    /// 轮询扫码登录进度（客户端 ~1.5s 一次，与 CLI PollInterval 同量级）。
+    /// 无进行中的会话 → `status=4`（不视为协议错误）。
+    LoginQrPoll,
+    /// 取消进行中的扫码登录会话（无会话时幂等 Ok）。
+    LoginQrCancel,
+    /// 退出登录：远端登出尽力而为 + 删除本地凭证（未登录幂等 Ok）。
+    Logout,
     /// 音质偏好读（config.toml `[quality]`）。
     QualityGet,
     /// 音质偏好写（daemon 落 config.toml；UI 只发意图，AUDIT §8.7）。
@@ -270,6 +292,10 @@ pub enum Response {
     Lyric(LyricPage),
     /// `AccountStatus` 的响应。
     AccountStatus(AccountInfo),
+    /// `LoginQrStart` 的响应（二维码图片本机路径）。
+    LoginQr(LoginQrSession),
+    /// `LoginQrPoll` 的响应（扫码进度）。
+    LoginQrState(LoginQrState),
     /// `QualityGet` / `QualitySet` 的响应。
     Quality(QualityPrefDto),
     /// `CoverGet` 的响应（`file://` 本地路径）。
@@ -359,6 +385,16 @@ pub enum PlaylistWriteOp {
     },
 }
 
+/// 评论列表缺省页号（1 基；serde 兼容旧 wire 帧）。
+fn default_comment_page() -> u32 {
+    1
+}
+
+/// 评论列表缺省页大小（serde 兼容旧 wire 帧）。
+fn default_comment_num() -> u32 {
+    20
+}
+
 /// 评论条目（展示投影；daemon 经 mid→qq_song_id 解析后返回）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CommentItem {
@@ -376,8 +412,14 @@ pub struct CommentItem {
 /// 评论页。
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct CommentPage {
-    /// 评论总数。
+    /// 评论总数（服务端 `TotalCmNum`）。
     pub total: i64,
+    /// 是否还有下一页（服务端 `CommentList.HasMore`）。
+    #[serde(default)]
+    pub has_more: bool,
+    /// 当前页号（1 基；回显请求窗口，JSON 消费方翻页用）。
+    #[serde(default = "default_comment_page")]
+    pub page: u32,
     pub comments: Vec<CommentItem>,
 }
 
@@ -547,6 +589,9 @@ pub struct LyricPage {
     pub lyric: String,
     /// 翻译歌词（LRC 文本；无翻译为空）。
     pub translation: String,
+    /// 来源（`"local"` = 本地 `.lrc`/内嵌标签，`"qq"` = QQ 音乐；未知为空）。
+    #[serde(default)]
+    pub source: String,
 }
 
 /// 账号状态（展示投影；未登录时仅 `logged_in=false` 有意义）。
@@ -560,6 +605,37 @@ pub struct AccountInfo {
     pub uin: String,
     /// VIP 摘要（如 "VIP 至 2027-01-01"；拉取失败为空）。
     pub vip_summary: String,
+}
+
+/// 扫码登录会话（`LoginQrStart` 响应）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginQrSession {
+    /// 二维码 PNG 的本机绝对路径（UI 禁 HTTP，直读本机文件）。
+    pub qr_path: String,
+}
+
+/// 扫码登录进度（`LoginQrPoll` 响应）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LoginQrState {
+    /// 0=等待扫码 1=已扫码待确认 2=登录成功 3=用户拒绝 4=无进行中的会话/失败。
+    pub status: i32,
+    /// 当前二维码路径（服务端超时自动刷新后路径变化，UI 按 path 变化重载图）。
+    pub qr_path: String,
+    /// 展示文案（失败/超时原因等；正常轮询为空）。
+    pub message: String,
+}
+
+impl LoginQrState {
+    /// 等待扫码。
+    pub const STATUS_WAITING: i32 = 0;
+    /// 已扫码，等待手机确认。
+    pub const STATUS_SCANNED: i32 = 1;
+    /// 登录成功（凭证已落库）。
+    pub const STATUS_DONE: i32 = 2;
+    /// 用户在手机上拒绝。
+    pub const STATUS_REFUSED: i32 = 3;
+    /// 无进行中的会话 / 失败终态（`message` 携带原因，非协议错误）。
+    pub const STATUS_IDLE: i32 = 4;
 }
 
 /// 音质偏好（config.toml `[quality]` 的 IPC 形态）。
@@ -714,6 +790,8 @@ mod tests {
             Request::CommentList {
                 mid: "m".into(),
                 sort: "hot".into(),
+                page: 1,
+                num: 20,
             },
             Request::CommentPost {
                 mid: "m".into(),
@@ -729,8 +807,16 @@ mod tests {
             Request::Search {
                 keyword: "夜曲".into(),
             },
-            Request::LyricGet { mid: "m".into() },
+            Request::LyricGet {
+                id: "m".into(),
+                title: "夜曲".into(),
+                artist: "周杰伦".into(),
+            },
             Request::AccountStatus,
+            Request::LoginQrStart,
+            Request::LoginQrPoll,
+            Request::LoginQrCancel,
+            Request::Logout,
             Request::QualityGet,
             Request::QualitySet {
                 mode: "flac".into(),
@@ -780,6 +866,8 @@ mod tests {
     fn response_roundtrips_through_frame() {
         let page = CommentPage {
             total: 1,
+            has_more: true,
+            page: 1,
             comments: vec![CommentItem {
                 cm_id: "c".into(),
                 seq_no: "s".into(),
@@ -830,12 +918,21 @@ mod tests {
             Response::Lyric(LyricPage {
                 lyric: "[00:01.00]test".into(),
                 translation: String::new(),
+                source: "local".into(),
             }),
             Response::AccountStatus(AccountInfo {
                 logged_in: true,
                 nickname: "胡桃".into(),
                 uin: "10001".into(),
                 vip_summary: "VIP".into(),
+            }),
+            Response::LoginQr(LoginQrSession {
+                qr_path: "/tmp/hmp/login-qr-1.png".into(),
+            }),
+            Response::LoginQrState(LoginQrState {
+                status: 1,
+                qr_path: "/tmp/hmp/login-qr-1.png".into(),
+                message: String::new(),
             }),
             Response::Quality(QualityPrefDto {
                 mode: "auto".into(),

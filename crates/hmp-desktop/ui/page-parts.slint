@@ -21,8 +21,11 @@ export component PageHeader inherits Rectangle {
     background: transparent;
     horizontal-stretch: 1;
 
+    // 交叉轴显式居中：布局默认 stretch 会把定高子元素（返回键/动作按钮）
+    // 顶对齐到 y=0，而标题块垂直居中——返回键永远对不齐的根因（PORTING.md 坑位）
     HorizontalLayout {
         spacing: Theme.space-4;
+        cross-axis-alignment: center;
 
         if show-back: Rectangle {
             width: 36px;
@@ -99,9 +102,11 @@ export component PageHeader inherits Rectangle {
             }
         }
 
+        // 页面级主动作区（播放全部/扫描/刷新……页面经 @children 注入）
         HorizontalLayout {
             spacing: Theme.space-2;
             alignment: LayoutAlignment.end;
+            cross-axis-alignment: center;
 
             @children
         }
@@ -120,6 +125,8 @@ export component SectionHeader inherits Rectangle {
 
     HorizontalLayout {
         spacing: Theme.space-3;
+        // 区块级动作（@children 注入的按钮/链接）与标题同行垂直居中
+        cross-axis-alignment: center;
 
         Text {
             text: root.title;
@@ -146,6 +153,8 @@ export component SectionHeader inherits Rectangle {
             more-row := HorizontalLayout {
                 spacing: 2px;
                 alignment: LayoutAlignment.start;
+                // 定高图标默认顶对齐，显式居中让箭头与文字同一视觉行
+                cross-axis-alignment: center;
 
                 Text {
                     text: "更多";
@@ -183,7 +192,8 @@ export component CoverCard inherits Rectangle {
     /** 页头/网格动作（页面外置）——保留占位以兼容旧调用 */
     callback clicked;
 
-    border-radius: Theme.radius-cover;
+    // Vue CoverCard.vue = --radius-lg（12px）；radius-cover(10px) 是移植偏差，已弃用
+    border-radius: Theme.radius-lg;
     background: transparent;
 
     card-touch := TouchArea {
@@ -205,7 +215,7 @@ export component CoverCard inherits Rectangle {
                 y: card-touch.has-hover ? -4px : 0px;
                 width: parent.width;
                 height: parent.width;
-                border-radius: Theme.radius-cover;
+                border-radius: Theme.radius-lg;
                 clip: true;
                 background: Theme.muted;
                 // Apple Music 风格：恒定柔和阴影 + 悬停加深（替代旧的 2px→12px 跳变）

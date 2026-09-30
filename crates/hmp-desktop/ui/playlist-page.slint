@@ -55,36 +55,27 @@ export component PlaylistPage inherits Rectangle {
                     }
                 }
 
-                // 信息列：页头在上、播放全部在下（Vue .playlist-actions 位置）
-                VerticalLayout {
+                // 信息列：页头即承载播放全部（页面级主动作放页头动作区，
+                // 原 .playlist-actions 独立行已收编）
+                PageHeader {
                     horizontal-stretch: 1;
-                    alignment: LayoutAlignment.center;
-                    spacing: Theme.space-3;
+                    title: Data.playlist-name;
+                    show-back: true;
+                    meta-items: Data.playlist-meta-items;
 
-                    PageHeader {
-                        title: Data.playlist-name;
-                        show-back: true;
-                        meta-items: Data.playlist-meta-items;
-
-                        back => {
-                            Nav.back();
-                        }
+                    back => {
+                        Nav.back();
                     }
 
-                    if Data.playlist-tracks.length > 0: HorizontalLayout {
-                        // start 取按钮自然宽（单按钮无 stretch 需求，不踩 alignment 坑）
-                        alignment: LayoutAlignment.start;
-
-                        Button {
-                            variant: ButtonVariant.default;
-                            small: true;
-                            icon: Icons.play_arrow;
-                            icon-size: 17.6px;
-                            text: "播放全部";
-                            height: 32px;
-                            clicked => {
-                                Player.play-tracks(Data.playlist-tracks, 0);
-                            }
+                    if Data.playlist-tracks.length > 0: Button {
+                        variant: ButtonVariant.default;
+                        small: true;
+                        icon: Icons.play_arrow;
+                        icon-size: 17.6px;
+                        text: "播放全部";
+                        height: 32px;
+                        clicked => {
+                            Player.play-tracks(Data.playlist-tracks, 0);
                         }
                     }
                 }

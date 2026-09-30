@@ -2,6 +2,10 @@
 //!
 //! `get_detail` 免登录；创建/删除/加歌/删歌/收藏均需登录态，
 //! 凭证由调用方显式传入 `&Credential`（§6.4 凭证解耦）。
+//!
+//! 写操作 ID 速查：`create`/`delete`/`add_songs`/`del_songs` 用 **dirid**
+//! （目录 ID，删除后可能被复用）；`get_detail` 用 **tid**（disstid，唯一）。
+//! 「我喜欢」目录 ID 固定为 201。
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -10,9 +14,13 @@ use crate::client::QqMusicClient;
 use crate::credential::Credential;
 use crate::error::QqMusicError;
 use crate::models::{Song, SongList};
+use crate::pagination::{Page, Paged, PagedView};
 use crate::protocol::cgi::CgiRequest;
 
 /// 歌单创建者信息（上游 `SonglistCreator`）。
+///
+/// 实测（2026-09-29）：`CgiGetDiss` 返回的 `dirinfo.creator` 可解析
+/// （musicid/nick/headurl/encrypt_uin）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SonglistCreator {
     /// 用户 musicid。
@@ -30,6 +38,9 @@ pub struct SonglistCreator {
 }
 
 /// 歌单详情返回的基础元数据（上游 `SonglistInfo`）。
+///
+/// `list` 以 flatten 复用 [`SongList`] 字段（`dirinfo` 内的
+/// `dissid`/`dissname`/`picurl`/`songnum` 等别名均可解析）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SonglistInfo {
     /// 歌单基础信息（继承 `SongList` 字段）。
@@ -41,6 +52,10 @@ pub struct SonglistInfo {
 }
 
 /// 歌单详情响应（上游 `GetSonglistDetailResponse`）。
+///
+/// 实测（2026-09-29）：`CgiGetDiss` 的业务结果放在 `data.code`
+/// （歌单不存在时为 -100006），`info`（别名 `dirinfo`）/`songlist`/
+/// `total_song_num` 均可解析；请求层业务码 0 时才返回本结构。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct GetSonglistDetailResponse {
     /// 返回码。
@@ -70,18 +85,21 @@ pub struct GetSonglistDetailResponse {
 }
 
 /// 创建/删除歌单响应（上游 `CreateDeleteSonglistResp`）。
+///
+/// 除顶层 `retCode` 外，tid/dirId/dirName 位于 `$.result` 子对象
+/// （由 [`extract_result_fields`] 提取；2026-09-29 实测确认）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct CreateDeleteSonglistResp {
     /// 返回码（0=成功）。
-    #[serde(default)]
+    #[serde(default, alias = "retCode")]
     pub ret_code: i64,
-    /// 创建成功的歌单 ID。
+    /// 创建成功的歌单 ID（`$.result.tid`，即 disstid）。
     #[serde(default)]
     pub id: i64,
-    /// 创建成功的歌单目录 ID。
+    /// 创建成功的歌单目录 ID（`$.result.dirId`）。
     #[serde(default)]
     pub dirid: i64,
-    /// 创建成功的歌单名称。
+    /// 创建成功的歌单名称（`$.result.dirName`）。
     #[serde(default)]
     pub name: String,
 }
@@ -106,20 +124,51 @@ pub struct SonglistApi<'a> {
     client: &'a QqMusicClient,
 }
 
+// ---------------------------------------------------------------------------
+// 统一分页视图（has_more 归一规则见 crate::pagination 模块文档）
+// ---------------------------------------------------------------------------
+
+/// 显式 hasmore 字段（`hasmore`，0/1），以服务端为准（规则 1）。
+///
+/// 「我喜欢」（`user.get_fav_song`）复用本响应类型，规则一致。
+impl Paged for GetSonglistDetailResponse {
+    type Item = Song;
+
+    fn paged(&self, page: Page) -> PagedView<'_, Song> {
+        PagedView {
+            items: &self.songs,
+            total: self.total,
+            has_more: self.hasmore != 0,
+            page,
+        }
+    }
+}
+
 impl<'a> SonglistApi<'a> {
     /// 构造歌单 API。
     pub fn new(client: &'a QqMusicClient) -> Self {
         Self { client }
     }
 
-    /// 获取歌单详细信息（上游 `get_detail`）。
-    #[allow(clippy::too_many_arguments)] // 对齐上游签名（songlist_id/dirid/num/page/onlysong/tag/userinfo）
+    /// 获取歌单详细信息（上游 `get_detail`；登录：免登录）。
+    ///
+    /// `songlist_id` 为歌单 disstid/tid（自建歌单用创建响应返回的 tid）；
+    /// `dirid` 一般传 0；`page` 为分页窗口；`onlysong`/`tag`/`userinfo`
+    /// 对齐上游开关。
+    ///
+    /// wire 参数归一（上游签名 `num`/`page` 两参数冗余，Rust 统一由
+    /// [`Page`] 派生，wire 语义不变）：`song_begin = page.offset()`
+    /// （上游 `num * (page - 1)`，即偏移）、`song_num = page.num`
+    /// （即页大小）——两个 wire 键服务端均需要，分别承担偏移与页大小
+    /// 语义，非冗余。
+    ///
+    /// 实测（2026-09-29）：可用（含新建空歌单与加/删歌后的状态核对；
+    /// 歌单不存在时 `data.code` 为 -100006，`info`/`songs` 为空）。
     pub async fn get_detail(
         &self,
         songlist_id: i64,
         dirid: i64,
-        num: i64,
-        page: i64,
+        page: Page,
         onlysong: bool,
         tag: bool,
         userinfo: bool,
@@ -131,8 +180,8 @@ impl<'a> SonglistApi<'a> {
                 "disstid": songlist_id,
                 "dirid": dirid,
                 "tag": tag,
-                "song_begin": num * (page - 1),
-                "song_num": num,
+                "song_begin": page.offset(),
+                "song_num": page.num,
                 "userinfo": userinfo,
                 "orderlist": true,
                 "onlysonglist": onlysong,
@@ -145,7 +194,13 @@ impl<'a> SonglistApi<'a> {
         })
     }
 
-    /// 创建歌单（上游 `create`）。重名不失败，服务端自动加时间戳。
+    /// 创建歌单（上游 `create`；登录：需登录）。重名不失败，服务端自动加时间戳。
+    ///
+    /// 返回 `id` 为歌单 tid（disstid，`get_detail`/收藏歌单用），`dirid` 为目录 ID
+    /// （`add_songs`/`del_songs`/`delete` 用）。注意 dirid 在删除后可能被新歌单复用
+    /// （2026-09-29 实测：删除 dirid=12 后重建仍得 dirid=12），唯一标识用 tid。
+    ///
+    /// 实测（2026-09-29）：可用（`"HMP-API-TEST-<时间戳>"` 创建成功，retCode=0）。
     pub async fn create(
         &self,
         dirname: &str,
@@ -155,7 +210,10 @@ impl<'a> SonglistApi<'a> {
             .await
     }
 
-    /// 删除歌单（上游 `delete`）。删除不存在的歌单返回 dirid=0。
+    /// 删除歌单（上游 `delete`；登录：需登录）。删除不存在的歌单返回 dirid=0。
+    ///
+    /// 实测（2026-09-29）：可用（临时歌单删除后 `get_detail` 报 -100006、
+    /// 自建歌单列表不再包含该 tid）。
     pub async fn delete(
         &self,
         dirid: i64,
@@ -165,9 +223,14 @@ impl<'a> SonglistApi<'a> {
             .await
     }
 
-    /// 添加歌曲到歌单（上游 `add_songs`）。
+    /// 添加歌曲到歌单（上游 `add_songs`；登录：需登录）。
     ///
-    /// 歌曲已存在于歌单也返回 `true`；无权限等返回 `false`。
+    /// `dirid` 为歌单目录 ID；`song_info` 每项为 `(song_id, song_type)`
+    /// （普通歌曲 songType=0，与上游 `Song.type` 一致）；`tid` 为歌单 tid（可传 0）。
+    /// 歌曲已存在于歌单也返回 `true`；上游对 CGI 错误 80092 返回 `false`，
+    /// 其余错误原样抛出（本实现以 `allow_error_codes` 对齐）。
+    ///
+    /// 实测（2026-09-29）：可用。
     pub async fn add_songs(
         &self,
         dirid: i64,
@@ -179,9 +242,11 @@ impl<'a> SonglistApi<'a> {
             .await
     }
 
-    /// 删除歌单中的歌曲（上游 `del_songs`）。
+    /// 删除歌单中的歌曲（上游 `del_songs`；登录：需登录）。
     ///
-    /// 歌曲不在歌单中也返回 `true`。
+    /// 参数同 [`SonglistApi::add_songs`]；歌曲不在歌单中也返回 `true`。
+    ///
+    /// 实测（2026-09-29）：可用。
     pub async fn del_songs(
         &self,
         dirid: i64,
@@ -193,7 +258,14 @@ impl<'a> SonglistApi<'a> {
             .await
     }
 
-    /// 收藏歌曲到「我喜欢」歌单（上游 `like_song`，固定 dirid=201）。
+    /// 收藏歌曲到「我喜欢」歌单（上游 `like_song`，固定 dirid=201；登录：需登录）。
+    ///
+    /// `song_info` 每项为 `(song_id, song_type)`；即以 dirid=201 调用
+    /// [`SonglistApi::add_songs`]。歌曲已在「我喜欢」中也返回 `true`。
+    ///
+    /// 实测（2026-09-29）：请求形态正确（同参数的 unlike 返回 true），但对测试
+    /// 歌曲（186016《开始懂了》）服务端返回 CGI 错误 80105（触发条件未查明，
+    /// 疑似歌曲权益/类型限制；上游对 80105 亦原样抛错）。
     pub async fn like_song(
         &self,
         song_info: &[(i64, i64)],
@@ -202,7 +274,10 @@ impl<'a> SonglistApi<'a> {
         self.add_songs(201, song_info, 0, credential).await
     }
 
-    /// 从「我喜欢」歌单移除歌曲（上游 `unlike_song`，固定 dirid=201）。
+    /// 从「我喜欢」歌单移除歌曲（上游 `unlike_song`，固定 dirid=201；登录：需登录）。
+    ///
+    /// `song_info` 每项为 `(song_id, song_type)`；歌曲不在「我喜欢」中也返回
+    /// `Ok(true)`（2026-09-29 实测：对未收藏歌曲返回 true）。
     pub async fn unlike_song(
         &self,
         song_info: &[(i64, i64)],
@@ -234,6 +309,10 @@ impl<'a> SonglistApi<'a> {
     }
 
     /// 歌单歌曲写操作（AddSonglist/DelSonglist）统一入口。
+    ///
+    /// 上游对 CGI 错误 80092 捕获后返回 `false`（`add_songs`/`del_songs`），
+    /// 其余错误原样抛出；本实现以 `allow_error_codes = [80092]` 对齐
+    /// （此时内层无 `retCode` → `Ok(false)`）。
     async fn detail_write(
         &self,
         method: &str,
@@ -246,7 +325,7 @@ impl<'a> SonglistApi<'a> {
             .iter()
             .map(|(song_id, song_type)| json!({"songId": song_id, "songType": song_type}))
             .collect();
-        let request = CgiRequest::new(
+        let mut request = CgiRequest::new(
             "music.musicasset.PlaylistDetailWrite",
             method,
             json!({
@@ -257,6 +336,7 @@ impl<'a> SonglistApi<'a> {
             }),
         )
         .with_require_login(true);
+        request.allow_error_codes = Some(vec![80092]);
         let data = self
             .client
             .musicu_request(&request, Some(credential))

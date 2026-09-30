@@ -296,9 +296,15 @@ const TAIL_PROBE: u64 = 0x40;
 /// 永久挂起（无错误、无回退），流式期间还会占死 Semaphore 许可饿死其余
 /// 区间请求。连接超时 + 读超时兜住这类故障。
 ///
+/// **直连不走系统代理**：QQ CDN（isure/y.gtimg 等均为国内 CDN）直连稳定
+/// 可达，而走系统代理（Clash 等）时大流量长流会被中间件随机停摆——小
+/// 区间探测正常、流中途断流，且故障无错误无回退（2026-09-29 QQ 远端
+/// 音频无法播放事故）。媒体取流路径不依赖用户的代理中间件。
+///
 /// `pub`：daemon 侧 QQ 封面下载（ContentService）复用同一超时配置。
 pub fn cdn_client() -> reqwest::Client {
     reqwest::Client::builder()
+        .no_proxy()
         .connect_timeout(std::time::Duration::from_secs(10))
         .read_timeout(std::time::Duration::from_secs(30))
         .build()

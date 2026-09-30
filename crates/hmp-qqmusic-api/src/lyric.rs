@@ -2,6 +2,10 @@
 //!
 //! 歌词响应中的 `lyric`/`trans`/`roma` 字段可能为加密 QRC（`crypt=1`），
 //! 解析时自动调用 `qrc_decrypt` 解密（对应上游 model validator）。
+//!
+//! 实测（2026-09-29）：免登录可用；请求 `qrc=true` 时解密结果为
+//! **QRC XML**（`<?xml ...><QrcInfosInfos>` 逐字歌词），非 QRC 时为 LRC 文本；
+//! `songid` 以服务端键 `songID` 解析。
 
 use serde::Deserialize;
 use serde_json::json;
@@ -12,27 +16,30 @@ use crate::error::QqMusicError;
 use crate::protocol::cgi::CgiRequest;
 
 /// 歌词响应（上游 `GetLyricResponse`）。
+///
+/// `lyric`/`trans`/`roma`/`singing_annotations_lyric` 在构造时已自动解密
+/// （见 [`GetLyricResponse::decrypt_fields`]）。
 #[derive(Clone, Debug, Deserialize)]
 pub struct GetLyricResponse {
-    /// 歌曲 ID。
+    /// 歌曲 ID（服务端键 `songID`）。
     #[serde(default, alias = "songID")]
     pub songid: i64,
-    /// 原始歌词内容（LRC 文本，已解密）。
+    /// 原始歌词内容（`qrc=true` 时为解密后的 QRC XML，否则为 LRC 文本）。
     #[serde(default)]
     pub lyric: String,
-    /// 翻译歌词内容。
+    /// 翻译歌词内容（请求 `trans=true` 时返回，已解密）。
     #[serde(default)]
     pub trans: String,
-    /// 罗马音歌词内容。
+    /// 罗马音歌词内容（请求 `roma=true` 时返回，已解密）。
     #[serde(default)]
     pub roma: String,
-    /// 助唱标注歌词。
+    /// 助唱标注歌词（服务端键 `singingAnnotationsLyric`，已解密）。
     #[serde(default, alias = "singingAnnotationsLyric")]
     pub singing_annotations_lyric: String,
     /// LRC 歌词更新时间戳。
     #[serde(default)]
     pub lrc_t: i64,
-    /// QRC 歌词更新时间戳。
+    /// QRC 歌词更新时间戳（有逐字歌词时 > 0）。
     #[serde(default)]
     pub qrc_t: i64,
     /// 翻译歌词更新时间戳。
@@ -41,13 +48,13 @@ pub struct GetLyricResponse {
     /// 罗马音歌词更新时间戳。
     #[serde(default)]
     pub roma_t: i64,
-    /// 是否有歌词贡献者。
+    /// 是否有歌词贡献者（服务端键 `hasContributor`）。
     #[serde(default, alias = "hasContributor")]
     pub has_contributor: bool,
-    /// 是否有翻译贡献者。
+    /// 是否有翻译贡献者（服务端键 `hasTransContributor`）。
     #[serde(default, alias = "hasTransContributor")]
     pub has_trans_contributor: bool,
-    /// 是否有多风格翻译歌词。
+    /// 是否有多风格翻译歌词（服务端键 `hasMultiTrans`）。
     #[serde(default, alias = "hasMultiTrans")]
     pub has_multi_trans: bool,
 }
@@ -89,9 +96,16 @@ impl<'a> LyricApi<'a> {
         Self { client }
     }
 
-    /// 获取歌词原始数据（上游 `get_lyric`）。
+    /// 获取歌词原始数据（上游 `get_lyric`；登录：免登录）。
     ///
-    /// `value` 为歌曲 ID（纯数字）或 MID。
+    /// `value` 为歌曲 ID（纯数字，走 `songId` 参数）或 MID（走 `songMid`）。
+    /// `song_type` 为歌曲类型（与 `Song::type_` 一致，普通歌曲 0）；
+    /// `qrc` 请求逐字歌词（返回解密后的 QRC XML）；`trans`/`roma`/
+    /// `singing_annotations` 分别请求翻译/罗马音/助唱标注。
+    /// 固定 `crypt=1`（服务端返回加密 QRC，本方法自动解密）。
+    ///
+    /// 实测（2026-09-29）：免登录可用；186016 与 97773（晴天）
+    /// `qrc=true` 均返回并解密为 QRC XML（`qrc_t > 0`）。
     pub async fn get_lyric(
         &self,
         value: &str,

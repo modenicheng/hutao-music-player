@@ -1,8 +1,9 @@
 // 下载（DownloadsView.vue，v0.13）：已下载曲目表 → 落盘明细（一行一事的发丝线
 // 定义行：存储位置 / 下载音质（读真实偏好）+ 在设置中调整 text-link）。
+// 后端尚无下载域（docs/AUDIT.md M8 记录）→ 诚实空态，不虚构曲目。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { Button, ButtonVariant } from "primitives.slint";
+import { AppIcon, Button, ButtonVariant } from "primitives.slint";
 import { FactRow, PageHeader, SectionHeader } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
 import { Nav, Route } from "nav.slint";
@@ -24,7 +25,7 @@ export component DownloadsPage inherits Rectangle {
             back => {
                 Nav.navigate(Route.library, "");
             }
-            meta-items: [
+            meta-items: Data.downloads-count == 0 ? ["0 首"] : [
                 "\{Data.downloads-count} 首",
                 "占用 \{Data.downloads-size}",
                 "含无损 \{Data.downloads-lossless} 首",
@@ -38,43 +39,87 @@ export component DownloadsPage inherits Rectangle {
                 text: "播放全部";
                 enabled: Data.downloads-count > 0;
                 height: 32px;
-                y: (parent.height - self.height) / 2;
                 clicked => {
                     Player.play-tracks(Data.downloads, 0);
                 }
             }
         }
 
-        // —— 已下载 ——
-        VerticalLayout {
-            spacing: Theme.space-3;
+        if Data.downloads-count == 0: VerticalLayout {
+            spacing: Theme.space-4;
 
             SectionHeader {
                 title: "已下载";
             }
-            TrackTable {
-                tracks: Data.downloads;
-                show-header: true;
+            Rectangle {
+                height: 168px;
+                border-radius: Theme.radius-lg;
+                background: Theme.surface-3;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: Theme.space-2;
+
+                    HorizontalLayout {
+                        alignment: center;
+
+                        AppIcon {
+                            source: Icons.download;
+                            icon-color: Theme.muted-foreground;
+                            width: 32px;
+                            height: 32px;
+                        }
+                    }
+                    Text {
+                        text: "还没有下载内容";
+                        color: Theme.foreground;
+                        font-size: 13.5px;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: "在线下载尚未开放；本地音乐请到「音乐库」查看。";
+                        color: Theme.muted-foreground;
+                        font-size: 12.8px;
+                        horizontal-alignment: center;
+                    }
+                }
             }
         }
 
-        // —— 落盘明细：编辑部式定义行 ——
-        VerticalLayout {
-            spacing: Theme.space-3;
+        if Data.downloads-count > 0: VerticalLayout {
+            spacing: Theme.space-8;
 
-            SectionHeader {
-                title: "落盘明细";
+            // —— 已下载 ——
+            VerticalLayout {
+                spacing: Theme.space-3;
+
+                SectionHeader {
+                    title: "已下载";
+                }
+                TrackTable {
+                    tracks: Data.downloads;
+                    show-header: true;
+                }
             }
-            FactRow {
-                label: "存储位置";
-                value: Data.downloads-storage-path;
-            }
-            FactRow {
-                label: "下载音质";
-                value: Quality.tier-label(Quality.selected);
-                with-adjust-link: true;
-                adjust-link-clicked => {
-                    Nav.navigate(Route.settings-playback, "");
+
+            // —— 落盘明细：编辑部式定义行 ——
+            VerticalLayout {
+                spacing: Theme.space-3;
+
+                SectionHeader {
+                    title: "落盘明细";
+                }
+                FactRow {
+                    label: "存储位置";
+                    value: Data.downloads-storage-path;
+                }
+                FactRow {
+                    label: "下载音质";
+                    value: Quality.tier-label(Quality.selected);
+                    with-adjust-link: true;
+                    adjust-link-clicked => {
+                        Nav.navigate(Route.settings-playback, "");
+                    }
                 }
             }
         }

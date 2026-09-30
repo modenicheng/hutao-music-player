@@ -52,13 +52,35 @@ pub fn set(alias: &str, fallback: bool) -> Result<String, String> {
 pub async fn run(
     alias: Option<String>,
     no_fallback: bool,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let out = match alias {
-        Some(alias) => set(&alias, !no_fallback)?,
-        None => format_current(),
-    };
+    if let Some(alias) = alias {
+        let message = set(&alias, !no_fallback)?;
+        if json {
+            let config = Config::load();
+            return super::output::print(&serde_json::json!({
+                "mode": config.quality.mode,
+                "fallback": config.quality.fallback,
+                "describe": config.quality.describe(),
+                "chain": config.quality.chain().iter().map(|q| q.to_alias()).collect::<Vec<_>>(),
+                "message": message,
+            }));
+        }
+        println!("{message}");
+        return Ok(());
+    }
+    let config = Config::load();
+    if json {
+        return super::output::print(&serde_json::json!({
+            "mode": config.quality.mode,
+            "fallback": config.quality.fallback,
+            "describe": config.quality.describe(),
+            "chain": config.quality.chain().iter().map(|q| q.to_alias()).collect::<Vec<_>>(),
+            "config_path": Config::path().display().to_string(),
+        }));
+    }
     let mut stdout = std::io::stdout().lock();
-    writeln!(stdout, "{out}")?;
+    writeln!(stdout, "{}", format_current())?;
     stdout.flush()?;
     Ok(())
 }

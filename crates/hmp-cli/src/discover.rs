@@ -8,9 +8,10 @@ use hmp_core::{Request, Response};
 
 use super::client::DaemonClient;
 use super::commands;
+use super::output;
 
 /// 发现页。
-pub async fn run(page: u32, area: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(page: u32, area: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let area_code = area_code(area)?;
     let mut c = DaemonClient::connect_or_spawn().await?;
     let resp = commands::send(
@@ -22,7 +23,12 @@ pub async fn run(page: u32, area: &str) -> Result<(), Box<dyn std::error::Error>
     )
     .await?;
     match resp {
-        Response::Discover(page) => print_page(&page),
+        Response::Discover(page) => {
+            if json {
+                return output::print(&page);
+            }
+            print_page(&page)
+        }
         Response::Err { code, message } => {
             Err(format!("query failed ({code:?}): {message}").into())
         }

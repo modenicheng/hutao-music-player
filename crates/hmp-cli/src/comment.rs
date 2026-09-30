@@ -14,8 +14,14 @@ use hmp_core::{CommentPage, Request, Response};
 use super::client::DaemonClient;
 use super::commands;
 
-/// 评论列表。
-pub async fn list(mid: &str, sort: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// 评论列表（`page` 1 基页号；`num` 页大小 1..=100）。
+pub async fn list(
+    mid: &str,
+    sort: &str,
+    page: u32,
+    num: u32,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !matches!(sort, "hot" | "new" | "recommend") {
         return Err(format!("unknown sort: {sort} (hot | new | recommend)").into());
     }
@@ -25,11 +31,18 @@ pub async fn list(mid: &str, sort: &str) -> Result<(), Box<dyn std::error::Error
         Request::CommentList {
             mid: mid.to_string(),
             sort: sort.to_string(),
+            page: page.max(1),
+            num: num.clamp(1, 100),
         },
     )
     .await?;
     match resp {
-        Response::CommentList(page) => print_page(&page),
+        Response::CommentList(page) => {
+            if json {
+                return super::output::print(&page);
+            }
+            print_page(&page)
+        }
         Response::Err { code, message } => {
             Err(format!("query failed ({code:?}): {message}").into())
         }
@@ -44,9 +57,15 @@ fn print_page(page: &CommentPage) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         writeln!(
             out,
-            "{} comment(s) (showing first {})",
+            "{} comment(s) (page {}, showing {}{})",
             page.total,
-            page.comments.len()
+            page.page,
+            page.comments.len(),
+            if page.has_more {
+                ", more pages"
+            } else {
+                ""
+            }
         )?;
         for c in &page.comments {
             let time = format_time(c.time);
@@ -56,6 +75,9 @@ fn print_page(page: &CommentPage) -> Result<(), Box<dyn std::error::Error>> {
                 c.cm_id, c.nickname, time, c.like_count
             )?;
             writeln!(out, "   {}", c.content)?;
+        }
+        if page.has_more {
+            writeln!(out, "（更多：--page {}）", page.page + 1)?;
         }
     }
     out.flush()?;

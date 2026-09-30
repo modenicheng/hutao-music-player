@@ -203,7 +203,7 @@ pub struct SongList {
     #[serde(default, alias = "dirId")]
     pub dirid: i64,
     /// 歌单标题。
-    #[serde(default, alias = "dissname", alias = "dirName")]
+    #[serde(default, alias = "dissname", alias = "dirName", alias = "name")]
     pub title: String,
     /// 歌单封面地址。
     #[serde(default, alias = "cover", alias = "logo", alias = "picUrl")]

@@ -9,13 +9,19 @@ use hmp_core::{Request, Response};
 
 use super::client::DaemonClient;
 use super::commands;
+use super::output;
 
 /// 排行榜分类。
-pub async fn category() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn category(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut c = DaemonClient::connect_or_spawn().await?;
     let resp = commands::send(&mut c, Request::TopCategoryGet).await?;
     match resp {
-        Response::TopCategory(page) => print_category(&page),
+        Response::TopCategory(page) => {
+            if json {
+                return output::print(&page);
+            }
+            print_category(&page)
+        }
         Response::Err { code, message } => {
             Err(format!("query failed ({code:?}): {message}").into())
         }
@@ -23,20 +29,30 @@ pub async fn category() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// 榜单详情。
-pub async fn detail(top_id: i64, page: i64) -> Result<(), Box<dyn std::error::Error>> {
+/// 榜单详情（`page` 1 基页号；`num` 页大小，服务端可能钳制）。
+pub async fn detail(
+    top_id: i64,
+    page: i64,
+    num: i64,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut c = DaemonClient::connect_or_spawn().await?;
     let resp = commands::send(
         &mut c,
         Request::TopDetailGet {
             top_id,
-            num: 100,
+            num: num.clamp(1, 100),
             page: page.max(1),
         },
     )
     .await?;
     match resp {
-        Response::TopDetail(page) => print_detail(&page),
+        Response::TopDetail(page) => {
+            if json {
+                return output::print(&page);
+            }
+            print_detail(&page)
+        }
         Response::Err { code, message } => {
             Err(format!("query failed ({code:?}): {message}").into())
         }

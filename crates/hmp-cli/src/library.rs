@@ -61,12 +61,70 @@ pub async fn sync() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 通用窗口边界：`(start, end)`（`limit == 0` 表示到末尾；start 钳制到 total）。
+pub(crate) fn window_bounds(total: usize, offset: usize, limit: usize) -> (usize, usize) {
+    let start = offset.min(total);
+    let end = if limit == 0 {
+        total
+    } else {
+        (start + limit).min(total)
+    };
+    (start, end)
+}
+
+/// 待同步意图总数（sync_status 文本/JSON 两路共用）。
+fn total_pending(
+    rels: &[hmp_storage::RelationRow],
+    pls: &[hmp_storage::PlaylistRow],
+    ops: &[hmp_storage::PlaylistOpRow],
+) -> usize {
+    rels.len() + pls.len() + ops.len()
+}
+
 /// 待同步意图与错误（直读本地 DB）。
-pub async fn sync_status() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn sync_status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;
     let rels = db.relations_pending()?;
     let pls = db.playlists_pending()?;
     let ops = db.playlist_ops_pending()?;
+    if json {
+        let errors: Vec<serde_json::Value> = rels
+            .iter()
+            .filter(|r| r.sync_state == "error")
+            .map(|r| {
+                serde_json::json!({
+                    "kind": "relation",
+                    "entity_type": r.entity_type,
+                    "relation": r.relation,
+                    "entity_key": r.entity_key,
+                    "retry_count": r.retry_count,
+                    "error": r.last_sync_error,
+                })
+            })
+            .chain(pls.iter().filter(|p| p.sync_state == "error").map(|p| {
+                serde_json::json!({
+                    "kind": "playlist",
+                    "id": p.id,
+                    "name": p.name,
+                    "retry_count": p.retry_count,
+                    "error": p.last_sync_error,
+                })
+            }))
+            .chain(ops.iter().filter(|o| o.sync_state == "error").map(|o| {
+                serde_json::json!({
+                    "kind": "playlist_op",
+                    "id": o.id,
+                    "op": o.op,
+                    "retry_count": o.retry_count,
+                    "error": o.last_error,
+                })
+            }))
+            .collect();
+        return super::output::print(&serde_json::json!({
+            "pending": total_pending(&rels, &pls, &ops),
+            "errors": errors,
+        }));
+    }
     let mut stdout = std::io::stdout().lock();
     let total = rels.len() + pls.len() + ops.len();
     if total == 0 {
@@ -109,10 +167,31 @@ pub async fn sync_status() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 我喜欢的歌曲（本地事实视图）。
-pub async fn tracks_liked() -> Result<(), Box<dyn std::error::Error>> {
+/// 我喜欢的歌曲（本地事实视图；`offset` 0 基起始，`limit` 0 = 全量）。
+pub async fn tracks_liked(
+    offset: usize,
+    limit: usize,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;
     let rows = db.list_favorites(10_000)?;
+    let (start, end) = window_bounds(rows.len(), offset, limit);
+    if json {
+        let items: Vec<serde_json::Value> = rows[start..end]
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "track_id": r.track_id,
+                    "source": r.source,
+                    "source_key": r.source_key,
+                    "title": r.title,
+                })
+            })
+            .collect();
+        return super::output::print(&serde_json::json!({
+            "total": rows.len(), "offset": start, "items": items,
+        }));
+    }
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
         writeln!(
@@ -120,23 +199,52 @@ pub async fn tracks_liked() -> Result<(), Box<dyn std::error::Error>> {
             "No favorites yet (try `hmp favorite add <track-id>` or `hmp library sync`)"
         )?;
     } else {
-        for (i, r) in rows.iter().enumerate() {
-            writeln!(stdout, "{:>3}. {}  {}", i + 1, r.title, r.source_key)?;
+        for (i, r) in rows[start..end].iter().enumerate() {
+            writeln!(stdout, "{:>3}. {}  {}", start + i + 1, r.title, r.source_key)?;
+        }
+        if end < rows.len() {
+            writeln!(stdout, "（{end} / {} 首：--offset {end} 翻页）", rows.len())?;
         }
     }
     stdout.flush()?;
     Ok(())
 }
 
-/// 本地曲目浏览（里程碑 E）：默认全部本地曲目，支持搜索/歌手/专辑/收藏过滤。
+/// 本地曲目浏览（里程碑 E）：默认全部本地曲目，支持搜索/歌手/专辑/收藏过滤；
+/// `offset` 0 基起始，`limit` 0 = 全量。
 pub async fn tracks_local(
     search: Option<&str>,
     artist: Option<&str>,
     album: Option<&str>,
     liked: bool,
+    offset: usize,
+    limit: usize,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;
     let rows = db.library_tracks(search, artist, album, liked)?;
+    let (start, end) = window_bounds(rows.len(), offset, limit);
+    if json {
+        let items: Vec<serde_json::Value> = rows[start..end]
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "track_id": r.track_id,
+                    "source_key": r.source_key,
+                    "title": r.title,
+                    "artist": r.artist,
+                    "album": r.album,
+                    "duration_ms": r.duration_ms,
+                    "year": r.year,
+                    "genre": r.genre,
+                    "missing": r.missing,
+                })
+            })
+            .collect();
+        return super::output::print(&serde_json::json!({
+            "total": rows.len(), "offset": start, "items": items,
+        }));
+    }
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
         writeln!(
@@ -144,16 +252,19 @@ pub async fn tracks_local(
             "no matching local tracks (run `hmp library scan <dir>` first)"
         )?;
     } else {
-        for (i, r) in rows.iter().enumerate() {
+        for (i, r) in rows[start..end].iter().enumerate() {
             let missing = if r.missing { " [missing]" } else { "" };
             writeln!(
                 stdout,
                 "{:>3}. {}{}  {}",
-                i + 1,
+                start + i + 1,
                 r.title,
                 missing,
                 r.source_key
             )?;
+        }
+        if end < rows.len() {
+            writeln!(stdout, "（{end} / {} 首：--offset {end} 翻页）", rows.len())?;
         }
     }
     stdout.flush()?;
@@ -161,9 +272,22 @@ pub async fn tracks_local(
 }
 
 /// 本地专辑聚合（里程碑 E）。
-pub async fn albums_local(search: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn albums_local(search: Option<&str>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;
     let rows = db.library_albums(search)?;
+    if json {
+        let items: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|g| {
+                serde_json::json!({
+                    "album": g.album,
+                    "artist": g.artist,
+                    "track_count": g.track_count,
+                })
+            })
+            .collect();
+        return super::output::print(&serde_json::json!({ "total": items.len(), "items": items }));
+    }
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
         writeln!(
@@ -187,9 +311,21 @@ pub async fn albums_local(search: Option<&str>) -> Result<(), Box<dyn std::error
 }
 
 /// 本地歌手聚合（里程碑 E；多艺术家拆行）。
-pub async fn artists_local() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn artists_local(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;
     let rows = db.library_artists()?;
+    if json {
+        let items: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|g| {
+                serde_json::json!({
+                    "artist": g.artist,
+                    "track_count": g.track_count,
+                })
+            })
+            .collect();
+        return super::output::print(&serde_json::json!({ "total": items.len(), "items": items }));
+    }
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
         writeln!(
@@ -212,9 +348,21 @@ pub async fn artists_local() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 我收藏的专辑（本地事实视图；标题随 sync 补齐前显示 id）。
-pub async fn albums_liked() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn albums_liked(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;
     let rows = db.relation_rows("album", "liked")?;
+    if json {
+        let items: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "entity_key": r.entity_key,
+                    "sync_state": r.sync_state,
+                })
+            })
+            .collect();
+        return super::output::print(&serde_json::json!({ "total": items.len(), "items": items }));
+    }
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
         writeln!(stdout, "No liked albums yet (try `hmp library sync`)")?;

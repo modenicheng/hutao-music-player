@@ -28,10 +28,23 @@ pub fn format_auth(cred: Option<&Credential>, backend: BackendKind) -> String {
 }
 
 /// 显示登录状况。
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let store = store_from_env();
     let backend = BackendKind::from_env();
     let cred = store.load()?;
+    if json {
+        let value = match cred.as_ref() {
+            Some(c) => serde_json::json!({
+                "logged_in": true,
+                "uin": c.uin,
+                "music_id": c.music_id,
+                "expired": c.is_expired(),
+                "backend": format!("{backend:?}"),
+            }),
+            None => serde_json::json!({ "logged_in": false }),
+        };
+        return super::output::print(&value);
+    }
     let mut out = std::io::stdout().lock();
     write!(out, "{}", format_auth(cred.as_ref(), backend))?;
     out.flush()?;

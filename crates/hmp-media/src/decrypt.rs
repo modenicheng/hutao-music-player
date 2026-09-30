@@ -14,6 +14,87 @@ use crate::cache::{self, extension_from_magic, final_path, tmp_path};
 /// 结果类型别名。
 type Result<T> = std::result::Result<T, MediaError>;
 
+/// 缓存命中查找（不下载不代理）：按稳定键（URL path | ekey）找已解密缓存，
+/// 返回 `file://` URI。兼容两种键形态——API ekey 键与内嵌键
+/// （`cache_key(url, "")`，Range 探测失败回退路径的产物）。文件头魔数
+/// 校验失败视为脏数据跳过（由回填覆盖修复）。
+pub fn cached_uri_at(root: &Path, url: &str, ekey: Option<&str>) -> Result<Option<String>> {
+    let mut keys = Vec::with_capacity(2);
+    if let Some(e) = ekey.filter(|e| !e.is_empty()) {
+        keys.push(cache::cache_key(url, e));
+    }
+    keys.push(cache::cache_key(url, ""));
+    for key in keys {
+        if let Some(path) = lookup_valid(root, &key) {
+            return Ok(Some(file_uri(&path)?));
+        }
+    }
+    Ok(None)
+}
+
+/// 按 key 前缀扫缓存目录，返回首个头魔数合法的 `<key>.<ext>` 文件。
+/// 实际扩展名可能与 URL 猜测不同（如明文 URL 无后缀），故扫描而非精确路径。
+fn lookup_valid(root: &Path, key: &str) -> Option<std::path::PathBuf> {
+    let prefix = format!("{key}.");
+    let dir = std::fs::read_dir(root).ok()?;
+    dir.flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix) && !n.ends_with(".part"))
+        })
+        .find(|path| {
+            read_first_bytes(path, 8)
+                .map(|head| !head.is_empty() && extension_from_magic(&head).is_some())
+                .unwrap_or(false)
+        })
+}
+
+/// 后台回填：全量下载（+解密）进缓存；已命中即幂等返回。
+/// ekey 非空走 [`prepare_playable_at`]（下载-解密-校验-驱逐全复用）；
+/// 明文下载后魔数校验直接落盘。返回缓存文件 `file://` URI。
+pub async fn cache_fill_at(root: &Path, url: &str, ekey: Option<&str>) -> Result<String> {
+    match ekey.filter(|e| !e.is_empty()) {
+        Some(e) => prepare_playable_at(root, url, Some(e), None).await,
+        None => fill_plain_at(root, url).await,
+    }
+}
+
+/// 明文文件回填：下载 → 头魔数校验 → 原子 rename → 容量驱逐。
+async fn fill_plain_at(root: &Path, url: &str) -> Result<String> {
+    let key = cache::cache_key(url, "");
+    if let Some(path) = lookup_valid(root, &key) {
+        return file_uri(&path);
+    }
+    let tmp = tmp_path(root, &key);
+    let _ = std::fs::remove_file(&tmp);
+    let result = async {
+        download_to_file(url, &tmp, None).await?;
+        let head = read_first_bytes(&tmp, 8)?;
+        let ext = extension_from_magic(&head).ok_or_else(|| {
+            MediaError::Unsupported(format!(
+                "unrecognized audio format (first 8 bytes: {})",
+                hex_str(&head)
+            ))
+        })?;
+        let final_path = final_path(root, &key, ext);
+        std::fs::rename(&tmp, &final_path)?;
+        if let Err(e) = crate::cache::evict_if_needed(root) {
+            warn!(%e, "cache eviction failed");
+        }
+        Ok(final_path)
+    }
+    .await;
+    match result {
+        Ok(path) => file_uri(&path),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 /// 下载-解密-缓存的主流程（显式缓存根目录，测试用）。
 ///
 /// - `url`：QQ 音乐加密音频流 URL
@@ -850,6 +931,112 @@ mod tests {
             "no .tmp files should remain after download failure"
         );
 
+        cleanup(&root);
+    }
+
+    /// 回填加密流后命中：cached_uri_at 按 API ekey 键命中；不同 ekey 不串台。
+    #[tokio::test]
+    async fn fill_encrypted_then_cached_uri_hits() {
+        let root = test_cache_root().join("fill_lookup");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let plaintext = b"fLaC".to_vec();
+        let (encrypted, ekey) =
+            testutil::make_encrypted(&plaintext, b"0123456789abcdefghij", false);
+        let server = MockServer::start().await;
+        let url = format!("{}/song.mflac", server.uri());
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(encrypted))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let filled = cache_fill_at(&root, &url, Some(&ekey)).await.unwrap();
+        assert!(filled.starts_with("file://"));
+
+        // 命中（零网络：mock expect(1) 已封顶）
+        let hit = cached_uri_at(&root, &url, Some(&ekey));
+        match hit {
+            Ok(Some(uri)) => {
+                let path = url::Url::parse(&uri).unwrap().to_file_path().unwrap();
+                assert_eq!(std::fs::read(path).unwrap(), plaintext);
+            }
+            other => panic!("expected cache hit, got {other:?}"),
+        }
+        // 不同 ekey → 不命中（键隔离）
+        assert_eq!(
+            cached_uri_at(&root, &url, Some("different-ekey")).unwrap(),
+            None
+        );
+        cleanup(&root);
+    }
+
+    /// 明文回填：魔数校验落盘 + 二次幂等（mock expect(1) 封顶请求次数）。
+    #[tokio::test]
+    async fn fill_plain_validates_magic_and_is_idempotent() {
+        let root = test_cache_root().join("fill_plain");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut body = b"fLaC".to_vec();
+        body.extend_from_slice(b"plain-payload");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let url = format!("{}/song.mp3", server.uri());
+
+        let r1 = cache_fill_at(&root, &url, None).await.unwrap();
+        let r2 = cache_fill_at(&root, &url, None).await.unwrap();
+        assert_eq!(r1, r2, "二次回填应命中同一缓存文件");
+        let path = url::Url::parse(&r1).unwrap().to_file_path().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        assert_eq!(path.extension(), Some(std::ffi::OsStr::new("flac")));
+        cleanup(&root);
+    }
+
+    /// 明文回填：非音频内容魔数校验失败 → Err 且无 tmp 残留。
+    #[tokio::test]
+    async fn fill_plain_rejects_bad_magic() {
+        let root = test_cache_root().join("fill_plain_bad");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"<!doctype html>"))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            cache_fill_at(&root, &server.uri(), None).await,
+            Err(MediaError::Unsupported(_))
+        ));
+        let has_leftover = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.ends_with(".tmp") || n.ends_with(".part")
+            });
+        assert!(!has_leftover, "失败后不应残留临时文件");
+        cleanup(&root);
+    }
+
+    /// 命中查找跳过脏缓存文件（魔数非法），不误报。
+    #[tokio::test]
+    async fn cached_uri_skips_corrupt_cache_file() {
+        let root = test_cache_root().join("corrupt_skip");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let url = "https://isure.stream.qqmusic.qq.com/abc.mflac";
+        let key = cache::cache_key(url, "");
+        std::fs::write(final_path(&root, &key, "flac"), b"garbage!!").unwrap();
+        assert_eq!(cached_uri_at(&root, url, None).unwrap(), None);
         cleanup(&root);
     }
 }

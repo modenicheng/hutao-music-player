@@ -2,6 +2,11 @@
 //!
 //! `get_info` / `get_tab_detail` 固定 Android 平台（ct=11/cv=14090008），
 //! 通过请求级 comm 覆盖实现；其余接口用默认 Web 平台。
+//!
+//! 全部接口免登录可用。实测（2026-09-29）：9 个接口全部通过；
+//! `get_desc` 布尔参数以 0/1 整数编码后全开（`ex_singer`/`wiki_singer`/
+//! `group_singer`/`pic`/`photos` 均为 true）亦可用；歌曲/专辑列表服务端
+//! 可能忽略 `number` 参数（请求 5 返回 30）。
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -9,6 +14,7 @@ use serde_json::{Value, json};
 use crate::client::QqMusicClient;
 use crate::error::QqMusicError;
 use crate::models::{Album, Song};
+use crate::pagination::{Page, Paged, PagedView, UNKNOWN_TOTAL};
 use crate::protocol::cgi::CgiRequest;
 
 /// Android 平台 comm 覆盖（上游 `VersionProfile.android`）。
@@ -683,6 +689,92 @@ pub struct SingerMvListResponse {
 }
 
 // ---------------------------------------------------------------------------
+// 统一分页视图（has_more 归一规则见 crate::pagination 模块文档）
+// ---------------------------------------------------------------------------
+
+/// 无显式 hasmore 字段，按总数推算（规则 2）：`total > offset + len`。
+///
+/// 服务端固定每页 80 条并忽略请求页大小，故 `Page::num` 仅参与 offset
+/// 计算；续页推进以 `items.len()` 为准（与上游
+/// `MultiFieldContinuationStrategy` 的 `sin + len >= total` 终止语义一致）。
+impl Paged for SingerIndexPageResponse {
+    type Item = SingerBrief;
+
+    fn paged(&self, page: Page) -> PagedView<'_, SingerBrief> {
+        PagedView {
+            items: &self.base.singerlist,
+            total: self.total,
+            has_more: self.total > page.offset() as i64 + self.base.singerlist.len() as i64,
+            page,
+        }
+    }
+}
+
+/// 无显式 hasmore 字段，按总数推算（规则 2）：`total_num > offset + len`。
+///
+/// 服务端忽略 `number` 按固定条数返回，续页推进以 `items.len()` 为准。
+impl Paged for SingerSongListResponse {
+    type Item = Song;
+
+    fn paged(&self, page: Page) -> PagedView<'_, Song> {
+        PagedView {
+            items: &self.song_list,
+            total: self.total_num,
+            has_more: self.total_num > page.offset() as i64 + self.song_list.len() as i64,
+            page,
+        }
+    }
+}
+
+/// 无显式 hasmore 字段，按总数推算（规则 2）：`total > offset + len`。
+///
+/// 服务端忽略 `number` 按固定条数返回，续页推进以 `items.len()` 为准。
+impl Paged for SingerAlbumListResponse {
+    type Item = AlbumBrief;
+
+    fn paged(&self, page: Page) -> PagedView<'_, AlbumBrief> {
+        PagedView {
+            items: &self.album_list,
+            total: self.total,
+            has_more: self.total > page.offset() as i64 + self.album_list.len() as i64,
+            page,
+        }
+    }
+}
+
+/// 无显式 hasmore 字段，按总数推算（规则 2）：`total > offset + len`。
+impl Paged for SingerMvListResponse {
+    type Item = VideoBrief;
+
+    fn paged(&self, page: Page) -> PagedView<'_, VideoBrief> {
+        PagedView {
+            items: &self.mv_list,
+            total: self.total,
+            has_more: self.total > page.offset() as i64 + self.mv_list.len() as i64,
+            page,
+        }
+    }
+}
+
+/// 显式 hasmore 字段（`HasMore`，0/1），以服务端为准（规则 1）。
+///
+/// 内容列表按 [`TabType`] 多态（歌曲/专辑/视频/简介），统一视图仅覆盖
+/// 歌曲 Tab（主用例）；专辑/视频 Tab 请直接读 `album_tab`/`video_tab`
+/// 与 `has_more` 字段。
+impl Paged for HomepageTabDetailResponse {
+    type Item = Song;
+
+    fn paged(&self, page: Page) -> PagedView<'_, Song> {
+        PagedView {
+            items: &self.song_tab,
+            total: UNKNOWN_TOTAL,
+            has_more: self.has_more != 0,
+            page,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 响应提取辅助（上游 jsonpath 的 Rust 等价物；API 与测试共用）
 // ---------------------------------------------------------------------------
 
@@ -765,6 +857,8 @@ pub(crate) fn extract_singer_songs(data: &Value) -> Vec<Song> {
 // ---------------------------------------------------------------------------
 
 /// 歌手 API（对应上游 `SingerApi`）。
+///
+/// 全部接口免登录可用（2026-09-29 逐接口实测）。
 pub struct SingerApi<'a> {
     client: &'a QqMusicClient,
 }
@@ -775,7 +869,11 @@ impl<'a> SingerApi<'a> {
         Self { client }
     }
 
-    /// 获取歌手列表（上游 `get_singer_list`）。
+    /// 获取歌手列表（上游 `get_singer_list`；登录：免登录）。
+    ///
+    /// 按 `area`/`sex`/`genre` 筛选（[`AreaType::All`] 等为 -100）。
+    /// 实测（2026-09-29）：免登录可用，全筛选返回 singerlist=1000、
+    /// hotlist=200；服务端 `tags` 可能返回空对象。
     pub async fn get_singer_list(
         &self,
         area: AreaType,
@@ -798,15 +896,19 @@ impl<'a> SingerApi<'a> {
             .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse singer list: {e}")))
     }
 
-    /// 获取按索引分页的歌手列表（上游 `get_singer_list_index`）。
+    /// 获取按索引分页的歌手列表（上游 `get_singer_list_index`；登录：免登录）。
+    ///
+    /// `page` 为分页窗口（[`Page`]，1 基页号 + 页大小）。**服务端固定每页
+    /// 80 条并忽略页大小**（2026-09-29 实测 page=1 返回 80 条、total=6803）：
+    /// [`Page::num`] 仅用于派生 `sin` 偏移（`sin = page.offset()`），翻页
+    /// 推进应以返回条数为准（见 [`SingerIndexPageResponse::paged`]）。
     pub async fn get_singer_list_index(
         &self,
         area: AreaType,
         sex: SexType,
         genre: GenreType,
         index: IndexType,
-        page: i64,
-        num: i64,
+        page: Page,
     ) -> Result<SingerIndexPageResponse, QqMusicError> {
         let request = CgiRequest::new(
             "music.musichallSinger.SingerList",
@@ -816,8 +918,8 @@ impl<'a> SingerApi<'a> {
                 "sex": sex.value(),
                 "genre": genre.value(),
                 "index": index.value(),
-                "sin": (page - 1) * num,
-                "cur_page": page,
+                "sin": page.offset(),
+                "cur_page": page.page,
             }),
         );
         let data = self.client.musicu_request(&request, None).await?;
@@ -827,7 +929,12 @@ impl<'a> SingerApi<'a> {
         })
     }
 
-    /// 获取歌手主页基本信息（上游 `get_info`，固定 Android 平台）。
+    /// 获取歌手主页基本信息（上游 `get_info`；登录：免登录）。
+    ///
+    /// 固定 Android 平台 comm（ct=11/cv=14090008）；`Info.Singer`/
+    /// `Info.BaseInfo` 已提取到响应的 `singer`/`base_info` 字段。
+    /// 与用户主页不同，歌手主页不需要 `NodeToken` 参数（2026-08-10 实测）。
+    /// 实测（2026-09-29）：免登录可用，`Status=0`。
     pub async fn get_info(&self, mid: &str) -> Result<HomepageHeaderResponse, QqMusicError> {
         let request = CgiRequest::new(
             "music.UnifiedHomepage.UnifiedHomepageSrv",
@@ -845,13 +952,20 @@ impl<'a> SingerApi<'a> {
         Ok(resp)
     }
 
-    /// 获取歌手主页特定 Tab 详情（上游 `get_tab_detail`，固定 Android 平台）。
+    /// 获取歌手主页特定 Tab 详情（上游 `get_tab_detail`；登录：免登录）。
+    ///
+    /// 固定 Android 平台 comm；`page` 为分页窗口（服务端
+    /// `PageNum = page.page - 1`、`PageSize = page.num`）。按 `tab_type` 返回
+    /// 对应内容列表（歌曲在 `song_tab`、专辑在 `album_tab`、MV 在
+    /// `video_tab`、简介在 `introduction_tab`，见
+    /// [`HomepageTabDetailResponse`]）。
+    /// 实测（2026-09-29）：免登录可用，`TabType::Song` 返回 5 首且
+    /// `has_more=1`。
     pub async fn get_tab_detail(
         &self,
         mid: &str,
         tab_type: TabType,
-        page: i64,
-        num: i64,
+        page: Page,
     ) -> Result<HomepageTabDetailResponse, QqMusicError> {
         let request = CgiRequest::new(
             "music.UnifiedHomepage.UnifiedHomepageSrv",
@@ -860,8 +974,8 @@ impl<'a> SingerApi<'a> {
                 "SingerMid": mid,
                 "IsQueryTabDetail": 1,
                 "TabID": tab_type.tab_id(),
-                "PageNum": page - 1,
-                "PageSize": num,
+                "PageNum": page.page.saturating_sub(1),
+                "PageSize": page.num,
                 "Order": 0,
             }),
         )
@@ -876,10 +990,14 @@ impl<'a> SingerApi<'a> {
         Ok(resp)
     }
 
-    /// 获取歌手描述信息（上游 `get_desc`）。
+    /// 获取歌手描述信息（上游 `get_desc`；登录：免登录）。
     ///
-    /// 实测该接口的布尔参数必须以 0/1 整数编码，JSON `true` 会返回 10006
-    /// （上游直接传 Python bool 属上游缺陷）；故内部统一转为 0/1。
+    /// 布尔参数必须以 0/1 整数编码，JSON `true` 会返回 10006
+    /// （上游 `bool_to_int` 默认转换，Rust 内部已统一 `as i64`）。
+    /// 实测（2026-09-29）：免登录可用；最小参数（仅 `singer_mids`）
+    /// 与全开参数（`ex_singer`/`wiki_singer`/`group_singer`/`pic`/
+    /// `photos` 均为 true）均通过（全开返回 desc 725 字符），
+    /// 2026-08-06 记录的「扩展参数 10006」为 JSON bool 编码所致。
     pub async fn get_desc(
         &self,
         mids: &[String],
@@ -907,7 +1025,10 @@ impl<'a> SingerApi<'a> {
             .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse singer desc: {e}")))
     }
 
-    /// 获取相似歌手列表（上游 `get_similar`）。
+    /// 获取相似歌手列表（上游 `get_similar`；登录：免登录）。
+    ///
+    /// `number` 为期望返回数量。实测（2026-09-29）：免登录可用，
+    /// number=5 返回 5 条。
     pub async fn get_similar(
         &self,
         mid: &str,
@@ -925,17 +1046,22 @@ impl<'a> SingerApi<'a> {
         })
     }
 
-    /// 获取歌手的歌曲列表（上游 `get_songs_list`）。
+    /// 获取歌手的歌曲列表（上游 `get_songs_list`；登录：免登录）。
+    ///
+    /// `page` 为分页窗口（服务端 `number = page.num`、`begin = page.offset()`）。
+    /// **服务端忽略 `number`，按固定条数返回**（2026-09-29 实测请求 5 返回
+    /// 30）：翻页按 `items.len()` 推进（下一页窗口的偏移应累加实际返回
+    /// 条数），**不能假设返回 `page.num` 条**；`$.songList[*].songInfo`
+    /// 已提取到 `song_list`。
     pub async fn get_songs_list(
         &self,
         mid: &str,
-        num: i64,
-        page: i64,
+        page: Page,
     ) -> Result<SingerSongListResponse, QqMusicError> {
         let request = CgiRequest::new(
             "musichall.song_list_server",
             "GetSingerSongList",
-            json!({"singerMid": mid, "order": 1, "number": num, "begin": (page - 1) * num}),
+            json!({"singerMid": mid, "order": 1, "number": page.num, "begin": page.offset()}),
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
@@ -947,17 +1073,21 @@ impl<'a> SingerApi<'a> {
         Ok(resp)
     }
 
-    /// 获取歌手的专辑列表（上游 `get_album_list`）。
+    /// 获取歌手的专辑列表（上游 `get_album_list`；登录：免登录）。
+    ///
+    /// `page` 为分页窗口（服务端 `number = page.num`、`begin = page.offset()`）。
+    /// **服务端忽略 `number`，按固定条数返回**（2026-09-29 实测请求 5 返回
+    /// 30）：翻页按 `items.len()` 推进，**不能假设返回 `page.num` 条**。
+    /// 实测免登录可用，total=43（周杰伦）。
     pub async fn get_album_list(
         &self,
         mid: &str,
-        num: i64,
-        page: i64,
+        page: Page,
     ) -> Result<SingerAlbumListResponse, QqMusicError> {
         let request = CgiRequest::new(
             "music.musichallAlbum.AlbumListServer",
             "GetAlbumList",
-            json!({"singerMid": mid, "order": 1, "number": num, "begin": (page - 1) * num}),
+            json!({"singerMid": mid, "order": 1, "number": page.num, "begin": page.offset()}),
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
@@ -966,17 +1096,21 @@ impl<'a> SingerApi<'a> {
         })
     }
 
-    /// 获取歌手 MV 列表（上游 `get_mv_list`）。
+    /// 获取歌手 MV 列表（上游 `get_mv_list`；登录：免登录）。
+    ///
+    /// `page` 为分页窗口（服务端 `count = page.num`、`start = page.offset()`）。
+    /// 服务端可能忽略 `count` 返回固定条数（歌手歌曲/专辑同族接口实测
+    /// 忽略 `number`；MV 2026-09-29 实测 count=5 返回 5 条）：翻页按
+    /// `items.len()` 推进，**不能假设返回 `page.num` 条**。
     pub async fn get_mv_list(
         &self,
         mid: &str,
-        num: i64,
-        page: i64,
+        page: Page,
     ) -> Result<SingerMvListResponse, QqMusicError> {
         let request = CgiRequest::new(
             "MvService.MvInfoProServer",
             "GetSingerMvList",
-            json!({"singermid": mid, "order": 1, "count": num, "start": (page - 1) * num}),
+            json!({"singermid": mid, "order": 1, "count": page.num, "start": page.offset()}),
         );
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));

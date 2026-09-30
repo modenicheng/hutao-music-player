@@ -3,15 +3,15 @@
 //! 页面数据源 = [`library_view`] 直读 library.sqlite3，播放/命令桥另行接线。）
 
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use slint::{ComponentHandle, Global, ModelRc, SharedString, Weak};
 
 use crate::covers::cover_image;
-use crate::format::{format_bytes, format_cny, format_long_duration};
+use crate::format::{format_bytes, format_long_duration};
 use crate::library_view::{self, PlaylistEntry, SongRow, local_cover_image};
-use crate::mock;
 use crate::prefs::Prefs;
 use crate::{
     AppWindow, CoverCardData, Data, FolderRow, Nav, PlaylistCover, Quality, Theme, TopCardData,
@@ -30,6 +30,13 @@ const REFRESH_DEBOUNCE: Duration = Duration::from_millis(500);
 thread_local! {
     static SEARCH_GENERATION: Cell<u64> = const { Cell::new(0) };
 }
+
+/// 扫码登录轮询代次（重新发起/取消即 bump；旧轮询循环的迟到响应按代次丢弃）。
+/// 轮询循环活在 runtime 工作线程，不能像 SEARCH_GENERATION 那样用
+/// thread_local（其正确性依赖「读写都在事件循环线程」），统一 AtomicU64。
+static LOGIN_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// 登录轮询间隔（`LoginQrPoll`；与 CLI PollInterval default 同量级）。
+const LOGIN_POLL_INTERVAL: Duration = Duration::from_millis(1500);
 
 fn model<T: 'static + Clone>(items: Vec<T>) -> ModelRc<T> {
     ModelRc::new(VecModel::from(items))
@@ -203,10 +210,7 @@ fn spawn_discover_load(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::B
                     data.set_discover_has_more(has_more);
                     data.set_discover_state(if empty { 3 } else { 2 });
                     // 模型落地后补真图（占位渐变 → 真实封面）
-                    crate::online_covers::refresh_discover_covers(
-                        ui.as_weak(),
-                        &runtime,
-                    );
+                    crate::online_covers::refresh_discover_covers(ui.as_weak(), &runtime);
                 }
                 _ => {
                     data.set_discover_state(4);
@@ -293,7 +297,10 @@ fn spawn_top_detail_load(
 }
 
 /// 拉取排行榜分类（免登录）。
-fn spawn_top_category_load(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::BackendRuntime>) {
+fn spawn_top_category_load(
+    ui_weak: Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+) {
     let weak = ui_weak;
     runtime.spawn(async move {
         // 置加载态在 tokio 线程（同 discover）
@@ -382,6 +389,92 @@ fn spawn_account_status_load(
             }
             data.set_account_state(if online { 1 } else { 2 });
         });
+    });
+}
+
+/// daemon 扫码状态 → UI login-state（1=等待扫码 2=已扫码 3=成功 4=已拒绝 5=失败）。
+fn login_ui_state(wire_status: i32) -> i32 {
+    match wire_status {
+        hmp_core::ipc::LoginQrState::STATUS_WAITING => 1,
+        hmp_core::ipc::LoginQrState::STATUS_SCANNED => 2,
+        hmp_core::ipc::LoginQrState::STATUS_DONE => 3,
+        hmp_core::ipc::LoginQrState::STATUS_REFUSED => 4,
+        _ => 5,
+    }
+}
+
+/// 加载登录二维码（daemon 已落盘的本机 PNG；UI 禁 HTTP，AUDIT §8.4）。
+fn load_login_qr_image(path: &str) -> Option<slint::Image> {
+    if path.is_empty() {
+        return None;
+    }
+    slint::Image::load_from_path(std::path::Path::new(path)).ok()
+}
+
+/// 登录轮询循环：每 1.5s 一次 `LoginQrPoll`，终态（成功/拒绝/失败/无会话）
+/// 即停；二维码超时自动刷新 → 路径变化 → 重载图。过代（新会话/取消）静默退出。
+fn spawn_login_poll_loop(
+    ui_weak: Weak<AppWindow>,
+    runtime: Arc<crate::backend::BackendRuntime>,
+    generation: u64,
+    mut qr_path: String,
+) {
+    let spawn_rt = Arc::clone(&runtime);
+    spawn_rt.spawn(async move {
+        loop {
+            tokio::time::sleep(LOGIN_POLL_INTERVAL).await;
+            if LOGIN_GENERATION.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            let result = crate::backend::request(hmp_core::Request::LoginQrPoll).await;
+            // 终态判定基于纯数据（Send）；UI 更新统一回事件循环线程。
+            let terminal = match &result {
+                Ok(hmp_core::Response::LoginQrState(state)) => !matches!(
+                    state.status,
+                    hmp_core::ipc::LoginQrState::STATUS_WAITING
+                        | hmp_core::ipc::LoginQrState::STATUS_SCANNED
+                ),
+                _ => true,
+            };
+            if let Ok(hmp_core::Response::LoginQrState(state)) = &result {
+                if !state.qr_path.is_empty() && state.qr_path != qr_path {
+                    qr_path = state.qr_path.clone();
+                }
+            }
+            let weak = ui_weak.clone();
+            let rt = Arc::clone(&runtime);
+            let current_path = qr_path.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak.upgrade() else { return };
+                if LOGIN_GENERATION.load(Ordering::Relaxed) != generation {
+                    return;
+                }
+                let data = Data::get(&ui);
+                match result {
+                    Ok(hmp_core::Response::LoginQrState(state)) => {
+                        if !state.qr_path.is_empty() && state.qr_path != current_path {
+                            if let Some(img) = load_login_qr_image(&state.qr_path) {
+                                data.set_login_qr(img);
+                            }
+                        }
+                        data.set_login_message(state.message.clone().into());
+                        data.set_login_state(login_ui_state(state.status));
+                        if state.status == hmp_core::ipc::LoginQrState::STATUS_DONE {
+                            // 登录成功即重查账号态：昵称/VIP 面板与猜你喜欢解锁
+                            // 都以 AccountStatus 为准（login-state=3 只是过渡展示）。
+                            spawn_account_status_load(ui.as_weak(), &rt);
+                        }
+                    }
+                    _ => {
+                        data.set_login_state(5);
+                        data.set_login_message("与守护进程通信失败，登录中止".into());
+                    }
+                }
+            });
+            if terminal {
+                return;
+            }
+        }
     });
 }
 
@@ -536,63 +629,19 @@ fn apply_snapshot(ui: &AppWindow, snap: &library_view::Snapshot) {
         });
     }
 
-    // ——— 下载/已购两页：后端无下载/已购域，暂 mock（缺口见 docs/AUDIT.md M8 记录）———
-    let pool = mock::song_pool();
-    let albums = mock::curated_albums();
-    let downloads = mock::download_library(&pool);
-    let purchased = mock::purchased_music(&pool, &albums);
-
-    let downloads_size: u64 = downloads.tracks.iter().map(|track| track.size_bytes).sum();
-    let lossless = downloads
-        .tracks
-        .iter()
-        .filter(|track| track.format == "FLAC")
-        .count();
-    data.set_downloads(model(
-        downloads
-            .tracks
-            .iter()
-            .map(|track| mock::to_track_row(&track.song))
-            .collect::<Vec<_>>(),
-    ));
-    data.set_downloads_count(downloads.tracks.len() as i32);
-    data.set_downloads_size(format_bytes(downloads_size).into());
-    data.set_downloads_lossless(lossless as i32);
-    data.set_downloads_storage_path(downloads.storage_path.clone().into());
-
-    let purchased_songs: Vec<mock::SongRef> = purchased
-        .singles
-        .iter()
-        .map(|single| single.song.clone())
-        .collect();
-    data.set_purchased_singles(model(mock::track_rows(&purchased_songs)));
-    let total_fen: u64 = purchased
-        .singles
-        .iter()
-        .map(|single| single.price_fen)
-        .chain(purchased.albums.iter().map(|album| album.price_fen))
-        .sum();
-    data.set_purchased_single_count(purchased.singles.len() as i32);
-    data.set_purchased_album_count(purchased.albums.len() as i32);
-    data.set_purchased_total(format_cny(total_fen).into());
-    data.set_purchased_albums(model(
-        purchased
-            .albums
-            .iter()
-            .map(|entry| {
-                cover_card(
-                    &entry.album.mid,
-                    &entry.album.name,
-                    format!(
-                        "{} 首 · {} 购买",
-                        entry.album.songs.len(),
-                        entry.purchased_at
-                    ),
-                    &format!("album:{}", entry.album.mid),
-                )
-            })
-            .collect::<Vec<_>>(),
-    ));
+    // ——— 下载/已购两页：后端尚无下载/已购域（docs/AUDIT.md M8 记录）———
+    // 诚实空态：不以虚构曲目填充，页面据 count=0 显示空态文案；
+    // 数据域落地后此处改为真实投影。
+    data.set_downloads(model(Vec::new()));
+    data.set_downloads_count(0);
+    data.set_downloads_size("—".into());
+    data.set_downloads_lossless(0);
+    data.set_downloads_storage_path("—".into());
+    data.set_purchased_singles(model(Vec::new()));
+    data.set_purchased_albums(model(Vec::new()));
+    data.set_purchased_single_count(0);
+    data.set_purchased_album_count(0);
+    data.set_purchased_total("—".into());
 }
 
 /// 路由落地后的详情装载（导航路径：单次同步读，单页查询量小；库变更刷新
@@ -924,6 +973,85 @@ pub fn bind(
     // 启动查一次；重进账号页时由 on_navigate 重发（见 spawn_account_status_load）
     spawn_account_status_load(ui.as_weak(), &runtime);
 
+    // ——— 扫码登录 / 退出登录（daemon LoginQr*/Logout IPC）———
+    {
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let runtime = Arc::clone(&runtime);
+        Data::get(ui).on_start_login(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            // bump 代次：已在进行的轮询循环即刻失效，daemon 侧 Start 换新会话
+            let generation = LOGIN_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+            {
+                let data = Data::get(&ui);
+                data.set_login_state(1);
+                data.set_login_message("正在生成二维码…".into());
+            }
+            let weak = ui_weak.clone();
+            let rt = Arc::clone(&runtime);
+            runtime.spawn(async move {
+                let result = crate::backend::request(hmp_core::Request::LoginQrStart).await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    if LOGIN_GENERATION.load(Ordering::Relaxed) != generation {
+                        return;
+                    }
+                    let data = Data::get(&ui);
+                    match result {
+                        Ok(hmp_core::Response::LoginQr(session)) => {
+                            if let Some(img) = load_login_qr_image(&session.qr_path) {
+                                data.set_login_qr(img);
+                            }
+                            data.set_login_message(String::new().into());
+                            data.set_login_state(1);
+                            spawn_login_poll_loop(ui.as_weak(), rt, generation, session.qr_path);
+                        }
+                        _ => {
+                            data.set_login_state(5);
+                            data.set_login_message("无法开始扫码登录（守护进程不可达）".into());
+                        }
+                    }
+                });
+            });
+        });
+    }
+    {
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let runtime = Arc::clone(&runtime);
+        Data::get(ui).on_cancel_login(move || {
+            // bump 代次终止轮询 + 复位面板；daemon 会话取消尽力而为
+            LOGIN_GENERATION.fetch_add(1, Ordering::Relaxed);
+            if let Some(ui) = ui_weak.upgrade() {
+                let data = Data::get(&ui);
+                data.set_login_state(0);
+                data.set_login_message(String::new().into());
+            }
+            runtime.spawn(async move {
+                let _ = crate::backend::request(hmp_core::Request::LoginQrCancel).await;
+            });
+        });
+    }
+    {
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let runtime = Arc::clone(&runtime);
+        Data::get(ui).on_logout(move || {
+            // 扫码面板乐观复位；账号态以 Logout 后的 AccountStatus 重查为准
+            LOGIN_GENERATION.fetch_add(1, Ordering::Relaxed);
+            if let Some(ui) = ui_weak.upgrade() {
+                let data = Data::get(&ui);
+                data.set_login_state(0);
+                data.set_login_message(String::new().into());
+            }
+            let weak = ui_weak.clone();
+            let rt = Arc::clone(&runtime);
+            runtime.spawn(async move {
+                let _ = crate::backend::request(hmp_core::Request::Logout).await;
+                spawn_account_status_load(weak, &rt);
+            });
+        });
+    }
+
     // ——— M4 在线内容页（DiscoverGet/TopCategoryGet/TopDetailGet/GuessGet）———
     // 发现页：免登录；进入页面或点刷新时拉取。runtime 供后台出网。
     {
@@ -945,10 +1073,6 @@ pub fn bind(
     {
         let ui_weak: Weak<AppWindow> = ui.as_weak();
         let rt = Arc::clone(&runtime);
-        let logged_in = {
-            let ui = ui_weak.upgrade().expect("bind holds ui");
-            Data::get(&ui).get_account_logged_in()
-        };
         Data::get(ui).on_refresh_guess(move || {
             let apply_state = move |state: i32, weak: Weak<AppWindow>| {
                 let _ = slint::invoke_from_event_loop(move || {
@@ -957,6 +1081,13 @@ pub fn bind(
                     }
                 });
             };
+            // 登录态在点击时读实时值：bind 时刻账号查询（异步）尚未完成，
+            // 恒 false——捕获进闭包会让「刷新猜你喜欢」在会话中途 `hmp login`
+            // 后永远误报未登录（2026-09-29 失效接线审计）。
+            let logged_in = ui_weak
+                .upgrade()
+                .map(|ui| Data::get(&ui).get_account_logged_in())
+                .unwrap_or(false);
             if !logged_in {
                 apply_state(3, ui_weak.clone());
                 return;
@@ -964,18 +1095,14 @@ pub fn bind(
             apply_state(1, ui_weak.clone());
             let weak = ui_weak.clone();
             rt.spawn(async move {
-                let result =
-                    crate::backend::request(hmp_core::Request::GuessGet { page: 1 }).await;
+                let result = crate::backend::request(hmp_core::Request::GuessGet { page: 1 }).await;
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
                     let data = Data::get(&ui);
                     match result {
                         Ok(hmp_core::Response::Guess(page)) if !page.songs.is_empty() => {
-                            let tracks: Vec<TrackRow> = page
-                                .songs
-                                .iter()
-                                .map(discover_track_row)
-                                .collect();
+                            let tracks: Vec<TrackRow> =
+                                page.songs.iter().map(discover_track_row).collect();
                             let cards: Vec<CoverCardData> = page
                                 .songs
                                 .iter()
@@ -1016,8 +1143,7 @@ pub fn bind(
             });
             let rt = Arc::clone(&rt_guess);
             rt.spawn(async move {
-                let result =
-                    crate::backend::request(hmp_core::Request::GuessGet { page: 1 }).await;
+                let result = crate::backend::request(hmp_core::Request::GuessGet { page: 1 }).await;
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
                     let data = Data::get(&ui);
