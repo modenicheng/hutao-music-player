@@ -8,13 +8,21 @@ use hmp_core::{Request, Response};
 
 use super::client::DaemonClient;
 use super::commands;
+use super::output;
 
-/// 猜你喜欢。
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// 猜你喜欢（`page` 1 基页号；服务端按页返回，空页即末页）。
+pub async fn run(page: u32, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut c = DaemonClient::connect_or_spawn().await?;
-    let resp = commands::send(&mut c, Request::GuessGet { page: 1 }).await?;
+    let resp = commands::send(
+        &mut c,
+        Request::GuessGet { page: page.max(1) },
+    )
+    .await?;
     match resp {
         Response::Guess(page) => {
+            if json {
+                return output::print(&page);
+            }
             let mut out = std::io::stdout().lock();
             use std::io::Write;
             if page.songs.is_empty() {

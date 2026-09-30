@@ -112,7 +112,7 @@ pub async fn remove_track(id: i64, position: i64) -> Result<(), Box<dyn std::err
 
 /// 歌单列表（统一视图：local / qq-owned / qq-favorite）。
 /// `scope`：all | local | owned | favorite（默认 all）。
-pub async fn list(scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn list(scope: Option<&str>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;
     let rows = db.list_playlists()?;
     let want = match scope {
@@ -128,6 +128,23 @@ pub async fn list(scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         .into_iter()
         .filter(|p| want.is_none_or(|w| p.relation == w))
         .collect();
+    if json {
+        let items: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "provider": p.provider,
+                    "relation": p.relation,
+                    "remote_id": p.remote_id,
+                    "sync_state": p.sync_state,
+                    "track_count": p.track_count,
+                })
+            })
+            .collect();
+        return super::output::print(&serde_json::json!({ "total": items.len(), "items": items }));
+    }
     let mut stdout = std::io::stdout().lock();
     if rows.is_empty() {
         writeln!(
@@ -157,16 +174,49 @@ pub async fn list(scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// 歌单内曲目。
-pub async fn show(id: i64) -> Result<(), Box<dyn std::error::Error>> {
+/// 歌单内曲目（`offset` 0 基起始；`limit` 0 = 全量）。
+pub async fn show(
+    id: i64,
+    offset: usize,
+    limit: usize,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = super::library::open_library()?;
     let tracks = db.playlist_tracks(id)?;
+    let total = tracks.len();
+    let page: Vec<_> = tracks
+        .into_iter()
+        .skip(offset)
+        .take(if limit == 0 { usize::MAX } else { limit })
+        .collect();
+    if json {
+        let items: Vec<serde_json::Value> = page
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "position": t.position,
+                    "track_id": t.track_id,
+                    "title": t.title,
+                    "source_key": t.source_key,
+                })
+            })
+            .collect();
+        return super::output::print(&serde_json::json!({
+            "id": id,
+            "total": total,
+            "offset": offset,
+            "items": items,
+        }));
+    }
     let mut stdout = std::io::stdout().lock();
-    if tracks.is_empty() {
-        writeln!(stdout, "Playlist #{id} is empty")?;
+    if page.is_empty() {
+        writeln!(stdout, "Playlist #{id} is empty (or window past end)")?;
     } else {
-        for t in &tracks {
+        for t in &page {
             writeln!(stdout, "{:>3}. {}  {}", t.position, t.title, t.source_key)?;
+        }
+        if offset + page.len() < total {
+            writeln!(stdout, "（{} / {} 首：--offset 翻页）", offset + page.len(), total)?;
         }
     }
     stdout.flush()?;

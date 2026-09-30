@@ -412,9 +412,14 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             write_frame(wr, &resp).await?;
         }
         // —— 评论（spec §6）：读走 TTL cache；写直发 QQ。
-        Ok(Request::CommentList { mid, sort }) => {
+        Ok(Request::CommentList {
+            mid,
+            sort,
+            page,
+            num,
+        }) => {
             let resp = match &handle.comment {
-                Some(svc) => match svc.list(&mid, &sort).await {
+                Some(svc) => match svc.list(&mid, &sort, page, num).await {
                     Ok(page) => Response::CommentList(page),
                     Err(message) => Response::Err {
                         code: IpcErrorCode::Internal,

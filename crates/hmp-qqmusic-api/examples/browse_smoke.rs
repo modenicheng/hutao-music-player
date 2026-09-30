@@ -3,6 +3,7 @@
 //! 运行：`cargo run -p hmp-qqmusic-api --example browse_smoke`
 
 use hmp_qqmusic_api::QqMusicClient;
+use hmp_qqmusic_api::pagination::Page;
 use hmp_qqmusic_api::album::AlbumApi;
 use hmp_qqmusic_api::recommend::RecommendApi;
 use hmp_qqmusic_api::singer::{AreaType, GenreType, IndexType, SexType, SingerApi, TabType};
@@ -18,7 +19,7 @@ async fn main() {
     // 歌单详情
     let sl = SonglistApi::new(&client);
     let detail = sl
-        .get_detail(8655927861, 0, 5, 1, false, true, true)
+        .get_detail(8655927861, 0, Page::new(1, 5), false, true, true)
         .await
         .unwrap();
     println!(
@@ -49,12 +50,12 @@ async fn main() {
             .collect::<Vec<_>>()
             .join("/")
     );
-    let asong = album.get_song("1458791", 5, 1).await.unwrap();
+    let asong = album.get_song("1458791", Page::new(1, 5)).await.unwrap();
     println!(
         "专辑歌曲: 共 {} 首, 首曲: {}",
         asong.total_num, asong.song_list[0].name
     );
-    let new_albums = album.get_new_album(1, 5, 1).await.unwrap();
+    let new_albums = album.get_new_album(1, Page::new(1, 5)).await.unwrap();
     println!(
         "新碟(内地): {} 张, 最新: {}",
         new_albums.total, new_albums.albums[0].album.name
@@ -82,8 +83,7 @@ async fn main() {
             SexType::All,
             GenreType::All,
             IndexType::Letter(b'Z'),
-            1,
-            10,
+            Page::new(1, 10),
         )
         .await
         .unwrap();
@@ -98,7 +98,7 @@ async fn main() {
         &header.base_info.avatar[..header.base_info.avatar.len().min(50)]
     );
     let tab = singer
-        .get_tab_detail(JAY_MID, TabType::Song, 1, 5)
+        .get_tab_detail(JAY_MID, TabType::Song, Page::new(1, 5))
         .await
         .unwrap();
     println!(
@@ -106,17 +106,17 @@ async fn main() {
         tab.song_tab.len(),
         tab.has_more > 0
     );
-    let ss = singer.get_songs_list(JAY_MID, 5, 1).await.unwrap();
+    let ss = singer.get_songs_list(JAY_MID, Page::new(1, 5)).await.unwrap();
     println!(
         "歌手歌曲: 共 {} 首, 首曲: {}",
         ss.total_num, ss.song_list[0].name
     );
-    let albums = singer.get_album_list(JAY_MID, 5, 1).await.unwrap();
+    let albums = singer.get_album_list(JAY_MID, Page::new(1, 5)).await.unwrap();
     println!(
         "歌手专辑: {} 张, 最新: {}",
         albums.total, albums.album_list[0].album.name
     );
-    let mvs = singer.get_mv_list(JAY_MID, 5, 1).await.unwrap();
+    let mvs = singer.get_mv_list(JAY_MID, Page::new(1, 5)).await.unwrap();
     println!("歌手 MV: {} 个, 首个: {}", mvs.total, mvs.mv_list[0].title);
     let similar = singer.get_similar(JAY_MID, 5).await.unwrap();
     println!(
@@ -150,7 +150,7 @@ async fn main() {
         first.name,
         first.id
     );
-    let td = top.get_detail(first.id, 5, 1, true).await.unwrap();
+    let td = top.get_detail(first.id, Page::new(1, 5), true).await.unwrap();
     println!(
         "榜单详情: {} - 第1名: {}",
         td.info.name,
@@ -174,7 +174,7 @@ async fn main() {
         radar.songs[0].name,
         radar.has_more
     );
-    let rsl = rec.get_recommend_songlist(1, 10).await.unwrap();
+    let rsl = rec.get_recommend_songlist(Page::new(1, 10)).await.unwrap();
     println!(
         "推荐歌单: {} 个 (还有更多: {})",
         rsl.songlists.len(),

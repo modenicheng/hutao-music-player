@@ -249,10 +249,13 @@ pub fn parse_source(src: &str) -> hmp_core::PlayRequest {
 }
 
 /// `hmp status`。
-pub async fn cmd_status(client: &mut DaemonClient) -> Result<(), CliError> {
+pub async fn cmd_status(client: &mut DaemonClient, json: bool) -> Result<(), CliError> {
     let resp = send(client, Request::Status).await?;
     match resp {
         Response::Status(st) => {
+            if json {
+                return super::output::print(&st).map_err(|e| CliError::Protocol(e.to_string()));
+            }
             let mut out = std::io::stdout().lock();
             write!(out, "{}", format_status(&st))?;
             out.flush()?;
@@ -278,9 +281,13 @@ pub async fn cmd_queue_list(
     client: &mut DaemonClient,
     all: bool,
     limit: usize,
+    json: bool,
 ) -> Result<(), CliError> {
     let mut out = std::io::stdout().lock();
     let mut total_printed = 0usize;
+    // 循环体至少执行一次且必先赋值后读取（空队列首响应也带 total）。
+    let mut queue_total;
+    let mut json_items: Vec<serde_json::Value> = Vec::new();
     loop {
         let resp = send(
             client,
@@ -299,7 +306,19 @@ pub async fn cmd_queue_list(
         // 本地媒体库批量投影（库缺失/未缓存 → 回退显示 id）。
         let ids: Vec<String> = page.items.iter().map(|e| e.track_id.to_string()).collect();
         let meta = project_meta(&ids);
+        queue_total = page.total;
         for (i, e) in page.items.iter().enumerate() {
+            if json {
+                let key = e.track_id.to_string();
+                json_items.push(serde_json::json!({
+                    "index": page.offset + i,
+                    "track_id": key,
+                    "title": meta.get(&key).map(|m| m.title.clone()),
+                    "artist": meta.get(&key).and_then(|m| m.artist.clone()),
+                    "is_current": e.is_current,
+                }));
+                continue;
+            }
             let mark = if e.is_current { "▶" } else { " " };
             let key = e.track_id.to_string();
             let title = meta.get(&key).map(|m| m.title.as_str()).unwrap_or(&key);
@@ -320,6 +339,14 @@ pub async fn cmd_queue_list(
         if !all || total_printed >= page.total {
             break;
         }
+    }
+    if json {
+        return super::output::print(&serde_json::json!({
+            "total": queue_total,
+            "count": json_items.len(),
+            "items": json_items,
+        }))
+        .map_err(|e| CliError::Protocol(e.to_string()));
     }
     out.flush()?;
     Ok(())

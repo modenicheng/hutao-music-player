@@ -167,6 +167,12 @@ pub enum Request {
         mid: String,
         /// 排序：hot | new | recommend。
         sort: String,
+        /// 页号（1 基；缺省 1）。
+        #[serde(default = "default_comment_page")]
+        page: u32,
+        /// 每页条数（1..=100，超出钳制；缺省 20）。
+        #[serde(default = "default_comment_num")]
+        num: u32,
     },
     /// 发表/回复评论（写；直发 QQ）。
     CommentPost {
@@ -359,6 +365,16 @@ pub enum PlaylistWriteOp {
     },
 }
 
+/// 评论列表缺省页号（1 基；serde 兼容旧 wire 帧）。
+fn default_comment_page() -> u32 {
+    1
+}
+
+/// 评论列表缺省页大小（serde 兼容旧 wire 帧）。
+fn default_comment_num() -> u32 {
+    20
+}
+
 /// 评论条目（展示投影；daemon 经 mid→qq_song_id 解析后返回）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CommentItem {
@@ -376,8 +392,14 @@ pub struct CommentItem {
 /// 评论页。
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct CommentPage {
-    /// 评论总数。
+    /// 评论总数（服务端 `TotalCmNum`）。
     pub total: i64,
+    /// 是否还有下一页（服务端 `CommentList.HasMore`）。
+    #[serde(default)]
+    pub has_more: bool,
+    /// 当前页号（1 基；回显请求窗口，JSON 消费方翻页用）。
+    #[serde(default = "default_comment_page")]
+    pub page: u32,
     pub comments: Vec<CommentItem>,
 }
 
@@ -714,6 +736,8 @@ mod tests {
             Request::CommentList {
                 mid: "m".into(),
                 sort: "hot".into(),
+                page: 1,
+                num: 20,
             },
             Request::CommentPost {
                 mid: "m".into(),
@@ -780,6 +804,8 @@ mod tests {
     fn response_roundtrips_through_frame() {
         let page = CommentPage {
             total: 1,
+            has_more: true,
+            page: 1,
             comments: vec![CommentItem {
                 cm_id: "c".into(),
                 seq_no: "s".into(),

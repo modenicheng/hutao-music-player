@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use hmp_qqmusic_api::pagination::{Page, Paged};
 use hmp_qqmusic_api::{CommentApi, QqMusicClient, credential::Credential, song::SongApi};
 use hmp_storage::LibraryDb;
 
@@ -18,8 +19,8 @@ fn cache_fresh(at: Instant, now: Instant) -> bool {
     now.duration_since(at) < CACHE_TTL
 }
 
-/// 缓存键：(mid, sort)；值：写入时刻 + 页。
-type CacheKey = (String, String);
+/// 缓存键：(mid, sort, page, num)；值：写入时刻 + 页。
+type CacheKey = (String, String, u32, u32);
 type CacheEntry = (Instant, hmp_core::CommentPage);
 
 /// 评论服务（server 持有；daemon 注入）。
@@ -91,9 +92,17 @@ impl CommentService {
         Ok(resp.track.id)
     }
 
-    /// 评论列表（TTL cache；sort: hot|new|recommend）。
-    pub async fn list(&self, mid: &str, sort: &str) -> Result<hmp_core::CommentPage, String> {
-        let key = (mid.to_string(), sort.to_string());
+    /// 评论列表（TTL cache；sort: hot|new|recommend；`page`/`num` 为
+    /// 1 基页号与页大小，页大小钳制到 [`hmp_qqmusic_api::pagination::MAX_NUM`]）。
+    pub async fn list(
+        &self,
+        mid: &str,
+        sort: &str,
+        page: u32,
+        num: u32,
+    ) -> Result<hmp_core::CommentPage, String> {
+        let window = Page::new(page.max(1), num.max(1));
+        let key = (mid.to_string(), sort.to_string(), window.page, window.num);
         if let Some((at, page)) = self.cache.lock().unwrap().get(&key) {
             if cache_fresh(*at, Instant::now()) {
                 return Ok(page.clone());
@@ -101,22 +110,25 @@ impl CommentService {
         }
         let biz_id = self.resolve_song_id(mid).await?;
         let api = CommentApi::new(&self.client);
-        let comments = match sort {
-            "new" => api.get_new_comments(biz_id, 1, 20).await,
-            "recommend" => api.get_recommend_comments(biz_id, 1, 20).await,
-            _ => api.get_hot_comments(biz_id, 1, 20).await,
+        let resp = match sort {
+            "new" => api.get_new_comments(biz_id, window).await,
+            "recommend" => api.get_recommend_comments(biz_id, window).await,
+            _ => api.get_hot_comments(biz_id, window).await,
         }
         .map_err(|e| e.to_string())?;
-        let count = api.get_comment_count(biz_id).await.unwrap_or(0);
+        let view = resp.paged(window);
         let page = hmp_core::CommentPage {
-            total: count,
-            comments: comments
-                .into_iter()
+            total: view.total,
+            has_more: view.has_more,
+            page: window.page,
+            comments: view
+                .items
+                .iter()
                 .map(|c| hmp_core::CommentItem {
-                    cm_id: c.cm_id,
-                    seq_no: c.seq_no,
-                    content: c.content,
-                    nickname: c.nickname,
+                    cm_id: c.cm_id.clone(),
+                    seq_no: c.seq_no.clone(),
+                    content: c.content.clone(),
+                    nickname: c.nickname.clone(),
                     time: c.time,
                     like_count: c.like_count,
                 })
@@ -177,7 +189,7 @@ mod tests {
         let svc = CommentService::new(store, lib);
         let mut cache = svc.cache.lock().unwrap();
         for i in 0..129 {
-            let key = (format!("mid-{i}"), "hot".to_string());
+            let key = (format!("mid-{i}"), "hot".to_string(), 1, 20);
             if cache.len() >= 128 {
                 cache.clear();
             }

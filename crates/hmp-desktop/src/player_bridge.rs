@@ -793,6 +793,8 @@ fn spawn_comment_fetch(
         let result = crate::backend::request(Request::CommentList {
             mid: mid.clone(),
             sort: sort_name.into(),
+            page: 1,
+            num: 20,
         })
         .await;
         let _ = slint::invoke_from_event_loop(move || {

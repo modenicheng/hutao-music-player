@@ -38,6 +38,7 @@ pub mod error;
 pub mod login;
 pub mod lyric;
 pub mod models;
+pub mod pagination;
 pub mod protocol;
 pub mod recommend;
 pub mod singer;
@@ -46,6 +47,8 @@ pub mod songlist;
 pub mod top;
 pub mod user;
 
+pub use pagination::{DEFAULT_NUM, MAX_NUM, UNKNOWN_TOTAL, Page, Paged, PagedView};
+
 pub use album::{
     AlbumApi, AlbumFavWriteResponse, GetAlbumDetailResponse, GetAlbumSongResponse,
     GetNewAlbumResponse,
@@ -53,7 +56,7 @@ pub use album::{
 pub use client::QqMusicClient;
 pub use comment::{AddCommentResponse, Comment, CommentApi, CommentListData, CommentListResponse};
 pub use config::ClientConfig;
-pub use credential::Credential;
+pub use credential::{Credential, LoginType};
 pub use error::QqMusicError;
 pub use login::{LoginApi, QR, QRCodeLoginEvents, QRLoginResult, QRLoginType};
 pub use lyric::{GetLyricResponse, LyricApi};
@@ -72,4 +75,5 @@ pub use songlist::{CreateDeleteSonglistResp, GetSonglistDetailResponse, Songlist
 pub use top::{TopApi, TopCategoryResponse, TopDetailResponse};
 pub use user::{
     UserApi, UserCreatedSonglistResponse, UserFavAlbumResponse, UserFavSonglistResponse,
+    UserMusicGeneResponse, UserInfoCard,
 };

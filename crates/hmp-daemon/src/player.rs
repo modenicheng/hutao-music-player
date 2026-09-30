@@ -13,6 +13,7 @@ use hmp_core::{
     PlayerCommand, PlayerEvent, Track, TrackId,
 };
 use hmp_player::PlayerCore;
+use hmp_qqmusic_api::pagination::Page;
 use hmp_qqmusic_api::{AlbumApi, QqMusicClient, SongApi, SongFileInfo, SongFileType, SonglistApi};
 use hmp_storage::credential::Store;
 use tokio::sync::{broadcast, watch};
@@ -445,7 +446,7 @@ pub async fn resolve_source_ids_impl(
                 let api = &api;
                 async move {
                     let resp = api
-                        .get_detail(list_id, 0, 100, page, true, false, false)
+                        .get_detail(list_id, 0, Page::new(page as u32, 100), true, false, false)
                         .await
                         .map_err(|e| EngineError::PlaylistNotFound(e.to_string()))?;
                     let stubs = resp.songs.iter().filter_map(song_stub).collect();
@@ -464,7 +465,7 @@ pub async fn resolve_source_ids_impl(
                 let api = &api;
                 async move {
                     let resp = api
-                        .get_song(id.as_ref(), 100, page)
+                        .get_song(id.as_ref(), Page::new(page as u32, 100))
                         .await
                         .map_err(|e| EngineError::PlaylistNotFound(e.to_string()))?;
                     let stubs = resp.song_list.iter().filter_map(song_stub).collect();

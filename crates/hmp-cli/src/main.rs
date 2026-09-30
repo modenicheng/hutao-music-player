@@ -22,6 +22,7 @@ mod guess;
 mod history;
 mod library;
 mod login;
+mod output;
 mod playlist;
 mod quality;
 mod scan;
@@ -41,6 +42,11 @@ use hmp_core::{LoopMode, Request};
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// Output structured JSON (pretty) for programmatic/agent consumption.
+    /// Data goes to stdout; errors become `{"error": …}` on stdout with a
+    /// non-zero exit code.
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 /// 顶层命令：高频短命令保留为 alias，完整命令面在二级子命令下。
@@ -93,9 +99,16 @@ enum Command {
         /// Detail page number (1-based).
         #[arg(long, default_value_t = 1)]
         page: i64,
+        /// Detail page size (server may clamp).
+        #[arg(long, default_value_t = 100)]
+        num: i64,
     },
     /// Guess-you-like songs (login required).
-    Guess,
+    Guess {
+        /// Page number (1-based).
+        #[arg(long, default_value_t = 1)]
+        page: u32,
+    },
     /// Log in via QQ QR code (ASCII art in the terminal).
     Login,
     /// Show login status (local credential check).
@@ -198,7 +211,15 @@ enum PlaylistCmd {
         scope: Option<String>,
     },
     /// Show tracks in a playlist.
-    Show { id: i64 },
+    Show {
+        id: i64,
+        /// 0-based start offset into the track list.
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Max tracks to show (0 = all).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
     /// Create a playlist.
     Create { name: String },
     /// Rename a playlist.
@@ -234,6 +255,12 @@ enum LibraryCmd {
         /// Show liked only.
         #[arg(long)]
         liked: bool,
+        /// 0-based start offset into the result list.
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Max rows to list (0 = all).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
     },
     /// Local album aggregation.
     Albums {
@@ -269,6 +296,12 @@ enum CommentCmd {
         /// Sort: hot | new | recommend (default hot).
         #[arg(long, default_value = "hot")]
         sort: String,
+        /// Page number (1-based).
+        #[arg(long, default_value_t = 1)]
+        page: u32,
+        /// Page size (1..=100).
+        #[arg(long, default_value_t = 20)]
+        num: u32,
     },
     /// Post a comment.
     Post {
@@ -301,7 +334,14 @@ enum FavoriteCmd {
     /// Unlike a track.
     Remove { id: String },
     /// List liked tracks.
-    List,
+    List {
+        /// 0-based start offset into the list.
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Max rows to list (0 = all).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
 }
 
 #[tokio::main]
@@ -316,8 +356,15 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
+    let json_mode = cli.json;
     if let Err(e) = run(cli).await {
-        eprintln!("error: {e}");
+        // JSON 模式下错误也走 stdout 的 `{"error": …}` 单对象（agent 解析契约），
+        // 非 JSON 模式保持 `error: …` 到 stderr。
+        if json_mode {
+            let _ = output::print(&serde_json::json!({ "error": e.to_string() }));
+        } else {
+            eprintln!("error: {e}");
+        }
         std::process::exit(1);
     }
 }
@@ -345,7 +392,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Volume { value } => run_remote(commands::volume_req(value)).await,
         Command::Status => {
             let mut c = client::DaemonClient::connect_or_spawn().await?;
-            commands::cmd_status(&mut c).await?;
+            commands::cmd_status(&mut c, cli.json).await?;
             Ok(())
         }
         Command::Quit => run_remote(commands::quit_req()).await,
@@ -356,27 +403,29 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 hmp_daemon::serve::run_foreground().await
             }
         }
-        Command::Search { keyword } => search::run(&keyword).await,
-        Command::Discover { page, area } => discover::run(page, &area).await,
-        Command::Top { top_id, page } => match top_id {
-            Some(id) => top::detail(id, page).await,
-            None => top::category().await,
+        Command::Search { keyword } => search::run(&keyword, cli.json).await,
+        Command::Discover { page, area } => discover::run(page, &area, cli.json).await,
+        Command::Top { top_id, page, num } => match top_id {
+            Some(id) => top::detail(id, page, num, cli.json).await,
+            None => top::category(cli.json).await,
         },
-        Command::Guess => guess::run().await,
+        Command::Guess { page } => guess::run(page, cli.json).await,
         Command::Login => login::run().await,
-        Command::Auth => auth::run().await,
+        Command::Auth => auth::run(cli.json).await,
         Command::Scan { dir } => scan::run(&dir).await,
         Command::Favorite(cmd) => match cmd {
             FavoriteCmd::Add { id } => favorite::add(&id).await,
             FavoriteCmd::Remove { id } => favorite::remove(&id).await,
-            FavoriteCmd::List => favorite::list().await,
+            FavoriteCmd::List { offset, limit } => {
+                favorite::list(offset, limit, cli.json).await
+            }
         },
 
         // —— 二级命令面 ——
         Command::Player(cmd) => match cmd {
             PlayerCmd::Status => {
                 let mut c = client::DaemonClient::connect_or_spawn().await?;
-                commands::cmd_status(&mut c).await?;
+                commands::cmd_status(&mut c, cli.json).await?;
                 Ok(())
             }
             PlayerCmd::Pause => run_remote(commands::pause_req()).await,
@@ -386,17 +435,19 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             PlayerCmd::Stop => run_remote(commands::stop_req()).await,
             PlayerCmd::Seek { secs } => run_remote(commands::seek_req(secs)).await,
             PlayerCmd::Volume { value } => run_remote(commands::volume_req(value)).await,
-            PlayerCmd::Quality { alias, no_fallback } => quality::run(alias, no_fallback).await,
+            PlayerCmd::Quality { alias, no_fallback } => {
+                quality::run(alias, no_fallback, cli.json).await
+            }
         },
         Command::Queue(cmd) => match cmd {
             QueueCmd::List { all, limit } => {
                 let mut c = client::DaemonClient::connect_or_spawn().await?;
-                commands::cmd_queue_list(&mut c, all, limit.unwrap_or(50)).await?;
+                commands::cmd_queue_list(&mut c, all, limit.unwrap_or(50), cli.json).await?;
                 Ok(())
             }
             QueueCmd::Show => {
                 let mut c = client::DaemonClient::connect_or_spawn().await?;
-                commands::cmd_queue_list(&mut c, false, 50).await?;
+                commands::cmd_queue_list(&mut c, false, 50, cli.json).await?;
                 Ok(())
             }
             QueueCmd::Add { source } => run_remote(commands::queue_append_req(&source)).await,
@@ -415,8 +466,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Command::Playlist(cmd) => match cmd {
-            PlaylistCmd::List { scope } => playlist::list(scope.as_deref()).await,
-            PlaylistCmd::Show { id } => playlist::show(id).await,
+            PlaylistCmd::List { scope } => playlist::list(scope.as_deref(), cli.json).await,
+            PlaylistCmd::Show {
+                id,
+                offset,
+                limit,
+            } => playlist::show(id, offset, limit, cli.json).await,
             PlaylistCmd::Create { name } => playlist::create(&name).await,
             PlaylistCmd::Rename { id, name } => playlist::rename(id, &name).await,
             PlaylistCmd::Add { id, track } => playlist::add(id, &track).await,
@@ -424,35 +479,40 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             PlaylistCmd::Delete { id } => playlist::delete(id).await,
         },
         Command::Library(cmd) => match cmd {
-            LibraryCmd::History { count } => history::run(count).await,
+            LibraryCmd::History { count } => history::run(count, cli.json).await,
             LibraryCmd::Sync => library::sync().await,
-            LibraryCmd::SyncStatus => library::sync_status().await,
+            LibraryCmd::SyncStatus => library::sync_status(cli.json).await,
             LibraryCmd::Tracks {
                 search,
                 artist,
                 album,
                 liked,
+                offset,
+                limit,
             } => {
                 if liked && search.is_none() && artist.is_none() && album.is_none() {
-                    library::tracks_liked().await
+                    library::tracks_liked(offset, limit, cli.json).await
                 } else {
                     library::tracks_local(
                         search.as_deref(),
                         artist.as_deref(),
                         album.as_deref(),
                         liked,
+                        offset,
+                        limit,
+                        cli.json,
                     )
                     .await
                 }
             }
             LibraryCmd::Albums { search, liked } => {
                 if liked && search.is_none() {
-                    library::albums_liked().await
+                    library::albums_liked(cli.json).await
                 } else {
-                    library::albums_local(search.as_deref()).await
+                    library::albums_local(search.as_deref(), cli.json).await
                 }
             }
-            LibraryCmd::Artists => library::artists_local().await,
+            LibraryCmd::Artists => library::artists_local(cli.json).await,
             LibraryCmd::Scan { dir } => scan::run(&dir).await,
         },
         Command::Account(cmd) => match cmd {
@@ -460,9 +520,16 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             AccountCmd::Vip => account::vip().await,
         },
         Command::Comment(cmd) => match cmd {
-            CommentCmd::List { mid, sort } => comment::list(&mid, &sort).await,
+            CommentCmd::List {
+                mid,
+                sort,
+                page,
+                num,
+            } => comment::list(&mid, &sort, page, num, cli.json).await,
             CommentCmd::Post { mid, text } => comment::post(&mid, &text).await,
-            CommentCmd::Reply { mid, cm_id, text } => comment::reply(&mid, &cm_id, &text).await,
+            CommentCmd::Reply { mid, cm_id, text } => {
+                comment::reply(&mid, &cm_id, &text).await
+            }
             CommentCmd::Delete { cm_id } => comment::delete(&cm_id).await,
         },
     }

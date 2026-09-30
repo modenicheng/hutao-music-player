@@ -154,19 +154,35 @@ impl ContentService {
             nickname: format!("QQ {}", credential.uin),
             vip_summary: String::new(),
         };
-        // 昵称：主页头部（encrypt_uin 入参）。失败保持回退值。
+        // 昵称：音乐基因用户名片（GetProfileReport，2026-09-29 实测可用）；
+        // 主页 GetHomepageHeader 当前服务端返回 10000 空壳，仅作兜底。
+        // 失败保持回退值。
         if !credential.encrypt_uin.is_empty() {
-            if let Ok(data) = UserApi::new(&self.client)
-                .get_homepage(&credential.encrypt_uin, Some(&credential))
+            let api = UserApi::new(&self.client);
+            let nick = match api
+                .get_music_gene(&credential.encrypt_uin, Some(&credential))
                 .await
             {
-                if let Some(nick) = find_str(&data, "nick")
-                    .or_else(|| find_str(&data, "nickname"))
-                    .or_else(|| find_str(&data, "name"))
-                {
-                    if !nick.is_empty() {
-                        info.nickname = nick.to_string();
+                Ok(gene) if !gene.userinfo_card.nick_name.is_empty() => {
+                    Some(gene.userinfo_card.nick_name)
+                }
+                _ => {
+                    let mut nick = None;
+                    if let Ok(data) = api
+                        .get_homepage(&credential.encrypt_uin, Some(&credential))
+                        .await
+                    {
+                        nick = find_str(&data, "nick")
+                            .or_else(|| find_str(&data, "nickname"))
+                            .or_else(|| find_str(&data, "name"))
+                            .map(String::from);
                     }
+                    nick
+                }
+            };
+            if let Some(nick) = nick {
+                if !nick.is_empty() {
+                    info.nickname = nick;
                 }
             }
         }
@@ -214,7 +230,7 @@ impl ContentService {
     ) -> Result<hmp_core::DiscoverPage, String> {
         let api = hmp_qqmusic_api::recommend::RecommendApi::new(&self.client);
         let playlists = api
-            .get_recommend_songlist(songlist_page.max(1) as i64, 30)
+            .get_recommend_songlist(hmp_qqmusic_api::pagination::Page::new(songlist_page, 30))
             .await
             .map_err(|e| e.to_string())?;
         let newsong = api
@@ -283,7 +299,11 @@ impl ContentService {
         page: i64,
     ) -> Result<hmp_core::TopDetailPage, String> {
         let resp = hmp_qqmusic_api::top::TopApi::new(&self.client)
-            .get_detail(top_id, num, page.max(1), false)
+            .get_detail(
+                top_id,
+                hmp_qqmusic_api::pagination::Page::new(page.max(1) as u32, num.max(1) as u32),
+                false,
+            )
             .await
             .map_err(|e| e.to_string())?;
         let total = resp.info.total_num;
@@ -382,8 +402,6 @@ fn project_song(s: &hmp_qqmusic_api::models::Song) -> hmp_core::DiscoverNewSong 
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +449,108 @@ mod tests {
         ] {
             assert!(svc.cover(url).await.is_err(), "应拒绝: {url}");
         }
+    }
+
+    fn song(mid: &str, name: &str, singer: &str) -> QuickSong {
+        QuickSong {
+            mid: mid.to_string(),
+            name: name.to_string(),
+            singer: singer.to_string(),
+        }
+    }
+
+    /// 匹配评分：标题全等 + 歌手命中 > 标题含 + 歌手命中 > 仅标题含（拒绝）。
+    #[test]
+    fn pick_best_song_scores_and_thresholds() {
+        let songs = vec![
+            song("a", "夜曲 (Live)", "别的歌手"),
+            song("b", "夜曲", "周杰伦 /费玉清"),
+            song("c", "夜曲钢琴版", "周杰伦"),
+        ];
+        assert_eq!(
+            pick_best_song(&songs, "夜 曲", "周杰伦").map(|s| s.mid.as_str()),
+            Some("b")
+        );
+        // 互为包含 + 歌手命中 = 2 分：采纳
+        let partial = vec![song("p", "夜曲钢琴版", "周杰伦")];
+        assert_eq!(
+            pick_best_song(&partial, "夜曲", "周杰伦").map(|s| s.mid.as_str()),
+            Some("p")
+        );
+        // 仅标题含、无歌手命中 = 1 分：拒绝
+        let weak = vec![song("w", "夜曲 (Live)", "别人")];
+        assert_eq!(pick_best_song(&weak, "夜曲", "周杰伦"), None);
+        // 空标题 / 空结果：None
+        assert_eq!(pick_best_song(&songs, "  ", "周杰伦"), None);
+        assert_eq!(pick_best_song(&[], "夜曲", "周杰伦"), None);
+    }
+
+    /// L2 磁盘命中：缓存文件存在时 `lyric` 直接返回、不出网
+    /// （无 hit 会走 detail API 对非法 mid 报错，断言即可甄别路径）。
+    #[allow(clippy::await_holding_lock)] // 测试串行锁，有意跨 await
+    #[tokio::test]
+    async fn lyric_disk_cache_hits_before_network() {
+        // 隔离 XDG_CACHE_HOME（daemon 测试套件无其他读者；改 env 串行由本锁保证）
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env = ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("hmp-content-lyric-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", &root);
+        }
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("XDG_CACHE_HOME") };
+            }
+        }
+        let _restore = Restore;
+
+        hmp_storage::lyric_cache::write_cached_lyric("cached01", "[00:01.00]盘内\n", "").unwrap();
+        let svc = ContentService::new(hmp_storage::credential::store_from_env());
+        let page = svc.lyric("cached01").await.unwrap();
+        assert_eq!(page.lyric, "[00:01.00]盘内\n");
+        assert_eq!(page.source, "qq");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 匹配评分：多歌手任一命中即可；平分先到先得。
+    #[test]
+    fn pick_best_song_artist_tokens_and_ties() {
+        let songs = vec![
+            song("first", "晴天", "周杰伦"),
+            song("second", "晴天", "周杰伦 / 杨瑞代"),
+        ];
+        assert_eq!(
+            pick_best_song(&songs, "晴天", "杨瑞代 / 周杰伦").map(|s| s.mid.as_str()),
+            Some("first")
+        );
+    }
+
+    /// 本地优先端到端（零出网）：同目录 `.lrc` 命中 → source=local；
+    /// 无 sidecar/无标签 → 走 QQ 检索（离线报 Err 而非静默空页）。
+    #[tokio::test]
+    async fn track_lyric_local_sidecar_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("song.mp3");
+        std::fs::write(&audio, b"not really audio").unwrap();
+        std::fs::write(dir.path().join("song.lrc"), "[00:01.00]本地歌词\n").unwrap();
+        let svc = ContentService::new(hmp_storage::credential::store_from_env());
+        let page = svc
+            .track_lyric(&format!("local:{}", audio.display()), "song", "artist")
+            .await
+            .unwrap();
+        assert_eq!(page.source, "local");
+        assert!(page.lyric.contains("本地歌词"));
+    }
+
+    #[tokio::test]
+    async fn track_lyric_empty_title_skips_search() {
+        let svc = ContentService::new(hmp_storage::credential::store_from_env());
+        let page = svc
+            .track_lyric("local:/nonexistent/x.mp3", "  ", "")
+            .await
+            .unwrap();
+        assert_eq!(page, LyricPage::default());
     }
 }

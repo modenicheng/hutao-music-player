@@ -7,6 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use hmp_qqmusic_api::pagination::Page;
 use hmp_qqmusic_api::{QqMusicClient, UserApi, credential::Credential};
 use hmp_storage::LibraryDb;
 
@@ -38,7 +39,7 @@ async fn reconcile_fav_songs(
     let mut page = 1i64;
     let mut present = Vec::new();
     loop {
-        let resp = match api.get_fav_song(euin, page, 100, Some(credential)).await {
+        let resp = match api.get_fav_song(euin, Page::new(page as u32, 100), Some(credential)).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(%e, "reconcile: failed to fetch liked songs");
@@ -77,7 +78,7 @@ async fn reconcile_fav_songlists(
     let mut present = Vec::new();
     loop {
         let resp = match api
-            .get_fav_songlist(euin, page, 100, Some(credential))
+            .get_fav_songlist(euin, Page::new(page as u32, 100), Some(credential))
             .await
         {
             Ok(r) => r,
@@ -150,7 +151,7 @@ async fn reconcile_fav_albums(
     let mut page = 1i64;
     let mut present = Vec::new();
     loop {
-        let resp = match api.get_fav_album(euin, page, 100, Some(credential)).await {
+        let resp = match api.get_fav_album(euin, Page::new(page as u32, 100), Some(credential)).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(%e, "reconcile: failed to fetch liked albums");

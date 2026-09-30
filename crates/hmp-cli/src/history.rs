@@ -22,7 +22,7 @@ pub fn format_recent(r: &RecentPlay) -> String {
 }
 
 /// 打印最近播放列表（默认 10 条）。
-pub async fn run(limit: Option<u32>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(limit: Option<u32>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let path = hmp_storage::data_dir().join("library.sqlite3");
     if !path.exists() {
         eprintln!(
@@ -33,6 +33,25 @@ pub async fn run(limit: Option<u32>) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut db = LibraryDb::open(&path)?;
     let plays = db.recent_plays(limit.unwrap_or(10))?;
+    if json {
+        let items: Vec<serde_json::Value> = plays
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "track_id": r.track_id,
+                    "title": r.title,
+                    "artist": r.artist,
+                    "source": r.source,
+                    "source_key": r.source_key,
+                    "started_at": r.started_at,
+                    "ended_at": r.ended_at,
+                    "listened_ms": r.listened_ms,
+                    "reason": r.reason,
+                })
+            })
+            .collect();
+        return super::output::print(&serde_json::json!({ "total": items.len(), "items": items }));
+    }
     let mut stdout = std::io::stdout().lock();
     if plays.is_empty() {
         writeln!(stdout, "No play history yet")?;

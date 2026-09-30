@@ -8,9 +8,11 @@ use serde_json::{Value, json};
 use crate::client::QqMusicClient;
 use crate::error::QqMusicError;
 use crate::models::Song;
+use crate::pagination::{Page, Paged, PagedView};
 use crate::protocol::cgi::CgiRequest;
 
-/// 排行榜预览歌曲条目（上游 `TopPreviewSong`）。
+/// 排行榜预览歌曲条目（上游 `TopPreviewSong`；字段为服务端扁平摘要形态，
+/// 非 [`Song`] 完整模型）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct TopPreviewSong {
     /// 排名位置。
@@ -45,7 +47,7 @@ pub struct TopPreviewSong {
     pub mv_id: i64,
 }
 
-/// 排行榜摘要信息（上游 `TopSummary`）。
+/// 排行榜摘要信息（上游 `TopSummary`；`GetAll` 分类项与 `GetDetail` 信息体共用）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct TopSummary {
     /// 排行榜 ID。
@@ -92,7 +94,7 @@ pub struct TopSummary {
     pub special_scheme: String,
 }
 
-/// 排行榜分类（上游 `TopCategory`）。
+/// 排行榜分类（上游 `TopCategory`；服务端键 `groupId`/`groupName`）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct TopCategory {
     /// 分类 ID。
@@ -107,6 +109,8 @@ pub struct TopCategory {
 }
 
 /// 排行榜分类响应（上游 `TopCategoryResponse`）。
+///
+/// 实测（2026-09-29）：服务端数据键 `group`（4 组，每组含榜单与预览歌曲）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct TopCategoryResponse {
     /// 排行榜分类列表。
@@ -115,6 +119,9 @@ pub struct TopCategoryResponse {
 }
 
 /// 排行榜详情响应（上游 `TopDetailResponse`）。
+///
+/// 实测（2026-09-29）：服务端数据键 `data`（榜单信息）/`songInfoList`（歌曲，
+/// 完整 [`Song`] 形态）/`songTagInfoList`/`extInfoList`/`indexInfoList`。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct TopDetailResponse {
     /// 排行榜基础信息。
@@ -151,13 +158,35 @@ pub struct TopApi<'a> {
     client: &'a QqMusicClient,
 }
 
+// ---------------------------------------------------------------------------
+// 统一分页视图（has_more 归一规则见 crate::pagination 模块文档）
+// ---------------------------------------------------------------------------
+
+/// 无显式 hasmore 字段，按总数推算（规则 2）：
+/// `info.total_num > offset + len`。
+impl Paged for TopDetailResponse {
+    type Item = Song;
+
+    fn paged(&self, page: Page) -> PagedView<'_, Song> {
+        PagedView {
+            items: &self.songs,
+            total: self.info.total_num,
+            has_more: self.info.total_num > page.offset() as i64 + self.songs.len() as i64,
+            page,
+        }
+    }
+}
+
 impl<'a> TopApi<'a> {
     /// 构造排行榜 API。
     pub fn new(client: &'a QqMusicClient) -> Self {
         Self { client }
     }
 
-    /// 获取所有排行榜分类（上游 `get_category`）。
+    /// 获取所有排行榜分类（上游 `get_category`；登录：免登录）。
+    ///
+    /// 实测（2026-09-29）：可用（免登录），返回 4 个分组（巅峰榜等），
+    /// 各榜单带 `song` 预览歌曲。
     pub async fn get_category(&self) -> Result<TopCategoryResponse, QqMusicError> {
         let request = CgiRequest::new("music.musicToplist.Toplist", "GetAll", json!({}));
         let data = self.client.musicu_request(&request, None).await?;
@@ -167,15 +196,22 @@ impl<'a> TopApi<'a> {
         })
     }
 
-    /// 获取排行榜详情及其歌曲列表（上游 `get_detail`）。
+    /// 获取排行榜详情及歌曲列表（上游 `get_detail`；登录：免登录）。
+    ///
+    /// `top_id` 榜单 ID（来自 [`Self::get_category`] 的 `TopSummary::id`）；
+    /// `page` 为分页窗口（服务端 `offset = page.offset()`、`num = page.num`）；
+    /// `tag` 是否携带 `withTags`（JSON 布尔，与服务端约定一致——注意这与
+    /// 需 0/1 整数的 `GetSingerDetail` 不同）。
+    ///
+    /// 实测（2026-09-29）：可用（免登录，`withTags=true` 服务端正常接受，
+    /// `songTagInfoList` 键存在）。
     pub async fn get_detail(
         &self,
         top_id: i64,
-        num: i64,
-        page: i64,
+        page: Page,
         tag: bool,
     ) -> Result<TopDetailResponse, QqMusicError> {
-        let mut param = json!({"topId": top_id, "offset": num * (page - 1), "num": num});
+        let mut param = json!({"topId": top_id, "offset": page.offset(), "num": page.num});
         if tag {
             param["withTags"] = json!(true);
         }

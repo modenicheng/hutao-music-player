@@ -47,6 +47,7 @@
 | `qqmusic_api/utils/device.py` | （待移植） | ⬜ 未移植 | 仅 Android 平台需要 |
 | `qqmusic_api/utils/qimei.py` | （待移植） | ⬜ 未移植 | 仅 Android 平台需要 |
 | `qqmusic_api/utils/mqtt.py` | — | ⬜ 不移植 | HMP 非目标功能 |
+| `qqmusic_api/core/pagination.py` | `pagination.rs` | 🔶 部分 | 策略层（PagerStrategy/AsyncPager）未移植；折叠为 `Page`/`PagedView`/`Paged` 统一分页原语 + 三条 has_more 归一规则（2026-09-29 重设计，见[统一分页重设计]） |
 | （无上游对应；独立实现） | `algorithms/qmc2` | ✅ 已移植 | QMC2 解密：TEA-CBC、ekey 派生（EncV1/EncV2）、map/RC4 流密码、STag/QTag 尾部检测 |
 | （无上游对应；独立实现） | `crates/hmp-media` | ✅ 已移植 | 加密流下载→解密→XDG 缓存→file URI（CLI/桌面共用；含 proxy：回环 Range 解密代理） |
 
@@ -128,9 +129,11 @@
 
 - 歌单/专辑/歌手/榜单/推荐分类全部免登录可用；「猜你喜欢」需登录态；
 - `GetSingerDetail`（歌手简介）布尔参数必须以 0/1 整数编码，JSON `true` 返回 10006（上游直接传 Python bool 属上游缺陷，移植已修正）；
-- `GetSingerDetail` 传 `ex_singer`/`group_singer` 等扩展参数时 10006，最小参数（`singer_mids` + `pic`）可用；
+- ~~`GetSingerDetail` 传 `ex_singer`/`group_singer` 等扩展参数时 10006，最小参数（`singer_mids` + `pic`）可用~~
+  （2026-09-29 修订：0/1 整数编码下**全开参数亦可用**，当时的 10006 实为 JSON bool 编码所致）；
 - 歌手歌曲/专辑接口服务端可能忽略 `number` 参数（请求 5 返回 30）；
-- `GetRecommendFeed` 免登录返回的 `cover`/`creator` 全为 null（提取逻辑由合成测试覆盖）。
+- `GetRecommendFeed` 免登录返回的 `cover`/`creator` 全为 null（提取逻辑由合成测试覆盖；
+  2026-09-29 复验：封面/创建者位于 `List[*].Playlist.basic` 下，提取层级已修复，不再恒空）。
 
 ### 用户库实测记录（2026-08-10）
 
@@ -143,18 +146,108 @@
 - `get_vip_info`/`get_created_songlist`/`get_fav_song`/`get_fav_songlist`/`get_fav_album`/
   `GetProfileReport`（音乐基因）均可用，`GetProfileReport` 可作主页昵称/头像的备用来源。
 
-## 尚未移植
+### 全量二次核验（2026-09-29，逐 API 现场核验 + 修复 + 回归）
 
-- 登录（QQ 二维码 / 微信扫码 / 微信换取登录态）—— 阶段 B
-- 播放 URL 获取 —— 阶段 C
-- 歌词 —— 阶段 C
-- 歌单 / 专辑 / 歌手 / 每日推荐 —— 阶段 D
-- 微信扫码登录 / 手机客户端扫码（MQTT）—— 微信需 open.weixin.qq.com 页面解析，手机端依赖 MQTT
-- 短信验证码登录（`PhoneLoginSession`）—— 待移植
-- MV 播放地址（`modules/mv.py`）—— 用户明确暂不需要
-- 加密音频解密播放（mflac/mgg → 明文）—— 播放器阶段（hmp-player）
-- 写操作（收藏、歌单管理）—— 阶段 E
-- Android 平台会话（`ensure_session`/QIMEI/设备指纹）—— HMP 目标为 Linux 桌面，暂不移植
+> 四域并行现场核验全部 pub API（约 115 次真机请求，间隔 ≥1.1s，未触发限流）；
+> 新增离线回归 65 例，`cargo test -p hmp-qqmusic-api` 231 例全绿。逐域记录：
+
+- **通用结论**：写操作/会话级响应的判定字段（`result`/`v_failedPlaylistId`/`SubCode`/`AddedCmId` 等）
+  均在**内层 `data`**，不在 musicu 子响应顶层；serde 区分大小写，服务端 CamelCase 键必须显式
+  alias，且同一服务家族内大小写可能不一致（`AddComment.SubCode` vs `DelComment.Subcode`）；
+- **用户/歌单域**：`GetPlaylistByUin` 必须数字 uin（加密 uin → 80030）；`PlaylistFavRead` 参数键
+  `uin`、`AlbumFavRead` 参数键 `euin`（均传加密 uin），两者列表键均为 `v_list`（原别名缺失致解析
+  0 条，已修复）；`FavPlaylist` 不能收藏自建歌单与 201 目录（result=80184）；写闭环（建临时歌单 →
+  加/删歌 → 收藏/取消 → 删除）全通，删除后 dirid 可被服务端复用，唯一标识用 tid；`CgiGetDiss`
+  对不存在歌单返回 data.code=-100006；`AddSonglist`/`DelSonglist` 的 CGI 80092 按上游语义映射
+  false（补 allow_error_codes）；like_song 对部分歌曲返回 80105（语义未明）；
+- **评论域**：`AddComment` 新评论 ID 键为内层 `data.AddedCmId`（原读顶层 commentId 恒空）；
+  `DelComment` 判定键为内层 `data.Subcode`（原读顶层 `SubCode` 恒 false）；评论发表→删除闭环
+  现场验证可用（创建即删）；
+- **推荐域**：`PlaylistSquare/GetRecommendFeed` 封面/创建者在 `Playlist.basic` 下（提取层级修复）；
+  「猜你喜欢」需登录确认（免登录 1000）；
+- **歌曲/歌词/歌手域**：`get_song_detail_yqq` 的公司/流派/简介/语言/发布时间在
+  `data.info.<字段>.content`（需内层提取，原解析恒空，已修复）；试听 `TRY` 免登录取流 Range 206
+  可读；**取流文件名必须用 `media_mid`**（doubled song-mid 服务端照常签发 vkey 但 CDN 404）；
+  加密 `FLAC` VIP 登录返回 ekey 且可流式读取；`qrc=true` 解密结果为 QRC XML（非 LRC）；
+  `GetSingerDetail` 0/1 编码下全开参数可用（修订 2026-08-06 记录）；歌手 9 接口全部免登录可用；
+- **登录/凭证域**：`ptqrshow` 免登录可用（PNG + qrsig）；`ptqrlogin` 携带伪造 qrsig 返回
+  **HTTP 403**（无效二维码以 HTTP 错误而非 ptuiCB 事件表达）；`wait_qrcode_login` 取消语义修复
+  （取消可中断睡眠与进行中轮询）；`refresh_credential` 的 `musicid` 须按数值下发、loginType 须
+  还原至 `comm.tmeLoginType`、内层 data.code 需二次校验；`Credential` serde 补齐服务端形状
+  （`musicid`/`musickey`/`loginType` int 形状、必填字段 default）与 keyring 形状双向往返；
+  `refresh_credential`/`logout`/`authorize_qq_qr` 为会话级写操作仅做离线验证；
+- **用户主页服务端异常**：`GetHomepageHeader` 自 2026-09-29 观测起对合法参数整体返回 10000
+  空壳（加密/数字 uin、有无 NodeToken 一致；参数校验仍在跑，数字型 NodeToken 触发 10006；上游
+  Python 同受影响）。昵称/头像改用 `GetProfileReport`（新增 `UserApi::get_music_gene`，上游
+  `get_music_gene` 补齐移植），CLI/daemon 数据源已切换、homepage 保留为兜底。
+
+### 统一分页重设计（2026-09-29，crate 层 Page/PagedView + 签名迁移 + live 复验）
+
+> 15+ 分页接口原为松散 `(page: i64, num: i64)` 参数、has_more 形态各异（`hasmore: i64`/
+> total 推算/缺失）；统一为 `src/pagination.rs` 的 `Page`（1 基页号 + 页大小，构造钳制
+> page≥1、num 1..=100）+ `Paged::paged(page) -> PagedView`（items 借用切片/total/
+> has_more/`next_page()`）。各接口由 Page 派生 wire 参数（`sin`/`begin`/`song_begin`/
+> `offset`/`start`/`From` = `page.offset()`；`num`/`song_num`/`size`/`count`/`Size`/
+> `PageSize` = `page.num`；评论 `PageNum = page-1`）。has_more 三条归一规则：①显式
+> `hasmore`/`HasMore` 以服务端为准（收藏歌单/收藏专辑/歌单详情/评论/推荐歌单）；②无显式
+> 字段但有总数（歌手列表/歌曲/专辑/MV/新碟/榜单详情）按 `total > offset + len` 推算；
+> ③两者皆缺按 `items.len() == page.num` 保守推算（`PagedView::conservative`，当前无此
+> 形态的响应类型，保留为公开 helper）。迁移与 wire 派生由 `tests/regression_pagination.rs`
+> 离线锚定（20 例）；daemon/cli/desktop 调用点仅做签名适配。
+
+- **live page=2 复验**（`examples/live_pagination.rs`，7 次请求，间隔 ≥1.1s）：
+  - `singer.get_songs_list`（周杰伦 mid=0025NhlN2yWrP4）：请求 `number=5` 服务端返回
+    **30 条**（确认忽略 number，2026-08-06 记录复现）；**`begin` 偏移被服务端尊重**——
+    page=2/num=5 首条（青花瓷）== page=1 第 6 条，无跳变；按实际返回条数推进
+    （page=2/num=30）与首页无重叠；`total_num=1012` → total 推算 has_more 成立。
+    **结论：该族接口（含 get_album_list/get_mv_list）翻页必须按 `items.len()` 推进，
+    不能假设返回 `page.num` 条**；
+  - `top.get_detail`（飙升榜 62）：`totalNum=100`；page=2（offset=5）与 page=1 无重叠，
+    total 推算 has_more 正确；
+  - `user.get_fav_songlist`（登录态）：total=12，page=1（10 条）`hasmore=1`、page=2
+    （2 条）`hasmore=0`——显式判定与实际剩余条数一致，服务端字段可靠；
+  - 歌手索引（`get_singer_list_index`）维持 2026-09-29 记录：服务端固定每页 80 条并忽略
+    页大小，`Page::num` 仅参与 `sin` 偏移计算，续页推进以 `items.len()` 为准（与上游
+    `MultiFieldContinuationStrategy` 的 `sin + len >= total` 终止语义一致）。
+
+## 尚未移植（2026-09-29 全量扫描重写）
+
+> 对上游 `modules/`、`models/`、`utils/`、`core/`、`algorithms/` 全量清点后重写本节；
+> 此前版本所列「登录/播放 URL/歌词/歌单/专辑/歌手/推荐/写操作」均已随阶段 B-E 完成，已移除。
+
+### 缺口：上游有、Rust 未移植
+
+**整个模块未移植：**
+
+| 上游模块 | 内容 | 规模 | HMP 取舍 |
+| --- | --- | --- | --- |
+| `modules/search.py` | `get_hotkey`（热搜词）/ `complete`（搜索联想）/ `general_search` / `search_by_type`（+`SearchType` 10 值枚举） | 4 方法 + 模型 | **建议移植（P1）**：hotkey/complete 免登录可用性高；`general_search` 2026-08-06 实测「需登录态」——当时无登录态，现已有，需登录复验；移植后 daemon 歌词兜底与搜索页受益。需 `utils/common.get_searchID` |
+| `modules/mv.py` | `get_detail` / `get_mv_urls` / `get_mv_list` | 3 方法 | 播放地址维持「用户明确暂不需要」；`get_detail`/`get_mv_list` 元数据随需要再议 |
+| `modules/private_message.py` | 私信域（会话/消息/发送/删除/配置等 15 方法） | 15 方法 | 建议登记**不移植**（HMP 非目标功能；此前未在本文档登记，补录） |
+| `modules/helper.py` + `helper_utils.py` | 云盘上传（`InitUpload`/`FinishUpload` + COS 分片 `UploadFileSession`） | 2 方法 + 会话类 | 建议登记**不移植**（HMP 无上传需求；补录） |
+
+**已移植模块内的方法缺口：**
+
+| 上游模块 | 缺失方法 | 备注 |
+| --- | --- | --- |
+| `song.py`（Rust 3/13） | `get_cdn_dispatch` / `get_similar_song` / `get_labels` / `get_related_songlist` / `get_related_mv` / `get_other_version` / `get_producer` / `get_sheet` / `has_sheet` / `get_fav_num` | 相似歌/相关歌单/相关 MV/其他版本对发现页/相关推荐 UI 有直接价值（P1）；其余随需要 |
+| `user.py`（Rust 9/13） | `get_follow_singers` / `get_fans` / `get_friend` / `get_follow_user` / `get_fav_mv` / `get_dislike_list` | 关注/粉丝/好友域，均需登录态；Rust 另有上游没有的 `fav_songlist`/`unfav_songlist`（本地增强） |
+| `lyric.py`（Rust 1/5） | `get_singing_annotations_info`（助唱标注）/ `get_multi_style_trans_lyric`（多风格翻译）/ `is_ai_dict_exists` / `get_ai_dict` | 桌面端逐字/翻译歌词增强时需要；`singingAnnotationsTs` 字段同样未含 |
+| `comment.py`（Rust 6/7） | `get_moment_comments`（Moment/动态评论，`SongTsComment`） | — |
+| `login.py`（LoginApi 8 方法 Rust 有 6）+ `login_utils.py` | 微信扫码（`QRLoginType::Wechat` 分支）、手机客户端扫码（`Mobile` 分支 + `checking_mobile_qrcode`）、`PhoneLoginSession`（`send_authcode`/`phone_authorize` 短信登录）、`iter_events` 事件流 API 形态 | 手机扫码依赖 MQTT（已决策不移植）；微信需 open.weixin.qq.com 页面解析；`iter_events` 为 API 形态差异（Rust 仅阻塞式 `wait_qrcode_login`，`PollInterval` 逻辑已内含） |
+
+**类型/常量缺口：**
+
+- `song.rs` `SongFileType` 缺 `SpecialSongFileType` 尾部 12 个常量：`MULTI`(O601)/`PIANO`(AI01)/`BAYIN`(AI02)/`GUZHENG`(AI03)/`QUDI`(AI04)/`HULUSI`(AI05)/`SUONA`(AI06)/`SHOUDIE`(AI07)/`GUITAR`(AI08)/`DRUMS`(AI09)/`KAZOO`(A200)/`THERAPY`(AA01)（AI 演奏/疗愈音色组，纯增量，随取流需要补）；
+- `RingSongFileType` 整组缺（`RING_128`(R500)/`RING_96`(R400)/`RING_48`(R200) 彩铃类型）；
+- 伴随模型缺口：`models/search.py`（Hotkey/Complete/GeneralSearch 响应）、`models/mv.py`、`models/private_message.py`、`models/user.py` 的 relation/dislike/fav_mv 类型。
+
+### 有意不移植（决策记录）
+
+- **Android 平台会话**：`utils/device.py`（设备指纹）/ `utils/qimei.py`（QIMEI）/ `utils/mqtt.py` —— HMP 目标为 Linux/Windows 桌面，WEB 平台覆盖目标场景；上游 `search.py` 的 `DoSearchForQQMusicMobile`、`login.py` 的手机扫码均依赖此层；
+- **分页策略层**：`core/pagination.py`（Offset/Page/MultiFieldContinuation 策略）—— 策略层不移植；语义折叠为 `src/pagination.rs` 的三条 has_more 归一规则（显式字段 / total 推算 / 满页保守推算），窗口统一为 `Page`（见[统一分页重设计]）；
+- **上游普通组明文高音质常量**（`F000`/`AI00`/`Q000` 等）—— 服务端已停发，Rust 高音质统一为加密版本；
+- **`MV 播放地址**（`get_mv_urls`）—— 用户明确暂不需要。
 
 ## Fixture
 
@@ -188,7 +281,7 @@
 | Android 平台 | 完整支持（QIMEI/设备会话） | 不移植 | HMP 面向 Linux 桌面 |
 | 响应模型 | pydantic BaseModel | serde（DTO 起步允许 `serde_json::Value`） | 稳定后逐步强类型化 |
 | 布尔参数 | `bool_to_int` 自动转换 | 显式 int 转换 | 保持可读性 |
-| **`get_homepage` 参数** | `{"uin": euin, "IsQueryTabDetail": 1}` | **额外携带 `NodeToken`**（当前毫秒时间戳字符串） | 上游缺省该参数时服务端返回 10000 空壳（2026-08-10 实测）；官方网页端 share/profile_v2 亦发送 `NodeToken: Date.now().toString()` |
+| **`get_homepage` 参数** | `{"uin": euin, "IsQueryTabDetail": 1}` | **额外携带 `NodeToken`**（当前毫秒时间戳字符串） | 上游缺省该参数时服务端返回 10000 空壳（2026-08-10 实测）；官方网页端 share/profile_v2 亦发送 `NodeToken: Date.now().toString()`。2026-09-29 起该 CGI 对合法参数整体返回 10000 空壳（服务端异常，上游同受影响），取昵称/头像改用 `get_music_gene`（`GetProfileReport`） |
 | **凭证模型** | client 持有全局 `credential`，方法可选覆盖 | **无全局凭证状态** | 请求级传入；仅显式 `refresh_credential`；调用方管理多凭证 |
 
 ## 设计决策记录
@@ -199,6 +292,26 @@
 - 需要登录态的请求由调用方传入 `Option<&Credential>`；
 - 刷新仅通过显式接口 `refresh_credential(&Credential) -> Credential`（阶段 B 实现）；
 - 调用方负责 keyring 存储与过期判断，客户端返回业务错误码供调用方决策。
+
+### 统一分页原语（2026-09-29，`src/pagination.rs`）
+
+- `Page { page, num }`（1 基页号 + 页大小，构造钳制 1..=100）：全部分页窗口
+  接口以 `Page` 为单一入参，各 CGI 自行派生 wire 参数（`song_begin`/`sin`/
+  `offset`/`PageNum` 等）；`Page::offset() = (page-1)*num`；
+- `PagedView<'a, T>`（`items`/`total`/`has_more`/`page` + `next_page()`）经
+  `Paged::paged(page)` trait 统一访问；13 个分页响应类型已实现；
+- **has_more 三条归一规则**（实现处 docstring 必须注明）：① 服务端显式
+  `hasmore`/`HasMore` 字段的以服务端为准（收藏歌单/专辑/歌单详情/评论/
+  推荐歌单）；② 无显式字段但有总数的按 `total > offset + len` 推算（歌手
+  列表/专辑/榜单）；③ 两者皆缺按 `len == num` 保守推算；
+- 服务端分页坑（实测）：`GetSingerListIndex` 固定 80/页忽略 num；歌手歌曲/
+  专辑/榜单列表服务端可能忽略 `number`（请求 5 返回 30）——**翻页推进以
+  返回条数为准，不能假设返回 `page.num` 条**；
+- 评论三读接口（热评/新评/推荐评）改为返回完整 `CommentListResponse` 信封
+  （总数 + 显式 `HasMore`），上游对应行为；调用方经 `paged()` 取视图；
+- 消费链路：daemon IPC `CommentList` 携带 `page`/`num`（serde default 兼容
+  旧帧），`CommentPage` 增加 `has_more`/`page`；CLI 全局 `--json` 直接序列化
+  分页 DTO 供 agent 程序化翻页。
 
 ## Live 测试
 
@@ -216,3 +329,6 @@ cargo test --features live-tests -- --ignored
 | --- | --- | --- | --- |
 | 2026-08-06 | `108617f` | 基线（首次移植） | — |
 | 2026-08-10 | 上游未修复 | `GetHomepageHeader`（用户主页）服务端要求 `NodeToken` 参数，上游缺省 → 返回 10000 空壳 | `user::UserApi::get_homepage` 补 `NodeToken`（毫秒时间戳字符串）；新增回归测试 |
+| 2026-09-29 | 上游未修复 | `GetHomepageHeader` 对合法参数整体返回 10000 空壳（服务端异常）；`GetProfileReport` 可用 | 新增 `user::UserApi::get_music_gene`（上游 `get_music_gene` 补齐移植）；CLI/daemon 昵称数据源切换，homepage 保留兜底 |
+| 2026-09-29 | 移植修复 7+ 项 | 全量二次核验：收藏歌单/专辑 `v_list` 别名、fav 写判定内层 `data`、评论 `AddedCmId`/`Subcode`、推荐歌单 `Playlist.basic` 封面层级、歌曲详情 `info.<字段>.content` 内层提取、`wait_qrcode_login` 取消语义、`Credential` 服务端形状解析（int `musicid`/int `loginType`/必填 default）、`refresh_credential` musicid 数值下发 + 内层 code 校验 | 各域 `tests/regression_*.rs` 共 65 例离线回归锚定（见[全量二次核验]） |
+| 2026-09-29 | 移植重构（分页重设计） | 新增 `src/pagination.rs`：`Page`/`PagedView`/`Paged` 统一分页原语 + has_more 三条归一规则；15 个分页接口 `(page, num)` 松散参数 → `Page`（songlist `get_detail` 的 num/page 双参数归一为 Page 派生 `song_begin`/`song_num`） | daemon/cli/desktop 调用点仅签名适配；离线回归 `tests/regression_pagination.rs`（20 例）+ live 探针 `examples/live_pagination.rs`（见[统一分页重设计]） |
