@@ -135,7 +135,7 @@ HMP 的正式目标包括：
 原因：
 
 - 常见格式解码不需要额外媒体 SDK 或插件树；
-- `stream-download` 将 HTTP(S) 媒体转换为可缓存、可 Seek 的输入；
+- 远端媒体经 hmp-media 的进程内随机访问源（`MediaStreamSource` → `Read+Seek` reader，后台预取）直连解码器，本地文件直接 `File` 打开；
 - 支持常见音频格式；
 - CPAL 同时支持 Windows 与 Linux 音频设备；
 - 保持 `PlaybackDriver` 边界，队列、解析和桌面协议不依赖具体音频实现。
@@ -804,7 +804,7 @@ pub enum AudioQuality {
 
 是否自动回退由设置控制。发生回退时 UI 应提示一次，不应静默让用户误以为正在播放目标音质。
 
-> **加密音质**：QQ 音乐的无损及以上音质（FLAC/HiRes/Atmos/Master，即 `.mflac`/`.mgg`/`.mmp4` 等）为加密文件，需要客户端用接口返回的 `ekey` 解密后才能播放。HMP 已实现 QMC2 解密（`hmp-qqmusic-api::algorithms::qmc2` + `hmp-media` 下载/解密/缓存），经本地回环解密代理（127.0.0.1 随机端口，Range 按需解密）流式播放，支持边下边播与即时 Seek；CDN 不支持 Range 时回退整文件解密缓存，无损链已恢复（`Master → HiRes → Atmos → Flac → Mp3_320 → Mp3_128`）；OGG 系列（`.mgg`，`O8M1` 等）尚未纳入回退链，属后续项。
+> **加密音质**：QQ 音乐的无损及以上音质（FLAC/HiRes/Atmos/Master，即 `.mflac`/`.mgg`/`.mmp4` 等）为加密文件，需要客户端用接口返回的 `ekey` 解密后才能播放。HMP 已实现 QMC2 解密（`hmp-qqmusic-api::algorithms::qmc2` + `hmp-media` 拉取/解密/缓存），经进程内随机访问解密源（`hmp_core::MediaStreamSource` → `DecryptReader`，`Read+Seek` + 后台分块预取，按绝对偏移即时解密）直连播放器，支持边下边播与即时 Seek，并顺带把顺序播放流 tee 进播放缓存（drop 后后台补齐剩余区间，二次播放全离线）；CDN 不支持 Range 时回退整文件解密缓存，无损链已恢复（`Master → HiRes → Atmos → Flac → Mp3_320 → Mp3_128`）；OGG 系列（`.mgg`，`O8M1` 等）尚未纳入回退链，属后续项。
 
 ---
 
@@ -831,7 +831,7 @@ Error
 选择歌曲
 → 查询播放 URL
 → 校验 URL 和有效期
-→ 设置 Rodio URI（加密音质经本地解密代理 http://127.0.0.1:port 按 Range 取明文，Seek 即 Range 重定位）
+→ 设置 Rodio 装载（远端音质经 `LoadRequest.stream` 携带进程内解密源 `MediaStreamSource`，Seek 即 reader 偏移重定位；本地文件按 `file://` URI 打开）
 → 进入 Loading
 → preroll
 → Playing

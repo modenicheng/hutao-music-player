@@ -313,6 +313,47 @@
   旧帧），`CommentPage` 增加 `has_more`/`page`；CLI 全局 `--json` 直接序列化
   分页 DTO 供 agent 程序化翻页。
 
+### 进程内随机访问解密源（2026-09-30，替换回环 HTTP 代理）
+
+- **动机**：2026-08-08 为 GStreamer（souphttpsrc 只认 HTTP Range）引入的
+  `127.0.0.1` 回环解密代理，在 gst 弃用（08-24 换 rodio）后纯属同进程内的
+  TCP/reqwest/stream-download 临时文件自我开销，且是系统代理劫持事故面
+  （2026-09-29/30 两次：`cdn_client` 与 `LOOPBACK_CLIENT` 被迫 `no_proxy`）。
+  QMC2 密钥流按绝对偏移寻址，天然随机访问——直接实现
+  `hmp_core::MediaStreamSource`（`len()` + `open() -> Read+Seek reader`），
+  `LoadRequest.stream` 优先于 uri，加密/明文统一（明文 = IdentityCipher）。
+- **reader 协议坑**（`hmp-media/src/stream/reader.rs`）：生产者（async 任务）
+  被区间请求头阶段的 epoch 变化"取消"时必须回到主循环重判（`continue 'main`），
+  绝不能当作退出——否则消费者在新偏移 condvar 死锁，且只在 seek 恰落窗口间
+  才偶发；完全消费的 chunk 不能立即出队（回看保留窗口），统一
+  `end + retain <= pos` 修剪；生产者绝不跨 `.await` 持 std MutexGuard；
+  Rust 2024 `gen` 是保留字（用 epoch）；`future::select` 双方需 Unpin
+  （`Box::pin`），输家原样归还是"假唤醒不产生重复请求"的关键。
+- **rodio 0.21 DecoderBuilder 要求 `R: Read + Seek + Send + Sync`**，而
+  `Box<dyn MediaStream>` 只有 Send → hmp-player 侧 `SyncStream(Mutex<...>)`
+  适配器桥接 Sync（无 unsafe）；decoder 构建仍必须在 `spawn_blocking`
+  （2026-09-29 LIFO 死锁纪律不变，仅措辞更新）。
+- **tee 边播边缓存**（取代解析即后台全量回填）：武装时机在 `open()` 而非
+  `prepare_media`（同源多次 open 防双写同一 tmp）；chunk offset < high-water
+  （探测期回读）跳过不 detach，> high-water（前向 seek 跳洞）永久 detach；
+  drop 后后台补齐 `[high-water, len)` 单区间再转正（收尾含驱逐扫描，也在
+  后台做，不卡解码线程）；键空间不变（path|ekey），二次播放
+  `cached_playable_uri` 命中语义不变。**语义变化**：G2 预解析但未播放的
+  曲目不再回填缓存。
+- **明文 + 无 Range CDN 会 prepare 失败**：回退路径对 ekey=None 走内嵌 ekey
+  尾提取，纯明文 MP3 无尾 → 该音质被跳过、继续回退链（daemon 侧表现）。
+- **RC4 段密钥流缓存**（`qmc2/cipher.rs`）：`QmcRc4Cipher` 内
+  `Mutex<Option<(seg_id, [u8;0x1400])>>` 容量 1 段；等价性依据"丢弃
+  seg_key+in_seg 步后取 N 字节 ≡ 丢弃 seg_key 步生成整段后取 [in_seg..]"；
+  `encode_other_segment` 的单段不变量（`in_seg + len <= 0x1400`）由 decrypt
+  四段式结构保证（有 debug_assert 钉住），勿引入绕过分段的调用路径。
+- **测试基建坑**：`#[tokio::test]`（current_thread）下消费者阻塞读会饿死同
+  runtime 的生产者 → 阻塞读一律 `spawn_blocking`；tokio runtime drop 会等
+  永久阻塞的 spawn_blocking 线程 → 测试用源必须在 drop 时解除阻塞；XDG
+  隔离锁 panic 毒化用 `unwrap_or_else(PoisonError::into_inner)`；本 crate
+  （hmp-qqmusic-api）生产代码 deny unwrap/expect，锁中毒走恢复不 panic；
+  wiremock 判别尾部探测时小于 0x40 的文件须用 `end == total-1` 判据。
+
 ## Live 测试
 
 > 需要真实账号与网络，默认忽略；Live 测试不使用个人 Cookie 提交公共 CI。
