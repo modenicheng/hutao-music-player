@@ -30,7 +30,7 @@ pub use ipc::{
 };
 pub use media::{Album, AlbumRef, ArtistRef, AudioQuality, CoverRef, Playlist, Track, TrackStub};
 pub use player::{
-    LoadRequest, LoopMode, PlaybackCapabilities, PlaybackState, PlaybackStatus, PlayerCommand,
-    PlayerEvent,
+    LoadRequest, LoopMode, MediaStream, MediaStreamSource, PlaybackCapabilities, PlaybackState,
+    PlaybackStatus, PlayerCommand, PlayerEvent,
 };
 pub use queue::{QueueCore, QueueSnapshot};

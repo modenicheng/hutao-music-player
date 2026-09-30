@@ -4,14 +4,12 @@
 
 pub mod cache;
 pub mod decrypt;
-pub mod proxy;
+pub mod stream;
 
 #[cfg(test)]
 pub(crate) mod testutil;
 
-pub use proxy::PreparedMedia;
-pub use proxy::cdn_client;
-pub use proxy::prepare_stream;
+pub use stream::{PreparedMedia, cdn_client, prepare_media};
 
 use thiserror::Error;
 
@@ -75,8 +73,8 @@ pub fn cached_playable_uri(url: &str, ekey: Option<&str>) -> Result<Option<Strin
 /// 容量驱逐与命中校验同回退路径。幂等：已缓存或同键回填进行中 →
 /// `Ok(None)`；本调用完成回填 → `Ok(Some(file:// URI))`。
 ///
-/// 供 daemon 播放解析在流式开播后 spawn：首播体验不变（Range 代理秒开），
-/// 回填完成后二次播放经 [`cached_playable_uri`] 全离线。
+/// 供 daemon 播放解析在需要时 spawn；流式播放路径的 tee 边播边缓存
+/// 共享同一去重键空间（[`INFLIGHT_FILL`]），两者不会重复下载。
 pub async fn cache_fill(url: &str, ekey: Option<&str>) -> Result<Option<String>, MediaError> {
     let root = default_cache_root()?;
     let key = cache::cache_key(url, ekey.unwrap_or(""));
@@ -89,7 +87,8 @@ pub async fn cache_fill(url: &str, ekey: Option<&str>) -> Result<Option<String>,
 }
 
 /// 进程内在途回填键（防同曲快速换进换出触发并发重复全量下载）。
-fn inflight_insert(key: String) -> bool {
+/// tee 边播边缓存（[`stream`]）与 [`cache_fill`] 共用。
+pub(crate) fn inflight_insert(key: String) -> bool {
     let mut guard = INFLIGHT_FILL.lock().unwrap();
     if guard.iter().any(|k| k == &key) {
         return false;
@@ -98,7 +97,7 @@ fn inflight_insert(key: String) -> bool {
     true
 }
 
-fn inflight_remove(key: &str) {
+pub(crate) fn inflight_remove(key: &str) {
     INFLIGHT_FILL.lock().unwrap().retain(|k| k != key);
 }
 
@@ -119,24 +118,9 @@ mod tests {
 
     /// 并发回填同键：恰一个执行下载、另一个 `Ok(None)`（in-flight 去重）。
     /// XDG 隔离防污染真实缓存目录（本 crate 无其他 cache_dir 读者）。
-    #[allow(clippy::await_holding_lock)] // 测试串行锁，有意跨 await
     #[tokio::test]
     async fn cache_fill_dedupes_concurrent_same_key() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _env = ENV_LOCK.lock().unwrap();
-        let root = std::env::temp_dir().join(format!("hmp-media-fill-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        unsafe {
-            std::env::set_var("XDG_CACHE_HOME", &root);
-        }
-        struct Restore;
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe { std::env::remove_var("XDG_CACHE_HOME") };
-            }
-        }
-        let _restore = Restore;
-
+        let _env = testutil::isolate_cache("fill_dedup");
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(
@@ -158,6 +142,5 @@ mod tests {
             (Ok(Some(_)), Ok(None)) | (Ok(None), Ok(Some(_)))
         );
         assert!(exactly_one, "恰一个回填执行: r1={r1:?} r2={r2:?}");
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

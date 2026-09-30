@@ -4,14 +4,43 @@ use std::fs::File;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hmp_core::{HmpError, LoadRequest, PlaybackState, PlaybackStatus, PlayerCommand, PlayerEvent};
+use hmp_core::{
+    HmpError, LoadRequest, MediaStream, PlaybackState, PlaybackStatus, PlayerCommand, PlayerEvent,
+};
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source, StreamError};
-use stream_download::http::reqwest;
-use stream_download::storage::temp::TempStorageProvider;
-use stream_download::{Settings, StreamDownload};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::source::{MediaLocation, parse_uri};
+
+/// rodio 的 `DecoderBuilder` 要求 reader `Send + Sync`，而 hmp-core 契约的
+/// [`MediaStream`] 只有 `Send`。Read/Seek 都是 `&mut self` 独占访问，decoder
+/// 是唯一消费者（无并发锁竞争），用 `Mutex` 桥接 `Sync`——无 unsafe。
+struct SyncStream(std::sync::Mutex<Box<dyn MediaStream>>);
+
+impl SyncStream {
+    fn new(stream: Box<dyn MediaStream>) -> Self {
+        Self(std::sync::Mutex::new(stream))
+    }
+}
+
+impl std::io::Read for SyncStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // 锁中毒（reader 读中途 panic）不致命：继续用内部 reader。
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .read(buf)
+    }
+}
+
+impl std::io::Seek for SyncStream {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .seek(pos)
+    }
+}
 
 enum LoadCommand {
     Load(Box<LoadRequest>),
@@ -289,11 +318,13 @@ async fn append_location(
     sink: &Sink,
     location: MediaLocation,
 ) -> Result<Option<Duration>, HmpError> {
-    // 格式探测（decoder 构建）是**阻塞读**（等 StreamDownload 攒够探测字节），
-    // 必须在 `spawn_blocking` 上做：若内联在 runtime worker 上，worker 被读
-    // 挂起，而刚 spawn 的 stream_download 下载任务正落在本 worker 的 LIFO 槽
-    // （不可被其他 worker 偷取）→ 下载任务永不调度、探测永远等不到字节，
-    // 装载死锁（2026-09-29 QQ 远端音频 5s 超时事故的第二个根因）。
+    // 格式探测（decoder 构建）是**阻塞读**（MediaStream 的 Read 在数据
+    // 饥饿时阻塞等源的后台预取），必须在 `spawn_blocking` 上做：若内联在
+    // runtime worker 上，worker 被读挂起，而源的后台预取生产任务
+    // （tokio::spawn）可能正落在本 worker 的 LIFO 槽（不可被其他 worker
+    // 偷取）→ 生产任务永不调度、探测永远等不到字节，装载死锁
+    // （2026-09-29 QQ 远端音频 5s 超时事故的第二个根因；stream-download
+    // 时代同型死锁，进程内源沿用同一条纪律）。
     // 构建好的 decoder 回传后再 append：装载被取代时本任务的结果经 oneshot
     // 丢弃，decoder 随之释放，不会追加过期音源。
     let decoder: Box<dyn Source<Item = f32> + Send> = match location {
@@ -310,14 +341,18 @@ async fn append_location(
             })
             .await?
         }
-        MediaLocation::Http(uri) => {
-            let stream = open_http_stream(uri).await?;
-            let builder = Decoder::builder().with_data(stream);
+        MediaLocation::Stream(source) => {
+            // open 在 tokio 上下文中调用（源内部 spawn 后台预取任务，
+            // 挂在当前 runtime 上）；reader 的 Read 仅在数据饥饿时阻塞。
+            let reader = source
+                .open()
+                .map_err(|error| HmpError::Playback(format!("open media stream: {error}")))?;
+            let builder = Decoder::builder().with_data(SyncStream::new(reader));
             spawn_decode(move || {
                 builder
                     .build()
                     .map(|decoder| Box::new(decoder) as Box<dyn Source<Item = f32> + Send>)
-                    .map_err(|error| HmpError::Playback(format!("decode audio stream: {error}")))
+                    .map_err(|error| HmpError::Playback(format!("decode media stream: {error}")))
             })
             .await?
         }
@@ -337,66 +372,27 @@ where
         .map_err(|error| HmpError::Playback(format!("decode task aborted: {error}")))?
 }
 
-/// 打开 HTTP 音频流。
-///
-/// **回环地址必须绕过系统代理**：`http://127.0.0.1:<port>/stream` 是
-/// hmp-media 解密代理（本进程内），走系统代理（Clash 等）会把回环请求
-/// 交给外部代理进程——轻则多一跳延迟，重则被远程节点吞掉（127.0.0.1
-/// 在远端是另一台机器），表现为响应头可达但响应体静默挂起，装载永不
-/// 完成（2026-09-29 QQ 远端音频全线无法播放事故）。外部主机保持默认
-/// 系统代理行为（用户的网络环境可能需要代理出网）。
-///
-/// `cancel_on_drop`：换曲/停止丢弃 reader 时同步取消后台下载任务，
-/// 避免已取消装载的 CDN 连接继续在后台拉全量数据。
-async fn open_http_stream(uri: url::Url) -> Result<HttpDownload, HmpError> {
-    let settings = Settings::default().cancel_on_drop(true);
-    let stream = if uri.host_str().is_some_and(is_loopback_host) {
-        static LOOPBACK_CLIENT: std::sync::LazyLock<reqwest::Client> =
-            std::sync::LazyLock::new(|| {
-                reqwest::Client::builder()
-                    .no_proxy()
-                    .build()
-                    .expect("loopback HTTP client build is infallible")
-            });
-        let http_stream = stream_download::http::HttpStream::new(LOOPBACK_CLIENT.clone(), uri)
-            .await
-            .map_err(|error| HmpError::Playback(format!("open audio stream: {error}")))?;
-        StreamDownload::from_stream(http_stream, TempStorageProvider::new(), settings)
-            .await
-            .map_err(|error| HmpError::Playback(format!("open audio stream: {error}")))?
-    } else {
-        StreamDownload::new_http(uri, TempStorageProvider::new(), settings)
-            .await
-            .map_err(|error| HmpError::Playback(format!("open audio stream: {error}")))?
-    };
-    Ok(stream)
-}
-
-type HttpDownload = StreamDownload<TempStorageProvider>;
-
-/// 回环主机判定（`127.0.0.1` / `::1` / `localhost`）。
-pub(crate) fn is_loopback_host(host: &str) -> bool {
-    host == "localhost"
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
-}
-
 /// 装载任务体：打开源并解码、追加进 sink。**只做阻塞在自身 future 里的
-/// 网络/解码工作**，状态转换一律由 drive 循环在收到 [`LoadCompletion`] 后
+/// 取流/解码工作**，状态转换一律由 drive 循环在收到 [`LoadCompletion`] 后
 /// 执行（任务可能被更新的装载/Stop/Shutdown abort，不得自行发布状态）。
 async fn perform_load(sink: Arc<Sink>, request: Box<LoadRequest>) -> LoadCompletion {
-    let result = match parse_uri(&request.uri) {
-        Ok(location) => {
-            sink.clear();
-            append_location(&sink, location).await
-        }
-        Err(error) => Err(error),
+    // stream 优先于 uri：远端曲目（明文/加密）一律经进程内源直连；
+    // uri 仅元数据/日志。无 stream 才按 file:// 解析本地文件。
+    let location = match request.stream.as_ref() {
+        Some(source) => MediaLocation::Stream(Arc::clone(source)),
+        None => match parse_uri(&request.uri) {
+            Ok(location) => location,
+            Err(error) => {
+                return LoadCompletion {
+                    request,
+                    result: Err(error),
+                }
+            }
+        },
     };
-    LoadCompletion {
-        request,
-        result,
-    }
+    sink.clear();
+    let result = append_location(&sink, location).await;
+    LoadCompletion { request, result }
 }
 
 async fn drive(
@@ -409,8 +405,8 @@ async fn drive(
     let mut state = PlaybackState::default();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // 派发中的装载（网络/解码在独立任务；命令循环永不为之阻塞——否则一次
-    // CDN 挂起就冻结全部命令处理，驱动永久僵尸，2026-09-29 事故）。
+    // 派发中的装载（取流/解码在独立任务；命令循环永不为之阻塞——否则一次
+    // 远端取流挂起就冻结全部命令处理，驱动永久僵尸，2026-09-29 事故）。
     let mut load_abort: Option<tokio::task::AbortHandle> = None;
     let mut load_done: Option<tokio::sync::oneshot::Receiver<LoadCompletion>> = None;
 

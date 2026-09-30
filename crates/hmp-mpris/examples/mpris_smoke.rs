@@ -115,6 +115,7 @@ async fn main() {
         track,
         quality: AudioQuality::Mp3_128,
         load_gen: 0,
+        stream: None,
     });
     core.play();
 

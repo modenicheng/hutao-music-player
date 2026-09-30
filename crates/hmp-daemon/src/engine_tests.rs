@@ -46,6 +46,8 @@ pub struct FakeDriver {
     pub state_tx: watch::Sender<PlaybackState>,
     pub events_tx: broadcast::Sender<PlayerEvent>,
     pub loads: Mutex<Vec<(String, u64)>>,
+    /// 每次装载是否携带进程内源（LoadRequest.stream 接线断言）。
+    pub stream_seen: Mutex<Vec<bool>>,
     pub commands: Mutex<Vec<PlayerCommand>>,
     /// 置位后下一次 load 不更新 current（模拟驱动装载失败 → wait 超时）。
     pub fail_next_load: std::sync::atomic::AtomicBool,
@@ -67,6 +69,7 @@ impl FakeDriver {
             state_tx,
             events_tx,
             loads: Mutex::new(Vec::new()),
+            stream_seen: Mutex::new(Vec::new()),
             commands: Mutex::new(Vec::new()),
             fail_next_load: std::sync::atomic::AtomicBool::new(false),
             fail_remaining: std::sync::atomic::AtomicU32::new(0),
@@ -103,6 +106,10 @@ impl FakeDriver {
 
 impl PlaybackDriver for FakeDriver {
     fn load(&self, request: LoadRequest) {
+        self.stream_seen
+            .lock()
+            .unwrap()
+            .push(request.stream.is_some());
         self.loads
             .lock()
             .unwrap()
@@ -2386,6 +2393,126 @@ async fn rollback_restores_gen_then_eos_advances() {
         s.playback.current.as_ref().unwrap().id,
         TrackId::new("c"),
         "回滚后同代 EOS 应触发续播（current_gen 复原语义）"
+    );
+}
+
+/// 测试用进程内源（`MediaStreamSource` 最小实现：open 出空 Cursor）。
+#[derive(Debug)]
+struct TestSource {
+    len: u64,
+}
+
+impl hmp_core::MediaStreamSource for TestSource {
+    fn len(&self) -> u64 {
+        self.len
+    }
+    fn open(&self) -> std::io::Result<Box<dyn hmp_core::MediaStream>> {
+        Ok(Box::new(std::io::Cursor::new(Vec::new())))
+    }
+}
+
+/// 按 id 决定是否携带进程内源的解析器（stream 接线测试：远端流式 vs
+/// 缓存命中/本地 file:// 形态）。
+#[derive(Debug)]
+struct StreamResolver {
+    stream_ids: Vec<TrackId>,
+}
+
+impl SourceResolver for StreamResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        let stubs = match src {
+            PlayRequest::Track(id) => vec![hmp_core::TrackStub {
+                id: id.clone(),
+                title: id.to_string(),
+                artists: Vec::new(),
+                album: None,
+                duration_ms: None,
+            }],
+            _ => Vec::new(),
+        };
+        Box::pin(async move { Ok(stubs) })
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        let id = id.clone();
+        let with_stream = self.stream_ids.contains(&id);
+        Box::pin(async move {
+            let media = with_stream.then(|| hmp_media::PreparedMedia {
+                uri: format!("cdn://{id}"),
+                source: Some(
+                    Arc::new(TestSource { len: 8 }) as Arc<dyn hmp_core::MediaStreamSource>
+                ),
+            });
+            Ok(ResolvedTrack {
+                track: Track {
+                    id: id.clone(),
+                    title: format!("t-{id}"),
+                    artists: vec![],
+                    album: None,
+                    duration: Some(std::time::Duration::from_secs(60)),
+                    cover: None,
+                    url: Some(format!("cdn://{id}")),
+                    available_qualities: vec![],
+                },
+                uri: format!("cdn://{id}"),
+                media,
+                quality: hmp_core::AudioQuality::Mp3_128,
+                replaygain_db: None,
+            })
+        })
+    }
+}
+
+/// 新链路接线：解析器产出的进程内源（`PreparedMedia.source`）经引擎递给
+/// 驱动（`LoadRequest.stream`）；缓存命中/本地形态（media=None）装载不带
+/// stream；装载失败回滚重建 LoadRequest 时带回 `AppliedLoad.source`
+/// （旧源可重复 `open`，恢复旧曲播放）。
+#[tokio::test]
+async fn load_passes_stream_source_and_rollback_reuses_it() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    // s1 携带进程内源（远端流式）；s2 不携带（缓存命中 file:// 形态）。
+    let resolver = Arc::new(StreamResolver {
+        stream_ids: vec![TrackId::new("s1")],
+    });
+    let handle = PlaybackEngine::start_with_options(
+        driver.clone(),
+        resolver,
+        Arc::new(|| true),
+        None,
+        std::time::Duration::from_millis(300),
+        None,
+        std::time::Duration::from_secs(5),
+    );
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("s1"))))
+        .await
+        .unwrap();
+    wait_idle().await;
+    assert_eq!(driver.load_uris(), vec!["cdn://s1"]);
+
+    // 换 s2 且装载失败（current 不更新 → 超时）→ 回滚重载 s1。
+    driver.set_fail_load(true);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("s2"))))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+    assert_eq!(
+        driver.load_uris(),
+        vec!["cdn://s1", "cdn://s2", "cdn://s1"],
+        "失败装载 + 回滚重载"
+    );
+    assert_eq!(
+        *driver.stream_seen.lock().unwrap(),
+        vec![true, false, true],
+        "流式曲目装载带 stream；file:// 形态不带；回滚重载带回旧 source"
     );
 }
 

@@ -3,6 +3,8 @@
 //! - 密钥长度 <= 300 → Map 密码（基于旋转的 XOR）
 //! - 密钥长度 > 300  → RC4 变体（分段流密码）
 
+use std::sync::Mutex;
+
 use super::key::{Qmc2Error, key_from_ref, parse_ekey};
 
 /// QMC2 流密码 trait。
@@ -71,6 +73,13 @@ struct QmcRc4Cipher {
     hash: u32,
     /// RC4 原始密钥。
     rc4_key: Vec<u8>,
+    /// 当前段密钥流缓存（容量 1 段，5 KiB）：段 id + 该段完整密钥流。
+    ///
+    /// 流式播放时每个网络 chunk 都会调用 `decrypt`，若每次都克隆 S 盒并重做
+    /// 整段丢弃步进，seek 密集场景 CPU 开销显著；改为 miss 时一次性派生整段
+    /// 密钥流并缓存，段 id 完全匹配时直接 XOR。首段 0x80 特殊路径不经过缓存。
+    /// trait 以 `&self` 解密且可能被并发调用，故用 `Mutex` 提供内部可变性。
+    segment_cache: Mutex<Option<(usize, Box<[u8; OTHER_SEGMENT_SIZE]>)>>,
 }
 
 impl QmcRc4Cipher {
@@ -96,6 +105,7 @@ impl QmcRc4Cipher {
             s,
             hash,
             rc4_key: rc4_key.to_vec(),
+            segment_cache: Mutex::new(None),
         }
     }
 
@@ -147,12 +157,31 @@ impl QmcRc4Cipher {
     }
 
     /// 加密其余段。
+    ///
+    /// `buf` 必须完全落在单个 `OTHER_SEGMENT_SIZE` 段内（`decrypt` 的分段
+    /// 逻辑保证这一不变量）。RC4 状态从段首开始确定性地演进，因此任意
+    /// 段内偏移处的密钥流字节等价于"整段密钥流在相同下标处的字节"，
+    /// 据此缓存整段密钥流：段 id 完全匹配则直接 XOR，miss 才派生并替换。
     fn encode_other_segment(&self, offset: usize, buf: &mut [u8]) {
         let seg_id = offset / OTHER_SEGMENT_SIZE;
-        let seg_id_small = seg_id & 0x1FF;
+        let in_seg = offset % OTHER_SEGMENT_SIZE;
+        debug_assert!(in_seg + buf.len() <= OTHER_SEGMENT_SIZE);
 
-        let mut discard_count = self.calc_segment_key(seg_id, self.rc4_key[seg_id_small]) & 0x1FF;
-        discard_count += offset % OTHER_SEGMENT_SIZE;
+        // 命中缓存：直接用该段密钥流 XOR。
+        {
+            let cache = self.lock_segment_cache();
+            if let Some((cached_id, keystream)) = cache.as_ref() {
+                if *cached_id == seg_id {
+                    QmcRc4Cipher::xor_with_keystream(buf, keystream, in_seg);
+                    return;
+                }
+            }
+        }
+
+        // miss：从 RC4 初始状态派生整段密钥流（丢弃步进仅含段密钥部分，
+        // 段内偏移由下标索引替代，结果与逐次丢弃逐字节一致）。
+        let seg_id_small = seg_id & 0x1FF;
+        let discard_count = self.calc_segment_key(seg_id, self.rc4_key[seg_id_small]) & 0x1FF;
 
         let n = self.rc4_key.len();
         let mut s = self.s.clone();
@@ -162,8 +191,35 @@ impl QmcRc4Cipher {
             QmcRc4Cipher::rc4_derive(n, &mut s, &mut j, &mut k);
         }
 
-        for b in buf.iter_mut() {
-            *b ^= QmcRc4Cipher::rc4_derive(n, &mut s, &mut j, &mut k);
+        let mut keystream = Box::new([0u8; OTHER_SEGMENT_SIZE]);
+        for byte in keystream.iter_mut() {
+            *byte = QmcRc4Cipher::rc4_derive(n, &mut s, &mut j, &mut k);
+        }
+
+        QmcRc4Cipher::xor_with_keystream(buf, &keystream, in_seg);
+        *self.lock_segment_cache() = Some((seg_id, keystream));
+    }
+
+    /// 锁定段密钥流缓存。
+    ///
+    /// 锁中毒时直接取出内部数据：缓存内容是确定性派生的纯数据，
+    /// 不存在半更新的一致性风险，恢复优于 panic（也符合本 crate
+    /// 生产代码禁用 unwrap/expect 的约束）。
+    #[inline]
+    fn lock_segment_cache(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<(usize, Box<[u8; OTHER_SEGMENT_SIZE]>)>> {
+        self.segment_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// 用段内偏移 `in_seg` 处起的密钥流 XOR `buf`。
+    #[inline]
+    fn xor_with_keystream(buf: &mut [u8], keystream: &[u8; OTHER_SEGMENT_SIZE], in_seg: usize) {
+        let ks = &keystream[in_seg..in_seg + buf.len()];
+        for (b, ks) in buf.iter_mut().zip(ks) {
+            *b ^= ks;
         }
     }
 }
@@ -333,6 +389,111 @@ mod tests {
                 151, 56, 198, 1, 226, 173, 127, 4, 181, 165, 171, 21, 82, 152, 195, 210
             ]
         );
+    }
+
+    // ---- 段密钥流缓存测试 ----
+
+    /// 生成非平凡明文（避免全 0 数据掩盖密钥流错误）。
+    fn sample_data(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8 ^ 0x5A).collect()
+    }
+
+    #[test]
+    fn rc4_large_buffer_matches_chunked_decrypt() {
+        // 顺序大 buffer 一次解密 == 分小块多次解密（跨段一致性回归钉住）。
+        // 覆盖：首段 0x80 特殊路径、段内对齐、跨 0x1400 段边界的 chunk。
+        let key = rc4_key_255();
+        let cipher = QmcRc4Cipher::new(&key);
+
+        let total = FIRST_SEGMENT_SIZE + OTHER_SEGMENT_SIZE * 3 + 0x321;
+        let mut whole = sample_data(total);
+        cipher.decrypt(0, &mut whole);
+
+        // 块大小故意不整除 0x1400，保证有 chunk 横跨段边界。
+        let mut chunked = sample_data(total);
+        let chunk_size = 0x371;
+        let mut pos = 0;
+        while pos < chunked.len() {
+            let end = std::cmp::min(pos + chunk_size, chunked.len());
+            cipher.decrypt(pos, &mut chunked[pos..end]);
+            pos = end;
+        }
+
+        assert_eq!(whole, chunked, "大 buffer 一次解密与分块解密必须逐字节一致");
+    }
+
+    #[test]
+    fn rc4_repeated_decrypt_same_segment_uses_cache() {
+        // 同段重复解密两次结果一致（缓存命中路径正确性）。
+        let key = rc4_key_255();
+        let cipher = QmcRc4Cipher::new(&key);
+
+        let offset = OTHER_SEGMENT_SIZE * 2 + 0x500;
+        let len = 0x800;
+        let plain = sample_data(len);
+        let mut first = plain.clone();
+        cipher.decrypt(offset, &mut first); // miss：派生并填充缓存
+
+        let mut second = plain.clone();
+        cipher.decrypt(offset, &mut second); // 命中缓存
+        assert_eq!(first, second, "同段重复解密（缓存命中）必须与首次解密一致");
+
+        // 同段内不同窗口（不同段内偏移）命中缓存时，也必须对应同一密钥流：
+        // 两侧明文同为 plain[0x100..]，密文一致 ⇔ 所用密钥流一致。
+        let mut shifted = plain[0x100..].to_vec();
+        cipher.decrypt(offset + 0x100, &mut shifted);
+        assert_eq!(
+            &first[0x100..],
+            &shifted[..],
+            "缓存命中下不同段内偏移必须索引到相同密钥流"
+        );
+    }
+
+    #[test]
+    fn factory_rc4_and_map_paths_regression() {
+        let chunk_size = 0x371;
+        let total = FIRST_SEGMENT_SIZE + OTHER_SEGMENT_SIZE * 2 + 0x2A5;
+
+        // 大密钥（>300 字节）→ RC4 路径回归
+        let large_key: Vec<u8> = (0..700usize).map(|i| (i * 7 + 3) as u8).collect();
+        let ekey = generate_ekey(&large_key);
+        let rc4 = decrypt_factory(&ekey).unwrap();
+
+        let mut whole = sample_data(total);
+        rc4.decrypt(0, &mut whole);
+        assert_ne!(whole, sample_data(total), "RC4 路径应实际改动数据");
+
+        let mut chunked = sample_data(total);
+        let mut pos = 0;
+        while pos < chunked.len() {
+            let end = std::cmp::min(pos + chunk_size, chunked.len());
+            rc4.decrypt(pos, &mut chunked[pos..end]);
+            pos = end;
+        }
+        assert_eq!(whole, chunked, "RC4 路径：大 buffer 与分块解密一致");
+
+        // XOR 流密码：同一段密钥流再解一次应还原明文
+        let mut restored = whole.clone();
+        rc4.decrypt(0, &mut restored);
+        assert_eq!(restored, sample_data(total), "RC4 路径：二次解密还原明文");
+
+        // 小密钥（≤300 字节）→ Map 路径回归
+        let small_key: Vec<u8> = (0..120usize).map(|i| (i * 11 + 1) as u8).collect();
+        let ekey = generate_ekey(&small_key);
+        let map = decrypt_factory(&ekey).unwrap();
+
+        let base_offset = 0x1234;
+        let mut m_whole = sample_data(total);
+        map.decrypt(base_offset, &mut m_whole);
+
+        let mut m_chunked = sample_data(total);
+        let mut pos = 0;
+        while pos < m_chunked.len() {
+            let end = std::cmp::min(pos + chunk_size, m_chunked.len());
+            map.decrypt(base_offset + pos, &mut m_chunked[pos..end]);
+            pos = end;
+        }
+        assert_eq!(m_whole, m_chunked, "Map 路径：大 buffer 与分块解密一致");
     }
 
     // ---- 哈希基值测试 ----

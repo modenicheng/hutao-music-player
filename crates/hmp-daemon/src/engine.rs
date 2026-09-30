@@ -81,6 +81,9 @@ struct AppliedLoad {
     uri: String,
     quality: hmp_core::AudioQuality,
     load_gen: u64,
+    /// 进程内随机访问源（远端流式曲目；回滚重建 LoadRequest 时带回，
+    /// 旧源可重复 `open` 恢复旧曲播放）。本地/缓存命中曲目为 `None`。
+    source: Option<std::sync::Arc<dyn hmp_core::MediaStreamSource>>,
 }
 
 /// 预解析槽（G2 gapless）：后台 resolve 队列下一首，曲间切换时直接消费。
@@ -93,7 +96,7 @@ struct PreloadSlot {
     key: (u64, u64),
     /// 预解析的目标曲目（消费时须与请求 id 一致）。
     id: TrackId,
-    /// 预解析结果（含解密代理 guard；消费时 move 移交）。
+    /// 预解析结果（含进程内解密源；消费时 move 移交）。
     res: ResolvedTrack,
 }
 
@@ -150,7 +153,6 @@ pub struct PlaybackEngine {
     state_tx: watch::Sender<DaemonState>,
     state_rx: watch::Receiver<PlaybackState>,
     cmd_rx: mpsc::UnboundedReceiver<Request>,
-    active_media: Option<hmp_media::PreparedMedia>,
     /// 命令代际（换曲操作执行前置位，Finding 1）。
     seq: u64,
     /// 最近一次命令错误（解析失败等；成功换曲时清空，Finding 2）。
@@ -285,7 +287,6 @@ impl PlaybackEngine {
             state_tx,
             state_rx: playback_rx,
             cmd_rx,
-            active_media: None,
             seq: 0,
             last_error: None,
             phase: hmp_core::EnginePhase::Idle,
@@ -1017,6 +1018,10 @@ impl PlaybackEngine {
         let prev_position = self.state_rx.borrow().position;
         let uri = res.uri.clone();
         let quality = res.quality;
+        // 进程内源随 LoadRequest 递给驱动（播放路径优先于 uri）。
+        // 引擎无需单独保活：reader（驱动 sink 持有）存活即源存活；
+        // 装载失败时 load 任务 abort 自动释放，`res.media` 随作用域丢弃。
+        let source = res.media.as_ref().and_then(|m| m.source.clone());
         let expected = res.track.id.clone();
         self.current_gen += 1;
         let load_gen = self.current_gen;
@@ -1025,14 +1030,13 @@ impl PlaybackEngine {
             uri,
             quality: quality.clone(),
             load_gen,
+            stream: source.clone(),
         });
         self.driver.play();
         // 等待驱动应用装载（真实驱动为异步管道）：完成前发布的复合状态
         // 不得携带旧曲目（Bug 2：play-next 后显示旧曲）。超时/通道断开 →
         // 失败路径（调用方回滚队列、保留旧曲；不创建播放历史）。
         if let Err(e) = self.wait_current_applied(&expected, load_gen).await {
-            // 未确认装载：新解密代理此刻释放；旧 active_media 保持。
-            drop(res.media);
             if let Some(p) = prev {
                 // 复原代际：回滚后旧曲重新成为当前代（driver loaded_gen 已
                 // 重载为 prev.load_gen），其 EOS/Error 不得再被误判为旧代
@@ -1046,16 +1050,17 @@ impl PlaybackEngine {
             self.publish();
             return Err(e);
         }
-        // ACK 成功才提交：替换 active_media（旧代理此刻才释放）、
-        // 记录装载（回滚用）、进入播放阶段、开启播放会话。
+        // ACK 成功才提交：记录装载（含进程内源，回滚重建 LoadRequest 用）、
+        // 进入播放阶段、开启播放会话。`res.media`（PreparedMedia 壳）随作用域
+        // 释放；source 的 Arc 由驱动的 reader 与 last_load 继续持有。
         // G2：ReplayGain 补偿（用户音量 × 当前曲增益；仅成功路径更新 rg_factor）。
         self.apply_gain(res.replaygain_db);
-        self.active_media = res.media;
         self.last_load = Some(AppliedLoad {
             track: res.track.clone(),
             uri: res.uri,
             quality,
             load_gen,
+            source,
         });
         self.phase = hmp_core::EnginePhase::Playing;
         // 媒体库：upsert 曲目 + 开启播放会话（B4）。
@@ -1213,6 +1218,8 @@ impl PlaybackEngine {
             uri: prev.uri,
             quality: prev.quality,
             load_gen: prev.load_gen,
+            // 带回旧装载的进程内源（可重复 `open`，恢复旧曲播放）。
+            stream: prev.source,
         });
         if self.wait_current_applied(&id, prev.load_gen).await.is_ok() {
             self.driver.seek(position);

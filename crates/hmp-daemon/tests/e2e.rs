@@ -16,9 +16,17 @@
 //! 见 hmp-storage xdg.rs）。
 //!
 //! 已知约束：daemon 取流拼接的 CDN 域名固定为
-//! `https://isure.stream.qqmusic.qq.com/<purl>`（player.rs），因此播放阶段
-//! 无法把音频指向 wiremock —— 明文/解密取流由测试 1 以响应契约方式验证，
-//! 实际音频播放由测试 2 以本地 wav 覆盖。
+//! `https://isure.stream.qqmusic.qq.com/<purl>`（player.rs），无法把播放阶段
+//! 的音频指向 wiremock。新链路（加密/明文统一 `hmp_media::prepare_media`
+//! 进程内直连）下的测试分工：
+//!
+//! 1. 音质回退链与「明文音质成功」经 wiremock QQ API + **预置播放缓存**
+//!    验证（`cached_playable_uri` 命中 → `file://` + 无进程内源，零 CDN）；
+//!    命中键由 daemon 拼接的 CDN url path 派生，命中本身即验证 URL 拼接契约。
+//! 2. 流式 `PreparedMedia` 契约（CDN url + `source`）由
+//!    [`prepared_media_contract_is_cdn_url_plus_stream_source`] 直接以
+//!    wiremock 充当 Range CDN 验证。
+//! 3. 实际音频播放由真机 `#[ignore]` 测试以本地 wav 覆盖。
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -35,7 +43,7 @@ use hmp_qqmusic_api::{ClientConfig, Credential, QqMusicClient};
 use hmp_storage::credential::{Store, store_from_env};
 use hmp_storage::xdg::config_dir;
 use serde_json::{Value, json};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// 测试曲目（mid 非纯数字 → 详情请求走 `song_mid` 参数）。
@@ -78,6 +86,7 @@ fn write_wav(path: &std::path::Path) {
 struct EnvGuard {
     backend: Option<OsString>,
     xdg_config: Option<OsString>,
+    xdg_cache: Option<OsString>,
 }
 
 /// 串行化修改环境变量的 resolve 测试（`Config::load` 读 `XDG_CONFIG_HOME`，
@@ -85,17 +94,22 @@ struct EnvGuard {
 static CONFIG_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl EnvGuard {
-    /// 设置 file 凭证后端 + 临时配置目录，返回还原句柄。
+    /// 设置 file 凭证后端 + 临时配置/缓存目录，返回还原句柄。
+    /// 缓存目录隔离：resolve 的 `cached_playable_uri` 与流式 tee 落
+    /// `XDG_CACHE_HOME`（Windows 亦尊重该覆盖，见 hmp-storage xdg.rs）。
     fn install(dir: &std::path::Path) -> Self {
         let backend = std::env::var_os("HMP_CREDENTIAL_BACKEND");
         let xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let xdg_cache = std::env::var_os("XDG_CACHE_HOME");
         unsafe {
             std::env::set_var("HMP_CREDENTIAL_BACKEND", "file");
             std::env::set_var("XDG_CONFIG_HOME", dir);
+            std::env::set_var("XDG_CACHE_HOME", dir.join("cache"));
         }
         Self {
             backend,
             xdg_config,
+            xdg_cache,
         }
     }
 }
@@ -111,8 +125,25 @@ impl Drop for EnvGuard {
                 Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
                 None => std::env::remove_var("XDG_CONFIG_HOME"),
             }
+            match &self.xdg_cache {
+                Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+                None => std::env::remove_var("XDG_CACHE_HOME"),
+            }
         }
     }
+}
+
+/// 预置播放缓存命中：按稳定键（URL path | ekey）在
+/// `$XDG_CACHE_HOME/hmp/decrypted` 写入合法魔数音频文件。resolve 的
+/// `cached_playable_uri` 即命中（零 CDN 网络路径）——wiremock 场景无法
+/// 触达真实 CDN（域名固定），借此走通「明文音质成功」路径；键由 daemon
+/// 拼接的 CDN url path 派生，命中本身即验证 URL 拼接契约。
+fn seed_playback_cache(cdn_url: &str, ekey: &str, bytes: &[u8]) {
+    let key = hmp_media::cache::cache_key(cdn_url, ekey);
+    let root = hmp_storage::cache_dir().join("decrypted");
+    std::fs::create_dir_all(&root).unwrap();
+    let ext = hmp_media::cache::extension_from_magic(bytes).expect("种子文件须有可识别魔数");
+    std::fs::write(root.join(format!("{key}.{ext}")), bytes).unwrap();
 }
 
 /// 构造指向 wiremock 的 QQ 客户端。
@@ -300,21 +331,28 @@ async fn resolve_track_falls_back_to_plain_via_mock_api() {
         vec![TrackId::new(TRACK_MID)]
     );
 
-    // 5) 曲目解析：详情 → 回退（加密全失败）→ 明文 M500 成功
+    // 5) 曲目解析：详情 → 回退（加密全失败）→ 明文 M500 成功。
+    //    预置播放缓存命中（零 CDN——域名固定无法指向 wiremock，见模块注释；
+    //    键由 daemon 拼接的 CDN url path 派生，命中即验证拼接契约）。
+    let cdn_url = format!(
+        "https://isure.stream.qqmusic.qq.com/M500{TRACK_MEDIA_MID}.mp3?guid=abc&vkey=testvkey"
+    );
+    seed_playback_cache(&cdn_url, "", b"ID3\x00\x00\x00\x00hmp-e2e-seed");
     let resolved = resolver
         .resolve_track(&TrackId::new(TRACK_MID))
         .await
         .expect("回退到明文音质后应成功解析");
 
-    // CDN URI 契约（daemon 拼接固定域名 + purl）
-    assert_eq!(
-        resolved.uri,
-        format!(
-            "https://isure.stream.qqmusic.qq.com/M500{TRACK_MEDIA_MID}.mp3?guid=abc&vkey=testvkey"
-        )
+    // 播放缓存命中契约：file:// 本地 URI + 无进程内源（media = None）。
+    assert!(
+        resolved.uri.starts_with("file://"),
+        "缓存命中应返回 file:// URI，实际 {}",
+        resolved.uri
     );
-    // 明文音质无需解密 guard（media = None → Rodio 直连 CDN）
-    assert!(resolved.media.is_none(), "明文路径不应有解密代理 guard");
+    assert!(
+        resolved.media.is_none(),
+        "缓存命中路径不应携带进程内源（直接播本地文件）"
+    );
 
     // 元数据（歌手/专辑/封面/时长）来自详情
     assert_eq!(resolved.track.id, TrackId::new(TRACK_MID));
@@ -556,6 +594,14 @@ async fn resolve_track_respects_fixed_quality_config() {
         .mount(&server)
         .await;
 
+    // M500 明文走播放缓存命中（域名固定无法指向 wiremock，见模块注释）。
+    seed_playback_cache(
+        &format!(
+            "https://isure.stream.qqmusic.qq.com/M500{TRACK_MEDIA_MID}.mp3?guid=abc&vkey=testvkey"
+        ),
+        "",
+        b"ID3\x00\x00\x00\x00hmp-e2e-seed",
+    );
     let resolver = QqSourceResolver::new(client_for(&server.uri()), store);
     let resolved = resolver
         .resolve_track(&TrackId::new(TRACK_MID))
@@ -581,6 +627,75 @@ async fn resolve_track_respects_fixed_quality_config() {
         vec!["F0M0"],
         "固定 FLAC 只应尝试 F0M0，实际: {prefixes:?}"
     );
+}
+
+/// 流式 `PreparedMedia` 契约（daemon 侧）：`prepare_media` 对支持 Range 的
+/// CDN 返回**原 CDN url**（仅元数据）+ 进程内随机访问源（`source` 直供
+/// 播放器，取代历史上的 `127.0.0.1` 回环代理）。daemon 拼接的 CDN 域名
+/// 固定无法指向 wiremock，故此处直接以 wiremock 充当 Range CDN 验证契约
+/// （明文 = IdentityCipher 直通）；resolve_track_impl 对它的调用由测试 1/2
+/// 的缓存命中路径与真机测试覆盖。
+#[tokio::test]
+async fn prepared_media_contract_is_cdn_url_plus_stream_source() {
+    let _lock = CONFIG_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::install(dir.path());
+
+    // 明文音源：尾部 4 字节 [204,205,206,207] 的 LE u32 远超 QMC2 V1 key
+    // 上限 0x400 → detect_footer 判 None（不会误入内嵌 ekey 提取）。
+    let plaintext: Vec<u8> = {
+        let mut v = b"fLaC".to_vec();
+        v.extend((0..2000).map(|i| (i % 256) as u8));
+        v.extend([204, 205, 206, 207]);
+        v
+    };
+    let total_len = plaintext.len() as u64;
+
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Length", total_len.to_string())
+                .insert_header("Accept-Ranges", "bytes"),
+        )
+        .mount(&server)
+        .await;
+    let body = plaintext.clone();
+    Mock::given(method("GET"))
+        .and(header_exists("Range"))
+        .respond_with(move |req: &wiremock::Request| match range_of(req) {
+            Some((start, end)) if start < total_len => {
+                let end_capped = end.min(total_len - 1);
+                ResponseTemplate::new(206)
+                    .insert_header(
+                        "Content-Range",
+                        format!("bytes {start}-{end_capped}/{total_len}"),
+                    )
+                    .set_body_bytes(body[start as usize..=end_capped as usize].to_vec())
+            }
+            _ => ResponseTemplate::new(416),
+        })
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/song.flac", server.uri());
+    let prepared = hmp_media::prepare_media(&url, None, None)
+        .await
+        .expect("流式 prepare 应成功");
+    assert_eq!(prepared.uri, url, "流式路径 uri 保留原 CDN url（元数据）");
+    let source = prepared
+        .source
+        .as_ref()
+        .expect("流式路径应携带进程内随机访问源");
+    assert_eq!(source.len(), total_len, "明文直通：len = 文件总长");
+}
+
+/// 解析请求的 `Range: bytes=start-end` 头。
+fn range_of(req: &wiremock::Request) -> Option<(u64, u64)> {
+    let v = req.headers.get("Range")?.to_str().ok()?;
+    let spec = v.strip_prefix("bytes=")?;
+    let (start, end) = spec.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?))
 }
 
 #[tokio::test]

@@ -34,7 +34,7 @@ pub fn cached_uri_at(root: &Path, url: &str, ekey: Option<&str>) -> Result<Optio
 
 /// 按 key 前缀扫缓存目录，返回首个头魔数合法的 `<key>.<ext>` 文件。
 /// 实际扩展名可能与 URL 猜测不同（如明文 URL 无后缀），故扫描而非精确路径。
-fn lookup_valid(root: &Path, key: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn lookup_valid(root: &Path, key: &str) -> Option<std::path::PathBuf> {
     let prefix = format!("{key}.");
     let dir = std::fs::read_dir(root).ok()?;
     dir.flatten()
@@ -342,7 +342,7 @@ async fn download_to_file(
     tmp: &Path,
     progress: Option<&tokio::sync::watch::Sender<Option<f64>>>,
 ) -> Result<()> {
-    let response = crate::proxy::source::cdn_client()
+    let response = crate::stream::source::cdn_client()
         .get(url)
         .send()
         .await
@@ -506,7 +506,7 @@ async fn decrypt_and_write(
 }
 
 /// 读取文件前 `n` 字节。
-fn read_first_bytes(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_first_bytes(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
     let mut buf = vec![0u8; n];

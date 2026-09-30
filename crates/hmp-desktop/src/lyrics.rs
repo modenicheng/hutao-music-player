@@ -1,6 +1,13 @@
 use std::collections::HashMap;
 
-use crate::app::UiLyricData;
+/// 歌词行显示数据。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiLyricData {
+    pub timestamp_ms: u64,
+    pub time: String,
+    pub text: String,
+    pub translation: String,
+}
 
 /// Parse LRC lyric and translation text into timestamped UI rows.
 pub fn parse_lrc(lyric: &str, translation: &str) -> Vec<UiLyricData> {

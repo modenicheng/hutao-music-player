@@ -213,15 +213,14 @@ pub enum Request {
     },
     /// 账号状态读（登录态 + 昵称/uin/VIP 摘要；AUDIT §8.6）。
     AccountStatus,
-    /// 发起 QQ 扫码登录：生成二维码落盘 `data_dir/`，返回图片路径。
-    /// 同一时刻至多一个进行中的会话（重复 Start 重开新会话）。
+    /// 扫码登录发起：生成二维码 PNG 落盘 `data_dir/`，返回本机路径
+    /// （UI 禁 HTTP，直读本机文件）。
     LoginQrStart,
-    /// 轮询扫码登录进度（客户端 ~1.5s 一次，与 CLI PollInterval 同量级）。
-    /// 无进行中的会话 → `status=4`（不视为协议错误）。
+    /// 扫码登录轮询（无状态短连接驱动；返回当前进度态）。
     LoginQrPoll,
-    /// 取消进行中的扫码登录会话（无会话时幂等 Ok）。
+    /// 扫码登录取消（幂等；无会话也是 Ok）。
     LoginQrCancel,
-    /// 退出登录：远端登出尽力而为 + 删除本地凭证（未登录幂等 Ok）。
+    /// 退出登录（远端登出尽力而为，本地凭证必删；账号缓存同步失效）。
     Logout,
     /// 音质偏好读（config.toml `[quality]`）。
     QualityGet,
@@ -292,9 +291,9 @@ pub enum Response {
     Lyric(LyricPage),
     /// `AccountStatus` 的响应。
     AccountStatus(AccountInfo),
-    /// `LoginQrStart` 的响应（二维码图片本机路径）。
+    /// `LoginQrStart` 的响应（二维码 PNG 本机路径）。
     LoginQr(LoginQrSession),
-    /// `LoginQrPoll` 的响应（扫码进度）。
+    /// `LoginQrPoll` 的响应（扫码进度态）。
     LoginQrState(LoginQrState),
     /// `QualityGet` / `QualitySet` 的响应。
     Quality(QualityPrefDto),
@@ -607,34 +606,34 @@ pub struct AccountInfo {
     pub vip_summary: String,
 }
 
-/// 扫码登录会话（`LoginQrStart` 响应）。
+/// 扫码登录会话（`LoginQrStart` 的响应）：二维码 PNG 已落盘的本机路径。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginQrSession {
-    /// 二维码 PNG 的本机绝对路径（UI 禁 HTTP，直读本机文件）。
+    /// 二维码 PNG 绝对路径（`data_dir/login-qr-{n}.png`）。
     pub qr_path: String,
 }
 
-/// 扫码登录进度（`LoginQrPoll` 响应）。
+/// 扫码登录进度态（`LoginQrPoll` 的响应）。
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LoginQrState {
-    /// 0=等待扫码 1=已扫码待确认 2=登录成功 3=用户拒绝 4=无进行中的会话/失败。
+    /// 进度常量（[`LoginQrState::STATUS_*`]）之一。
     pub status: i32,
-    /// 当前二维码路径（服务端超时自动刷新后路径变化，UI 按 path 变化重载图）。
+    /// 二维码 PNG 当前路径（会话超时自动刷新后变化；终态为空串）。
     pub qr_path: String,
-    /// 展示文案（失败/超时原因等；正常轮询为空）。
+    /// 展示消息（进度提示/失败原因；无消息为空串）。
     pub message: String,
 }
 
 impl LoginQrState {
     /// 等待扫码。
     pub const STATUS_WAITING: i32 = 0;
-    /// 已扫码，等待手机确认。
+    /// 已扫码，待手机确认。
     pub const STATUS_SCANNED: i32 = 1;
     /// 登录成功（凭证已落库）。
     pub const STATUS_DONE: i32 = 2;
     /// 用户在手机上拒绝。
     pub const STATUS_REFUSED: i32 = 3;
-    /// 无进行中的会话 / 失败终态（`message` 携带原因，非协议错误）。
+    /// 会话空闲/终止（未发起、超时、错误；`message` 携带原因）。
     pub const STATUS_IDLE: i32 = 4;
 }
 
@@ -813,10 +812,6 @@ mod tests {
                 artist: "周杰伦".into(),
             },
             Request::AccountStatus,
-            Request::LoginQrStart,
-            Request::LoginQrPoll,
-            Request::LoginQrCancel,
-            Request::Logout,
             Request::QualityGet,
             Request::QualitySet {
                 mode: "flac".into(),
@@ -925,14 +920,6 @@ mod tests {
                 nickname: "胡桃".into(),
                 uin: "10001".into(),
                 vip_summary: "VIP".into(),
-            }),
-            Response::LoginQr(LoginQrSession {
-                qr_path: "/tmp/hmp/login-qr-1.png".into(),
-            }),
-            Response::LoginQrState(LoginQrState {
-                status: 1,
-                qr_path: "/tmp/hmp/login-qr-1.png".into(),
-                message: String::new(),
             }),
             Response::Quality(QualityPrefDto {
                 mode: "auto".into(),

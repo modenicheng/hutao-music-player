@@ -90,13 +90,17 @@ impl PlaybackDriver for RodioDriver {
     }
 }
 
-/// 解析完成的曲目（含解密 guard，随 daemon 存活）。
+/// 解析完成的曲目（远端流式路径含进程内解密源）。
 pub struct ResolvedTrack {
     /// 领域曲目元数据。
     pub track: Track,
-    /// 播放 URI（http://127.0.0.1 代理或 CDN 直连）。
+    /// 播放 URI（远端流式 = 原 CDN url，仅元数据/日志；CDN 无 Range
+    /// 回退与播放缓存命中 = `file://`）。
     pub uri: String,
-    /// 解密代理 guard（明文播放期间必须持有；换曲时被引擎替换 Drop）。
+    /// 进程内解密源（流式路径 `Some`，字节流经 `source` 直供播放器）；
+    /// 缓存命中/回退（`file://`）与本地曲目为 `None`。生命周期随
+    /// reader/引擎 `AppliedLoad.source`（reader 存活即源存活，无需
+    /// 引擎单独保活）。
     pub media: Option<hmp_media::PreparedMedia>,
     /// 本次实际选定的音质（媒体库重构 B3：actual vs available 分离）。
     pub quality: AudioQuality,
@@ -106,7 +110,7 @@ pub struct ResolvedTrack {
 
 impl std::fmt::Debug for ResolvedTrack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `PreparedMedia` 不实现 Debug；只呈现是否持有 guard。
+        // `PreparedMedia` 不实现 Debug；只呈现是否持有进程内源。
         f.debug_struct("ResolvedTrack")
             .field("track", &self.track)
             .field("uri", &self.uri)
@@ -252,19 +256,6 @@ fn quality_to_file_type(q: &AudioQuality) -> Option<SongFileType> {
     }
 }
 
-/// 后台回填播放缓存（幂等；失败仅日志，不影响当次流式播放）。
-/// `ekey` 空串 = 明文。回填完成后二次播放经 `cached_playable_uri` 全离线。
-fn spawn_cache_fill(url: String, ekey: String) {
-    tokio::spawn(async move {
-        let ekey_opt = (!ekey.is_empty()).then_some(ekey.as_str());
-        match hmp_media::cache_fill(&url, ekey_opt).await {
-            Ok(Some(uri)) => tracing::debug!(url, uri, "playback cache filled"),
-            Ok(None) => {}
-            Err(e) => tracing::warn!(url, %e, "playback cache fill failed"),
-        }
-    });
-}
-
 /// 解析单个曲目 → 可播放 URI + 元数据（音质回退 + QMC2 解密）。
 pub async fn resolve_track_impl(
     client: &QqMusicClient,
@@ -351,25 +342,25 @@ pub async fn resolve_track_impl(
                                 tracing::debug!(%e, "playback cache lookup failed; streaming");
                             }
                         }
-                        if file_type.is_encrypted {
-                            match hmp_media::prepare_stream(&remote_uri, ekey_opt, None).await {
-                                Ok(p) => {
-                                    // 首播流式秒开，后台回填全量缓存供二次播放离线
-                                    spawn_cache_fill(remote_uri.clone(), item.ekey.clone());
-                                    let uri = p.uri.clone();
-                                    found = Some((file_type, uri, Some(p)));
-                                    break;
-                                }
-                                Err(e) => {
-                                    last_error = Some(format!("QMC2 decrypt failed: {e}"));
-                                    continue;
-                                }
+                        // 加密/明文统一经 prepare_media：加密走 QMC2 流密码，
+                        // 明文（ekey 空且无内嵌 footer）走 IdentityCipher 直通。
+                        // CDN 支持 Range → 进程内随机访问源（uri 保留原 CDN url，
+                        // 播放字节流经 source 直供播放器）；无 Range → hmp-media
+                        // 自动回退全量下载-解密-缓存（uri = file://，source None）。
+                        // 流式 reader 自带 tee 边播边缓存（顺序消费写入缓存，
+                        // drop 后后台补齐剩余区间），二次播放由上方
+                        // cached_playable_uri 命中——解析层不再后台二次全量下载
+                        // （未播放的预解析曲目不回填缓存）。
+                        match hmp_media::prepare_media(&remote_uri, ekey_opt, None).await {
+                            Ok(p) => {
+                                let uri = p.uri.clone();
+                                found = Some((file_type, uri, Some(p)));
+                                break;
                             }
-                        } else {
-                            // 明文无需解密 guard：直接播放 CDN URL（media: None）
-                            spawn_cache_fill(remote_uri.clone(), String::new());
-                            found = Some((file_type, remote_uri, None));
-                            break;
+                            Err(e) => {
+                                last_error = Some(format!("prepare media failed: {e}"));
+                                continue;
+                            }
                         }
                     } else {
                         last_error = Some(format!("result={}", item.result));

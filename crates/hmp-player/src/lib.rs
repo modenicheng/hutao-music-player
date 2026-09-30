@@ -12,29 +12,112 @@ pub use core::open_default_output;
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use hmp_core::{AudioQuality, LoadRequest, PlaybackStatus, Track, TrackId};
+    use hmp_core::{
+        AudioQuality, LoadRequest, MediaStream, MediaStreamSource, PlaybackStatus, Track, TrackId,
+    };
 
     use crate::{PlayerCore, source::file_path};
 
-    fn write_silent_wav(path: &std::path::Path, duration_ms: u32) {
+    /// 生成静音 WAV 字节（8kHz 单声道 16bit）。
+    fn silent_wav_bytes(duration_ms: u32) -> Vec<u8> {
         let sample_rate = 8_000u32;
         let data_len = sample_rate * duration_ms / 1_000 * 2;
-        let mut file = std::fs::File::create(path).unwrap();
-        file.write_all(b"RIFF").unwrap();
-        file.write_all(&(36 + data_len).to_le_bytes()).unwrap();
-        file.write_all(b"WAVEfmt ").unwrap();
-        file.write_all(&16u32.to_le_bytes()).unwrap();
-        file.write_all(&1u16.to_le_bytes()).unwrap();
-        file.write_all(&1u16.to_le_bytes()).unwrap();
-        file.write_all(&sample_rate.to_le_bytes()).unwrap();
-        file.write_all(&(sample_rate * 2).to_le_bytes()).unwrap();
-        file.write_all(&2u16.to_le_bytes()).unwrap();
-        file.write_all(&16u16.to_le_bytes()).unwrap();
-        file.write_all(b"data").unwrap();
-        file.write_all(&data_len.to_le_bytes()).unwrap();
-        file.write_all(&vec![0; data_len as usize]).unwrap();
+        let mut wav = std::io::Cursor::new(Vec::new());
+        wav.write_all(b"RIFF").unwrap();
+        wav.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+        wav.write_all(b"WAVEfmt ").unwrap();
+        wav.write_all(&16u32.to_le_bytes()).unwrap();
+        wav.write_all(&1u16.to_le_bytes()).unwrap();
+        wav.write_all(&1u16.to_le_bytes()).unwrap();
+        wav.write_all(&sample_rate.to_le_bytes()).unwrap();
+        wav.write_all(&(sample_rate * 2).to_le_bytes()).unwrap();
+        wav.write_all(&2u16.to_le_bytes()).unwrap();
+        wav.write_all(&16u16.to_le_bytes()).unwrap();
+        wav.write_all(b"data").unwrap();
+        wav.write_all(&data_len.to_le_bytes()).unwrap();
+        wav.write_all(&vec![0; data_len as usize]).unwrap();
+        wav.into_inner()
+    }
+
+    fn write_silent_wav(path: &std::path::Path, duration_ms: u32) {
+        std::fs::write(path, silent_wav_bytes(duration_ms)).unwrap();
+    }
+
+    /// 进程内内存源（[`MediaStreamSource`] 测试替身）：open 返回全量字节的
+    /// `Cursor`（`Read + Seek + Send`，经 blanket impl 自动满足
+    /// [`MediaStream`]）——与生产解密源同一接缝。
+    struct MemSource(Arc<Vec<u8>>);
+
+    impl std::fmt::Debug for MemSource {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            // 只打长度，不打印字节本体（生产源同理只打元信息）。
+            f.debug_struct("MemSource")
+                .field("len", &self.0.len())
+                .finish()
+        }
+    }
+
+    impl MediaStreamSource for MemSource {
+        fn len(&self) -> u64 {
+            self.0.len() as u64
+        }
+
+        fn open(&self) -> std::io::Result<Box<dyn MediaStream>> {
+            Ok(Box::new(std::io::Cursor::new((*self.0).clone())))
+        }
+    }
+
+    /// 黑洞源（[`MediaStreamSource`] 测试替身，替代旧测试的黑洞 HTTP 服务器）：
+    /// open 立即成功，但 reader 的 Read/Seek 永久阻塞——模拟后台预取永远
+    /// 饥饿的远端源。
+    ///
+    /// 无人向 channel 发送：`recv()` 阻塞到 [`HungSource`] 被 drop（装载被
+    /// 取代/Stop/Shutdown abort 后 request 释放最后一个 Arc）——senders
+    /// 随之全部释放，`recv` 返回 Err、阻塞在探测上的 `spawn_blocking` 线程
+    /// 以错误结束并归还线程池（tokio runtime drop 会等阻塞任务到天荒地老，
+    /// 读必须随源 drop 一起终止）。
+    #[derive(Debug, Default)]
+    struct HungSource {
+        releases: std::sync::Mutex<Vec<std::sync::mpsc::Sender<()>>>,
+    }
+
+    impl MediaStreamSource for HungSource {
+        fn len(&self) -> u64 {
+            1
+        }
+
+        fn open(&self) -> std::io::Result<Box<dyn MediaStream>> {
+            let (release, blocked) = std::sync::mpsc::channel::<()>();
+            self.releases.lock().unwrap().push(release);
+            Ok(Box::new(HungReader(blocked)))
+        }
+    }
+
+    /// Read/Seek 永久阻塞的 reader（阻塞在 recv 上，见 [`HungSource`]）。
+    struct HungReader(std::sync::mpsc::Receiver<()>);
+
+    impl std::io::Read for HungReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            // recv 只会因 senders 全部释放而返回 Err（无人发送）。
+            let _ = self.0.recv();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "hung source released",
+            ))
+        }
+    }
+
+    impl std::io::Seek for HungReader {
+        fn seek(&mut self, _pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            let _ = self.0.recv();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "hung source released",
+            ))
+        }
     }
 
     #[test]
@@ -56,6 +139,7 @@ mod tests {
             uri,
             quality: AudioQuality::Flac,
             load_gen: 7,
+            stream: None,
         });
 
         let mut state = core.subscribe_state();
@@ -88,22 +172,13 @@ mod tests {
         core.shutdown();
     }
 
-    /// 回归（2026-09-29 QQ 远端音频事故·驱动僵尸）：挂起的网络装载不得阻塞
+    /// 回归（2026-09-29 QQ 远端音频事故·驱动僵尸）：挂起的取流装载不得阻塞
     /// 命令循环——装载在独立任务执行，后续装载能立即取代它并生效。
     ///
-    /// 黑洞服务器（接受连接但不响应）模拟 CDN/代理挂起；第二个本地 WAV
+    /// HungSource 的 Read 永久阻塞（模拟 CDN/后台预取挂起）；第二个本地 WAV
     /// 装载必须在短时间内应用（旧实现中它会排在挂起 future 之后永不执行）。
     #[tokio::test]
     async fn superseded_hung_load_does_not_block_next_load() {
-        // 黑洞 HTTP 服务器：accept 后保持沉默
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let blackhole_addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let _ = stream; // 收下连接，永不响应
-            }
-        });
-
         let dir = tempfile::tempdir().unwrap();
         let wav_path = dir.path().join("next.wav");
         write_silent_wav(&wav_path, 120);
@@ -111,12 +186,14 @@ mod tests {
         let core = PlayerCore::new_silent_for_test();
         let mut state = core.subscribe_state();
 
-        // gen 1：挂起的网络装载（回环地址 → no_proxy 客户端 → 黑洞无响应头）
+        // gen 1：挂起的流装载（open 成功、探测 Read 永久阻塞）；
+        // uri 只是元数据，播放走 stream。
         core.load(LoadRequest {
             track: Track::new(TrackId::new("hung-stream"), "Hung"),
-            uri: format!("http://{blackhole_addr}/stream"),
+            uri: "https://isure.stream.qqmusic.qq.com/hung.wav".into(),
             quality: AudioQuality::Mp3_128,
             load_gen: 1,
+            stream: Some(Arc::new(HungSource::default())),
         });
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -135,6 +212,7 @@ mod tests {
             uri: url::Url::from_file_path(&wav_path).unwrap().to_string(),
             quality: AudioQuality::Flac,
             load_gen: 2,
+            stream: None,
         });
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -159,21 +237,14 @@ mod tests {
     /// 不得在 Stop 之后把状态「复活」为 Playing。
     #[tokio::test]
     async fn stop_cancels_inflight_load_no_late_resurrection() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let blackhole_addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let _ = stream;
-            }
-        });
-
         let core = PlayerCore::new_silent_for_test();
         let mut state = core.subscribe_state();
         core.load(LoadRequest {
             track: Track::new(TrackId::new("hung-stream"), "Hung"),
-            uri: format!("http://{blackhole_addr}/stream"),
+            uri: "https://isure.stream.qqmusic.qq.com/hung.wav".into(),
             quality: AudioQuality::Mp3_128,
             load_gen: 1,
+            stream: Some(Arc::new(HungSource::default())),
         });
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -187,7 +258,7 @@ mod tests {
         .expect("hung load should enter Loading");
 
         core.stop();
-        // 若装载未被取消，黑洞永不响应本测试也不会等到完成——这里只能验证
+        // 若装载未被取消，黑洞源永不产出本测试也不会等到完成——这里只能验证
         // Stop 生效且短窗内无复活；「Stop 后完成」的真复活路径由取代测试
         // 的取消语义（abort + drop 接收端）覆盖。
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -196,51 +267,23 @@ mod tests {
     }
 
     /// 回归（2026-09-29 QQ 远端音频事故·LIFO 死锁）：decoder 格式探测的
-    /// 阻塞读若内联在 runtime worker 上，worker 被读挂起，而 stream_download
-    /// 的下载任务落在同 worker 的 LIFO 槽（不可偷取）→ 下载任务永不调度 →
-    /// 探测永远等不到字节 → 装载死锁（修复：探测在 `spawn_blocking` 上）。
-    /// 本地 HTTP 服务真流式供 WAV——旧代码在本测试下确定性死锁（超时）。
+    /// 阻塞读必须落在 `spawn_blocking` 上——若内联在 runtime worker 上，
+    /// worker 被读挂起，而源的后台预取任务落在同 worker 的 LIFO 槽（不可被
+    /// 其他 worker 偷取）→ 预取任务永不调度 → 探测永远等不到字节 → 装载
+    /// 死锁。旧 stream-download 实现在本测试形态下确定性死锁（超时）；现以
+    /// 进程内源（内存 WAV 经 MediaStreamSource 直连 decoder）保持同一接缝，
+    /// 流装载必须到达 Playing。
     #[tokio::test]
-    async fn http_stream_load_reaches_playing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("http.wav");
-        write_silent_wav(&path, 200);
-        let body = std::fs::read(&path).unwrap();
-
-        // 极简 HTTP/1.1 服务：忽略 Range，一律 200 + 全量 body
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let body = body.clone();
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader, Write};
-                    let mut reader = BufReader::new(stream.try_clone().unwrap());
-                    let mut request_line = String::new();
-                    while reader.read_line(&mut request_line).unwrap_or(0) > 0 {
-                        if request_line.trim().is_empty() {
-                            break;
-                        }
-                        request_line.clear();
-                    }
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: audio/wav\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = stream.write_all(header.as_bytes());
-                    let _ = stream.write_all(&body);
-                    let _ = stream.flush();
-                });
-            }
-        });
+    async fn stream_source_load_reaches_playing() {
+        let wav = Arc::new(silent_wav_bytes(200));
 
         let core = PlayerCore::new_silent_for_test();
         core.load(LoadRequest {
-            track: Track::new(TrackId::new("http-test"), "Http"),
-            uri: format!("http://{addr}/sample.wav"),
+            track: Track::new(TrackId::new("stream-test"), "Stream"),
+            uri: "https://isure.stream.qqmusic.qq.com/sample.wav".into(),
             quality: AudioQuality::Mp3_128,
             load_gen: 3,
+            stream: Some(Arc::new(MemSource(wav))),
         });
         let mut state = core.subscribe_state();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -252,19 +295,8 @@ mod tests {
             }
         })
         .await
-        .expect("HTTP stream must reach Playing (LIFO deadlock regression)");
+        .expect("in-process stream must reach Playing (probe-on-spawn_blocking regression)");
         assert_eq!(state.borrow().load_gen, 3);
         core.shutdown();
-    }
-
-    /// 回环主机判定：no_proxy 客户端选择依据。
-    #[test]
-    fn loopback_host_classification() {
-        assert!(crate::core::is_loopback_host("127.0.0.1"));
-        assert!(crate::core::is_loopback_host("::1"));
-        assert!(crate::core::is_loopback_host("localhost"));
-        assert!(!crate::core::is_loopback_host("isure.stream.qqmusic.qq.com"));
-        assert!(!crate::core::is_loopback_host("192.168.1.10"));
-        assert!(!crate::core::is_loopback_host(""));
     }
 }
