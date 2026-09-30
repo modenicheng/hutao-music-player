@@ -69,6 +69,12 @@ impl ContentService {
             .filter(|c| c.is_logged_in()))
     }
 
+    /// 账号缓存失效（登录/登出后由 server 调用）：下次 `AccountStatus`
+    /// 绕过 TTL 重新出网，桌面账号页立即可见新登录态。
+    pub fn invalidate_account_cache(&self) {
+        *self.account_cache.lock().unwrap() = None;
+    }
+
     /// 快速搜索（免登录 smartbox；AUDIT §8.2）。
     pub async fn search(&self, keyword: &str) -> Result<SearchPage, String> {
         if keyword.trim().is_empty() {

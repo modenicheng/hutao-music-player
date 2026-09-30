@@ -1,6 +1,6 @@
-// 账号设置（AccountSettingsView.vue）：数据 = daemon AccountStatus IPC
-// （docs/AUDIT.md §8.6 已补——登录态 + 昵称/uin/VIP 摘要；未登录诚实展示
-// 登录引导）。登录/退出流程仍属 CLI（`hmp login`），桌面不做凭证操作。
+// 账号设置（AccountSettingsView.vue）：账号态 = daemon AccountStatus IPC
+// （docs/AUDIT.md §8.6）；扫码登录 / 退出登录 = daemon LoginQr*/Logout IPC
+// （凭证操作统一在 daemon，二维码经本机文件展示，UI 不直连 QQ）。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, Button, ButtonVariant } from "primitives.slint";
@@ -12,12 +12,32 @@ import { Data } from "stores.slint";
 export component SettingsAccountPage inherits Rectangle {
     background: transparent;
 
+    // 登录面板状态行（login-state：1=等待扫码 2=已扫码 3=成功 4=已拒绝 5=失败）
+    function login-status-text() -> string {
+        if (Data.login-state == 1) {
+            return Data.login-message != "" ? Data.login-message : "请用手机 QQ「扫一扫」扫描二维码";
+        }
+        if (Data.login-state == 2) {
+            return "已扫码，请在手机上确认登录";
+        }
+        if (Data.login-state == 3) {
+            return "登录成功，账号信息已更新";
+        }
+        if (Data.login-state == 4) {
+            return "已在手机上拒绝登录";
+        }
+        if (Data.login-state == 5) {
+            return Data.login-message != "" ? Data.login-message : "登录失败，请重试";
+        }
+        return "";
+    }
+
     VerticalLayout {
         padding-top: Theme.space-6;
         padding-left: Theme.space-8;
         padding-right: Theme.space-8;
         padding-bottom: Theme.space-10;
-        spacing: Theme.space-4;
+        spacing: Theme.space-3;
         max-width: 896px;
 
         PageHeader {
@@ -30,7 +50,7 @@ export component SettingsAccountPage inherits Rectangle {
 
         SettingsNav { }
 
-        // —— 资料卡（头像 + 登录态/昵称 + 退出（登录流未入桌面，禁用））———
+        // —— 资料卡（头像 + 登录态/昵称 + 退出登录）———
         Rectangle {
             height: 96px;
             border-radius: Theme.radius-lg;
@@ -88,16 +108,22 @@ export component SettingsAccountPage inherits Rectangle {
                 if Data.account-logged-in: Button {
                     variant: ButtonVariant.outline;
                     small: true;
+                    icon: Icons.logout;
+                    icon-size: 17.6px;
                     text: "退出登录";
-                    enabled: false;
-                    tool-tip: "桌面端登录/退出流未接入；请在终端运行 hmp login / hmp logout";
+                    enabled: Data.account-state == 1;
                     height: 32px;
+                    clicked => {
+                        Data.logout();
+                    }
                 }
             }
         }
 
         // —— 信息行（只读；接口没给的值诚实显示 "—"）———
-        SettingGroup {
+        // 扫码流程进行中整组隐藏（未登录时全为 "—" 无信息量，让位给二维码面板；
+        // 应用页面无滚动容器，800px 视口减播放条后装不下两块同时展开）。
+        if !(Data.login-state >= 1 && Data.login-state <= 5): SettingGroup {
             title: "账号信息";
 
             FactRow {
@@ -120,24 +146,96 @@ export component SettingsAccountPage inherits Rectangle {
             }
         }
 
+        // —— 扫码登录（未登录且 daemon 可达时出现；登录成功后面板随登录态隐藏）———
+        // 面板尺寸按 800px 视口收紧（应用页面无滚动容器惯例），保证整页不溢出。
         if !Data.account-logged-in && Data.account-state == 1: SettingGroup {
-            title: "登录方式";
+            title: "扫码登录";
 
-            FactRow {
-                label: "命令行登录";
-                value: "hmp login";
+            if Data.login-state == 0: VerticalLayout {
+                spacing: Theme.space-3;
+
+                Text {
+                    text: "使用手机 QQ 扫描二维码登录，登录后可同步云端歌单、收藏与每日推荐。";
+                    color: Theme.muted-foreground;
+                    font-size: 12.8px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    Button {
+                        variant: ButtonVariant.default;
+                        small: true;
+                        text: "生成登录二维码";
+                        height: 32px;
+                        clicked => {
+                            Data.start-login();
+                        }
+                    }
+                }
             }
-            Text {
-                text: "扫码登录暂未进入桌面端；在终端完成 `hmp login` 后回到此页刷新即可看到账号。";
-                color: Theme.muted-foreground;
-                font-size: 12.8px;
+
+            if Data.login-state >= 1 && Data.login-state <= 5: VerticalLayout {
+                spacing: Theme.space-3;
+
+                // 二维码（等待扫码/已扫码两态显示；白底保证扫码对比度）
+                if Data.login-state == 1 || Data.login-state == 2: HorizontalLayout {
+                    alignment: center;
+
+                    Rectangle {
+                        width: 172px;
+                        height: 172px;
+                        border-radius: Theme.radius-md;
+                        background: #FFFFFF;
+
+                        Image {
+                            source: Data.login-qr;
+                            width: 156px;
+                            height: 156px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+                    }
+                }
+
+                Text {
+                    width: parent.width;
+                    horizontal-alignment: center;
+                    text: root.login-status-text();
+                    color: Theme.muted-foreground;
+                    font-size: 12.8px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: Theme.space-3;
+
+                    if Data.login-state == 1 || Data.login-state == 2: Button {
+                        variant: ButtonVariant.outline;
+                        small: true;
+                        text: "取消";
+                        height: 32px;
+                        clicked => {
+                            Data.cancel-login();
+                        }
+                    }
+                    if Data.login-state == 4 || Data.login-state == 5: Button {
+                        variant: ButtonVariant.default;
+                        small: true;
+                        text: "重新扫码";
+                        height: 32px;
+                        clicked => {
+                            Data.start-login();
+                        }
+                    }
+                }
             }
         }
 
         Text {
-            text: "播放/收藏等操作经由本地守护进程完成，无需登录即可使用本地音乐库。";
+            text: "播放/收藏等操作经由本地守护进程完成，无需登录即可使用本地音乐库；也可以在终端运行 hmp login / hmp logout 管理登录。";
             color: Theme.muted-foreground;
             font-size: 12.8px;
+            wrap: word-wrap;
         }
     }
 }

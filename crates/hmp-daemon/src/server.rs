@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use hmp_core::ipc::{
-    Event, IpcErrorCode, MAX_FRAME, Request, Response, decode_frame, encode_frame,
+    Event, IpcErrorCode, LoginQrState, MAX_FRAME, Request, Response, decode_frame, encode_frame,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -514,6 +514,80 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 None => Response::Err {
                     code: IpcErrorCode::Internal,
                     message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        // —— 扫码登录 / 登出（凭证操作统一在 daemon；AUDIT §8.6 延伸）———
+        Ok(Request::LoginQrStart) => {
+            let resp = match &handle.login {
+                Some(svc) => match svc.start().await {
+                    Ok(session) => Response::LoginQr(session),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "login service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::LoginQrPoll) => {
+            let resp = match &handle.login {
+                Some(svc) => {
+                    let state = svc.poll().await;
+                    if state.status == LoginQrState::STATUS_DONE {
+                        // 登录成功：账号缓存失效（下次 AccountStatus 重新出网）
+                        // + QQ 用户库 reconcile（spec §4：有凭证即拉快照）。
+                        if let Some(content) = &handle.content {
+                            content.invalidate_account_cache();
+                        }
+                        if let Some(sync) = &handle.sync_handle {
+                            sync.reconcile();
+                        }
+                    }
+                    Response::LoginQrState(state)
+                }
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "login service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::LoginQrCancel) => {
+            let resp = match &handle.login {
+                Some(svc) => {
+                    svc.cancel();
+                    Response::Ok
+                }
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "login service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::Logout) => {
+            let resp = match &handle.login {
+                Some(svc) => match svc.logout().await {
+                    Ok(()) => {
+                        if let Some(content) = &handle.content {
+                            content.invalidate_account_cache();
+                        }
+                        Response::Ok
+                    }
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "login service unavailable".into(),
                 },
             };
             write_frame(wr, &resp).await?;

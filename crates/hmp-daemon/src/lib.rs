@@ -4,6 +4,7 @@ pub mod content;
 pub mod daemon;
 pub mod engine;
 pub mod local;
+pub mod login;
 #[cfg(feature = "mpris")]
 pub mod mpris;
 pub mod player;

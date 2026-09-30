@@ -1,6 +1,9 @@
 // 已购音乐（PurchasedView.vue，v0.13）：页头 meta 聚合（单曲/专辑/合计金额）
 // → 已购单曲曲目表（购买日期归页头、不进行内列）→ 已购专辑封面卡网格。
+// QQ 开放接口无已购域 → 诚实空态，不虚构曲目/金额。
 import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { AppIcon } from "primitives.slint";
 import { CoverCardGrid, PageHeader, SectionHeader } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
 import { Nav, Route } from "nav.slint";
@@ -22,15 +25,57 @@ export component PurchasedPage inherits Rectangle {
             back => {
                 Nav.navigate(Route.library, "");
             }
-            meta-items: [
-                "单曲 \{Data.purchased-single-count}",
-                "专辑 \{Data.purchased-album-count}",
-                "合计 \{Data.purchased-total}",
-            ];
+            meta-items: Data.purchased-single-count == 0 && Data.purchased-album-count == 0
+                ? ["暂无已购"]
+                : [
+                    "单曲 \{Data.purchased-single-count}",
+                    "专辑 \{Data.purchased-album-count}",
+                    "合计 \{Data.purchased-total}",
+                ];
         }
 
-        // —— 已购单曲：整表可播 ——
-        VerticalLayout {
+        if Data.purchased-single-count == 0 && Data.purchased-album-count == 0: VerticalLayout {
+            spacing: Theme.space-4;
+
+            SectionHeader {
+                title: "已购单曲";
+            }
+            Rectangle {
+                height: 168px;
+                border-radius: Theme.radius-lg;
+                background: Theme.surface-3;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: Theme.space-2;
+
+                    HorizontalLayout {
+                        alignment: center;
+
+                        AppIcon {
+                            source: Icons.shopping_bag;
+                            icon-color: Theme.muted-foreground;
+                            width: 32px;
+                            height: 32px;
+                        }
+                    }
+                    Text {
+                        text: "还没有已购音乐";
+                        color: Theme.foreground;
+                        font-size: 13.5px;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: "购买的单曲与专辑会显示在这里。";
+                        color: Theme.muted-foreground;
+                        font-size: 12.8px;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+        }
+
+        if Data.purchased-single-count > 0: VerticalLayout {
             spacing: Theme.space-3;
 
             SectionHeader {
@@ -42,9 +87,8 @@ export component PurchasedPage inherits Rectangle {
             }
         }
 
-        // —— 已购专辑：封面卡进入专辑详情 ——
-        VerticalLayout {
-            spacing: Theme.space-4;
+        if Data.purchased-album-count > 0: VerticalLayout {
+            spacing: Theme.space-3;
 
             SectionHeader {
                 title: "已购专辑";

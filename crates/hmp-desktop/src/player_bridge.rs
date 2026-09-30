@@ -1067,7 +1067,7 @@ fn queue_cover(meta: &QueueRowMeta) -> slint::Image {
     crate::covers::cover_image(&cover_seed(meta))
 }
 
-/// 程序化封面种子：按专辑聚合（与 mock `album:{album-mid}` 同观感），
+/// 程序化封面种子：按专辑聚合（同专辑恒同图，`album:{album-mid}` 惯例），
 /// 无专辑信息回退按曲目（同曲恒同图，covers.rs 确定性保证）。
 fn cover_seed(meta: &QueueRowMeta) -> String {
     if meta.album.is_empty() {

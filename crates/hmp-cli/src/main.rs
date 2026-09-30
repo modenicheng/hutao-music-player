@@ -123,6 +123,8 @@ enum Command {
     },
     /// Log in via QQ QR code (ASCII art in the terminal).
     Login,
+    /// Log out: remote sign-out best-effort + delete local credentials.
+    Logout,
     /// Show login status (local credential check).
     Auth,
     /// Recursively scan a local music directory into the library.
@@ -426,6 +428,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
         Command::Guess { page } => guess::run(page, cli.json).await,
         Command::Login => login::run().await,
+        Command::Logout => account::logout().await,
         Command::Auth => auth::run(cli.json).await,
         Command::Scan { dir } => scan::run(&dir).await,
         Command::Favorite(cmd) => match cmd {
@@ -531,8 +534,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             LibraryCmd::Scan { dir } => scan::run(&dir).await,
         },
         Command::Account(cmd) => match cmd {
-            AccountCmd::Profile => account::profile().await,
-            AccountCmd::Vip => account::vip().await,
+            AccountCmd::Profile => account::profile(cli.json).await,
+            AccountCmd::Vip => account::vip(cli.json).await,
         },
         Command::Comment(cmd) => match cmd {
             CommentCmd::List {

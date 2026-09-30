@@ -79,7 +79,7 @@ export global Player {
     callback hide-overlay();
 }
 
-// 音质档位（qualityStore.ts）：mock 期固定四档
+// 音质档位（qualityStore.ts）：四档（daemon config.toml 为唯一事实源）
 export global Quality {
     /** 用户偏好（0=标准 1=高清 2=无损 3=Hi-Res），默认无损 */
     in-out property <int> selected: 2;
@@ -104,7 +104,7 @@ export global Quality {
     }
 }
 
-// 页面数据模型（lib/api 的 mock 层对应物；Rust 装载，页面只读。
+// 页面数据模型（Rust 装载，页面只读。
 // 统计/格式化字段在 Rust 侧算好，Slint 不做数字格式化）
 export global Data {
     // —— 我喜欢页 ——
@@ -179,6 +179,17 @@ export global Data {
     in-out property <string> account-uin: "";
     in-out property <string> account-vip: "";
 
+    // —— 扫码登录（daemon LoginQr* IPC；设置页账号面板）———
+    /** 0=未在进行 1=等待扫码 2=已扫码待确认 3=登录成功 4=已拒绝 5=失败/超时（message 有因） */
+    in-out property <int> login-state: 0;
+    /** 当前二维码图（daemon 落盘 PNG；路径变化时 Rust 重载） */
+    in-out property <image> login-qr;
+    /** 失败原因 / 自动刷新提示（正常流程为空） */
+    in-out property <string> login-message: "";
+    callback start-login();
+    callback cancel-login();
+    callback logout();
+
     // —— M4 在线内容页（daemon DiscoverGet/TopCategoryGet/TopDetailGet/GuessGet）———
     /** 发现页状态：0=初始 1=加载中 2=有内容 3=空 4=失败 */
     in-out property <int> discover-state: 0;
@@ -228,7 +239,7 @@ export global NowPlaying {
     in-out property <int> comment-sort: 0;
     callback request-comments();
 
-    // —— 喜欢（mock 态：换曲回落未点亮，与原型一致；播放页直接写 liked）———
+    // —— 喜欢（换曲回落未点亮，与原型一致；播放页直接写 liked）———
     in-out property <bool> liked: false;
 }
 

@@ -74,6 +74,9 @@ impl Daemon {
         ));
         // 内容读服务（搜索/歌词/账号/封面；daemon 持凭证统一出网，AUDIT §8.2-8.6）。
         handle.content = Some(crate::content::ContentService::new(store_from_env()));
+        // 扫码登录服务（桌面端 LoginQr*/Logout）；启动清理上次会话遗留的二维码图。
+        handle.login = Some(Arc::new(crate::login::LoginService::new(store_from_env())));
+        crate::login::cleanup_stale_qr_files();
         handle.library = Some(library.clone());
         handle.library_tx = library_tx.clone();
         handle.library_rx = library_rx;

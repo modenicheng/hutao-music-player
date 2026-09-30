@@ -111,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut flight: Option<u64> = None;
     let mut queue = false;
     let mut overlay = false;
+    let mut account_demo = 0i32;
     let mut wheel: Option<(f32, f32, f32, u32)> = None;
     let mut wait_ms: u64 = 0;
     let mut seed = false;
@@ -151,6 +152,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--overlay" => overlay = true,
             // 合成数据灌 Player/NowPlaying（布局/弹簧/高亮验收；不依赖 daemon 推送）
             "--seed" => seed = true,
+            // 账号页演示态（合成数据；daemon 真实态在沙箱不可确定性呈现）：
+            // 1=已登录 2=扫码中（QR 面板展开）3=未登录（扫码入口可见）
+            "--account-demo" => account_demo = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--theme" => {
                 theme_dark = args.next().map(|v| v == "dark").unwrap_or(false);
             }
@@ -222,6 +226,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 c2: color,
             },
         ])));
+    }
+
+    // 账号页演示态（仅截图配方；1=已登录 2=扫码中）。
+    // bind 的真实 AccountStatus 查询在沙箱 daemon 不可达，状态会漂——演示
+    // 值在 wait 之后最终覆写一次，保证截图确定性。
+    if account_demo > 0 {
+        let data = hmp_desktop::Data::get(&ui);
+        data.set_account_state(1);
+        if account_demo == 1 {
+            data.set_account_logged_in(true);
+            data.set_account_nickname("胡桃".into());
+            data.set_account_uin("10001".into());
+            data.set_account_vip("VIP 会员".into());
+        } else if account_demo == 2 {
+            // 扫码中：程序化 QR 占位图（黑白格，仅验证面板布局与对比度）
+            data.set_login_state(1);
+            data.set_login_qr(qr_placeholder_image());
+        }
+        // account_demo == 3：未登录（state=1 + logged_in=false），扫码入口可见
     }
 
     // 先推进一段 mock 时间，让初始过渡（侧栏宽度等）收敛，再注 hover；
@@ -301,6 +324,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // 账号页演示值截图前最终覆写：bind 的真实 AccountStatus 重试/回包若在
+    // 上面的泵帧窗口内落地，会把演示态冲掉——这里再写一次保证确定性。
+    if account_demo > 0 {
+        let data = hmp_desktop::Data::get(&ui);
+        data.set_account_state(1);
+        if account_demo == 1 {
+            data.set_account_logged_in(true);
+            data.set_account_nickname("胡桃".into());
+            data.set_account_uin("10001".into());
+            data.set_account_vip("VIP 会员".into());
+        } else if account_demo == 2 {
+            data.set_login_state(1);
+            data.set_login_qr(qr_placeholder_image());
+            data.set_login_message(String::new().into());
+        }
+        // account_demo == 3：未登录（state=1 + logged_in=false），扫码入口可见
+    }
+
     match flight {
         // 抓动画中帧：只推进到指定时刻
         Some(ms) => step_to(ms),
@@ -320,8 +361,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn parse_route(s: &str) -> Option<hmp_desktop::Route> {
-    use hmp_desktop::Route;
+/// 程序化 QR 占位图（33×33 黑白格 + 定位角；仅账号页扫码面板布局验收）。
+fn qr_placeholder_image() -> slint::Image {
+    const N: usize = 33;
+    let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(N as u32, N as u32);
+    let pixels = buf.make_mut_slice();
+    let finder = |r: usize, c: usize| (r < 7 && c < 7) || (r < 7 && c >= N - 7) || (r >= N - 7 && c < 7);
+    for r in 0..N {
+        for c in 0..N {
+            let dark = finder(r, c)
+                || ((r * 7 + c * 13 + ((r / 3) * 5) ^ (c / 2)) % 3 == 0 && !finder(r, c));
+            pixels[r * N + c] = if dark {
+                slint::Rgba8Pixel::new(0x10, 0x10, 0x12, 0xFF)
+            } else {
+                slint::Rgba8Pixel::new(0xFF, 0xFF, 0xFF, 0xFF)
+            };
+        }
+    }
+    slint::Image::from_rgba8(buf)
+}
+
+fn parse_route(s: &str) -> Option<hmp_desktop::Route> {    use hmp_desktop::Route;
     Some(match s {
         "home" => Route::Home,
         "discover" => Route::Discover,

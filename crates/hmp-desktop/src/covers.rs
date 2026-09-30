@@ -15,7 +15,7 @@ use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 const FNV_OFFSET_BASIS: u32 = 0x811c_9dc5;
 const FNV_PRIME: u32 = 0x0100_0193;
 
-/// FNV-1a 32 位哈希（与 covers.ts hashSeed 逐字节一致，mock 层确定性地基）
+/// FNV-1a 32 位哈希（与 covers.ts hashSeed 逐字节一致，程序化封面的确定性地基）
 pub fn hash_seed(seed: &str) -> u32 {
     let mut hash = FNV_OFFSET_BASIS;
     for ch in seed.chars() {
