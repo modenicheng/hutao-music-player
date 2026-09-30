@@ -21,9 +21,9 @@
 
 use hmp_qqmusic_api::album::{AlbumApi, AlbumFavWriteResponse};
 use hmp_qqmusic_api::client::QqMusicClient;
-use hmp_qqmusic_api::pagination::{Page, Paged};
 use hmp_qqmusic_api::comment::{AddCommentResponse, CommentApi};
 use hmp_qqmusic_api::credential::Credential;
+use hmp_qqmusic_api::pagination::{Page, Paged};
 use hmp_qqmusic_api::protocol::cgi::CgiRequest;
 use hmp_qqmusic_api::recommend::RecommendApi;
 use hmp_qqmusic_api::top::TopApi;
@@ -51,7 +51,9 @@ async fn gap() {
 
 /// 对象键列表（诊断输出用）。
 fn keys(v: &Value) -> Vec<String> {
-    v.as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default()
+    v.as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// 子响应内层 data 的键。
@@ -95,7 +97,8 @@ async fn run_cmt_verify() {
 
 /// 补测：推荐歌单广场 wire dump（核对 List[*].Playlist.cover 的真实键形，
 /// 登录/免登录下 `cover.default_url` 提取结果均为空，需确认服务端键形）。
-async fn run_wire_dump() {    let client = QqMusicClient::new();
+async fn run_wire_dump() {
+    let client = QqMusicClient::new();
     let cred = load_credential();
     gap().await;
     match client
@@ -120,8 +123,20 @@ async fn run_wire_dump() {    let client = QqMusicClient::new();
             println!("WIRE List[0] keys={:?}", keys(&first));
             let playlist = first.get("Playlist").cloned().unwrap_or(json!({}));
             println!("WIRE List[0].Playlist keys={:?}", keys(&playlist));
-            println!("WIRE List[0].Playlist.cover={}", playlist.get("cover").map(|c| c.to_string()).unwrap_or_default());
-            println!("WIRE List[0].Playlist.creator={}", playlist.get("creator").map(|c| c.to_string()).unwrap_or_default());
+            println!(
+                "WIRE List[0].Playlist.cover={}",
+                playlist
+                    .get("cover")
+                    .map(|c| c.to_string())
+                    .unwrap_or_default()
+            );
+            println!(
+                "WIRE List[0].Playlist.creator={}",
+                playlist
+                    .get("creator")
+                    .map(|c| c.to_string())
+                    .unwrap_or_default()
+            );
         }
         Err(e) => println!("WIRE PlaylistSquare FAIL: {e}"),
     }
@@ -131,7 +146,8 @@ async fn run_wire_dump() {    let client = QqMusicClient::new();
 ///
 /// 服务端 `CgiGetAlbumFavInfo` 单页上限 20（size=100 也只返回 20），
 /// 按页扫全量后选一张未收藏新碟做 fav → del 净零闭环。
-async fn run_fav_only() {    let client = QqMusicClient::new();
+async fn run_fav_only() {
+    let client = QqMusicClient::new();
     let album = AlbumApi::new(&client);
     let rec = RecommendApi::new(&client);
     let user = UserApi::new(&client);
@@ -180,7 +196,10 @@ async fn run_fav_only() {    let client = QqMusicClient::new();
     let mut scan_ok = true;
     for page in 1..=3i64 {
         gap().await;
-        match user.get_fav_album(&euin, Page::new(page as u32, 20), Some(&cred)).await {
+        match user
+            .get_fav_album(&euin, Page::new(page as u32, 20), Some(&cred))
+            .await
+        {
             Ok(r) => {
                 fav_total = r.total;
                 covered += r.albums.len() as i64;
@@ -235,7 +254,11 @@ async fn run_fav_only() {    let client = QqMusicClient::new();
     let mut favorited = false;
     match &fav_wire {
         Ok(sub) => {
-            println!("WIRE FavAlbum sub keys={:?} data keys={:?}", keys(sub), data_keys(sub));
+            println!(
+                "WIRE FavAlbum sub keys={:?} data keys={:?}",
+                keys(sub),
+                data_keys(sub)
+            );
             println!("WIRE FavAlbum full={sub}");
             let parsed: AlbumFavWriteResponse =
                 serde_json::from_value(sub.get("data").cloned().unwrap_or(json!({})))
@@ -305,9 +328,9 @@ async fn run_fav_only() {    let client = QqMusicClient::new();
             r.failed_album_id,
             r.success()
         ),
-        Err(e) => println!(
-            "FAIL album.del_fav_album: {e}（请人工检查 album_id={album_id} 收藏状态）"
-        ),
+        Err(e) => {
+            println!("FAIL album.del_fav_album: {e}（请人工检查 album_id={album_id} 收藏状态）")
+        }
     }
 }
 
@@ -343,7 +366,11 @@ async fn main() {
     match album.get_detail("003RMaRI1iFoYd").await {
         Ok(r) => println!(
             "PASS album.get_detail(mid): name={:?} time={:?} company={:?} singers={} lang={:?}",
-            r.album.album.name, r.album.album.time_public, r.company.name, r.singers.len(), r.album.language
+            r.album.album.name,
+            r.album.album.time_public,
+            r.company.name,
+            r.singers.len(),
+            r.album.language
         ),
         Err(e) => println!("FAIL album.get_detail(mid): {e}"),
     }
@@ -352,7 +379,9 @@ async fn main() {
     match album.get_detail("1458791").await {
         Ok(r) => println!(
             "PASS album.get_detail(numeric albumId): id={} name={:?} desc_len={}",
-            r.album.album.id, r.album.album.name, r.album.desc.len()
+            r.album.album.id,
+            r.album.album.name,
+            r.album.desc.len()
         ),
         Err(e) => println!("FAIL album.get_detail(numeric): {e}"),
     }
@@ -368,7 +397,9 @@ async fn main() {
             }
             println!(
                 "PASS album.get_song: album_mid={:?} total={} parsed={} first_id={first_song_id}",
-                r.album_mid, r.total_num, r.song_list.len()
+                r.album_mid,
+                r.total_num,
+                r.song_list.len()
             );
         }
         Err(e) => println!("FAIL album.get_song: {e}（用兜底 song id={FALLBACK_SONG_ID}）"),
@@ -397,8 +428,13 @@ async fn main() {
             "PASS top.get_category: groups={} first_group={:?} first_top={:?} preview_songs={}",
             r.group.len(),
             r.group.first().map(|g| g.name.clone()),
-            r.group.first().and_then(|g| g.toplist.first().map(|t| t.name.clone())),
-            r.group.first().and_then(|g| g.toplist.first().map(|t| t.songs.len())).unwrap_or(0)
+            r.group
+                .first()
+                .and_then(|g| g.toplist.first().map(|t| t.name.clone())),
+            r.group
+                .first()
+                .and_then(|g| g.toplist.first().map(|t| t.songs.len()))
+                .unwrap_or(0)
         ),
         Err(e) => println!("FAIL top.get_category: {e}"),
     }
@@ -407,7 +443,11 @@ async fn main() {
     match top.get_detail(62, Page::new(1, 5), true).await {
         Ok(r) => println!(
             "PASS top.get_detail(id=62, withTags=true): name={:?} total={} songs={} tags={} ext={}",
-            r.info.name, r.info.total_num, r.songs.len(), r.song_tags.len(), r.ext_info_list.len()
+            r.info.name,
+            r.info.total_num,
+            r.songs.len(),
+            r.song_tags.len(),
+            r.ext_info_list.len()
         ),
         Err(e) => println!("FAIL top.get_detail: {e}"),
     }
@@ -428,7 +468,10 @@ async fn main() {
     match rec.get_radar_recommend(1).await {
         Ok(r) => println!(
             "PASS recommend.get_radar_recommend: songs={} ids={} has_more={} toast={:?}",
-            r.songs.len(), r.recommend_song_ids.len(), r.has_more, r.toast
+            r.songs.len(),
+            r.recommend_song_ids.len(),
+            r.has_more,
+            r.toast
         ),
         Err(e) => println!("FAIL recommend.get_radar_recommend: {e}"),
     }
@@ -451,7 +494,9 @@ async fn main() {
     match rec.get_recommend_newsong(5).await {
         Ok(r) => println!(
             "PASS recommend.get_recommend_newsong(type=5): songs={} lan={:?} tags={}",
-            r.songs.len(), r.lan, r.song_tags.len()
+            r.songs.len(),
+            r.lan,
+            r.song_tags.len()
         ),
         Err(e) => println!("FAIL recommend.get_recommend_newsong: {e}"),
     }
@@ -573,7 +618,11 @@ async fn main() {
         .await
     {
         Ok(sub) => {
-            println!("WIRE AddComment sub keys={:?} data keys={:?}", keys(&sub), data_keys(&sub));
+            println!(
+                "WIRE AddComment sub keys={:?} data keys={:?}",
+                keys(&sub),
+                data_keys(&sub)
+            );
             println!("WIRE AddComment full={sub}");
             // 复刻公共 API 解析路径，验证 AddCommentResponse 字段别名
             let parsed: Result<AddCommentResponse, _> =
@@ -638,7 +687,10 @@ async fn main() {
     let mut covered = 0i64;
     let mut scan_ok = true;
     for page in 1..=3i64 {
-        match user.get_fav_album(&euin, Page::new(page as u32, 100), Some(&cred)).await {
+        match user
+            .get_fav_album(&euin, Page::new(page as u32, 100), Some(&cred))
+            .await
+        {
             Ok(r) => {
                 fav_total = r.total;
                 covered += r.albums.len() as i64;
@@ -690,10 +742,9 @@ async fn main() {
                             data_keys(sub)
                         );
                         // 复刻公共 API 解析路径
-                        let parsed: AlbumFavWriteResponse = serde_json::from_value(
-                            sub.get("data").cloned().unwrap_or(json!({})),
-                        )
-                        .unwrap_or_default();
+                        let parsed: AlbumFavWriteResponse =
+                            serde_json::from_value(sub.get("data").cloned().unwrap_or(json!({})))
+                                .unwrap_or_default();
                         println!(
                             "PARSE FavAlbum: result={} failed={:?} success={}",
                             parsed.result,
@@ -736,7 +787,9 @@ async fn main() {
                                 parsed.success()
                             );
                         }
-                        Err(e) => println!("FAIL WIRE CancelFavAlbum: {e}（请人工检查 album_id={album_id}）"),
+                        Err(e) => println!(
+                            "FAIL WIRE CancelFavAlbum: {e}（请人工检查 album_id={album_id}）"
+                        ),
                     }
                     // 3) 公共 API 完整闭环：fav（再收藏）→ del（恢复，净零）
                     gap().await;
@@ -762,7 +815,9 @@ async fn main() {
                         ),
                     }
                 } else {
-                    println!("SKIP album.fav_album 闭环: FavAlbum 未成功（状态未变更，不执行 del）");
+                    println!(
+                        "SKIP album.fav_album 闭环: FavAlbum 未成功（状态未变更，不执行 del）"
+                    );
                 }
             }
         }

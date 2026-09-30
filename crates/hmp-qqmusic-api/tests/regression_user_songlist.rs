@@ -162,7 +162,10 @@ async fn fav_song_sends_enc_host_uin_and_parses_detail() {
 
     let client = client_for(&server.uri());
     let api = UserApi::new(&client);
-    let resp = api.get_fav_song(ENCRYPT_UIN, Page::new(1, 2), Some(&cred())).await.unwrap();
+    let resp = api
+        .get_fav_song(ENCRYPT_UIN, Page::new(1, 2), Some(&cred()))
+        .await
+        .unwrap();
     assert_eq!(resp.total, 801);
     assert_eq!(resp.songs.len(), 1);
     assert_eq!(resp.songs[0].id, 186016);
@@ -181,7 +184,8 @@ async fn fav_songlist_sends_uin_key_and_parses_v_list() {
             "music.musicasset.PlaylistFavRead",
             "CgiGetPlaylistFavInfo",
             |param| {
-                param["uin"] == json!(ENCRYPT_UIN) && param["offset"] == json!(0)
+                param["uin"] == json!(ENCRYPT_UIN)
+                    && param["offset"] == json!(0)
                     && param["size"] == json!(10)
             },
         ))
@@ -223,7 +227,8 @@ async fn fav_album_sends_euin_key_and_parses_v_list() {
             "music.musicasset.AlbumFavRead",
             "CgiGetAlbumFavInfo",
             |param| {
-                param["euin"] == json!(ENCRYPT_UIN) && param["offset"] == json!(10)
+                param["euin"] == json!(ENCRYPT_UIN)
+                    && param["offset"] == json!(10)
                     && param["size"] == json!(10)
             },
         ))
@@ -279,7 +284,10 @@ async fn music_gene_sends_visit_account_and_parses_card() {
 
     let client = client_for(&server.uri());
     let api = UserApi::new(&client);
-    let gene = api.get_music_gene(ENCRYPT_UIN, Some(&cred())).await.unwrap();
+    let gene = api
+        .get_music_gene(ENCRYPT_UIN, Some(&cred()))
+        .await
+        .unwrap();
     assert_eq!(gene.userinfo_card.nick_name, "程家麒");
     assert_eq!(gene.userinfo_card.head_url, "https://img.example/head");
     assert_eq!(gene.userinfo_card.signature, "签名");
@@ -302,7 +310,9 @@ async fn fav_songlist_unwraps_inner_data_and_returns_true() {
                 param["uin"] == json!(ENCRYPT_UIN) && param["v_playlistId"] == json!([42])
             },
         ))
-        .respond_with(ok_sub(json!({"result": 0, "v_failedPlaylistId": [], "reason": ""})))
+        .respond_with(ok_sub(
+            json!({"result": 0, "v_failedPlaylistId": [], "reason": ""}),
+        ))
         .expect(1)
         .mount(&server)
         .await;
@@ -342,7 +352,9 @@ async fn unfav_songlist_returns_true_for_not_favorited() {
             "CancelFavPlaylist",
             |param| param["uin"] == json!(ENCRYPT_UIN) && param["v_playlistId"] == json!([42]),
         ))
-        .respond_with(ok_sub(json!({"result": 0, "v_failedPlaylistId": [], "reason": ""})))
+        .respond_with(ok_sub(
+            json!({"result": 0, "v_failedPlaylistId": [], "reason": ""}),
+        ))
         .expect(1)
         .mount(&server)
         .await;
@@ -518,7 +530,10 @@ async fn del_songs_returns_true_on_retcode_zero() {
         .and(req_matches(
             "music.musicasset.PlaylistDetailWrite",
             "DelSonglist",
-            |param| param["dirId"] == json!(12) && param["v_songInfo"] == json!([{"songId": 186016, "songType": 0}]),
+            |param| {
+                param["dirId"] == json!(12)
+                    && param["v_songInfo"] == json!([{"songId": 186016, "songType": 0}])
+            },
         ))
         .respond_with(ok_sub(json!({"retCode": 0})))
         .expect(1)
@@ -622,7 +637,9 @@ async fn write_ops_require_credential() {
         Err(QqMusicError::AuthenticationRequired)
     ));
     assert!(matches!(
-        songlist.add_songs(1, &empty, 0, &Credential::default()).await,
+        songlist
+            .add_songs(1, &empty, 0, &Credential::default())
+            .await,
         Err(QqMusicError::AuthenticationRequired)
     ));
     assert!(matches!(

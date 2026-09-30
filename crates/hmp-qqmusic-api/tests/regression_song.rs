@@ -23,9 +23,7 @@ use hmp_qqmusic_api::credential::{Credential, LoginType};
 use hmp_qqmusic_api::error::QqMusicError;
 use hmp_qqmusic_api::lyric::LyricApi;
 use hmp_qqmusic_api::pagination::Page;
-use hmp_qqmusic_api::singer::{
-    AreaType, GenreType, IndexType, SexType, SingerApi, TabType,
-};
+use hmp_qqmusic_api::singer::{AreaType, GenreType, IndexType, SexType, SingerApi, TabType};
 use hmp_qqmusic_api::song::{SongApi, SongFileInfo, SongFileType, SongQueryInfo};
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -253,18 +251,14 @@ async fn try_urls_use_media_mid_filename_and_parse_midurlinfo() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/cgi-bin/musicu.fcg"))
-        .and(req_matches(
-            "music.vkey.GetVkey",
-            "UrlGetVkey",
-            |param| {
-                param["filename"] == json!([format!("RS02{MEDIA_MID}.mp3")])
-                    && param["songmid"] == json!([SONG_MID])
-                    && param["songtype"] == json!([0])
-                    && param["ctx"] == json!(0)
-                    && param["uin"] == json!("")
-                    && param["guid"].is_string()
-            },
-        ))
+        .and(req_matches("music.vkey.GetVkey", "UrlGetVkey", |param| {
+            param["filename"] == json!([format!("RS02{MEDIA_MID}.mp3")])
+                && param["songmid"] == json!([SONG_MID])
+                && param["songtype"] == json!([0])
+                && param["ctx"] == json!(0)
+                && param["uin"] == json!("")
+                && param["guid"].is_string()
+        }))
         .respond_with(ok_sub(json!({
             "expiration": 7200,
             "midurlinfo": [{
@@ -312,11 +306,9 @@ async fn urls_without_media_mid_double_the_song_mid() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/cgi-bin/musicu.fcg"))
-        .and(req_matches(
-            "music.vkey.GetVkey",
-            "UrlGetVkey",
-            |param| param["filename"] == json!([format!("RS02{SONG_MID}{SONG_MID}.mp3")]),
-        ))
+        .and(req_matches("music.vkey.GetVkey", "UrlGetVkey", |param| {
+            param["filename"] == json!([format!("RS02{SONG_MID}{SONG_MID}.mp3")])
+        }))
         .respond_with(ok_sub(json!({"expiration": 7200, "midurlinfo": []})))
         .expect(1)
         .mount(&server)
@@ -344,14 +336,10 @@ async fn encrypted_flac_uses_evkey_with_credential() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/cgi-bin/musicu.fcg"))
-        .and(req_matches(
-            "music.vkey.GetEVkey",
-            "CgiGetEVkey",
-            |param| {
-                param["filename"] == json!([format!("F0M0{MEDIA_MID}.mflac")])
-                    && param["uin"] == json!(NUMERIC_UIN)
-            },
-        ))
+        .and(req_matches("music.vkey.GetEVkey", "CgiGetEVkey", |param| {
+            param["filename"] == json!([format!("F0M0{MEDIA_MID}.mflac")])
+                && param["uin"] == json!(NUMERIC_UIN)
+        }))
         .respond_with(ok_sub(json!({
             "expiration": 80400,
             "midurlinfo": [{
@@ -472,7 +460,10 @@ async fn lyric_sends_crypt_params_and_decrypts_qrc() {
     );
     let fixture: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fixture_path).unwrap()).unwrap();
-    let encrypted = fixture["req_0"]["data"]["lyric"].as_str().unwrap().to_owned();
+    let encrypted = fixture["req_0"]["data"]["lyric"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -506,7 +497,10 @@ async fn lyric_sends_crypt_params_and_decrypts_qrc() {
 
     let client = client_for(&server.uri());
     let api = LyricApi::new(&client);
-    let resp = api.get_lyric("186016", 0, true, false, false, false).await.unwrap();
+    let resp = api
+        .get_lyric("186016", 0, true, false, false, false)
+        .await
+        .unwrap();
     assert_eq!(resp.songid, 186016);
     assert!(
         resp.lyric.contains('[') || resp.lyric.contains("ti"),
@@ -526,14 +520,19 @@ async fn lyric_by_mid_uses_song_mid_key() {
             "GetPlayLyricInfo",
             |param| param["songMid"] == json!(SONG_MID) && param.get("songId").is_none(),
         ))
-        .respond_with(ok_sub(json!({"songID": 186016, "lyric": "[ti:test]\n[00:01.00]x"})))
+        .respond_with(ok_sub(
+            json!({"songID": 186016, "lyric": "[ti:test]\n[00:01.00]x"}),
+        ))
         .expect(1)
         .mount(&server)
         .await;
 
     let client = client_for(&server.uri());
     let api = LyricApi::new(&client);
-    let resp = api.get_lyric(SONG_MID, 0, false, false, false, false).await.unwrap();
+    let resp = api
+        .get_lyric(SONG_MID, 0, false, false, false, false)
+        .await
+        .unwrap();
     assert_eq!(resp.lyric, "[ti:test]\n[00:01.00]x", "明文 LRC 应原样保留");
 }
 
@@ -767,7 +766,10 @@ async fn singer_songs_extracts_song_info() {
 
     let client = client_for(&server.uri());
     let api = SingerApi::new(&client);
-    let resp = api.get_songs_list(SINGER_MID, Page::new(1, 5)).await.unwrap();
+    let resp = api
+        .get_songs_list(SINGER_MID, Page::new(1, 5))
+        .await
+        .unwrap();
     assert_eq!(resp.singer_mid, SINGER_MID);
     assert_eq!(resp.total_num, 1012);
     assert_eq!(resp.song_list.len(), 1);
@@ -783,10 +785,7 @@ async fn singer_albums_parse_album_list_key() {
         .and(req_matches(
             "music.musichallAlbum.AlbumListServer",
             "GetAlbumList",
-            |param| {
-                param["singerMid"] == json!(SINGER_MID)
-                    && param["begin"] == json!(5)
-            },
+            |param| param["singerMid"] == json!(SINGER_MID) && param["begin"] == json!(5),
         ))
         .respond_with(ok_sub(json!({
             "singerMid": SINGER_MID,
@@ -802,12 +801,18 @@ async fn singer_albums_parse_album_list_key() {
 
     let client = client_for(&server.uri());
     let api = SingerApi::new(&client);
-    let resp = api.get_album_list(SINGER_MID, Page::new(2, 5)).await.unwrap();
+    let resp = api
+        .get_album_list(SINGER_MID, Page::new(2, 5))
+        .await
+        .unwrap();
     assert_eq!(resp.total, 43);
     assert_eq!(resp.album_list.len(), 1);
     assert_eq!(resp.album_list[0].album.name, "风筝");
     assert_eq!(resp.album_list[0].total_num, 10);
-    assert!(resp.album_list[0].tags.is_empty(), "tags=null 应规整为空列表");
+    assert!(
+        resp.album_list[0].tags.is_empty(),
+        "tags=null 应规整为空列表"
+    );
 }
 
 /// MV 列表键 `list` → mv_list；VideoBrief.mvid 别名。
@@ -854,9 +859,7 @@ async fn similar_singers_parse_aliases() {
         .and(req_matches(
             "music.SimilarSingerSvr",
             "GetSimilarSingerList",
-            |param| {
-                param["singerMid"] == json!(SINGER_MID) && param["number"] == json!(5)
-            },
+            |param| param["singerMid"] == json!(SINGER_MID) && param["number"] == json!(5),
         ))
         .respond_with(ok_sub(json!({
             "singerlist": [

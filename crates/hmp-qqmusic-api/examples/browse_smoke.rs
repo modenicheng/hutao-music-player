@@ -3,8 +3,8 @@
 //! 运行：`cargo run -p hmp-qqmusic-api --example browse_smoke`
 
 use hmp_qqmusic_api::QqMusicClient;
-use hmp_qqmusic_api::pagination::Page;
 use hmp_qqmusic_api::album::AlbumApi;
+use hmp_qqmusic_api::pagination::Page;
 use hmp_qqmusic_api::recommend::RecommendApi;
 use hmp_qqmusic_api::singer::{AreaType, GenreType, IndexType, SexType, SingerApi, TabType};
 use hmp_qqmusic_api::songlist::SonglistApi;
@@ -106,12 +106,18 @@ async fn main() {
         tab.song_tab.len(),
         tab.has_more > 0
     );
-    let ss = singer.get_songs_list(JAY_MID, Page::new(1, 5)).await.unwrap();
+    let ss = singer
+        .get_songs_list(JAY_MID, Page::new(1, 5))
+        .await
+        .unwrap();
     println!(
         "歌手歌曲: 共 {} 首, 首曲: {}",
         ss.total_num, ss.song_list[0].name
     );
-    let albums = singer.get_album_list(JAY_MID, Page::new(1, 5)).await.unwrap();
+    let albums = singer
+        .get_album_list(JAY_MID, Page::new(1, 5))
+        .await
+        .unwrap();
     println!(
         "歌手专辑: {} 张, 最新: {}",
         albums.total, albums.album_list[0].album.name
@@ -150,7 +156,10 @@ async fn main() {
         first.name,
         first.id
     );
-    let td = top.get_detail(first.id, Page::new(1, 5), true).await.unwrap();
+    let td = top
+        .get_detail(first.id, Page::new(1, 5), true)
+        .await
+        .unwrap();
     println!(
         "榜单详情: {} - 第1名: {}",
         td.info.name,

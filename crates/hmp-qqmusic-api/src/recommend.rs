@@ -457,8 +457,14 @@ mod tests {
         assert!(!sl.title.is_empty());
         // 回归锚点（2026-09-29 修复）：cover/creator 位于 Playlist.basic 下，
         // 此前提取 Playlist.cover 层级导致 picurl/creator_nick 恒为空。
-        assert!(!sl.picurl.is_empty(), "basic.cover.default_url 应解析出封面");
-        assert!(!sl.creator_nick.is_empty(), "basic.creator.nick 应解析出昵称");
+        assert!(
+            !sl.picurl.is_empty(),
+            "basic.cover.default_url 应解析出封面"
+        );
+        assert!(
+            !sl.creator_nick.is_empty(),
+            "basic.creator.nick 应解析出昵称"
+        );
     }
 
     #[test]

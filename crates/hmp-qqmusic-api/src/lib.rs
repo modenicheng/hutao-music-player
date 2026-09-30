@@ -47,7 +47,7 @@ pub mod songlist;
 pub mod top;
 pub mod user;
 
-pub use pagination::{DEFAULT_NUM, MAX_NUM, UNKNOWN_TOTAL, Page, Paged, PagedView};
+pub use pagination::{DEFAULT_NUM, MAX_NUM, Page, Paged, PagedView, UNKNOWN_TOTAL};
 
 pub use album::{
     AlbumApi, AlbumFavWriteResponse, GetAlbumDetailResponse, GetAlbumSongResponse,
@@ -75,5 +75,5 @@ pub use songlist::{CreateDeleteSonglistResp, GetSonglistDetailResponse, Songlist
 pub use top::{TopApi, TopCategoryResponse, TopDetailResponse};
 pub use user::{
     UserApi, UserCreatedSonglistResponse, UserFavAlbumResponse, UserFavSonglistResponse,
-    UserMusicGeneResponse, UserInfoCard,
+    UserInfoCard, UserMusicGeneResponse,
 };

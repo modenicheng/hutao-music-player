@@ -39,7 +39,10 @@ async fn reconcile_fav_songs(
     let mut page = 1i64;
     let mut present = Vec::new();
     loop {
-        let resp = match api.get_fav_song(euin, Page::new(page as u32, 100), Some(credential)).await {
+        let resp = match api
+            .get_fav_song(euin, Page::new(page as u32, 100), Some(credential))
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(%e, "reconcile: failed to fetch liked songs");
@@ -151,7 +154,10 @@ async fn reconcile_fav_albums(
     let mut page = 1i64;
     let mut present = Vec::new();
     loop {
-        let resp = match api.get_fav_album(euin, Page::new(page as u32, 100), Some(credential)).await {
+        let resp = match api
+            .get_fav_album(euin, Page::new(page as u32, 100), Some(credential))
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(%e, "reconcile: failed to fetch liked albums");

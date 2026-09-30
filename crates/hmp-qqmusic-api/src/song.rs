@@ -355,9 +355,10 @@ impl<'a> SongApi<'a> {
         let request = CgiRequest::new("music.pf_song_detail_svr", "get_song_detail_yqq", param);
         let data = self.client.musicu_request(&request, None).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        let mut resp: GetSongDetailResponse = serde_json::from_value(data.clone()).map_err(|e| {
-            QqMusicError::InvalidResponse(format!("failed to parse song detail: {e}"))
-        })?;
+        let mut resp: GetSongDetailResponse =
+            serde_json::from_value(data.clone()).map_err(|e| {
+                QqMusicError::InvalidResponse(format!("failed to parse song detail: {e}"))
+            })?;
         extract_detail_sections(&data, &mut resp);
         Ok(resp)
     }

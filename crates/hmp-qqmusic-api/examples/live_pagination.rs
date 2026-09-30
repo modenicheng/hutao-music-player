@@ -85,13 +85,20 @@ async fn singer_songs_offset_paging(client: &QqMusicClient) {
     match api.get_songs_list(JAY_MID, Page::new(2, 5)).await {
         Ok(r) => {
             let view = r.paged(Page::new(2, 5));
-            let ok = view.items.first().is_some_and(|s| s.id == p1s5.0 && s.mid == p1s5.1);
+            let ok = view
+                .items
+                .first()
+                .is_some_and(|s| s.id == p1s5.0 && s.mid == p1s5.1);
             println!(
                 "PASS singer.get_songs_list(page=2/num=5): items={} first={:?} → offset={} {}",
                 view.items.len(),
                 view.items.first().map(|s| s.name.clone()),
                 Page::new(2, 5).offset(),
-                if ok { "= page1.items[5]（offset 翻页正确）" } else { "≠ page1.items[5]（offset 语义异常）" }
+                if ok {
+                    "= page1.items[5]（offset 翻页正确）"
+                } else {
+                    "≠ page1.items[5]（offset 语义异常）"
+                }
             );
         }
         Err(e) => println!("FAIL singer.get_songs_list(page=2/num=5): {e}"),
@@ -150,14 +157,21 @@ async fn top_detail_total_paging(client: &QqMusicClient) {
         Ok(r) => {
             let view = r.paged(page2);
             let overlap = view.items.iter().any(|s| {
-                first.songs.iter().any(|p| !p.mid.is_empty() && p.mid == s.mid)
+                first
+                    .songs
+                    .iter()
+                    .any(|p| !p.mid.is_empty() && p.mid == s.mid)
             });
             println!(
                 "PASS top.get_detail(page=2): items={} total={} has_more={} → {}",
                 view.items.len(),
                 view.total,
                 view.has_more,
-                if overlap { "与 page=1 重叠（异常）" } else { "与 page=1 无重叠（offset 翻页正确）" }
+                if overlap {
+                    "与 page=1 重叠（异常）"
+                } else {
+                    "与 page=1 无重叠（offset 翻页正确）"
+                }
             );
         }
         Err(e) => println!("FAIL top.get_detail(page=2): {e}"),
@@ -204,7 +218,11 @@ async fn fav_songlist_server_hasmore(client: &QqMusicClient, cred: Option<&Crede
                 "PASS user.get_fav_songlist(page=2): items={} hasmore={} → {}",
                 view.items.len(),
                 view.has_more,
-                if overlap { "与 page=1 重叠（异常）" } else { "与 page=1 无重叠（offset 翻页正确）" }
+                if overlap {
+                    "与 page=1 重叠（异常）"
+                } else {
+                    "与 page=1 无重叠（offset 翻页正确）"
+                }
             );
         }
         Err(e) => println!("FAIL user.get_fav_songlist(page=2): {e}"),
