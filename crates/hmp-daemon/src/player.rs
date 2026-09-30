@@ -125,7 +125,7 @@ pub enum EngineError {
     PlaylistNotFound(String),
     #[error("no available audio quality: {0}")]
     QualityUnavailable(String),
-    #[error("driver did not apply the load within 5s")]
+    #[error("driver did not apply the load before the load timeout")]
     Timeout,
     #[error("internal error: {0}")]
     Internal(String),
@@ -251,6 +251,19 @@ fn quality_to_file_type(q: &AudioQuality) -> Option<SongFileType> {
     }
 }
 
+/// 后台回填播放缓存（幂等；失败仅日志，不影响当次流式播放）。
+/// `ekey` 空串 = 明文。回填完成后二次播放经 `cached_playable_uri` 全离线。
+fn spawn_cache_fill(url: String, ekey: String) {
+    tokio::spawn(async move {
+        let ekey_opt = (!ekey.is_empty()).then_some(ekey.as_str());
+        match hmp_media::cache_fill(&url, ekey_opt).await {
+            Ok(Some(uri)) => tracing::debug!(url, uri, "playback cache filled"),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(url, %e, "playback cache fill failed"),
+        }
+    });
+}
+
 /// 解析单个曲目 → 可播放 URI + 元数据（音质回退 + QMC2 解密）。
 pub async fn resolve_track_impl(
     client: &QqMusicClient,
@@ -324,15 +337,24 @@ pub async fn resolve_track_impl(
                     if item.result == 0 && !item.purl.is_empty() {
                         let remote_uri =
                             format!("https://isure.stream.qqmusic.qq.com/{}", item.purl);
+                        let ekey_opt = (!item.ekey.is_empty()).then_some(item.ekey.as_str());
+                        // 播放缓存命中 → 直接播本地（零 CDN；键=URL path|ekey
+                        // 跨 purl 重签稳定，与回退/回填路径同键空间）。
+                        match hmp_media::cached_playable_uri(&remote_uri, ekey_opt) {
+                            Ok(Some(local_uri)) => {
+                                found = Some((file_type, local_uri, None));
+                                break;
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::debug!(%e, "playback cache lookup failed; streaming");
+                            }
+                        }
                         if file_type.is_encrypted {
-                            match hmp_media::prepare_stream(
-                                &remote_uri,
-                                (!item.ekey.is_empty()).then_some(item.ekey.as_str()),
-                                None,
-                            )
-                            .await
-                            {
+                            match hmp_media::prepare_stream(&remote_uri, ekey_opt, None).await {
                                 Ok(p) => {
+                                    // 首播流式秒开，后台回填全量缓存供二次播放离线
+                                    spawn_cache_fill(remote_uri.clone(), item.ekey.clone());
                                     let uri = p.uri.clone();
                                     found = Some((file_type, uri, Some(p)));
                                     break;
@@ -344,6 +366,7 @@ pub async fn resolve_track_impl(
                             }
                         } else {
                             // 明文无需解密 guard：直接播放 CDN URL（media: None）
+                            spawn_cache_fill(remote_uri.clone(), String::new());
                             found = Some((file_type, remote_uri, None));
                             break;
                         }

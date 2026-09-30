@@ -306,8 +306,13 @@ enum FavoriteCmd {
 
 #[tokio::main]
 async fn main() {
+    // RUST_LOG 可控（默认 warn）；排障时 `RUST_LOG=debug hmpd --autonomous`
+    // 可见 CDN 探测/取流/装载全链路（2026-09-29 播放排障中被固定 warn 级坑）。
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
 
     let cli = Cli::parse();

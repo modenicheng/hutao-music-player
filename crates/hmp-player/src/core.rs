@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use hmp_core::{HmpError, LoadRequest, PlaybackState, PlaybackStatus, PlayerCommand, PlayerEvent};
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source, StreamError};
+use stream_download::http::reqwest;
 use stream_download::storage::temp::TempStorageProvider;
 use stream_download::{Settings, StreamDownload};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -15,6 +16,15 @@ use crate::source::{MediaLocation, parse_uri};
 enum LoadCommand {
     Load(Box<LoadRequest>),
     Shutdown,
+}
+
+/// 装载任务完成消息（oneshot 回传 drive 循环）。
+///
+/// 被更新的装载/Stop/Shutdown 取代时接收端被 drop，发送端 `send` 失败
+/// 即静默作废——取代语义的一部分，不是错误。
+struct LoadCompletion {
+    request: Box<LoadRequest>,
+    result: Result<Option<Duration>, HmpError>,
 }
 
 /// Open the platform-appropriate output stream (safe variant).
@@ -279,31 +289,113 @@ async fn append_location(
     sink: &Sink,
     location: MediaLocation,
 ) -> Result<Option<Duration>, HmpError> {
-    match location {
+    // 格式探测（decoder 构建）是**阻塞读**（等 StreamDownload 攒够探测字节），
+    // 必须在 `spawn_blocking` 上做：若内联在 runtime worker 上，worker 被读
+    // 挂起，而刚 spawn 的 stream_download 下载任务正落在本 worker 的 LIFO 槽
+    // （不可被其他 worker 偷取）→ 下载任务永不调度、探测永远等不到字节，
+    // 装载死锁（2026-09-29 QQ 远端音频 5s 超时事故的第二个根因）。
+    // 构建好的 decoder 回传后再 append：装载被取代时本任务的结果经 oneshot
+    // 丢弃，decoder 随之释放，不会追加过期音源。
+    let decoder: Box<dyn Source<Item = f32> + Send> = match location {
         MediaLocation::File(path) => {
-            let file = File::open(&path).map_err(|error| {
-                HmpError::Playback(format!("open audio file {}: {error}", path.display()))
-            })?;
-            let decoder = Decoder::try_from(file).map_err(|error| {
-                HmpError::Playback(format!("decode audio file {}: {error}", path.display()))
-            })?;
-            let duration = decoder.total_duration();
-            sink.append(decoder);
-            Ok(duration)
+            spawn_decode(move || {
+                let file = File::open(&path).map_err(|error| {
+                    HmpError::Playback(format!("open audio file {}: {error}", path.display()))
+                })?;
+                Decoder::try_from(file)
+                    .map(|decoder| Box::new(decoder) as Box<dyn Source<Item = f32> + Send>)
+                    .map_err(|error| {
+                        HmpError::Playback(format!("decode audio file {}: {error}", path.display()))
+                    })
+            })
+            .await?
         }
         MediaLocation::Http(uri) => {
-            let stream =
-                StreamDownload::new_http(uri, TempStorageProvider::new(), Settings::default())
-                    .await
-                    .map_err(|error| HmpError::Playback(format!("open audio stream: {error}")))?;
-            let decoder = Decoder::builder()
-                .with_data(stream)
-                .build()
-                .map_err(|error| HmpError::Playback(format!("decode audio stream: {error}")))?;
-            let duration = decoder.total_duration();
-            sink.append(decoder);
-            Ok(duration)
+            let stream = open_http_stream(uri).await?;
+            let builder = Decoder::builder().with_data(stream);
+            spawn_decode(move || {
+                builder
+                    .build()
+                    .map(|decoder| Box::new(decoder) as Box<dyn Source<Item = f32> + Send>)
+                    .map_err(|error| HmpError::Playback(format!("decode audio stream: {error}")))
+            })
+            .await?
         }
+    };
+    let duration = decoder.total_duration();
+    sink.append(decoder);
+    Ok(duration)
+}
+
+/// 在阻塞线程池上构建 decoder（见 `append_location` 注释）。
+async fn spawn_decode<F>(build: F) -> Result<Box<dyn Source<Item = f32> + Send>, HmpError>
+where
+    F: FnOnce() -> Result<Box<dyn Source<Item = f32> + Send>, HmpError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(build)
+        .await
+        .map_err(|error| HmpError::Playback(format!("decode task aborted: {error}")))?
+}
+
+/// 打开 HTTP 音频流。
+///
+/// **回环地址必须绕过系统代理**：`http://127.0.0.1:<port>/stream` 是
+/// hmp-media 解密代理（本进程内），走系统代理（Clash 等）会把回环请求
+/// 交给外部代理进程——轻则多一跳延迟，重则被远程节点吞掉（127.0.0.1
+/// 在远端是另一台机器），表现为响应头可达但响应体静默挂起，装载永不
+/// 完成（2026-09-29 QQ 远端音频全线无法播放事故）。外部主机保持默认
+/// 系统代理行为（用户的网络环境可能需要代理出网）。
+///
+/// `cancel_on_drop`：换曲/停止丢弃 reader 时同步取消后台下载任务，
+/// 避免已取消装载的 CDN 连接继续在后台拉全量数据。
+async fn open_http_stream(uri: url::Url) -> Result<HttpDownload, HmpError> {
+    let settings = Settings::default().cancel_on_drop(true);
+    let stream = if uri.host_str().is_some_and(is_loopback_host) {
+        static LOOPBACK_CLIENT: std::sync::LazyLock<reqwest::Client> =
+            std::sync::LazyLock::new(|| {
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .expect("loopback HTTP client build is infallible")
+            });
+        let http_stream = stream_download::http::HttpStream::new(LOOPBACK_CLIENT.clone(), uri)
+            .await
+            .map_err(|error| HmpError::Playback(format!("open audio stream: {error}")))?;
+        StreamDownload::from_stream(http_stream, TempStorageProvider::new(), settings)
+            .await
+            .map_err(|error| HmpError::Playback(format!("open audio stream: {error}")))?
+    } else {
+        StreamDownload::new_http(uri, TempStorageProvider::new(), settings)
+            .await
+            .map_err(|error| HmpError::Playback(format!("open audio stream: {error}")))?
+    };
+    Ok(stream)
+}
+
+type HttpDownload = StreamDownload<TempStorageProvider>;
+
+/// 回环主机判定（`127.0.0.1` / `::1` / `localhost`）。
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// 装载任务体：打开源并解码、追加进 sink。**只做阻塞在自身 future 里的
+/// 网络/解码工作**，状态转换一律由 drive 循环在收到 [`LoadCompletion`] 后
+/// 执行（任务可能被更新的装载/Stop/Shutdown abort，不得自行发布状态）。
+async fn perform_load(sink: Arc<Sink>, request: Box<LoadRequest>) -> LoadCompletion {
+    let result = match parse_uri(&request.uri) {
+        Ok(location) => {
+            sink.clear();
+            append_location(&sink, location).await
+        }
+        Err(error) => Err(error),
+    };
+    LoadCompletion {
+        request,
+        result,
     }
 }
 
@@ -317,6 +409,10 @@ async fn drive(
     let mut state = PlaybackState::default();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // 派发中的装载（网络/解码在独立任务；命令循环永不为之阻塞——否则一次
+    // CDN 挂起就冻结全部命令处理，驱动永久僵尸，2026-09-29 事故）。
+    let mut load_abort: Option<tokio::task::AbortHandle> = None;
+    let mut load_done: Option<tokio::sync::oneshot::Receiver<LoadCompletion>> = None;
 
     loop {
         tokio::select! {
@@ -345,6 +441,12 @@ async fn drive(
                         }
                     }
                     PlayerCommand::Stop => {
+                        // 未完成装载一并取消：否则晚到的装载完成会在 Stop 后
+                        // 「复活」为 Playing（用户已明确要求停止）。
+                        if let Some(abort) = load_abort.take() {
+                            abort.abort();
+                        }
+                        drop(load_done.take());
                         sink.stop();
                         state.status = PlaybackStatus::Stopped;
                         state.position = Duration::ZERO;
@@ -353,8 +455,12 @@ async fn drive(
                         match sink.try_seek(position) {
                             Ok(()) => state.position = position,
                             Err(error) => {
+                                // seek 失败不宣告播放器故障：曲目继续从原位置播，
+                                // 仅发错误事件。置 Error 会冻结进度（ticker 只在
+                                // Playing/Paused 推进）并让 CLI 把已成功的装载误判
+                                // 为失败（2026-09-29 恢复续播 seek 未缓冲区间时）。
                                 let error = HmpError::Playback(format!("seek audio stream: {error}"));
-                                state.status = PlaybackStatus::Error;
+                                tracing::warn!(%error, "seek failed; keeping playback state");
                                 let _ = events_tx.send(PlayerEvent::Error {
                                     load_gen: state.load_gen,
                                     error,
@@ -377,45 +483,74 @@ async fn drive(
             load = load_rx.recv() => {
                 let Some(load) = load else { continue };
                 match load {
-                    LoadCommand::Shutdown => break,
+                    LoadCommand::Shutdown => {
+                        if let Some(abort) = load_abort.take() {
+                            abort.abort();
+                        }
+                        break;
+                    }
                     LoadCommand::Load(request) => {
+                        // 取代进行中的装载：abort 未完成任务、作废旧结果
+                        // （drop 接收端，任务侧 send 失败即静默）。新旧任务对
+                        // sink 的 clear 竞口窗口为一个调度间隔，随后任务启动
+                        // 时的 clear 会清掉任何晚追加的旧解码器。
+                        if let Some(abort) = load_abort.take() {
+                            abort.abort();
+                        }
+                        drop(load_done.take());
                         state.status = PlaybackStatus::Loading;
                         state.buffering = Some(0.0);
                         let _ = state_tx.send(state.clone());
                         let _ = events_tx.send(PlayerEvent::BufferingChanged(Some(0.0)));
-
-                        let result = match parse_uri(&request.uri) {
-                            Ok(location) => {
-                                sink.clear();
-                                append_location(&sink, location).await
-                            }
-                            Err(error) => Err(error),
-                        };
-                        match result {
-                            Ok(duration) => {
-                                state.current = Some(request.track);
-                                state.actual_quality = Some(request.quality);
-                                state.load_gen = request.load_gen;
-                                state.position = Duration::ZERO;
-                                state.duration = duration;
-                                state.can_seek = true;
-                                state.buffering = None;
-                                sink.play();
-                                state.status = PlaybackStatus::Playing;
-                                let _ = state_tx.send(state.clone());
-                                let _ = events_tx.send(PlayerEvent::BufferingChanged(None));
-                                let _ = events_tx.send(PlayerEvent::TrackChanged);
-                            }
-                            Err(error) => {
-                                state.status = PlaybackStatus::Error;
-                                state.buffering = None;
-                                let _ = state_tx.send(state.clone());
-                                let _ = events_tx.send(PlayerEvent::Error {
-                                    load_gen: request.load_gen,
-                                    error,
-                                });
-                            }
-                        }
+                        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                        let task_sink = Arc::clone(&sink);
+                        let abort = tokio::spawn(async move {
+                            let completion = perform_load(task_sink, request).await;
+                            let _ = done_tx.send(completion);
+                        })
+                        .abort_handle();
+                        load_abort = Some(abort);
+                        load_done = Some(done_rx);
+                    }
+                }
+            }
+            completion = async {
+                match load_done.as_mut() {
+                    Some(done_rx) => match done_rx.await {
+                        Ok(completion) => Some(completion),
+                        Err(_) => None,
+                    },
+                    None => std::future::pending().await,
+                }
+            } => {
+                load_done = None;
+                load_abort = None;
+                // None = 被取代/中止（发送端失败），非错误。
+                let Some(completion) = completion else { continue };
+                let request = completion.request;
+                match completion.result {
+                    Ok(duration) => {
+                        state.current = Some(request.track);
+                        state.actual_quality = Some(request.quality);
+                        state.load_gen = request.load_gen;
+                        state.position = Duration::ZERO;
+                        state.duration = duration;
+                        state.can_seek = true;
+                        state.buffering = None;
+                        sink.play();
+                        state.status = PlaybackStatus::Playing;
+                        let _ = state_tx.send(state.clone());
+                        let _ = events_tx.send(PlayerEvent::BufferingChanged(None));
+                        let _ = events_tx.send(PlayerEvent::TrackChanged);
+                    }
+                    Err(error) => {
+                        state.status = PlaybackStatus::Error;
+                        state.buffering = None;
+                        let _ = state_tx.send(state.clone());
+                        let _ = events_tx.send(PlayerEvent::Error {
+                            load_gen: request.load_gen,
+                            error,
+                        });
                     }
                 }
             }
