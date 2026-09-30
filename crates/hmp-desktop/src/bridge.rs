@@ -460,7 +460,7 @@ fn spawn_login_poll_loop(
 }
 
 /// 把媒体库快照（直读 library.sqlite3，离线降级为空）装载进 Data global：
-/// 五个库页真数据；下载/已购两页后端无对应域，保留 mock 喂数据。
+/// 五个库页真数据；下载/已购两页后端无对应域，渲染为诚实空态。
 pub fn load_data(ui: &AppWindow) {
     apply_snapshot(ui, &library_view::load_snapshot());
 }

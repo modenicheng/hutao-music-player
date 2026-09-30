@@ -89,13 +89,12 @@
    删除的文件永不标记 missing，直到下次扫描。
 4. **`delete_playlists_absent` FK 地雷**：subscribed 歌单一旦有曲目缓存就会 FK 失败
    （当前写路径拒绝 subscribed，暂不可达；缓存功能落地前必须先清理子行）。
-5. proxy 多区间 Range 返回 416（RFC 建议 200 全量）；`stream_range_body` 对空流
-   会挂起自定义 `Source` 实现者（内置实现不触发）。
-6. decrypt 全文件读取用 `std::fs::read` 在 async 上下文（百毫秒级 worker 停顿，
-   可 spawn_blocking）。
-7. **顶层短命令别名缺失**：main.rs 的设计注释说「高频短命令保留为 alias」，但
-   `hmp quality/loop/shuffle/history` 不存在（文档曾是这么写的，本轮已把文档对齐到
-   `hmp player quality` 等）。是否补顶层别名是产品决策。
+5. ~~proxy 多区间 Range 返回 416；`stream_range_body` 对空流会挂起~~
+   **已随回环代理整体删除而失效**（2026-09-30 进程内随机访问解密源取代，载体不存在）。
+6. ~~decrypt 全文件读取用 `std::fs::read` 在 async 上下文~~ **已失效**
+   （流式改造后无 async 上下文全文件读取路径）。
+7. **顶层短命令别名**：已补齐（main.rs 有 Pause/Resume/Next/Prev/Stop/Seek/Volume
+   顶层别名；quality/loop/shuffle/history 维持子命令，与 USAGE 一致）。
 8. 桌面端（hmp-desktop）UI 文案仍中文：独立产品面，未动。
 9. 登录超时判定按消息文案（已双语容错）；QQ 服务端改协议时可考虑按 code 判定。
 
@@ -392,9 +391,10 @@
 
 - FLAC 标签文件级乱码（`立春 - 薛凯琪.flac` 下载时双重编码，库内其余曲目正常）
   ——数据问题不修代码；如需处理应在下载链路做编码探测。
-- `show-overlay` 无挂载组件（M6 播放页未移植，点击封面区暂无响应，已知缺口）。
-- 运维提醒：协议演进后需重启 daemon；桌面自动拉起只认 current_exe 同目录与
-  PATH 的 `hmp`，release 部署需同步重建。
+- ~~`show-overlay` 无挂载组件~~ 已接线（player-bar → player_bridge，M6 播放页收口）。
+- 运维提醒：协议演进后需重启 daemon（DaemonState 新增字段已带 `#[serde(default)]`，
+  旧 daemon 快照可解码；unknown variant 类破坏性变更仍需重启）；桌面自动拉起只认
+  current_exe 同目录与 PATH 的 `hmp`，release 部署需同步重建。
 
 ## §15 播放页（M6）初移植——歌词页 & 评论（2026-09-08）
 
@@ -435,3 +435,37 @@ LRC，QRC 词级时间轴未透出）；景深无 blur（Slint 无滤镜），�
 4. `%` 不是取模（`Math.mod`）；字符串拼接用 `"\{expr}"` 模板；
 5. 函数体内未声明标识符直接赋值解析错（局部量用 let，或内联表达式）；
 6. 负 delta 滚轮 = 向下滚。
+
+## §16 播放与 IPC 深度审计（2026-10-01，三路子代理专项：播放链路 / IPC 生命周期 / 文档交叉核对）
+
+**零号发现（环境级）**：真机常驻 daemon 跑的是 d3298a3 时代（21:31 构建）二进制，
+aeb2437（明文无 Range 回退）提交于其后 22:36、**从未进入任何可执行文件**——重构
+提交后的播放实测全部发生在陈旧进程上。纪律：改播放/IPC 链后必须重建 + `hmp quit`
+再实测；`tasklist` 核对进程二进制 mtime（PORTING 排查口诀的 daemon 常驻版）。
+
+**本轮修复（5 项，全部红→绿回归）**：
+
+1. **DecryptReader 窗口内 seek 恰落 `fetched_until` 双向永久挂起**（探针实锤）：
+   Seek in-window 分支单调推进 `consumed_until` + notify；read 饥饿兜底 notify。
+   经 rodio `try_seek` 阻塞反馈可瘫痪整个音频驱动（hmp-media/stream/reader.rs）。
+2. **`wait_current_applied` 忽略 `load_gen` 假 ACK**：同曲重载时旧装载同 id 立即
+   ACK、失败无回滚——改双条件（gen+id）；FakeDriver 系补置 load_gen（hmp-daemon/engine.rs）。
+3. **装载期暂停被覆盖**：completion 分支硬编码 `sink.play()`——Pause 在 Loading 态
+   记录意图、completion 保持 Paused（hmp-player/core.rs）。
+4. **DaemonState 新增字段无 serde default**（E2E 实锤：旧 daemon 存活时新客户端
+   全部 `protocol error: missing field`；桌面订阅解码失败静默 continue → UI 永久冻结）：
+   四字段补 default + ipc.rs 头部立 wire 兼容约定 + 桌面解码失败断线重连 + CLI
+   附 `hmp quit` 重试提示（hmp-core/ipc.rs、hmp-desktop/backend.rs、hmp-cli/client.rs）。
+5. **`hmp quit` 在 daemon 未运行时先 spawn 再杀**（慢盘下留孤儿 daemon）：
+   `connect_existing` 纯连接，端点无监听 = 幂等成功（hmp-cli/main.rs）。
+
+**开放项（按优先级，未修）**：
+
+- IPC：accept 循环一错即停摆无自愈（server.rs break）；单实例管道 + 1s BUSY 重试
+  预算在连接风暴下可能耗尽（实测裸连 97% BUSY）；客户端读响应无超时。
+- 播放：中途读错误被 rodio 视为 EOS → 静默跳歌无 Error 态；`try_seek` 阻塞命令循环
+  最长 30s；音质回退链不覆盖解码期失败；预解析期无总超时。
+- 引擎命令循环内联 await 解析（歌单/专辑秒级）→ 播放控制命令排队，UI 感知「点了
+  没反应几秒」。
+- 其余见 §4（footer 误报流式路径残余、INNER JOIN 收藏、local_files 二等行、FK 地雷）
+  与 PORTING.md（设备热插拔不迁移、逐字歌词、P9 喜欢键）。

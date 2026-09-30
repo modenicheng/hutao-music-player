@@ -1,8 +1,8 @@
 # HMP (hutao-music-player)
 
-HMP is a lightweight, Rust-native QQ Music player for Linux with complete MPRIS integration.
+HMP is a lightweight, Rust-native QQ Music player for Windows and Linux (MPRIS on Linux, SMTC on Windows).
 
-HMP 是一个面向 Linux 的轻量 Rust QQ 音乐播放器，重点提供完整的 MPRIS 系统媒体控制体验。
+HMP 是一个跨平台（Windows / Linux）的轻量 Rust QQ 音乐播放器：Linux 侧提供完整 MPRIS 系统媒体控制，Windows 侧接入 SMTC 与托盘。
 
 ## 仓库结构
 
@@ -13,8 +13,8 @@ hutao-music-player/
 │   ├── hmp-core/           # 领域模型：Track/PlayerCommand/PlaybackState/QueueCore/IPC 协议
 │   ├── hmp-qqmusic-api/    # QQ 音乐 API 移植 crate（独立发布 crates.io）
 │   ├── hmp-player/     # Rodio 播放核心（PlayerCore）
-│   ├── hmp-media/          # 下载/QMC2 解密/缓存/本地回环解密代理
-│   ├── hmp-storage/        # 凭证存储
+│   ├── hmp-media/          # 下载/QMC2 解密/缓存/进程内随机访问解密源（流式）
+│   ├── hmp-storage/        # 凭证存储 + 媒体库（SQLite，扫描/歌单/封面缓存）
 │   ├── hmp-mpris/          # MPRIS D-Bus 服务
 │   ├── hmp-daemon/         # 后台播放后端（socket 服务器 + 播放引擎 + tray/MPRIS 适配）
 │   ├── hmp-desktop/        # Slint 桌面端（daemon 前端：库页/播放已接真实后端）
@@ -84,8 +84,9 @@ hmp quit                     # 优雅退出后端
 hmp serve                    # 前台运行后端（--background 后台运行，由遥控命令自动拉起）
 ```
 
-后台播放：`hmp play/status/...` 等遥控命令自动拉起常驻 daemon（单例 Unix socket
-`$XDG_RUNTIME_DIR/hmp.sock`，`flock` 保证单实例），CLI 退出后播放不中断；亦可用
+后台播放：`hmp play/status/...` 等遥控命令自动拉起常驻 daemon（单例 IPC 端点：
+Unix socket `$XDG_RUNTIME_DIR/hmp.sock` / Windows 命名管道 `\\.\pipe\hmp`；
+`flock` / first_pipe_instance 保证单实例），CLI 退出后播放不中断；亦可用
 `playerctl -p hmp ...` 经 MPRIS 遥控（见 [docs/USAGE.md](docs/USAGE.md) §7）。
 
 ## 鸣谢 / Acknowledgements

@@ -33,7 +33,7 @@
 - [x] **M5 设置**：总览三分类卡 + 常规（主题三选真实生效，Theme.set-mode）/ 播放（音质四档 Quality.select + 默认音量 HSlider→Player.set-volume 双写）/ 账号（账号读接口未接入 AUDIT §8.6：资料卡诚实占位 + 退出登录禁用 + FactRow "—"）
 - [x] **M6 播放页（2026-09-09 收口，余一项后端阻塞）**：全屏 overlay（slide-bottom 入/退场 + 软卸载）、RulerProgress 刻度条、控制台、OKLab 取色（TrackPalette global 覆写，见下方 M6 收口记录）、歌词（弹簧跟随+景深+无滚动条）、评论区（编辑部式重排 + 112px 固定过渡带）、队列抽屉 themed 态；**未做**：逐字扫色（QRC 词级时间轴未投影，AUDIT §14）
 - [ ] **M7 收尾**：ESC/键盘语义、焦点可达、reduced-motion 免动画、窄窗（⅓ 宽 683px）断点核对
-- [~] **M8 数据接线**：mock → daemon IPC（2026-09-07 完成首轮：播放/队列/收藏歌单/最近/本地库/侧栏歌单真数据，详见下方 M8 接线记录）；内容页（M4 余量）与歌词（M6）等待后端补接口（docs/AUDIT.md §8）
+- [~] **M8 数据接线**：mock → daemon IPC（2026-09-07 完成首轮：播放/队列/收藏歌单/最近/本地库/侧栏歌单真数据，详见下方 M8 接线记录）；内容页/歌词已接入（ff8050e 内容域 + M6 歌词页）；**下载/已购两页后端无对应域，诚实空态**（2026-09-29 删除 mock.rs，AUDIT §8.5）
 
 ## 已定工程决策
 
@@ -49,13 +49,13 @@
 ## M8 接线记录（2026-09-07，首轮）
 
 **架构**：沿 docs/PROJECT.md §8.6 解耦设计 —— 桌面 UI 是 daemon 的又一个适配器。
-`src/backend.rs`：Unix socket 客户端（长度前缀 JSON 帧，`hmp_core::ipc`），连接失败仿 CLI `connect_or_spawn` 拉起 `hmp serve --background`（`spawn_detached_exe` 定位 current_exe 同目录/PATH 上的 hmp 二进制；flock 单实例仍归 daemon）；彻底失败 → 离线诚实降级（全空态，命令 no-op，daemon 退出不自动复活——`hmp quit` 语义优先）。订阅长连接收 `Event::StateChanged`，快照经 `invoke_from_event_loop` 回 UI 线程（推送 ~10Hz）。队列重建只认 `QueueSummary.revision`。媒体库读 = 直读 `library.sqlite3`（`src/library_view.rs`，CLI 同契约）。
+`src/backend.rs`：平台 IPC 客户端（Windows 命名管道 / Unix socket，长度前缀 JSON 帧，`hmp_core::ipc`），连接失败仿 CLI `connect_or_spawn` 拉起 `hmp serve --background`（`spawn_detached_exe` 定位 current_exe 同目录/PATH 上的 hmp 二进制；flock/first_pipe_instance 单实例仍归 daemon）；彻底失败 → 离线诚实降级（全空态，命令 no-op，daemon 退出不自动复活——`hmp quit` 语义优先）。订阅长连接收 `Event::StateChanged`，快照经 `invoke_from_event_loop` 回 UI 线程（推送 ~10Hz）；**事件帧解码失败 → 记日志断线重连**（不静默跳过，协议版本错配下防 UI 冻结）。队列重建只认 `QueueSummary.revision`。媒体库读 = 直读 `library.sqlite3`（`src/library_view.rs`，CLI 同契约）。
 
 **真数据**：我喜欢 / 最近播放（真实时间戳文案）/ 音乐库（扫描根分组统计）/ 歌单（relation 分流，副标题 "N 首"）/ 侧栏歌单区（Data.sidebar-*，色对按 id 哈希确定性装饰）/ 播放条与队列（DaemonState → Player 单向映射，命令 → Request）。
 
 **M4.5 详情页接线（2026-09-07 第二轮）**：歌单/专辑/歌手三页详情 = 导航时同步直读 sqlite（`library_view::playlist_detail / album_detail / artist_detail`，`with_db` 单连接单投影，失败 → found=false 诚实空态）。**详情页参数约定**：歌单 = DB id；专辑/歌手 = 展示名（远端 mid 要等内容接口，AUDIT §8.2）——`SongRow::to_track_row` 把 `artist_mid/album_mid` 填成展示名，TrackTable 空参禁用链接；歌手页对含分隔符的展示串（如 "张韶涵/HOYO-MiX"）按 `library_artists` 名字做最长包含归一。装卸点 = `bridge::apply_route`（navigate/back 共用）。
 
-**仍 mock**：下载/已购两页（后端无此域，AUDIT §8.5）。
+**诚实空态**：下载/已购两页（后端无此域，AUDIT §8.5；2026-09-29 删除 mock.rs）。
 
 **已知偏差（M8 新增）**：
 - 音质文案由 `actual_quality` 映射，无采样率（"FLAC" 而非 "FLAC · 44.1kHz"，诚实）；
@@ -154,7 +154,7 @@ Rust 预烘焙：封面等比降采样（≤480）+ 3 趟盒滤波（半径随�
 - 歌手列整体一个链接（→ 主歌手页），多人合唱逐人分链待 M4 评估；
 - 文件大小公式修正了 TS 版的量纲 bug（`(kbps*1000*ms)/8` → `kbps*ms/8`，旧式单曲显示 ~26 GB）；
 - 窗口标题栏 CJK 方框是 niri 装饰条字体问题，与应用无关；
-- **无窗口关闭按钮**：`no-frame: true`（绕 CSD 字体问题）且未自绘窗口控制，关窗走 WM；要补自绘按钮留 M4+ 壳层打磨。
+- ~~**无窗口关闭按钮**~~：已由自绘标题栏补齐（`title-bar.slint` minimized/maximized/close 三钮 + winit drag 桥 + 8px resize 边，2026-09-09）。
 
 ## Slint 机制坑位（源码确证，2026-09-06）
 
@@ -187,7 +187,7 @@ Rust 预烘焙：封面等比降采样（≤480）+ 3 趟盒滤波（半径随�
 - 构建：`cargo build --release`（桌面启动会自动拉起 daemon，需要 `hmp` 二进制在 PATH 或与桌面二进制同目录）。
 - 测试：`cargo test -p hmp-desktop`（mock/nav/format 纯逻辑单测 + backend/library_view 投影单测）。
 - 启动：`cargo run --release -p hmp-desktop --bin hmp-desktop`（niri 下逻辑目标 1024×1152 半宽 / 2048×1152 全宽）。
-  - 启动即连接 daemon socket（`$XDG_RUNTIME_DIR/hmp.sock`），连不上自动 `hmp serve --background`（CLI 同款）；失败降级离线（全空态、命令无效）。
+  - 启动即连接 daemon IPC 端点（Windows 命名管道 / Unix socket，同 `server::socket_path()`），连不上自动 `hmp serve --background`（CLI 同款）；失败降级离线（全空态、命令无效）。
   - 库页数据 = 启动时直读 `$XDG_DATA_HOME/hmp/library.sqlite3` 的静态快照：先 `hmp scan ~/Music` 入库本地曲目，QQ 侧 `hmp login` + `hmp library sync`。
   - 播放/收藏/歌单写全走 daemon（与 CLI/MPRIS 同一状态源）；`hmp quit` 后 UI 呈离线空态，不自动复活后端。
 - 视觉 QA：`cargo run --release -p hmp-desktop --example shot -- <route> [--param <值>] [--theme dark] [--queue] [--playing]`（真实应用宿主，route 如 library/recent/local/downloads/purchased/playlist/album/artist/settings*）+ `/tmp/hmp-qa2/dshot3.sh <name> <args…>`（niri 截图；**不隔离 XDG_DATA_HOME**，直读真实用户库；daemon 需已在跑，播放态用 `hmp play` 预置）。

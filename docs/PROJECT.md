@@ -294,9 +294,9 @@ pub struct PlaybackState {
 | 搜索 | 已接入 | 使用 QQ Music Rust API |
 | 播放控制 | 已接入 | 播放、暂停、上一首、下一首、Seek、音量 |
 | 队列展示 | 已接入 | 展示 AppCore 当前真实队列 |
-| 歌词展示 | 部分接入 | 已接入接口与空状态，按真实返回展示 |
-| 推荐内容 | 开发中 / 演示数据 | 当前使用本地演示数据 |
-| 收藏与资料库同步 | 开发中 | 尚未接入账号云端同步 |
+| 歌词展示 | 已接入 | 行级 LRC+翻译（本地 sidecar/内嵌 → QQ 兜底，三级缓存） |
+| 推荐内容 | 已接入 | 发现/排行榜/猜你喜欢三域（daemon 真数据） |
+| 收藏与资料库同步 | 已接入 | QQ 收藏/歌单 reconcile + 本地扫描 |
 
 ---
 
@@ -876,9 +876,10 @@ pub struct PlaybackQueue {
 
 ### 8.6 后台播放（service + tray）
 
-`hmp serve` 启动常驻后端（CLI 遥控命令自动拉起：连接 `$XDG_RUNTIME_DIR/hmp.sock`
-失败时 spawn `hmp serve --background`），单例 Unix socket（`$XDG_RUNTIME_DIR/hmp.sock`，
-回退 `/tmp/hmp-{uid}.sock`）。
+`hmp serve` 启动常驻后端（CLI 遥控命令自动拉起：连接端点失败时 spawn
+`hmp serve --background`），单例 IPC 端点：Unix socket（`$XDG_RUNTIME_DIR/hmp.sock`，
+回退 `/tmp/hmp-{uid}.sock`）或 Windows 命名管道（`\\.\pipe\hmp`，
+`FILE_FLAG_FIRST_PIPE_INSTANCE` 单例）。
 
 ```text
 hmp play <track-id|playlist:<id>|album:<id>>   # 播放/换队列
@@ -1415,7 +1416,7 @@ test(qqmusic): add vkey response fixture
 - [x] Rodio 播放（hmp-player）；
 - [x] 播放 / 暂停（PlayerCommand::TogglePlay）；
 - [x] Seek（UI 进度条 / MPRIS position）；
-- [~] 封面（占位渐变；远程封面下载待接入）；
+- [x] 封面（CoverGet 管线：远程三域白名单 + 本地产物回写 + 歌单封面 v6，无源时中性占位）；
 - [x] 完整基础 MPRIS（playerctl 实测）；
 - [x] 最小搜索 UI（Slint，Apple Music 风格）；
 - [x] 底部播放栏。

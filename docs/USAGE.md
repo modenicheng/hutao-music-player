@@ -53,17 +53,18 @@ hmp auth
 
 ```text
 hmp play <track-id> ──┐
-hmp status            ├─►  Unix socket JSON-RPC ──►  hmp daemon（常驻）
-playerctl -p hmp ...  │        (127.0.0.1 本机)          │
-系统托盘菜单 ──────────┘                                 │
-                                                         ▼
-                                      队列核心 → 音质回退 → QMC2 解密 → Rodio 播放
+hmp status            ├─►  IPC JSON 帧 ──►  hmp daemon（常驻）
+playerctl -p hmp ...  │   (Unix socket / Windows 命名管道，127.0.0.1 本机)
+系统托盘菜单 ──────────┘                    │
+                                            ▼
+                         队列核心 → 音质回退 → 进程内解密源 → Rodio 播放
 ```
 
-- **单例常驻**：`hmp play/status/...` 等遥控命令发现 daemon 未运行时会**自动拉起**（detached + setsid，终端关闭播放不中断）；已运行则复用。
-- **控制面**：Unix socket（`$XDG_RUNTIME_DIR/hmp.sock`，无 XDG_RUNTIME_DIR 时 ` /tmp/hmp-<uid>/hmp.sock`，权限 0600），长度前缀 JSON 帧；多个客户端（多终端 + tray + MPRIS）可并发。
-- **单实例保证**：`flock` 锁文件（`<socket>.lock`）原子抢占；后启动的实例检测到已在运行即退出。
+- **单例常驻**：`hmp play/status/...` 等遥控命令发现 daemon 未运行时会**自动拉起**（detached：Unix setsid / Windows 隐藏窗口独立进程组，终端关闭播放不中断）；已运行则复用。`hmp quit` 只连接不拉起（daemon 未运行时幂等成功）。
+- **控制面**：Unix socket（`$XDG_RUNTIME_DIR/hmp.sock`，无 XDG_RUNTIME_DIR 时 ` /tmp/hmp-<uid>/hmp.sock`，权限 0600）或 Windows 命名管道（`\\.\pipe\hmp`），长度前缀 JSON 帧；多个客户端（多终端 + tray + MPRIS/SMTC）可并发。
+- **单实例保证**：Unix `flock` 锁文件（`<socket>.lock`）/ Windows `FILE_FLAG_FIRST_PIPE_INSTANCE` 原子抢占；后启动的实例检测到已在运行即退出。
 - **状态单一来源**：daemon 发布 `DaemonState`（播放状态 + 队列 + 能力），CLI/tray/MPRIS 均只读它。
+- **wire 兼容**：daemon 是常驻单例，升级窗口内旧进程仍占端点——响应/事件结构体新增字段一律带 `#[serde(default)]`，桌面订阅对解码失败断线重连不静默（CLI 解码失败会提示 `hmp quit` 后重试）。
 - **退出**：`hmp quit` 或托盘「退出」→ 停止播放、清理 socket、释放 MPRIS、关闭 tray，进程退出；SIGINT/SIGTERM 同样处理。
 
 ## 4. 命令参考（完整）
@@ -120,7 +121,7 @@ playerctl -p hmp ...  │        (127.0.0.1 本机)          │
 | 命令 | 说明 |
 |---|---|
 | `hmp serve` | 前台运行 daemon（调试用，Ctrl+C 退出） |
-| `hmp serve --background` | 后台运行（detached + setsid，命令立即返回）；遥控命令自动拉起时也走此路径 |
+| `hmp serve --background` | 后台运行（detached：Unix setsid / Windows 隐藏窗口独立进程组，命令立即返回）；遥控命令自动拉起时也走此路径 |
 
 ## 5. 队列与播放语义
 
@@ -144,7 +145,7 @@ playerctl -p hmp ...  │        (127.0.0.1 本机)          │
   ```
 - **回退链**：`auto` = `Master → HiRes → Atmos → Flac → Mp3_320 → Mp3_128`；固定档位从该档起降级。音质是 **source resolution policy**（resolver 按链取流），不是播放器参数。
 - **可用 vs 实际**：曲目的 `available_qualities`（QQ size 字段 + 本次探测成功档位）与播放状态的 `actual_quality` 分离；`hmp status` 显示实际音质。
-- **加密音质**（`.mflac`/`.mgg`/`.mmp4` 等，FLAC 及以上）：daemon 用接口 `ekey` 经本地回环解密代理（127.0.0.1 随机端口，Range 按需解密）**流式播放**，边下边播、支持即时 Seek；CDN 不支持 Range 时回退整文件解密缓存；
+- **加密音质**（`.mflac`/`.mgg`/`.mmp4` 等，FLAC 及以上）：daemon 用接口 `ekey` 经进程内随机访问解密源**流式播放**（Range 按需解密 + 边播边缓存），支持即时 Seek；CDN 不支持 Range 时回退整文件解密缓存；
 - OGG 系列（`O8M1` 等）尚未纳入回退链（后续项）。
 
 ## 6.5 本地音乐（媒体库）
@@ -169,7 +170,7 @@ MPRIS `OpenUri`（`playerctl open file:///...`）经同一路径播放。
   playerctl -p hmp status        # Playing / Paused
   playerctl -p hmp metadata      # 曲目元数据
   ```
-  `CanGoNext`/`CanGoPrevious` 按队列位置与循环模式实时上报；`xesam:url` 为本地解密代理 URI。
+  `CanGoNext`/`CanGoPrevious` 按队列位置与循环模式实时上报；`xesam:url` 为当前曲 URI（元数据）。
 - **托盘**：菜单 = 播放/暂停、上一首、下一首、停止、退出，与 CLI/MPRIS 同源生效。图标随播放态切换（暂停=双竖条，播放=音符），tooltip 显示当前曲目。
   - Windows：Win32 原生（explorer 通知区）。左键单击 = 播放/暂停，右键 = 菜单。
   - Linux：D-Bus StatusNotifierItem（KDE 等原生支持；GNOME 需 AppIndicator 扩展）。无桌面会话时自动跳过，不影响播放。
@@ -185,7 +186,7 @@ cargo run --release -p hmp-desktop --bin hmp-desktop
 - 库页（我喜欢/最近播放/音乐库/歌单）在启动时直读媒体库（`$XDG_DATA_HOME/hmp/library.sqlite3`）：先 `hmp scan ~/Music` 入库本地曲目；QQ 侧登录后 `hmp library sync` 同步歌单/收藏。
 - 播放条/队列与 CLI 同源：CLI 换歌桌面即时可见，反之亦然；`hmp quit` 后界面保持打开但呈离线空态，不会自动拉活后端。
 - 空数据是诚实状态：未扫描/未同步时对应页面为空，音乐库页"扫描本地音乐"按钮在桌面端禁用（走 `hmp scan`）。
-- 已知边界（docs/AUDIT.md §8）：内容页（首页/搜索/歌单详情）与歌词页尚未移植；QQ 曲目封面为程序化占位（封面代理待后端落地）。
+- 已知边界（docs/AUDIT.md §8）：下载/已购两页后端无对应域（诚实空态）；远端内容卡跳详情仍按展示名查本地库。内容页（发现/排行榜/猜你喜欢/搜索）、歌词页与封面（daemon CoverGet：远程三域白名单 + 本地产物回写 + 歌单封面，无源时中性占位）均已接入。
 
 ## 8. 故障排查
 
