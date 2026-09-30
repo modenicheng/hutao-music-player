@@ -284,7 +284,13 @@ impl Read for DecryptReader {
                     "stream ended before audio_len",
                 ));
             }
-            // 5. 数据饥饿：等待生产者 push（wait 释放锁，被 notify_all 唤醒重查）
+            // 5. 数据饥饿：等待生产者 push（wait 释放锁，被 notify_all 唤醒重查）。
+            //    pos 已达 fetched_until（如 seek 恰落取流头）而生产者 park
+            //    在 Notify 上时，等价于数据永不到来——先兜底唤醒重估
+            //    （reader_starved_read_notifies_parked_producer）。
+            if self.pos >= st.fetched_until && !st.eof {
+                self.shared.producer_ctl.notify_one();
+            }
             st = self
                 .shared
                 .data_ready
@@ -325,6 +331,15 @@ impl Seek for DecryptReader {
                 st.consumed_until = clamped;
                 st.eof = false;
                 st.error = None;
+                drop(st);
+                self.shared.producer_ctl.notify_one();
+            } else if clamped > st.consumed_until {
+                // 窗口内前向 seek：旧位置之前的缓冲作废，消费位置单调推进
+                // ——生产者的暂停判定（fetched_until - consumed_until >=
+                // prefetch）可能就此解除。不唤醒则 park 中的生产者无人叫醒，
+                // read 在 fetched_until 处饥饿时双向死锁
+                // （reader_in_window_seek_to_park_head_no_hang）。
+                st.consumed_until = clamped;
                 drop(st);
                 self.shared.producer_ctl.notify_one();
             }
@@ -794,4 +809,249 @@ where
         runtime.spawn(fut);
     }))
     .is_ok()
+}
+
+// ── 测试 ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil;
+
+    use std::time::Duration;
+
+    use wiremock::matchers::{header_exists, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// 窗口参数：chunk=64 / prefetch=2*chunk-1。prefetch 取 127 使生产者
+    /// 的 park 头与探测读的落地时机（consumed ∈ {0,1}）无关：
+    /// 128 - consumed >= 127 对两者均成立 → 确定性 park 在 2*chunk。
+    const CHUNK: u64 = 64;
+    const PREFETCH: u64 = 2 * CHUNK - 1;
+    /// 唯一可能的 park 头（暂停判定首个成立的窗口边界）。
+    const PARK_HEAD: u64 = 2 * CHUNK;
+    /// audio_len 远大于 park 头，生产者先到暂停 park 而非 eof 待命态。
+    const AUDIO_LEN: u64 = 4096;
+    /// 挂起检测超时：修复前 read 永久阻塞，超时即回归实锤。
+    const HANG_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// 明文直通密码（tee=None 场景，测试不触碰缓存环境）。
+    struct PlainCipher;
+
+    impl Qmc2Cipher for PlainCipher {
+        fn decrypt(&self, _offset: usize, _buf: &mut [u8]) {}
+    }
+
+    fn plaintext() -> Vec<u8> {
+        (0..AUDIO_LEN).map(|i| (i % 251) as u8).collect()
+    }
+
+    fn window_params() -> ReaderParams {
+        ReaderParams {
+            chunk: CHUNK,
+            prefetch: PREFETCH,
+            retain: CHUNK,
+        }
+    }
+
+    /// 明文 Range CDN mock：GET+Range → 206 严格 Content-Range。
+    /// 直构 `SourceContext`（不走 prepare_media 探测），只需 GET mock。
+    /// 返回 server 本体由测试持有至结束——只返回 uri 的话 MockServer 在
+    /// 函数出口即析构，wiremock 异步拆除监听后端口会被全量并发跑的
+    /// 其他测试服务器复用，reader 的后续拉取命中别家 mock（表现为
+    /// Content-Range 错配/预取停摆）。
+    async fn setup_plain_cdn(body: Vec<u8>) -> (MockServer, String) {
+        let total = body.len() as u64;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(header_exists("Range"))
+            .respond_with(move |req: &wiremock::Request| {
+                let range_val = req
+                    .headers
+                    .get("Range")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                let Some(spec) = range_val.strip_prefix("bytes=") else {
+                    return ResponseTemplate::new(416);
+                };
+                let Some((s, e)) = spec.split_once('-') else {
+                    return ResponseTemplate::new(416);
+                };
+                let (Ok(s), Ok(e)) = (s.parse::<u64>(), e.parse::<u64>()) else {
+                    return ResponseTemplate::new(416);
+                };
+                if s >= total {
+                    return ResponseTemplate::new(416);
+                }
+                let end = e.min(total - 1);
+                ResponseTemplate::new(206)
+                    .insert_header("Content-Range", format!("bytes {s}-{end}/{total}"))
+                    .set_body_bytes(body[s as usize..=end as usize].to_vec())
+            })
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        (server, uri)
+    }
+
+    fn plain_ctx(url: String, params: ReaderParams) -> Arc<SourceContext> {
+        Arc::new(SourceContext {
+            // no_proxy：本机系统代理（Clash）会把发往 mock 的回环请求也劫持，
+            // 高并发下间歇性篡改 206 响应——与生产 cdn_client() 语义对齐
+            client: crate::stream::source::cdn_client(),
+            cdn_url: url,
+            cipher: Arc::new(PlainCipher),
+            audio_len: AUDIO_LEN,
+            total_len: AUDIO_LEN,
+            sem: Arc::new(Semaphore::new(4)),
+            tee: None,
+            params,
+        })
+    }
+
+    /// 打开 reader 并读 1 字节（blocking 线程：read 饥饿时阻塞 condvar，
+    /// 不能占住测试 runtime 线程饿死生产者任务）。
+    async fn open_and_read_one(reader: DecryptReader) -> (DecryptReader, u8) {
+        testutil::blocking(move || {
+            let mut reader = reader;
+            let mut buf = [0u8; 1];
+            reader.read_exact(&mut buf).unwrap();
+            (reader, buf[0])
+        })
+        .await
+    }
+
+    /// 等待生产者 park 在 `PARK_HEAD`（暂停判定唯一可能的首个成立点）：
+    /// fetched_until 到达后短暂静置，确认不再推进（未 park 则会续拉）。
+    async fn wait_parked(reader: &DecryptReader) {
+        testutil::eventually("生产者到达 park 头", || {
+            let fetched = reader.shared.state.lock().unwrap().fetched_until;
+            (fetched == PARK_HEAD).then_some(())
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let fetched = reader.shared.state.lock().unwrap().fetched_until;
+        assert_eq!(fetched, PARK_HEAD, "生产者未在预期位置 park");
+    }
+
+    /// 限时单字节 read（独立 std::thread 执行；挂起时线程随进程回收）。
+    /// 不得用 spawn_blocking：泄漏的 blocking 线程会让 `#[tokio::test]`
+    /// 的 runtime drop 永久等待，超时保护反而变成套件级死锁。
+    async fn read_one_with_timeout(
+        reader: DecryptReader,
+        hang_msg: &'static str,
+    ) -> (DecryptReader, u8) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut buf = [0u8; 1];
+            let byte = reader.read(&mut buf).map(|_| buf[0]);
+            let _ = tx.send((reader, byte));
+        });
+        let (reader, byte) = tokio::time::timeout(HANG_TIMEOUT, rx)
+            .await
+            .expect(hang_msg)
+            .expect("read thread dropped the result channel");
+        (reader, byte.expect("read failed"))
+    }
+
+    /// 回归（审计实锤的永久挂起）：窗口内 seek 恰落在 fetched_until
+    /// （生产者 park 的取流头）后，read 无覆盖分块 → 在 data_ready 上
+    /// 永久等待；生产者的 park 判定（fetched_until - consumed_until >=
+    /// prefetch）基于推进前的 consumed_until 仍成立，park 在 Notify 上
+    /// 无人唤醒 → 双向永久挂起。修复：Seek 的 in-window 分支单调推进
+    /// consumed_until 并 notify_one，判定立即失真解除、续拉数据。
+    #[tokio::test]
+    async fn reader_in_window_seek_to_park_head_no_hang() {
+        let (_server, url) = setup_plain_cdn(plaintext()).await;
+        let reader = DecryptReader::spawn(plain_ctx(url, window_params())).unwrap();
+
+        // 读 1 字节（consumed=1），此后不再读，让生产者推到 park 头
+        let (mut reader, first) = open_and_read_one(reader).await;
+        assert_eq!(first, 0);
+        wait_parked(&reader).await;
+
+        // 窗口内（[0, 128]）seek 恰到 park 头 == fetched_until
+        reader.seek(SeekFrom::Start(PARK_HEAD)).unwrap();
+
+        // 修复前：read 永久挂起 → 本断言超时失败；修复后：seek 的 notify
+        // 解除生产者 park、续拉 [128, 192)，read 返回该字节
+        let (reader, byte) = read_one_with_timeout(
+            reader,
+            "回归：窗口内 seek 到 fetched_until（park 头）后 read 永久挂起",
+        )
+        .await;
+        assert_eq!(byte, 128);
+
+        // 生产者判定解除后续拉至下一 park 点：consumed=129，
+        // 256 - 129 = 127 >= prefetch → park 在 4*chunk
+        testutil::eventually("seek 后生产者续拉至下一 park 点", || {
+            let fetched = reader.shared.state.lock().unwrap().fetched_until;
+            (fetched >= PARK_HEAD + 2 * CHUNK).then_some(())
+        })
+        .await;
+        drop(reader);
+    }
+
+    /// 窗口内前向 seek 到缓冲窗口内部（非队首）位置：consumed_until 推进
+    /// 须立即解除生产者的 park 判定——无需任何后续 read，预取即恢复。
+    /// 修复前：判定基于推进前的 consumed_until（=1）仍成立，无 read 则
+    /// fetched_until 永久冻结在 park 头。
+    #[tokio::test]
+    async fn reader_in_window_interior_seek_resumes_prefetch() {
+        let (_server, url) = setup_plain_cdn(plaintext()).await;
+        let reader = DecryptReader::spawn(plain_ctx(url, window_params())).unwrap();
+
+        let (mut reader, first) = open_and_read_one(reader).await;
+        assert_eq!(first, 0);
+        wait_parked(&reader).await;
+
+        // 窗口内部目标：consumed(1) < 64 < park 头(128)，且
+        // 128 - 64 = 64 < prefetch → seek 后判定必解除
+        let target = PARK_HEAD - CHUNK;
+        reader.seek(SeekFrom::Start(target)).unwrap();
+
+        // 不做任何 read：生产者须自行续拉一个窗口（128 → 192）
+        testutil::eventually("窗口内 seek 后预取自行恢复", || {
+            let fetched = reader.shared.state.lock().unwrap().fetched_until;
+            (fetched >= PARK_HEAD + CHUNK).then_some(())
+        })
+        .await;
+
+        // 目标仍在缓冲窗口内：内容即时可读且正确
+        let (reader, byte) = read_one_with_timeout(reader, "缓冲内 read 不应挂起").await;
+        assert_eq!(byte, target as u8);
+        drop(reader);
+    }
+
+    /// 修复 2（兜底唤醒）单测：白盒构造「暂停判定已失真解除但生产者仍
+    /// park 在 Notify 上」的漏网状态（模拟某条推进 consumed_until 却未
+    /// 通知的路径），read 饥饿（pos == fetched_until）前必须 notify 唤醒
+    /// 生产者续拉，而非永久等待。
+    #[tokio::test]
+    async fn reader_starved_read_notifies_parked_producer() {
+        let (_server, url) = setup_plain_cdn(plaintext()).await;
+        let reader = DecryptReader::spawn(plain_ctx(url, window_params())).unwrap();
+
+        let (mut reader, first) = open_and_read_one(reader).await;
+        assert_eq!(first, 0);
+        wait_parked(&reader).await;
+
+        // 状态手术：consumed_until 推进到判定解除（128 - 2 = 126 < 127）
+        // 但不经过任何 notify 路径；pos 直置 fetched_until（无覆盖分块
+        // 的饥饿点）
+        {
+            let mut st = reader.shared.state.lock().unwrap();
+            st.consumed_until = PARK_HEAD + 1 - PREFETCH;
+        }
+        reader.pos = PARK_HEAD;
+
+        // 修复前：无 notify → 生产者 park 不动 → read 永久挂起；修复后：
+        // 饥饿分支兜底 notify_one → 生产者重估（判定已解除）→ 续拉
+        // [128, 192) → read 返回
+        let (reader, byte) =
+            read_one_with_timeout(reader, "回归：read 饥饿前未兜底唤醒 park 中的生产者").await;
+        assert_eq!(byte, PARK_HEAD as u8 % 251);
+        drop(reader);
+    }
 }
