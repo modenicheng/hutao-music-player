@@ -73,6 +73,17 @@ mod tests {
 
     #[test]
     fn persist_cover_writes_deduplicated_file() {
+        // 隔离数据目录：persist_cover 写 `<data_dir>/covers`（全局解析路径）。
+        // 不隔离有两个后果：与同二进制内持 TEST_ENV_LOCK 改 XDG_DATA_HOME 的
+        // 测试（xdg.rs dirs_*）竞态——数据目录被指到随后删除的 TempDir，
+        // exists() 断言偶发红（2026-09-29 全量跑复现）；且测试封面会落进
+        // 开发机真实媒体库目录。
+        let _lock = crate::TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        // SAFETY: 持 TEST_ENV_LOCK，改 env 的测试互斥串行。
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", dir.path());
+        }
         let cover = vec![1u8, 2, 3, 4];
         let uri1 = persist_cover(&cover).unwrap();
         let uri2 = persist_cover(&cover).unwrap();
@@ -80,5 +91,9 @@ mod tests {
         assert!(uri1.starts_with("file://"), "{uri1}");
         let p = uri1.strip_prefix("file://").unwrap();
         assert!(std::path::Path::new(p).exists());
+        // SAFETY: 同上（先恢复 env 再让 TempDir 落盘内容随目录销毁）。
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+        }
     }
 }
