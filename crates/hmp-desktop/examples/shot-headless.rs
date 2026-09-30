@@ -115,6 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut wheel: Option<(f32, f32, f32, u32)> = None;
     let mut wait_ms: u64 = 0;
     let mut seed = false;
+    let mut discover_live = false;
     let mut loop_mode = 0i32;
     let mut shuffle = false;
     let mut theme_dark = false;
@@ -175,6 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             }
             "--param" => param = args.next().unwrap_or_default(),
+            "--discover-live" => discover_live = true,
             other => route_str = other.to_owned(),
         }
     }
@@ -211,21 +213,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 离线/无库环境下播种侧栏歌单，保证歌单行 hover 几何真实存在（同 hover_slider 测试）
     {
         let data = hmp_desktop::Data::get(&ui);
-        let color = slint::Color::from_rgb_u8(0x1e, 0x38, 0x5f);
         data.set_sidebar_created(slint::ModelRc::new(slint::VecModel::from(vec![
             hmp_desktop::PlaylistCover {
                 id: "1".into(),
                 name: "测试歌单甲".into(),
-                c1: color,
-                c2: color,
+                image: hmp_desktop::covers::cover_image("playlist:1"),
             },
             hmp_desktop::PlaylistCover {
                 id: "2".into(),
                 name: "测试歌单乙".into(),
-                c1: color,
-                c2: color,
+                image: hmp_desktop::covers::cover_image("playlist:2"),
             },
         ])));
+    }
+
+    // —— 发现页真实数据诊断模式（--discover-live）———
+    // 测试后端下 invoke_from_event_loop 的回调在 mock 泵里不出队（异步回包
+    // 饿死，真实 GUI 由 winit 事件循环驱动无此限制），在线内容页在无头截图
+    // 里永远停在加载文案。此模式在 UI 线程同步 block_on 拉真实发现页 +
+    // 逐卡 CoverGet 换真图（与生产同一 daemon IPC 链路），直接落模型——
+    // 专供「真实封面渲染」验收；异步竞态防护仍以真实 GUI 为准。
+    if discover_live {
+        let data = hmp_desktop::Data::get(&ui);
+        let block_rt = tokio::runtime::Runtime::new().expect("block-on runtime");
+        let page = match block_rt.block_on(hmp_desktop::backend::request(
+            hmp_core::Request::DiscoverGet { songlist_page: 1, new_song_type: 5 },
+        )) {
+            Ok(hmp_core::Response::Discover(page)) => page,
+            other => panic!("discover-live: daemon request failed: {other:?}"),
+        };
+        let mut cards: Vec<hmp_desktop::CoverCardData> = page
+            .playlists
+            .iter()
+            .map(|p| hmp_desktop::CoverCardData {
+                mid: p.id.to_string().into(),
+                title: p.title.as_str().into(),
+                subtitle: format!("{} 首 · {}", p.songnum, p.creator).into(),
+                cover: hmp_desktop::covers::cover_image(&format!("playlist:{}", p.id)),
+            })
+            .collect();
+        data.set_discover_new_songs(slint::ModelRc::new(slint::VecModel::from(
+            page.new_songs.iter().map(discover_row).collect::<Vec<_>>(),
+        )));
+        data.set_discover_state(2);
+        // 逐卡取真图（同步；上限 12 张控制截图时长），先占位后替换
+        for (i, p) in page.playlists.iter().enumerate().take(12) {
+            if p.picurl.is_empty() {
+                continue;
+            }
+            if let Ok(hmp_core::Response::Cover(uri)) = block_rt.block_on(
+                hmp_desktop::backend::request(hmp_core::Request::CoverGet {
+                    url: p.picurl.clone(),
+                }),
+            ) {
+                let path = uri.strip_prefix("file://").unwrap_or(&uri);
+                if let Ok(image) = slint::Image::load_from_path(std::path::Path::new(path)) {
+                    if let Some(card) = cards.get_mut(i) {
+                        card.cover = image;
+                    }
+                }
+            }
+        }
+        data.set_discover_playlists(slint::ModelRc::new(slint::VecModel::from(cards)));
     }
 
     // 账号页演示态（仅截图配方；1=已登录 2=扫码中）。
@@ -375,6 +424,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     img.save(&out)?;
     println!("saved {out} ({}x{})", w, h);
     Ok(())
+}
+
+/// DiscoverNewSong → TrackRow（--discover-live 专用；与 bridge 同投影，
+/// 封面程序化占位——列表行不做逐行网络取图）。
+fn discover_row(s: &hmp_core::DiscoverNewSong) -> hmp_desktop::TrackRow {
+    hmp_desktop::TrackRow {
+        mid: s.mid.as_str().into(),
+        source: 0,
+        title: s.name.as_str().into(),
+        artists: s.singer.as_str().into(),
+        artist_mid: "".into(),
+        album: s.album.as_str().into(),
+        album_mid: "".into(),
+        duration_ms: (s.interval * 1000) as i32,
+        quality: "".into(),
+        cover: hmp_desktop::covers::cover_image(&format!("album:{}", s.mid)),
+    }
 }
 
 /// 程序化 QR 占位图（33×33 黑白格 + 定位角；仅账号页扫码面板布局验收）。

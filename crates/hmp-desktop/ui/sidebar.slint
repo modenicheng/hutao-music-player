@@ -269,8 +269,12 @@ export component Sidebar inherits Rectangle {
                                                 width: 28px;
                                                 height: 28px;
                                                 border-radius: Theme.radius-sm;
-                                                background: @linear-gradient(135deg, playlist.c1, playlist.c2);
                                                 y: (parent.height - self.height) / 2;
+                                                Image {
+                                                    source: playlist.image;
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                }
                                             }
                                             Text {
                                                 text: playlist.name;
@@ -370,9 +374,13 @@ export component Sidebar inherits Rectangle {
                                         width: 28px;
                                         height: 28px;
                                         border-radius: Theme.radius-sm;
-                                        background: @linear-gradient(135deg, playlist.c1, playlist.c2);
                                         x: (parent.width - self.width) / 2;
                                         y: (parent.height - self.height) / 2;
+                                        Image {
+                                            source: playlist.image;
+                                            width: parent.width;
+                                            height: parent.height;
+                                        }
                                     }
                                 }
                             }

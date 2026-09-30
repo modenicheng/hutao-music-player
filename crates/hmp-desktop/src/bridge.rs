@@ -63,28 +63,15 @@ fn playlist_card(entry: &PlaylistEntry) -> CoverCardData {
     )
 }
 
-/// 侧栏歌单渐变：媒体库无配色数据，色对是 UI 层的确定性装饰——
-/// 8 组手选低饱和对，按歌单 id 的 FNV-1a 哈希选取（与封面同一确定性地基）。
+/// 侧栏歌单占位封面：与库页歌单卡同 seed（playlist:{id}）同图——
+/// covers 中性底 + 歌单图标（2026-09-30 起不再用 UI 层彩色渐变对）。
 fn sidebar_cover(entry: &PlaylistEntry) -> PlaylistCover {
-    const PAIRS: [(u8, u8, u8, u8, u8, u8); 8] = [
-        (0xe4, 0x4b, 0x32, 0xf3, 0xb3, 0x2f),
-        (0x1e, 0x38, 0x5f, 0xd4, 0x9b, 0x60),
-        (0x76, 0x60, 0xa4, 0xef, 0x9d, 0x9d),
-        (0x2f, 0x6b, 0x4f, 0xa8, 0xd0, 0x8d),
-        (0x3a, 0x5a, 0x7c, 0x9f, 0xc2, 0xd9),
-        (0xb0, 0x7d, 0x2b, 0xe8, 0xd0, 0x8d),
-        (0x4a, 0x4a, 0x66, 0xb3, 0xb3, 0xd9),
-        (0x8c, 0x3b, 0x58, 0xe8, 0xa0, 0xb0),
-    ];
-    let hash = crate::covers::hash_seed(&format!("playlist:{}", entry.id)) as usize;
-    let (r1, g1, b1, r2, g2, b2) = PAIRS[hash % PAIRS.len()];
     PlaylistCover {
         // id 原样透传：与库页歌单卡（playlist_card → CoverCardData.mid）同一
         // 字符串形式，歌单详情页按它 parse 成 i64 查库
         id: entry.id.clone().into(),
         name: entry.name.clone().into(),
-        c1: slint::Color::from_rgb_u8(r1, g1, b1),
-        c2: slint::Color::from_rgb_u8(r2, g2, b2),
+        image: cover_image(&format!("playlist:{}", entry.id)),
     }
 }
 
@@ -1110,7 +1097,7 @@ pub fn bind(
                                     mid: s.mid.clone().into(),
                                     title: s.name.clone().into(),
                                     subtitle: s.singer.clone().into(),
-                                    cover: slint::Image::default(),
+                                    cover: crate::covers::cover_image(&format!("album:{}", s.mid)),
                                 })
                                 .collect();
                             data.set_guess_tracks(model(tracks));
@@ -1191,9 +1178,10 @@ mod tests {
         };
         let a = sidebar_cover(&entry);
         let b = sidebar_cover(&entry);
-        assert_eq!(a.c1, b.c1);
-        assert_eq!(a.c2, b.c2);
+        assert_eq!(a.id, b.id, "同实体 id 稳定");
         assert_eq!(a.name, "深夜循环");
+        assert_eq!(a.image.size().width, b.image.size().width, "占位封面确定性");
+        assert!(a.image.size().width > 0, "占位封面图非空");
     }
 
     /// 档位 ↔ config 别名往返：写路径四个档位各有别名，读路径能映射回来。

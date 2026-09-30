@@ -60,27 +60,23 @@ fn hover_slider_chain_reports_and_clears() {
     // 让歌单行 hover 链路的结构覆盖与媒体库数据来源解耦。
     {
         let data = hmp_desktop::Data::get(&ui);
-        let color = slint::Color::from_rgb_u8(0x1e, 0x38, 0x5f);
         data.set_sidebar_created(slint::ModelRc::new(slint::VecModel::from(vec![
             hmp_desktop::PlaylistCover {
                 id: "901".into(),
                 name: "测试歌单甲".into(),
-                c1: color,
-                c2: color,
+                image: hmp_desktop::covers::cover_image("playlist:901"),
             },
             hmp_desktop::PlaylistCover {
                 id: "902".into(),
                 name: "测试歌单乙".into(),
-                c1: color,
-                c2: color,
+                image: hmp_desktop::covers::cover_image("playlist:902"),
             },
         ])));
         data.set_sidebar_favorited(slint::ModelRc::new(slint::VecModel::from(vec![
             hmp_desktop::PlaylistCover {
                 id: "903".into(),
                 name: "收藏歌单".into(),
-                c1: color,
-                c2: color,
+                image: hmp_desktop::covers::cover_image("playlist:903"),
             },
         ])));
         // 我喜欢列表同样播种：内容页滚动命中的行此前隐式依赖真库

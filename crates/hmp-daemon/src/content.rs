@@ -22,8 +22,35 @@ const ACCOUNT_TTL: Duration = Duration::from_secs(600);
 /// 缓存条目上限（防 (mid) 键无限增长；超限清空，同评论服务策略）。
 const CACHE_CAP: usize = 128;
 
-/// QQ 封面 CDN 前缀（CoverGet 只接受该来源，收敛 SSRF 面）。
-const COVER_HOST_PREFIX: &str = "https://y.gtimg.cn/";
+/// QQ 封面 CDN 允许域（CoverGet 只接受这些来源，收敛 SSRF 面）。
+/// 推荐歌单广场/新歌实测（2026-09-30 探针）返回 `qpic.y.qq.com` 与
+/// `music-file.y.qq.com`，专辑 pmid 模板（player.rs 同款）在 `y.gtimg.cn`。
+const COVER_HOSTS: [&str; 3] = ["y.gtimg.cn", "qpic.y.qq.com", "music-file.y.qq.com"];
+
+/// 校验并归一封面 URL：host 必须在允许域内；scheme 一律升级 https
+/// （三个域均实测支持；上游常给 http 形式的 qpic 链接）。
+fn normalize_cover_url(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    if !COVER_HOSTS.contains(&host) {
+        return None;
+    }
+    Some(format!(
+        "https://{host}/{}",
+        rest[host.len()..].trim_start_matches('/')
+    ))
+}
+
+/// 专辑 pmid → 封面 URL（T002R300x300M000 模板，与 daemon player.rs /
+/// 桌面 app.rs 同款；空 pmid → 空串，UI 保持程序化占位）。
+fn cover_url_from_pmid(pmid: &str) -> String {
+    if pmid.is_empty() {
+        return String::new();
+    }
+    format!("https://y.gtimg.cn/music/photo_new/T002R300x300M000{pmid}.jpg")
+}
 
 /// 缓存条目是否新鲜（纯函数便于测试）。
 fn fresh(at: Instant, now: Instant, ttl: Duration) -> bool {
@@ -338,9 +365,9 @@ impl ContentService {
     /// QQ 封面取本地产物（AUDIT §8.4）：下载进 `<data_dir>/covers/<hash>.jpg`
     /// （persist_cover 内容哈希去重，二次请求零网络），返回 `file://` URI。
     pub async fn cover(&self, url: &str) -> Result<String, String> {
-        if !url.starts_with(COVER_HOST_PREFIX) {
-            return Err(format!("cover url must be {COVER_HOST_PREFIX}…"));
-        }
+        let url = normalize_cover_url(url).ok_or_else(|| {
+            format!("cover url host not allowed (expect one of {COVER_HOSTS:?})")
+        })?;
         let bytes = hmp_media::cdn_client()
             .get(url)
             .send()
@@ -608,7 +635,9 @@ fn project_song(s: &hmp_qqmusic_api::models::Song) -> hmp_core::DiscoverNewSong 
         singer,
         album: s.album.name.clone(),
         interval: s.interval,
-        picurl: s.album.pmid.clone(),
+        // 裸 pmid 不是 URL（2026-09-30 修复：此前直接透传，UI 经 CoverGet
+        // 换图时被域守卫拒绝）；套 T002 模板成完整封面地址
+        picurl: cover_url_from_pmid(&s.album.pmid),
     }
 }
 
@@ -676,13 +705,53 @@ mod tests {
         assert_eq!(find_flag(&serde_json::json!({}), "isVip"), None);
     }
 
-    /// 封面前缀守卫：非 y.gtimg.cn 拒绝（不出网）。
+    /// URL 归一（纯函数）：允许域 http 升 https；域外/非 http scheme 拒绝。
+    #[test]
+    fn normalize_cover_url_allowlist_and_upgrade() {
+        // 三个允许域全放行，http 一律升 https
+        assert_eq!(
+            normalize_cover_url("http://y.gtimg.cn/a.jpg").as_deref(),
+            Some("https://y.gtimg.cn/a.jpg")
+        );
+        assert_eq!(
+            normalize_cover_url("https://y.gtimg.cn/a.jpg").as_deref(),
+            Some("https://y.gtimg.cn/a.jpg")
+        );
+        assert_eq!(
+            normalize_cover_url("http://qpic.y.qq.com/music_cover/x/300?n=1").as_deref(),
+            Some("https://qpic.y.qq.com/music_cover/x/300?n=1")
+        );
+        assert_eq!(
+            normalize_cover_url(
+                "https://music-file.y.qq.com/songlist/u/a/b.jpg?imageView2/4/w/300/h/300"
+            )
+            .as_deref(),
+            Some("https://music-file.y.qq.com/songlist/u/a/b.jpg?imageView2/4/w/300/h/300")
+        );
+        // 域外 / 伪装 host / 非 http scheme / 空串：拒绝
+        assert_eq!(normalize_cover_url("https://evil.example.com/a.jpg"), None);
+        assert_eq!(normalize_cover_url("https://y.gtimg.cn.evil.com/a.jpg"), None);
+        assert_eq!(normalize_cover_url("file:///etc/passwd"), None);
+        assert_eq!(normalize_cover_url(""), None);
+    }
+
+    /// pmid → T002 模板（空 pmid → 空串）。
+    #[test]
+    fn cover_url_from_pmid_template() {
+        assert_eq!(
+            cover_url_from_pmid("002RDtQX06q5Is_1"),
+            "https://y.gtimg.cn/music/photo_new/T002R300x300M000002RDtQX06q5Is_1.jpg"
+        );
+        assert_eq!(cover_url_from_pmid(""), "");
+    }
+
+    /// 封面域守卫：非允许域拒绝（不出网）；http 形式的允许域升级后放行。
     #[tokio::test]
     async fn cover_rejects_non_gtimg_urls() {
         let svc = ContentService::new(hmp_storage::credential::store_from_env());
         for url in [
-            "http://y.gtimg.cn/a.jpg",
             "https://evil.example.com/a.jpg",
+            "https://y.gtimg.cn.evil.com/a.jpg",
             "file:///etc/passwd",
             "",
         ] {

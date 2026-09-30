@@ -1,9 +1,16 @@
-//! 程序化确定性封面 / 头像生成（移植自 apps/hmp-tauri/src/lib/api/covers.ts）。
+//! 程序化确定性占位封面 / 头像生成。
 //!
 //! 为什么必须确定性：同一实体在页面各处拿到同一张图、取色模块（M6）输入稳定、
 //! 不依赖网络。一切"随机量"只从 seed 经 FNV-1a 哈希派生，禁止时间/真随机。
 //!
-//! SVG 字符串与 TS 版逐字段一致；栅格化经 resvg（slint svg 特性同款依赖），
+//! 占位封面语义（2026-09-30 改版）：真图缺失/未到达时的中性占位——
+//! 设计系统中性色底（--neutral-400 系）+ 资源类型图标（Material Symbols
+//! Rounded，与 ui/assets/icons 同源 path），按 seed 前缀选形：
+//! `playlist:` → library-music、`artist:` → person、其余（专辑/曲目）→ album。
+//! 不再做全彩渐变构图：列表页铺满彩色块喧宾夺主，且与"氛围色不进列表"
+//! （DESIGN.md §1.2 v0.4）相悖。
+//!
+//! SVG 字符串确定性生成；栅格化经 resvg（slint svg 特性同款依赖），
 //! 结果按 seed 缓存为 [`slint::Image`]。tiny-skia 像素是预乘 alpha，
 //! Slint 需要直 alpha，拷贝时反预乘。
 
@@ -44,33 +51,19 @@ fn radix36(mut value: u32) -> String {
     String::from_utf8(buf).expect("radix36 digits are ascii")
 }
 
-struct Palette {
-    hue: u32,
-    hue_analog: u32,
-    hue_accent: u32,
-    s1: u32,
-    s2: u32,
-    l1: u32,
-    l2: u32,
-}
+// —— 中性占位色板（apps/hmp-tauri/src/styles/index.css 浅色套）———
+// 底 = --neutral-400 → 加深一档的竖向微渐变；图标 = --neutral-600。
+// 中间调在浅色页底（neutral-50/100）与深色页底（#131312/#1D1D1B）上都不刺眼。
+const TILE_BG_TOP: (u8, u8, u8) = (0xB6, 0xAE, 0xAC);
+const TILE_BG_BOTTOM: (u8, u8, u8) = (0xA5, 0x9C, 0x99);
+const TILE_ICON: (u8, u8, u8) = (0x75, 0x67, 0x64);
 
-/// 色板规则与 covers.ts paletteFor 一致：色相覆盖全环，
-/// 封面内部只用 "主色 + 邻近色 + 低透明对侧 accent"，S 45–75%、L 35–65%。
-fn palette_for(seed: &str) -> (u32, Palette) {
-    let base = hash_seed(&format!("cover:{seed}"));
-    let hue = base % 360;
-    let p = Palette {
-        hue,
-        hue_analog: (hue + 14 + (derive(base, "analog") % 44)) % 360,
-        hue_accent: (hue + 150 + (derive(base, "accent") % 60)) % 360,
-        s1: 45 + (derive(base, "s1") % 31),
-        s2: 45 + (derive(base, "s2") % 31),
-        l1: 35 + (derive(base, "l1") % 31),
-        l2: 35 + (derive(base, "l2") % 31),
-    };
-    (base, p)
-}
+/// Material Symbols Rounded 24×24 图标 path（与 ui/assets/icons/*.svg 同源）。
+const ICON_ALBUM: &str = "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z";
+const ICON_PLAYLIST: &str = "M12.5 15q1.05 0 1.775-.725T15 12.5V7h2q.425 0 .713-.288T18 6t-.288-.712T17 5h-2q-.425 0-.712.288T14 6v4.5q-.325-.25-.7-.375T12.5 10q-1.05 0-1.775.725T10 12.5t.725 1.775T12.5 15M8 18q-.825 0-1.412-.587T6 16V4q0-.825.588-1.412T8 2h12q.825 0 1.413.588T22 4v12q0 .825-.587 1.413T20 18zm-4 4q-.825 0-1.412-.587T2 20V7q0-.425.288-.712T3 6t.713.288T4 7v13h13q.425 0 .713.288T18 21t-.288.713T17 22z";
+const ICON_ARTIST: &str = "M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z";
 
+/// 渐变方向轴（avatar_svg 头像渐变仍在用）。
 const GRADIENT_AXES: [(f64, f64, f64, f64); 4] = [
     (0.0, 0.0, 1.0, 1.0),
     (1.0, 0.0, 0.0, 1.0),
@@ -78,56 +71,28 @@ const GRADIENT_AXES: [(f64, f64, f64, f64); 4] = [
     (0.0, 1.0, 1.0, 0.0),
 ];
 
-/// 生成确定性封面 SVG（与 covers.ts coverUrl 的 SVG 串一致；600×600 viewBox）
+/// seed 前缀 → 资源类型图标（歌单/歌手/专辑，专辑为默认兜底）。
+fn icon_path_for(seed: &str) -> &'static str {
+    if seed.starts_with("playlist:") {
+        ICON_PLAYLIST
+    } else if seed.starts_with("artist:") {
+        ICON_ARTIST
+    } else {
+        ICON_ALBUM
+    }
+}
+
+/// 生成确定性中性占位封面 SVG（600×600 viewBox：中性底渐变 + 居中类型图标）。
+/// 同类实体同图（同一性由 seed 前缀保证），不同实体不再做色彩区分。
 pub fn cover_svg(seed: &str) -> String {
-    let (base, p) = palette_for(seed);
-    let axis = GRADIENT_AXES[(derive(base, "axis") % 4) as usize];
-    let layout = (derive(base, "layout") % 4) as usize;
-    let hsl = |h: u32, s: u32, l: u32| format!("hsl({h}, {s}%, {l}%)");
-    let hsla = |h: u32, s: u32, l: u32, a: f64| format!("hsla({h}, {s}%, {l}%, {a})");
-
-    let shapes = match layout {
-        // 轨道：大行星 + 细轨道环 + 卫星点
-        0 => format!(
-            r#"<circle cx="432" cy="176" r="196" fill="{}"/><circle cx="150" cy="452" r="118" fill="none" stroke="{}" stroke-width="3"/><circle cx="150" cy="452" r="26" fill="{}"/>"#,
-            hsla(p.hue_accent, p.s1, p.l1, 0.2),
-            hsla(p.hue_analog, p.s2, p.l2, 0.55),
-            hsla(p.hue_analog, p.s2, 74, 0.5),
-        ),
-        // 山脊：两座错落三角 + 低悬的"太阳"
-        1 => format!(
-            r#"<path d="M0 600 L230 210 L460 600 Z" fill="{}"/><path d="M210 600 L420 300 L620 600 Z" fill="{}"/><circle cx="438" cy="150" r="64" fill="{}"/>"#,
-            hsla(p.hue_analog, p.s2, p.l2, 0.28),
-            hsla(p.hue_accent, p.s1, p.l1, 0.22),
-            hsla(p.hue_accent, p.s2, 72, 0.42),
-        ),
-        // 声波：自下而上的三道同心弧
-        2 => format!(
-            r#"<path d="M0 760 A300 300 0 0 1 600 760" fill="none" stroke="{}" stroke-width="44"/><path d="M-120 760 A420 420 0 0 1 720 760" fill="none" stroke="{}" stroke-width="30"/><path d="M-240 760 A540 540 0 0 1 840 760" fill="none" stroke="{}" stroke-width="20"/>"#,
-            hsla(p.hue_analog, p.s2, p.l2, 0.2),
-            hsla(p.hue_accent, p.s1, p.l1, 0.14),
-            hsla(p.hue, p.s1, 70, 0.1),
-        ),
-        // 斜切：左上大圆 + 右下旋转菱形 + 一道对角细线
-        _ => format!(
-            r#"<circle cx="120" cy="96" r="210" fill="{}"/><rect x="380" y="330" width="260" height="260" transform="rotate(45 510 460)" fill="{}"/><path d="M60 540 L540 60" stroke="{}" stroke-width="3"/>"#,
-            hsla(p.hue_analog, p.s2, p.l2, 0.3),
-            hsla(p.hue_accent, p.s1, p.l1, 0.24),
-            hsla(p.hue, p.s1, 82, 0.5),
-        ),
-    };
-
-    let l1_glow = (p.l1 + 12).min(70); // TS: Math.min(70, l1 + 12)
+    let icon = icon_path_for(seed);
+    let (r1, g1, b1) = TILE_BG_TOP;
+    let (r2, g2, b2) = TILE_BG_BOTTOM;
+    let (ir, ig, ib) = TILE_ICON;
+    // 24 单元图标放大 9 倍（216px，36% 视宽），居中
+    let inset = (600.0 - 24.0 * 9.0) / 2.0;
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600" viewBox="0 0 600 600"><defs><linearGradient id="bg" x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}"><stop offset="0" stop-color="{c1}"/><stop offset="1" stop-color="{c2}"/></linearGradient><radialGradient id="glow" cx="0.5" cy="0.36" r="0.75"><stop offset="0" stop-color="{c3}" stop-opacity="0.35"/><stop offset="1" stop-color="{c4}" stop-opacity="0"/></radialGradient></defs><rect width="600" height="600" fill="url(#bg)"/><rect width="600" height="600" fill="url(#glow)"/>{shapes}</svg>"#,
-        x1 = axis.0,
-        y1 = axis.1,
-        x2 = axis.2,
-        y2 = axis.3,
-        c1 = hsl(p.hue, p.s1, p.l1),
-        c2 = hsl(p.hue_analog, p.s2, p.l2),
-        c3 = hsl(p.hue_accent, p.s1, l1_glow.min(70)),
-        c4 = hsl(p.hue_accent, p.s1, p.l1),
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600" viewBox="0 0 600 600"><defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="rgb({r1},{g1},{b1})"/><stop offset="1" stop-color="rgb({r2},{g2},{b2})"/></linearGradient></defs><rect width="600" height="600" fill="url(#bg)"/><path transform="translate({inset} {inset}) scale(9)" d="{icon}" fill="rgb({ir},{ig},{ib})"/></svg>"#,
     )
 }
 
@@ -184,6 +149,28 @@ fn svg_to_image(svg: &str) -> Image {
     Image::from_rgba8(buffer)
 }
 
+/// `file://` URI → 本地路径（两种在库形态都收）：
+/// - 规范 URL 形态 `file:///C:/a/b.jpg`（Url::to_file_path 产物）：剥前缀后
+///   以 `/` 开头且次字符是盘符冒号 → 去.protocol 斜杠、`/`→`\`；
+///   Unix 规范形态 `/home/...` 原样；
+/// - 宽容形态 `file://C:\a\b.jpg`（persist_cover 的 `format!("file://{}")`）：
+///   剥前缀即本地路径。
+/// 裸剥前缀的旧写法会把规范形态解析成 `/C:/...`（Windows 读不到），是
+/// "封面文件在盘上却显示占位"的根因之一。不做 percent 解码（写入方均为
+/// Path::display 形态，无转义字符）。
+pub fn file_uri_to_path(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    if let Some(after_slash) = rest.strip_prefix('/') {
+        // 规范形态：file:///...
+        if after_slash.as_bytes().get(1) == Some(&b':') {
+            return Some(after_slash.replace('/', "\\"));
+        }
+        // Unix 绝对路径
+        return Some(after_slash.to_string());
+    }
+    Some(rest.to_string())
+}
+
 /// 确定性封面图（seed 同 covers.ts：专辑用 `album:{mid}`）。
 /// slint::Image 非 Send/Sync：缓存放 thread_local（UI 消费全程在主线程）
 pub fn cover_image(seed: &str) -> Image {
@@ -215,13 +202,50 @@ mod tests {
     }
 
     #[test]
-    fn cover_svg_is_deterministic_and_wellformed() {
+    fn cover_svg_is_deterministic_and_typed() {
         let a = cover_svg("album:al01");
         let b = cover_svg("album:al01");
         assert_eq!(a, b);
         assert!(a.starts_with(r#"<svg xmlns="http://www.w3.org/2000/svg""#));
         assert!(a.contains("linearGradient"));
-        assert_ne!(cover_svg("album:al02"), a);
+        // 同类实体同图（中性占位不做色彩区分）；不同类型图标不同
+        assert_eq!(cover_svg("album:al02"), a);
+        assert_eq!(cover_svg("album:完全不同"), a);
+        let playlist = cover_svg("playlist:al01");
+        let artist = cover_svg("artist:al01");
+        assert_ne!(playlist, a);
+        assert_ne!(artist, a);
+        assert_ne!(playlist, artist);
+    }
+
+    #[test]
+    fn icon_kind_follows_seed_prefix() {
+        assert_eq!(icon_path_for("playlist:123"), ICON_PLAYLIST);
+        assert_eq!(icon_path_for("artist:周杰伦"), ICON_ARTIST);
+        assert_eq!(icon_path_for("album:al01"), ICON_ALBUM);
+        assert_eq!(icon_path_for("liked:so001"), ICON_ALBUM, "无前缀兜底专辑盘");
+    }
+
+    #[test]
+    fn file_uri_to_path_handles_both_forms() {
+        // 规范 URL 形态（Url::to_file_path 产物）：Windows 盘符
+        assert_eq!(
+            file_uri_to_path("file:///C:/Users/cheng/AppData/Local/hmp/covers/a.jpg").as_deref(),
+            Some(r"C:\Users\cheng\AppData\Local\hmp\covers\a.jpg")
+        );
+        // 宽容形态（persist_cover 的 file://{display}）
+        assert_eq!(
+            file_uri_to_path(r"file://C:\Users\cheng\covers\a.jpg").as_deref(),
+            Some(r"C:\Users\cheng\covers\a.jpg")
+        );
+        // Unix 规范形态
+        assert_eq!(
+            file_uri_to_path("file:///home/u/covers/a.jpg").as_deref(),
+            Some("/home/u/covers/a.jpg")
+        );
+        // 非 file:// 与空串：None
+        assert_eq!(file_uri_to_path("https://y.gtimg.cn/a.jpg"), None);
+        assert_eq!(file_uri_to_path(""), None);
     }
 
     #[test]
