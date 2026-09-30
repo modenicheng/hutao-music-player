@@ -606,15 +606,16 @@ fn apply_daemon_state(
             np.set_liked(false);
             np.set_active_line(-1);
             LYRIC_STAMPS.with(|cell| cell.borrow_mut().clear());
-            if mid.starts_with("local:") {
-                // 本地曲无歌词管线：立即空态（不发起 LyricGet）
-                np.set_lyrics(ModelRc::new(VecModel::from(Vec::<LyricRow>::new())));
-                np.set_lyrics_loading(false);
-                np.set_lyrics_generation(np.get_lyrics_generation() + 1);
-            } else {
-                np.set_lyrics_loading(true);
-                spawn_lyric_fetch(ui_weak, runtime, mid.clone());
-            }
+            // 本地/QQ 同一歌词管线：本地曲 daemon 先读同目录 .lrc/内嵌标签，
+            // 缺失再按标题+歌手检索 QQ 兜底（本地优先）；QQ 曲按 mid 直取。
+            np.set_lyrics_loading(true);
+            spawn_lyric_fetch(
+                ui_weak,
+                runtime,
+                mid.clone(),
+                track.title.clone(),
+                track.artist_names(),
+            );
             COMMENT_KEY.with(|cell| *cell.borrow_mut() = None);
             maybe_load_comments(runtime, ui_weak);
         }
@@ -682,20 +683,32 @@ fn apply_daemon_state(
     player.set_track_max_tier(quality.map(quality_tier).unwrap_or(0));
 }
 
-/// 播放页歌词装载（QQ 曲目）：LyricGet → LRC 解析 → 模型落地。
-/// 每 mid 每进程只请求一次（失败不重试，换曲再回来时自然重试）；
+/// 播放页歌词装载：LyricGet（daemon 本地优先 + QQ 检索兜底）→ LRC 解析 →
+/// 模型落地。每 id 每进程只请求一次（失败不重试，换曲再回来时自然重试）；
 /// 回包时当前曲已换 → 丢弃（串台守卫，同封面取回路径）。
-fn spawn_lyric_fetch(ui_weak: &Weak<AppWindow>, runtime: &Arc<BackendRuntime>, mid: String) {
+fn spawn_lyric_fetch(
+    ui_weak: &Weak<AppWindow>,
+    runtime: &Arc<BackendRuntime>,
+    id: String,
+    title: String,
+    artist: String,
+) {
     thread_local! {
         static REQUESTED: RefCell<std::collections::HashSet<String>> = RefCell::new(HashSet::new());
     }
-    if !REQUESTED.with(|set| set.borrow_mut().insert(mid.clone())) {
+    if !REQUESTED.with(|set| set.borrow_mut().insert(id.clone())) {
         return;
     }
     let ui_weak = ui_weak.clone();
     let runtime = Arc::clone(runtime);
     runtime.spawn(async move {
-        let lines = match crate::backend::request(Request::LyricGet { mid: mid.clone() }).await {
+        let lines = match crate::backend::request(Request::LyricGet {
+            id: id.clone(),
+            title,
+            artist,
+        })
+        .await
+        {
             Ok(Response::Lyric(page)) => crate::lyrics::parse_lrc(&page.lyric, &page.translation),
             _ => Vec::new(),
         };
@@ -703,7 +716,7 @@ fn spawn_lyric_fetch(ui_weak: &Weak<AppWindow>, runtime: &Arc<BackendRuntime>, m
             let Some(ui) = ui_weak.upgrade() else {
                 return;
             };
-            if Player::get(&ui).get_current_mid() != mid.as_str() {
+            if Player::get(&ui).get_current_mid() != id.as_str() {
                 return;
             }
             let np = NowPlaying::get(&ui);

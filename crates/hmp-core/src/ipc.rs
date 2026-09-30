@@ -200,10 +200,16 @@ pub enum Request {
         /// 关键词。
         keyword: String,
     },
-    /// 歌词读取（LRC 文本 + 翻译；daemon 出网并解析 song_type，AUDIT §8.3）。
+    /// 歌词读取（本地优先：`local:` 曲先读同目录 `.lrc`/内嵌标签，缺失时
+    /// 按标题+歌手检索 QQ 匹配曲目取词；QQ 曲按 mid 直取。daemon 出网，
+    /// AUDIT §8.3）。
     LyricGet {
-        /// 曲目 mid。
-        mid: String,
+        /// 曲目 ID（QQ mid 或 `local:<绝对路径>`）。
+        id: String,
+        /// 标题（仅本地曲 QQ 检索兜底用；QQ 曲忽略）。
+        title: String,
+        /// 歌手（`"A / B"` 拼接；仅本地曲 QQ 检索兜底用）。
+        artist: String,
     },
     /// 账号状态读（登录态 + 昵称/uin/VIP 摘要；AUDIT §8.6）。
     AccountStatus,
@@ -569,6 +575,9 @@ pub struct LyricPage {
     pub lyric: String,
     /// 翻译歌词（LRC 文本；无翻译为空）。
     pub translation: String,
+    /// 来源（`"local"` = 本地 `.lrc`/内嵌标签，`"qq"` = QQ 音乐；未知为空）。
+    #[serde(default)]
+    pub source: String,
 }
 
 /// 账号状态（展示投影；未登录时仅 `logged_in=false` 有意义）。
@@ -753,7 +762,11 @@ mod tests {
             Request::Search {
                 keyword: "夜曲".into(),
             },
-            Request::LyricGet { mid: "m".into() },
+            Request::LyricGet {
+                id: "m".into(),
+                title: "夜曲".into(),
+                artist: "周杰伦".into(),
+            },
             Request::AccountStatus,
             Request::QualityGet,
             Request::QualitySet {
@@ -856,6 +869,7 @@ mod tests {
             Response::Lyric(LyricPage {
                 lyric: "[00:01.00]test".into(),
                 translation: String::new(),
+                source: "local".into(),
             }),
             Response::AccountStatus(AccountInfo {
                 logged_in: true,

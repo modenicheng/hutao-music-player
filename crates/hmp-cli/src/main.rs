@@ -22,6 +22,7 @@ mod guess;
 mod history;
 mod library;
 mod login;
+mod lyric;
 mod output;
 mod playlist;
 mod quality;
@@ -83,6 +84,17 @@ enum Command {
     },
     /// Search songs.
     Search { keyword: String },
+    /// Lyrics for a track (local sidecar/embedded first, QQ search fallback).
+    Lyric {
+        /// Track id (QQ mid or local:<path>).
+        id: String,
+        /// Title (local-track QQ search fallback).
+        #[arg(long, default_value = "")]
+        title: String,
+        /// Artist "A / B" (local-track QQ search fallback).
+        #[arg(long, default_value = "")]
+        artist: String,
+    },
     /// Discover page (recommend playlists + new songs; no login needed).
     Discover {
         /// Songlist square page (1-based).
@@ -404,6 +416,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Search { keyword } => search::run(&keyword, cli.json).await,
+        Command::Lyric { id, title, artist } => {
+            lyric::run(&id, &title, &artist, cli.json).await
+        }
         Command::Discover { page, area } => discover::run(page, &area, cli.json).await,
         Command::Top { top_id, page, num } => match top_id {
             Some(id) => top::detail(id, page, num, cli.json).await,

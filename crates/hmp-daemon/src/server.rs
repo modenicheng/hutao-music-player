@@ -486,9 +486,9 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             };
             write_frame(wr, &resp).await?;
         }
-        Ok(Request::LyricGet { mid }) => {
+        Ok(Request::LyricGet { id, title, artist }) => {
             let resp = match &handle.content {
-                Some(svc) => match svc.lyric(&mid).await {
+                Some(svc) => match svc.track_lyric(&id, &title, &artist).await {
                     Ok(page) => Response::Lyric(page),
                     Err(message) => Response::Err {
                         code: IpcErrorCode::Internal,
@@ -1042,7 +1042,11 @@ mod tests {
             Request::Search {
                 keyword: "x".into(),
             },
-            Request::LyricGet { mid: "m".into() },
+            Request::LyricGet {
+                id: "m".into(),
+                title: "x".into(),
+                artist: String::new(),
+            },
             Request::AccountStatus,
             Request::CoverGet {
                 url: "https://y.gtimg.cn/a.jpg".into(),

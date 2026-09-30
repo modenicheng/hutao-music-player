@@ -14,6 +14,7 @@ pub mod config;
 pub mod credential;
 pub mod db;
 pub mod local;
+pub mod lyric_cache;
 pub mod scan;
 pub mod xdg;
 
@@ -23,7 +24,10 @@ pub use db::{
     FavoriteRow, LibraryDb, PlayEnd, PlaylistOpRow, PlaylistRow, PlaylistTrackRow, RecentPlay,
     RelationRow, ScanOutcome, TrackMeta, TrackRow,
 };
-pub use local::{LocalMeta, is_audio_ext, read_meta};
+pub use local::{
+    LocalMeta, decode_lrc_text, is_audio_ext, read_embedded_lyrics, read_meta, read_sidecar_lrc,
+    sidecar_lrc_candidates,
+};
 pub use path::{canonical_display_path, strip_verbatim};
 pub use xdg::{cache_dir, config_dir, data_dir};
 

@@ -5,11 +5,13 @@
 //! 目录契约落盘（与本地扫描共用 persist_cover，天然去重）。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hmp_core::{AccountInfo, LyricPage, SearchPage};
 use hmp_qqmusic_api::credential::Credential;
+use hmp_qqmusic_api::protocol::search::QuickSong;
 use hmp_qqmusic_api::{LyricApi, QqMusicClient, UserApi, song::SongApi};
 use hmp_storage::credential::CredentialStore;
 
@@ -109,11 +111,22 @@ impl ContentService {
 
     /// 歌词（AUDIT §8.3）：song_type 由 daemon 内部经详情补齐（老 AppCore
     /// 从播放列表项取该字段；daemon 解析路径未透出 → 此处自查）。
+    /// 三级读取：内存 TTL（L1）→ 磁盘缓存（L2，`cache_dir()/lyrics/`，
+    /// 跨重启免重复出网）→ QQ 网络；网络成功后双写回填。
     pub async fn lyric(&self, mid: &str) -> Result<LyricPage, String> {
         if let Some((at, page)) = self.lyric_cache.lock().unwrap().get(mid) {
             if fresh(*at, Instant::now(), LYRIC_TTL) {
                 return Ok(page.clone());
             }
+        }
+        if let Some((lyric, translation)) = hmp_storage::lyric_cache::read_cached_lyric(mid) {
+            let page = LyricPage {
+                lyric,
+                translation,
+                source: "qq".into(),
+            };
+            self.lyric_insert(mid, page.clone());
+            return Ok(page);
         }
         // song_type：详情接口的 track.type（1=普通歌曲 2=长音频 6=视频）。
         let detail = SongApi::new(&self.client)
@@ -125,16 +138,114 @@ impl ContentService {
             .get_lyric(mid, song_type, false, true, false, false)
             .await
             .map_err(|e| e.to_string())?;
+        // L2 落盘（空正文静默跳过；失败仅丢缓存不阻断）。落盘前校验内容
+        // 像 LRC（含 `[` 标签）：上游偶发返回未解密的 QRC hex，落盘会把
+        // 解密失败的脏数据永久化，存疑内容不缓存、下次请求重试网络。
+        if resp.lyric.contains('[') {
+            if let Err(e) =
+                hmp_storage::lyric_cache::write_cached_lyric(mid, &resp.lyric, &resp.trans)
+            {
+                tracing::warn!(mid, %e, "lyric disk cache write failed");
+            }
+        }
         let page = LyricPage {
             lyric: resp.lyric,
             translation: resp.trans,
+            source: "qq".into(),
         };
+        self.lyric_insert(mid, page.clone());
+        Ok(page)
+    }
+
+    /// L1 内存缓存写入（超限清空，同评论服务策略）。
+    fn lyric_insert(&self, key: &str, page: LyricPage) {
         let mut cache = self.lyric_cache.lock().unwrap();
         if cache.len() >= CACHE_CAP {
             cache.clear();
         }
-        cache.insert(mid.to_string(), (Instant::now(), page.clone()));
+        cache.insert(key.to_string(), (Instant::now(), page));
+    }
+
+    /// 歌词（统一入口，本地优先）：`local:` 曲先读同目录 sidecar `.lrc`、
+    /// 再试内嵌歌词标签；两者皆无 → 按标题+歌手检索 QQ 最佳匹配曲目取词
+    /// （免登录 smartbox）；QQ 曲按 mid 直取。结果（含空页负缓存，防
+    /// 换曲风暴重复出网）按键 `id` 入缓存。
+    pub async fn track_lyric(
+        &self,
+        id: &str,
+        title: &str,
+        artist: &str,
+    ) -> Result<LyricPage, String> {
+        if let Some((at, page)) = self.lyric_cache.lock().unwrap().get(id) {
+            if fresh(*at, Instant::now(), LYRIC_TTL) {
+                return Ok(page.clone());
+            }
+        }
+        let page = match id.strip_prefix("local:") {
+            Some(path) => {
+                self.local_lyric_with_fallback(Path::new(path), title, artist)
+                    .await?
+            }
+            None => self.lyric(id).await?,
+        };
+        self.lyric_insert(id, page.clone());
         Ok(page)
+    }
+
+    /// 本地曲歌词：sidecar `.lrc` → 内嵌歌词标签 → QQ 检索兜底。
+    /// 本地命中标注 `source: "local"`；兜底无达标匹配 → 空页（非错误，
+    /// UI 呈现"暂无歌词"）。
+    async fn local_lyric_with_fallback(
+        &self,
+        path: &Path,
+        title: &str,
+        artist: &str,
+    ) -> Result<LyricPage, String> {
+        if let Some(lyric) =
+            hmp_storage::read_sidecar_lrc(path).or_else(|| hmp_storage::read_embedded_lyrics(path))
+        {
+            return Ok(LyricPage {
+                lyric,
+                translation: String::new(),
+                source: "local".into(),
+            });
+        }
+        let Some(mid) = self.search_lyric_mid(title, artist).await? else {
+            return Ok(LyricPage::default());
+        };
+        self.lyric(&mid).await
+    }
+
+    /// 本地曲 QQ 检索兜底：免登录 smartbox，先 `"标题 歌手"` 再退 `"标题"`；
+    /// 命中 [`pick_best_song`] 评分门槛 → mid。检索全部失败 → Err（网络
+    /// 问题向上浮）；全部成功但无达标匹配 → Ok(None)。
+    async fn search_lyric_mid(&self, title: &str, artist: &str) -> Result<Option<String>, String> {
+        let trimmed_title = title.trim();
+        if trimmed_title.is_empty() {
+            return Ok(None);
+        }
+        let trimmed_artist = artist.trim();
+        let mut keywords = Vec::with_capacity(2);
+        if !trimmed_artist.is_empty() {
+            keywords.push(format!("{trimmed_title} {trimmed_artist}"));
+        }
+        keywords.push(trimmed_title.to_owned());
+        let mut last_err = None;
+        for keyword in keywords {
+            match self.client.quick_search(&keyword).await {
+                Ok(result) => {
+                    if let Some(song) = pick_best_song(&result.songs, trimmed_title, trimmed_artist)
+                    {
+                        return Ok(Some(song.mid.clone()));
+                    }
+                }
+                Err(e) => last_err = Some(e.to_string()),
+            }
+        }
+        match last_err {
+            Some(message) => Err(message),
+            None => Ok(None),
+        }
     }
 
     /// 账号状态（AUDIT §8.6）：未登录返回 `logged_in=false`（Ok，非错误）；
@@ -346,6 +457,58 @@ impl ContentService {
             songs: resp.songs.iter().map(project_song).collect(),
         })
     }
+}
+
+/// 查询归一化：小写 + 去全部空白，用于标题/歌手比对（全半角混排容错）。
+fn normalize_text(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// QQ 检索结果最佳匹配（保守门槛，宁缺毋错词）：归一化标题全等 +2，
+/// 互为包含 +1；歌手令牌（`"A / B"` 按 `/` 拆）命中 +1。总分 ≥ 2 才采纳，
+/// 取最高分（先到先得平分）。无达标 → None（上层空页负缓存）。
+fn pick_best_song<'a>(songs: &'a [QuickSong], title: &str, artist: &str) -> Option<&'a QuickSong> {
+    let title_norm = normalize_text(title);
+    if title_norm.is_empty() {
+        return None;
+    }
+    let artist_tokens: Vec<String> = artist
+        .split('/')
+        .map(normalize_text)
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut best: Option<(i32, &QuickSong)> = None;
+    for song in songs {
+        let name_norm = normalize_text(&song.name);
+        let mut score = 0;
+        if name_norm == title_norm {
+            score += 2;
+        } else if !name_norm.is_empty()
+            && (name_norm.contains(&title_norm) || title_norm.contains(&name_norm))
+        {
+            score += 1;
+        }
+        if !artist_tokens.is_empty() {
+            let singer_norm = normalize_text(&song.singer);
+            if artist_tokens
+                .iter()
+                .any(|token| singer_norm.contains(token.as_str()))
+            {
+                score += 1;
+            }
+        }
+        if score >= 2
+            && best
+                .as_ref()
+                .is_none_or(|(best_score, _)| score > *best_score)
+        {
+            best = Some((score, song));
+        }
+    }
+    best.map(|(_, song)| song)
 }
 
 /// 展示型字段提取：从 JSON 任意层级找第一个指定 key 的字符串值
