@@ -44,15 +44,6 @@ fn model<T: 'static + Clone>(items: Vec<T>) -> ModelRc<T> {
 
 use slint::VecModel;
 
-fn cover_card(mid: &str, title: &str, subtitle: String, cover_seed: &str) -> CoverCardData {
-    CoverCardData {
-        mid: mid.into(),
-        title: title.into(),
-        subtitle: subtitle.into(),
-        cover: cover_image(cover_seed),
-    }
-}
-
 /// 歌单卡（副标题来自媒体库投影的 "N 首"——媒体库无播放计数，不伪造"X次播放"；
 /// 封面：QQ 歌单封面本地产物优先，缺失回退中性占位）。
 fn playlist_card(entry: &PlaylistEntry) -> CoverCardData {

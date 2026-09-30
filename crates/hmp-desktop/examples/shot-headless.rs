@@ -155,7 +155,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--seed" => seed = true,
             // 账号页演示态（合成数据；daemon 真实态在沙箱不可确定性呈现）：
             // 1=已登录 2=扫码中（QR 面板展开）3=未登录（扫码入口可见）
-            "--account-demo" => account_demo = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--account-demo" => {
+                account_demo = args.next().and_then(|v| v.parse().ok()).unwrap_or(0)
+            }
             "--theme" => {
                 theme_dark = args.next().map(|v| v == "dark").unwrap_or(false);
             }
@@ -237,7 +239,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let data = hmp_desktop::Data::get(&ui);
         let block_rt = tokio::runtime::Runtime::new().expect("block-on runtime");
         let page = match block_rt.block_on(hmp_desktop::backend::request(
-            hmp_core::Request::DiscoverGet { songlist_page: 1, new_song_type: 5 },
+            hmp_core::Request::DiscoverGet {
+                songlist_page: 1,
+                new_song_type: 5,
+            },
         )) {
             Ok(hmp_core::Response::Discover(page)) => page,
             other => panic!("discover-live: daemon request failed: {other:?}"),
@@ -261,11 +266,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if p.picurl.is_empty() {
                 continue;
             }
-            if let Ok(hmp_core::Response::Cover(uri)) = block_rt.block_on(
-                hmp_desktop::backend::request(hmp_core::Request::CoverGet {
+            if let Ok(hmp_core::Response::Cover(uri)) =
+                block_rt.block_on(hmp_desktop::backend::request(hmp_core::Request::CoverGet {
                     url: p.picurl.clone(),
-                }),
-            ) {
+                }))
+            {
                 let path = uri.strip_prefix("file://").unwrap_or(&uri);
                 if let Ok(image) = slint::Image::load_from_path(std::path::Path::new(path)) {
                     if let Some(card) = cards.get_mut(i) {
@@ -448,11 +453,12 @@ fn qr_placeholder_image() -> slint::Image {
     const N: usize = 33;
     let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(N as u32, N as u32);
     let pixels = buf.make_mut_slice();
-    let finder = |r: usize, c: usize| (r < 7 && c < 7) || (r < 7 && c >= N - 7) || (r >= N - 7 && c < 7);
+    let finder =
+        |r: usize, c: usize| (r < 7 && c < 7) || (r < 7 && c >= N - 7) || (r >= N - 7 && c < 7);
     for r in 0..N {
         for c in 0..N {
             let dark = finder(r, c)
-                || ((r * 7 + c * 13 + ((r / 3) * 5) ^ (c / 2)) % 3 == 0 && !finder(r, c));
+                || ((r * 7 + c * 13 + ((r / 3) * 5)) ^ (c / 2)) % 3 == 0 && !finder(r, c);
             pixels[r * N + c] = if dark {
                 slint::Rgba8Pixel::new(0x10, 0x10, 0x12, 0xFF)
             } else {
@@ -463,7 +469,8 @@ fn qr_placeholder_image() -> slint::Image {
     slint::Image::from_rgba8(buf)
 }
 
-fn parse_route(s: &str) -> Option<hmp_desktop::Route> {    use hmp_desktop::Route;
+fn parse_route(s: &str) -> Option<hmp_desktop::Route> {
+    use hmp_desktop::Route;
     Some(match s {
         "home" => Route::Home,
         "discover" => Route::Discover,

@@ -155,6 +155,7 @@ fn svg_to_image(svg: &str) -> Image {
 ///   Unix 规范形态 `/home/...` 原样；
 /// - 宽容形态 `file://C:\a\b.jpg`（persist_cover 的 `format!("file://{}")`）：
 ///   剥前缀即本地路径。
+///
 /// 裸剥前缀的旧写法会把规范形态解析成 `/C:/...`（Windows 读不到），是
 /// "封面文件在盘上却显示占位"的根因之一。不做 percent 解码（写入方均为
 /// Path::display 形态，无转义字符）。

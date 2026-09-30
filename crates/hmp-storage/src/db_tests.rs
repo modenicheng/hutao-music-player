@@ -1213,7 +1213,7 @@ fn merge_ghost_local_tracks_remaps_relations_and_playlists() {
 fn rebind_cover_url_rewrites_matching_tracks() {
     let mut db = LibraryDb::open_in_memory().unwrap();
     let row = |key: &str, url: &str| crate::TrackRow {
-        source: "qq".into(),
+        source: "qq",
         source_key: key.into(),
         title: "晴天".into(),
         cover_uri: Some(url.into()),
@@ -1231,13 +1231,21 @@ fn rebind_cover_url_rewrites_matching_tracks() {
     for tid in [a, b] {
         let uri: String = db
             .conn
-            .query_row("SELECT cover_uri FROM tracks WHERE id = ?1", params![tid], |r| r.get(0))
+            .query_row(
+                "SELECT cover_uri FROM tracks WHERE id = ?1",
+                params![tid],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(uri, local, "回写为本地产物 URI");
     }
     let other: String = db
         .conn
-        .query_row("SELECT cover_uri FROM tracks WHERE id = ?1", params![c], |r| r.get(0))
+        .query_row(
+            "SELECT cover_uri FROM tracks WHERE id = ?1",
+            params![c],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(other, url_y, "其他 URL 不受影响");
 
