@@ -340,8 +340,9 @@
   后台做，不卡解码线程）；键空间不变（path|ekey），二次播放
   `cached_playable_uri` 命中语义不变。**语义变化**：G2 预解析但未播放的
   曲目不再回填缓存。
-- **明文 + 无 Range CDN 会 prepare 失败**：回退路径对 ekey=None 走内嵌 ekey
-  尾提取，纯明文 MP3 无尾 → 该音质被跳过、继续回退链（daemon 侧表现）。
+- **明文 + 无 Range CDN 的回退**：内嵌 ekey 提取失败后转 `fill_plain_at`
+  明文全量落缓存（先内嵌后明文双探测；明文侧多一次全量下载，仅此罕见
+  回退路径发生）。
 - **RC4 段密钥流缓存**（`qmc2/cipher.rs`）：`QmcRc4Cipher` 内
   `Mutex<Option<(seg_id, [u8;0x1400])>>` 容量 1 段；等价性依据"丢弃
   seg_key+in_seg 步后取 N 字节 ≡ 丢弃 seg_key 步生成整段后取 [in_seg..]"；

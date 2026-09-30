@@ -51,18 +51,9 @@ pub(crate) fn lookup_valid(root: &Path, key: &str) -> Option<std::path::PathBuf>
         })
 }
 
-/// 后台回填：全量下载（+解密）进缓存；已命中即幂等返回。
-/// ekey 非空走 [`prepare_playable_at`]（下载-解密-校验-驱逐全复用）；
-/// 明文下载后魔数校验直接落盘。返回缓存文件 `file://` URI。
-pub async fn cache_fill_at(root: &Path, url: &str, ekey: Option<&str>) -> Result<String> {
-    match ekey.filter(|e| !e.is_empty()) {
-        Some(e) => prepare_playable_at(root, url, Some(e), None).await,
-        None => fill_plain_at(root, url).await,
-    }
-}
-
 /// 明文文件回填：下载 → 头魔数校验 → 原子 rename → 容量驱逐。
-async fn fill_plain_at(root: &Path, url: &str) -> Result<String> {
+/// 供回退路径（无 Range CDN 的明文曲目）落全量缓存。
+pub(crate) async fn fill_plain_at(root: &Path, url: &str) -> Result<String> {
     let key = cache::cache_key(url, "");
     if let Some(path) = lookup_valid(root, &key) {
         return file_uri(&path);
@@ -952,7 +943,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let filled = cache_fill_at(&root, &url, Some(&ekey)).await.unwrap();
+        let filled = prepare_playable_at(&root, &url, Some(&ekey), None)
+            .await
+            .unwrap();
         assert!(filled.starts_with("file://"));
 
         // 命中（零网络：mock expect(1) 已封顶）
@@ -989,8 +982,8 @@ mod tests {
             .await;
         let url = format!("{}/song.mp3", server.uri());
 
-        let r1 = cache_fill_at(&root, &url, None).await.unwrap();
-        let r2 = cache_fill_at(&root, &url, None).await.unwrap();
+        let r1 = fill_plain_at(&root, &url).await.unwrap();
+        let r2 = fill_plain_at(&root, &url).await.unwrap();
         assert_eq!(r1, r2, "二次回填应命中同一缓存文件");
         let path = url::Url::parse(&r1).unwrap().to_file_path().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), body);
@@ -1012,7 +1005,7 @@ mod tests {
             .await;
 
         assert!(matches!(
-            cache_fill_at(&root, &server.uri(), None).await,
+            fill_plain_at(&root, &server.uri()).await,
             Err(MediaError::Unsupported(_))
         ));
         let has_leftover = std::fs::read_dir(&root)

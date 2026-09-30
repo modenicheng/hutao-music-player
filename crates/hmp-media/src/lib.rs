@@ -41,53 +41,15 @@ pub enum MediaError {
     Cache(String),
 }
 
-/// 生产入口：下载、解密、缓存至 XDG 缓存目录。
-///
-/// 缓存目录为 `hmp_storage::cache_dir().join("decrypted")`。
-pub async fn prepare_playable(
-    url: &str,
-    ekey: Option<&str>,
-    progress: Option<&tokio::sync::watch::Sender<Option<f64>>>,
-) -> Result<String, MediaError> {
-    let root = default_cache_root()?;
-    decrypt::prepare_playable_at(&root, url, ekey, progress).await
-}
-
-/// 下载加密流并尝试使用文件内嵌 ekey（STag/QTag 尾部）解密。
-pub async fn prepare_playable_embedded(
-    url: &str,
-    progress: Option<&tokio::sync::watch::Sender<Option<f64>>>,
-) -> Result<String, MediaError> {
-    let root = default_cache_root()?;
-    decrypt::prepare_playable_embedded_at(&root, url, progress).await
-}
-
-/// 播放缓存命中查找（不下载不代理）：按稳定键（URL path | ekey，跨
+/// 播放缓存命中查找（不下载）：按稳定键（URL path | ekey，跨
 /// purl 重签稳定）找已解密缓存文件，命中返回 `file://` URI（零 CDN 播放）。
 pub fn cached_playable_uri(url: &str, ekey: Option<&str>) -> Result<Option<String>, MediaError> {
     let root = default_cache_root()?;
     decrypt::cached_uri_at(&root, url, ekey)
 }
 
-/// 后台回填播放缓存：全量下载（+解密）进 `cache_dir()/decrypted`，
-/// 容量驱逐与命中校验同回退路径。幂等：已缓存或同键回填进行中 →
-/// `Ok(None)`；本调用完成回填 → `Ok(Some(file:// URI))`。
-///
-/// 供 daemon 播放解析在需要时 spawn；流式播放路径的 tee 边播边缓存
-/// 共享同一去重键空间（[`INFLIGHT_FILL`]），两者不会重复下载。
-pub async fn cache_fill(url: &str, ekey: Option<&str>) -> Result<Option<String>, MediaError> {
-    let root = default_cache_root()?;
-    let key = cache::cache_key(url, ekey.unwrap_or(""));
-    if !inflight_insert(key.clone()) {
-        return Ok(None);
-    }
-    let result = decrypt::cache_fill_at(&root, url, ekey).await;
-    inflight_remove(&key);
-    result.map(Some)
-}
-
-/// 进程内在途回填键（防同曲快速换进换出触发并发重复全量下载）。
-/// tee 边播边缓存（[`stream`]）与 [`cache_fill`] 共用。
+/// 进程内在途回填键（防同曲快速换进换出触发并发重复缓存写入），
+/// 供 [`stream`] 的 tee 边播边缓存与后台补齐去重共用。
 pub(crate) fn inflight_insert(key: String) -> bool {
     let mut guard = INFLIGHT_FILL.lock().unwrap();
     if guard.iter().any(|k| k == &key) {
@@ -113,34 +75,17 @@ pub(crate) fn default_cache_root() -> Result<std::path::PathBuf, MediaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::method;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// 并发回填同键：恰一个执行下载、另一个 `Ok(None)`（in-flight 去重）。
-    /// XDG 隔离防污染真实缓存目录（本 crate 无其他 cache_dir 读者）。
-    #[tokio::test]
-    async fn cache_fill_dedupes_concurrent_same_key() {
-        let _env = testutil::isolate_cache("fill_dedup");
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_bytes(b"fLaC-payload".to_vec())
-                    .set_delay(std::time::Duration::from_millis(300)),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        let url = format!("{}/song.mp3", server.uri());
-
-        let (r1, r2) = tokio::join!(
-            cache_fill(&url, None::<&str>),
-            cache_fill(&url, None::<&str>)
-        );
-        let exactly_one = matches!(
-            (&r1, &r2),
-            (Ok(Some(_)), Ok(None)) | (Ok(None), Ok(Some(_)))
-        );
-        assert!(exactly_one, "恰一个回填执行: r1={r1:?} r2={r2:?}");
+    /// in-flight 去重：同键二次插入被拒、移除后可再插入
+    /// （tee 武装与后台补齐共用的并发防护语义锚点）。
+    #[test]
+    fn inflight_dedup_is_key_scoped() {
+        assert!(inflight_insert("k1".into()));
+        assert!(!inflight_insert("k1".into()), "同键在途 → 拒绝");
+        assert!(inflight_insert("k2".into()), "不同键互不影响");
+        inflight_remove("k1");
+        assert!(inflight_insert("k1".into()), "移除后可再插入");
+        inflight_remove("k1");
+        inflight_remove("k2");
     }
 }

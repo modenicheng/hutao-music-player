@@ -625,7 +625,13 @@ async fn fallback_playable(
     let uri = if let Some(e) = ekey {
         decrypt::prepare_playable_at(&root, url, Some(e), progress).await?
     } else {
-        decrypt::prepare_playable_embedded_at(&root, url, progress).await?
+        // 无 API ekey：可能是内嵌 ekey 加密文件，也可能是纯明文——先按内嵌
+        // 解密回退，失败再按明文全量落缓存（魔数校验兜底，双下载仅此罕见
+        // 回退路径且只在明文侧发生）。
+        match decrypt::prepare_playable_embedded_at(&root, url, progress).await {
+            Ok(uri) => uri,
+            Err(_) => decrypt::fill_plain_at(&root, url).await?,
+        }
     };
 
     Ok(PreparedMedia::fallback(uri))
@@ -1006,6 +1012,36 @@ mod tests {
             .unwrap();
         let decoded = std::fs::read(path).unwrap();
         assert_eq!(decoded, plaintext, "回退内容应与明文一致");
+    }
+
+    /// 明文 + 无 Range CDN：内嵌 ekey 提取失败后按明文全量落缓存
+    /// （回退链补全——此前此场景会直接失败）。
+    #[tokio::test]
+    async fn prepare_media_falls_back_to_plain_without_cdn_range_or_ekey() {
+        let _env = testutil::isolate_cache("fallback_plain");
+        let plaintext = {
+            let mut v = b"fLaC".to_vec();
+            v.extend((0..512).map(|i| (i % 256) as u8));
+            v
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(plaintext.clone()))
+            .mount(&server)
+            .await;
+
+        let prepared = prepare_media(&server.uri(), None, None)
+            .await
+            .expect("明文无 Range 应回退全量落缓存而非失败");
+
+        assert!(prepared.uri.starts_with("file://"));
+        assert!(prepared.source.is_none());
+        let path = url::Url::parse(&prepared.uri)
+            .unwrap()
+            .to_file_path()
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), plaintext);
     }
 
     #[tokio::test]
