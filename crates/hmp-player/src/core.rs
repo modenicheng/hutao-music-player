@@ -423,7 +423,11 @@ async fn drive(
                     }
                     PlayerCommand::Pause => {
                         sink.pause();
-                        if state.current.is_some() {
+                        // 装载在途（Loading）时同样记录暂停意图：completion
+                        // 分支据此不自动开播（否则曲尾自动切歌/装载期按暂停，
+                        // 过一会儿自己响）。首装载无 current 时也须记录；
+                        // Stopped 空闲态不受影响。
+                        if state.current.is_some() || state.status == PlaybackStatus::Loading {
                             state.status = PlaybackStatus::Paused;
                         }
                     }
@@ -530,8 +534,16 @@ async fn drive(
                         state.duration = duration;
                         state.can_seek = true;
                         state.buffering = None;
-                        sink.play();
-                        state.status = PlaybackStatus::Playing;
+                        // 装载期间用户已暂停（Pause 在 Loading 态置 Paused，
+                        // 见命令分支）→ 保持 Paused，不自动开播——暂停意图
+                        // 不丢。解码器已 append 且 sink 处于 paused，后续
+                        // Play 命令正常恢复。其余到达 completion 的状态只有
+                        // Loading/Playing（Stop 会 abort 装载、Ended 只在
+                        // Load 分派前瞬时存在）→ 新装载即播放意图，play。
+                        if state.status != PlaybackStatus::Paused {
+                            sink.play();
+                            state.status = PlaybackStatus::Playing;
+                        }
                         let _ = state_tx.send(state.clone());
                         let _ = events_tx.send(PlayerEvent::BufferingChanged(None));
                         let _ = events_tx.send(PlayerEvent::TrackChanged);

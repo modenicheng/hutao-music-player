@@ -830,11 +830,16 @@ mod tests {
     impl PlaybackDriver for SDriver {
         fn load(&self, r: LoadRequest) {
             // 同步应用（模拟真实驱动装载臂）：current + Playing。
-            let (track, quality) = (r.track, r.quality);
+            // load_gen 与 current 同拍置值（对齐真实驱动 core.rs completion
+            // 分支行为）：引擎 wait_current_applied 以 (load_gen, current)
+            // 双条件 ACK，不置值会让每次装载等到 5s 超时（F2 Bug 1 修复的
+            // 驱动对齐面，与 engine_tests.rs FakeDriver 同一性质）。
+            let (track, quality, load_gen) = (r.track, r.quality, r.load_gen);
             self.state_tx.send_modify(|s| {
                 s.status = PlaybackStatus::Playing;
                 s.current = Some(track);
                 s.actual_quality = Some(quality);
+                s.load_gen = load_gen;
             });
         }
         fn play(&self) {}

@@ -1148,8 +1148,11 @@ impl PlaybackEngine {
         };
     }
 
-    /// 等待驱动把 current 更新为 `expected`（同步应用的驱动立即返回；
-    /// 异步音频驱动等待其装载任务发布）。
+    /// 等待驱动把 current 更新为 `expected` **且**状态 `load_gen` 等于本次
+    /// 装载代际（两者由驱动完成装载时同拍置值；同步应用的驱动立即返回；
+    /// 异步音频驱动等待其装载任务发布）。同曲重载（Play 同 mid / PlayList
+    /// 起播曲 = 当前曲）时旧装载的 current 与新请求同 id——仅凭 id 判定会
+    /// 在装载在途时假 ACK，引擎随后提交未确认的装载（队列/会话/last_load）。
     /// 超时（`load_timeout`，默认 5s）→ `Timeout`：调用方按装载失败处理
     /// （回滚队列、旧曲继续），不得把未确认的装载当成功提交
     /// （此前仅 warn 后继续置 Playing/建历史）。
@@ -1169,7 +1172,10 @@ impl PlaybackEngine {
         loop {
             {
                 let cur = self.state_rx.borrow();
-                if cur.current.as_ref().map(|t| &t.id) == Some(expected) {
+                // 双条件 ACK：id 相符且代际相符。代际由驱动 completion 置值
+                // （与 current 同拍），装载在途时仍是旧代 → 继续等待。
+                if cur.load_gen == load_gen && cur.current.as_ref().map(|t| &t.id) == Some(expected)
+                {
                     return Ok(());
                 }
             }

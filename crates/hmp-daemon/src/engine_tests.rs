@@ -129,11 +129,15 @@ impl PlaybackDriver for FakeDriver {
             return; // 失败模拟：current 不更新 → wait_current_applied 超时
         }
         // 模拟真实驱动：装载即把 current 更新为目标曲目并进入 Playing。
+        // load_gen 与 current 同拍置值（对齐真实驱动 core.rs completion 分支
+        // 行为）：wait_current_applied 以 (load_gen, current) 双条件 ACK，
+        // 同步 fake 不置值会让所有装载等到超时（F2 Bug 1 修复的驱动对齐面）。
         let (track, quality) = (request.track.clone(), request.quality);
         self.state_tx.send_modify(|s| {
             s.status = PlaybackStatus::Playing;
             s.current = Some(track);
             s.actual_quality = Some(quality);
+            s.load_gen = request.load_gen;
         });
     }
     fn play(&self) {
@@ -1313,12 +1317,15 @@ impl PlaybackDriver for SlowDriver {
             .unwrap()
             .push((request.uri.clone(), request.load_gen));
         let st = self.inner.state_tx.clone();
-        let track = request.track.clone();
+        let (track, quality, load_gen) = (request.track.clone(), request.quality, request.load_gen);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             st.send_modify(|s| {
                 s.status = PlaybackStatus::Playing;
                 s.current = Some(track);
+                s.actual_quality = Some(quality);
+                // load_gen 与 current 同拍置值（对齐真实驱动 completion 行为）。
+                s.load_gen = load_gen;
             });
         });
     }
@@ -1329,6 +1336,105 @@ impl PlaybackDriver for SlowDriver {
         self.inner.command(PlayerCommand::Stop);
     }
     fn set_volume(&self, _v: f64) {}
+    fn command(&self, cmd: PlayerCommand) {
+        self.inner.command(cmd);
+    }
+    fn shutdown(&self) {}
+    fn subscribe_state(&self) -> watch::Receiver<PlaybackState> {
+        self.inner.subscribe_state()
+    }
+    fn subscribe_events(&self) -> broadcast::Receiver<PlayerEvent> {
+        self.inner.subscribe_events()
+    }
+}
+
+/// 装载延迟落地且可编程失败的驱动变体（模拟真实 Rodio 异步管道：装载任务
+/// 完成**之后**才更新 current/load_gen；失败则状态保持旧装载、只发同代
+/// Error 事件——core.rs completion 两分支的忠实对照）。同步 FakeDriver 的
+/// 「load 即应用」会掩盖「装载在途」窗口，正是同曲重载假 ACK（F2 Bug 1）
+/// 被掩盖的原因；本驱动 50ms 后落地，用于复现该窗口。
+struct DeferredDriver {
+    inner: Arc<FakeDriver>,
+}
+
+impl DeferredDriver {
+    fn new() -> (
+        Arc<Self>,
+        watch::Receiver<PlaybackState>,
+        broadcast::Receiver<PlayerEvent>,
+    ) {
+        let (inner, sr, er) = FakeDriver::new();
+        (Arc::new(Self { inner }), sr, er)
+    }
+}
+
+impl PlaybackDriver for DeferredDriver {
+    fn load(&self, request: LoadRequest) {
+        self.inner
+            .stream_seen
+            .lock()
+            .unwrap()
+            .push(request.stream.is_some());
+        self.inner
+            .loads
+            .lock()
+            .unwrap()
+            .push((request.uri.clone(), request.load_gen));
+        // 失败标志在 load() 时消费（与 FakeDriver 同语义），延迟落地。
+        let fail = self
+            .inner
+            .fail_next_load
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+            || self
+                .inner
+                .fail_remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok();
+        let st = self.inner.state_tx.clone();
+        let events = self.inner.events_tx.clone();
+        let (track, quality, load_gen) = (request.track.clone(), request.quality, request.load_gen);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if fail {
+                // 模拟真实驱动装载失败（completion Err 分支）：current/load_gen
+                // 保持旧装载，仅 status=Error + 同代 Error 事件。
+                st.send_modify(|s| {
+                    s.status = PlaybackStatus::Error;
+                    s.buffering = None;
+                });
+                let _ = events.send(PlayerEvent::Error {
+                    load_gen,
+                    error: hmp_core::HmpError::Playback(format!("deferred load {load_gen} failed")),
+                });
+            } else {
+                st.send_modify(|s| {
+                    s.status = PlaybackStatus::Playing;
+                    s.current = Some(track);
+                    s.actual_quality = Some(quality);
+                    s.load_gen = load_gen;
+                });
+            }
+        });
+    }
+    fn play(&self) {
+        self.inner.play();
+    }
+    fn pause(&self) {
+        self.inner.pause();
+    }
+    fn seek(&self, p: std::time::Duration) {
+        self.inner.seek(p);
+    }
+    fn stop(&self) {
+        self.inner.stop();
+    }
+    fn set_volume(&self, v: f64) {
+        self.inner.set_volume(v);
+    }
     fn command(&self, cmd: PlayerCommand) {
         self.inner.command(cmd);
     }
@@ -2393,6 +2499,204 @@ async fn rollback_restores_gen_then_eos_advances() {
         s.playback.current.as_ref().unwrap().id,
         TrackId::new("c"),
         "回滚后同代 EOS 应触发续播（current_gen 复原语义）"
+    );
+}
+
+// ---- F2 Bug 1 回归：wait_current_applied 必须校验 load_gen（同曲重载假 ACK） ----
+
+/// 轮询等待复合状态 playback.load_gen 到达 `gen`（DeferredDriver 装载延迟
+/// 落地，`wait_idle` 不消耗真实时间；超时即失败，不悬挂）。
+async fn wait_playback_gen(st: &mut watch::Receiver<DaemonState>, expected_gen: u64) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if st.borrow().playback.load_gen == expected_gen {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "3s 内 playback.load_gen 未到达 {expected_gen}"
+        );
+        st.changed().await.unwrap();
+    }
+}
+
+/// 轮询等待条件成立（驱动侧 loads 长度 / 状态字段等无 watch 通知的边界）。
+async fn wait_until(f: impl Fn() -> bool, msg: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !f() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "3s 内未满足边界条件：{msg}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// F2 Bug 1：同曲重载（再次 Play 同 mid）且装载异步落地时，不得凭旧装载的
+/// 同 id current 提前 ACK——引擎必须等到新装载代际应用（驱动完成装载时
+/// current 与 load_gen 同拍置值）才提交队列/会话/last_load。同步 FakeDriver
+/// 的「load 即应用」会掩盖该窗口，故用 DeferredDriver（50ms 后落地）复现
+/// 真实时序。回归前：wait_current_applied 只看 current id → 立即 ACK，
+/// seq 越过边界的首个发布仍是旧装载（gen=1）；修复后：该发布已携带 gen=2。
+#[tokio::test]
+async fn same_track_reload_acks_only_after_load_gen_applied() {
+    let (driver, _sr, _er) = DeferredDriver::new();
+    // 两次 Play 各弹一个解析列表。
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("a")]]);
+    let handle = PlaybackEngine::start(driver.clone(), resolver, Arc::new(|| true));
+    let mut st = handle.state_rx.clone();
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    // 前置：首载（gen=1）已应用、命令完成（seq 边界）。
+    wait_playback_gen(&mut st, 1).await;
+    let seq1 = st.borrow().seq;
+    assert_eq!(seq1, 1, "首条 Play 命令已完成");
+    // 同曲重载：gen=2 装载在途 50ms。
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        {
+            let s = st.borrow();
+            if s.seq > seq1 {
+                assert_eq!(
+                    s.playback.load_gen, 2,
+                    "seq 首次推进时必须已应用 gen=2 装载（不得凭旧装载假 ACK）"
+                );
+                assert_eq!(
+                    s.playback.current.as_ref().map(|t| t.id.as_ref()),
+                    Some("a")
+                );
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "3s 内重载未完成（seq 未推进）"
+        );
+        st.changed().await.unwrap();
+    }
+    assert_eq!(
+        driver.inner.load_uris(),
+        vec!["fake://a", "fake://a"],
+        "同曲重载应真实重载（两条装载记录）"
+    );
+}
+
+/// F2 Bug 1：同曲重载装载**失败**（异步落地后只发同代 Error 事件、状态保持
+/// 旧装载）时，不得凭旧装载同 id current 假成功——必须走失败路径：回滚重载
+/// 上一曲（原代际）、发布 last_error。回归前：假 ACK → 引擎提交队列/会话/
+/// last_load（无回滚、无错误），随后 Error 事件只 publish、状态污染——
+/// 装载记录停在 2 条（超时即假 ACK 证据）。
+#[tokio::test]
+async fn same_track_reload_failure_rolls_back_not_fake_ack() {
+    let (driver, _sr, _er) = DeferredDriver::new();
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("a")]]);
+    let handle = PlaybackEngine::start(driver.clone(), resolver, Arc::new(|| true));
+    let mut st = handle.state_rx.clone();
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_playback_gen(&mut st, 1).await;
+    // 重载同曲但装载延迟失败（Error gen=2；current/load_gen 保持旧装载）。
+    driver.inner.set_fail_load(true);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    // 边界：回滚重载出现（第 3 条装载记录）；假 ACK 时永不出现。
+    wait_until(
+        || driver.inner.loads.lock().unwrap().len() >= 3,
+        "失败装载后应回滚重载上一曲（疑似假 ACK：失败装载被当成功提交）",
+    )
+    .await;
+    // 回滚完成后 last_error 才发布（rollback_load 返回之后）。
+    wait_until(
+        || st.borrow().last_error.is_some(),
+        "同曲重载失败必须发布错误（假 ACK 时无错误、无回滚）",
+    )
+    .await;
+    let s = st.borrow();
+    assert_eq!(
+        s.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("a"),
+        "失败后旧装载（同曲）仍是当前曲"
+    );
+    assert_eq!(
+        s.playback.load_gen, 1,
+        "回滚后恢复上一装载代际（失败装载 gen=2 不得提交）"
+    );
+    assert_eq!(s.phase, hmp_core::EnginePhase::Playing);
+    drop(s);
+    assert_eq!(
+        driver.inner.load_uris(),
+        vec!["fake://a", "fake://a", "fake://a"],
+        "首载 + 失败重载 + 回滚重载"
+    );
+}
+
+/// F2 Bug 1 守护（回滚路径 gen 校验不回归）：换曲装载异步失败 → 回滚重载
+/// 上一曲（以 prev.load_gen 调用 wait_current_applied）必须被 gen 校验正确
+/// 确认——不因新代际在途而假失败，也不绕过校验；确认后 seek 回旧位置并续播。
+#[tokio::test]
+async fn rollback_after_async_load_failure_confirms_previous_gen() {
+    let (driver, _sr, _er) = DeferredDriver::new();
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("b")]]);
+    let handle = PlaybackEngine::start(driver.clone(), resolver, Arc::new(|| true));
+    let mut st = handle.state_rx.clone();
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_playback_gen(&mut st, 1).await;
+    // 旧曲位置推进（回滚后应 seek 回此处；watch 值同步可见，无竞态）。
+    driver
+        .inner
+        .state_tx
+        .send_modify(|s| s.position = std::time::Duration::from_secs(12));
+    // Play(b) 延迟失败（Error gen=2）→ 回滚重载 a（gen=1）。
+    driver.inner.set_fail_load(true);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+        .await
+        .unwrap();
+    wait_until(
+        || driver.inner.loads.lock().unwrap().len() >= 3,
+        "失败装载后应回滚重载上一曲",
+    )
+    .await;
+    wait_until(|| st.borrow().last_error.is_some(), "装载失败应发布错误").await;
+    let s = st.borrow();
+    assert!(s.last_error.is_some(), "装载失败应发布错误");
+    assert_eq!(
+        s.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("a"),
+        "回滚后旧曲恢复为当前曲"
+    );
+    assert_eq!(
+        s.playback.load_gen, 1,
+        "回滚装载沿用原代际（prev.load_gen=1）"
+    );
+    assert_eq!(s.phase, hmp_core::EnginePhase::Playing);
+    drop(s);
+    assert_eq!(
+        driver.inner.load_uris(),
+        vec!["fake://a", "fake://b", "fake://a"],
+        "失败装载 + 回滚重载"
+    );
+    assert!(
+        driver
+            .inner
+            .commands
+            .lock()
+            .unwrap()
+            .contains(&PlayerCommand::Seek(std::time::Duration::from_secs(12))),
+        "回滚应 seek 回旧位置"
     );
 }
 

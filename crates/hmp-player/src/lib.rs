@@ -120,6 +120,89 @@ mod tests {
         }
     }
 
+    /// 门控源（[`MediaStreamSource`] 测试替身）：reader 的首个 `read` 阻塞
+    /// 直到测试放行——精确拉长「装载在途」窗口，构造装载期间发命令的
+    /// 确定性时序（[`HungSource`] 的可释放变体；阻塞发生在 spawn_blocking
+    /// 的格式探测上，不占 runtime worker，drive 循环照常处理命令）。
+    struct GatedSource {
+        wav: Arc<Vec<u8>>,
+        /// 放行端由测试持有；reader 在 `recv` 上等第一次 send（单次 open）。
+        release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl std::fmt::Debug for GatedSource {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            // 只打长度，不打印字节本体（生产源同理只打元信息）。
+            f.debug_struct("GatedSource")
+                .field("len", &self.wav.len())
+                .finish()
+        }
+    }
+
+    impl MediaStreamSource for GatedSource {
+        fn len(&self) -> u64 {
+            self.wav.len() as u64
+        }
+
+        fn open(&self) -> std::io::Result<Box<dyn MediaStream>> {
+            let release = self
+                .release
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| std::io::Error::other("gated source already opened"))?;
+            Ok(Box::new(GatedReader {
+                wav: Arc::clone(&self.wav),
+                release,
+                released: false,
+                pos: 0,
+            }))
+        }
+    }
+
+    /// 首次 `read` 阻塞等待放行的 reader；放行后服务 WAV 字节。
+    struct GatedReader {
+        wav: Arc<Vec<u8>>,
+        release: std::sync::mpsc::Receiver<()>,
+        released: bool,
+        pos: usize,
+    }
+
+    impl std::io::Read for GatedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.released {
+                match self.release.recv() {
+                    Ok(()) => self.released = true,
+                    // 放行端已丢弃（测试异常退出）→ 以 EOF 结束，不悬挂线程池。
+                    Err(_) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "gated source released",
+                        ));
+                    }
+                }
+            }
+            let n = (self.wav.len() - self.pos).min(buf.len());
+            buf[..n].copy_from_slice(&self.wav[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    impl std::io::Seek for GatedReader {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            let len = self.wav.len() as i64;
+            let next = match pos {
+                std::io::SeekFrom::Start(n) => n as i64,
+                std::io::SeekFrom::End(n) => len + n,
+                std::io::SeekFrom::Current(n) => self.pos as i64 + n,
+            }
+            .clamp(0, len);
+            self.pos = next as usize;
+            Ok(next as u64)
+        }
+    }
+
     #[test]
     fn file_uri_roundtrips_windows_paths() {
         let path = std::env::temp_dir().join("hmp player test.wav");
@@ -297,6 +380,126 @@ mod tests {
         .await
         .expect("in-process stream must reach Playing (probe-on-spawn_blocking regression)");
         assert_eq!(state.borrow().load_gen, 3);
+        core.shutdown();
+    }
+
+    /// 回归（F2 Bug 2）：装载完成不得覆盖装载期暂停——completion 分支硬编码
+    /// `sink.play()` 会让「装载期间按的暂停」过一会儿自己响（曲尾自动切歌
+    /// 场景必现）。门控源精确构造时序：装载在途 → Pause（首装载无 current，
+    /// Loading 态也必须记录暂停意图）→ 放行装载完成 → 必须停在 Paused 且
+    /// 不自动开播；随后的 Play 命令正常恢复（解码器已 append、sink 处于
+    /// paused）。
+    #[tokio::test]
+    async fn pause_during_load_survives_completion() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let core = PlayerCore::new_silent_for_test();
+        let mut state = core.subscribe_state();
+        core.load(LoadRequest {
+            track: Track::new(TrackId::new("gated"), "Gated"),
+            uri: "https://example.com/gated.wav".into(),
+            quality: AudioQuality::Mp3_128,
+            load_gen: 1,
+            stream: Some(Arc::new(GatedSource {
+                wav: Arc::new(silent_wav_bytes(400)),
+                release: std::sync::Mutex::new(Some(release_rx)),
+            })),
+        });
+        // 进入 Loading（装载阻塞在门上，completion 未到）。
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.borrow().status == PlaybackStatus::Loading {
+                    break;
+                }
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("gated load should enter Loading");
+        // 装载在途发暂停（首装载：current 尚为 None）。
+        core.pause();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.borrow().status == PlaybackStatus::Paused {
+                    break;
+                }
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("pause during load must record Paused (no current yet)");
+        // 放行 → 装载完成：不得自动开播（暂停意图不丢）。
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let s = state.borrow();
+                if s.load_gen == 1 && s.current.is_some() {
+                    assert_eq!(
+                        s.status,
+                        PlaybackStatus::Paused,
+                        "装载完成不得覆盖装载期暂停（F2 Bug 2）"
+                    );
+                    return;
+                }
+                drop(s);
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("gated load should complete");
+        // Play 命令正常恢复播放。
+        core.play();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.borrow().status == PlaybackStatus::Playing {
+                    break;
+                }
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("Play after load-time pause must resume playback");
+        core.shutdown();
+    }
+
+    /// 对照（F2 Bug 2）：装载期间未暂停 → completion 正常 Playing（既有语义
+    /// 不回归）。同一门控源，放行后完成。
+    #[tokio::test]
+    async fn load_without_pause_completes_to_playing() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let core = PlayerCore::new_silent_for_test();
+        let mut state = core.subscribe_state();
+        core.load(LoadRequest {
+            track: Track::new(TrackId::new("gated-control"), "Gated"),
+            uri: "https://example.com/gated.wav".into(),
+            quality: AudioQuality::Mp3_128,
+            load_gen: 5,
+            stream: Some(Arc::new(GatedSource {
+                wav: Arc::new(silent_wav_bytes(400)),
+                release: std::sync::Mutex::new(Some(release_rx)),
+            })),
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.borrow().status == PlaybackStatus::Loading {
+                    break;
+                }
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("gated load should enter Loading");
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.borrow().status == PlaybackStatus::Playing {
+                    break;
+                }
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("load without pause must reach Playing");
+        assert_eq!(state.borrow().load_gen, 5);
         core.shutdown();
     }
 }
