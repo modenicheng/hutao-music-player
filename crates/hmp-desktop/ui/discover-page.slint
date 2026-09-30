@@ -23,12 +23,8 @@ export component DiscoverPage inherits Rectangle {
             title: "发现";
             meta-items: Data.discover-playlists.length > 0
                 ? [Data.discover-playlists.length + " 个歌单"] : [];
-        }
 
-        // 页头动作区（独立行；不让条件组件进 PageHeader 布局）
-        HorizontalLayout {
-            alignment: end;
-
+            // 页面级主动作放页头动作区：加载中显示提示，其余态显示刷新
             if Data.discover-state == 1: Text {
                 text: "正在加载…";
                 color: Theme.muted-foreground;

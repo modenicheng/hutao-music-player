@@ -39,6 +39,10 @@ component LyricLine inherits Rectangle {
     in property <bool> is-active: false;
     /** 视口中心在内容坐标系的 y（跟随位置 + 半视口高），景深衰减用 */
     in property <float> view-center-y: 0.0;
+    /** 视口高（内容系）：上下缘 alpha 衰减的取景依据——Slint 无原生 mask，
+        行中心进入视口边缘带内渐进透明，等价歌词层上下渐隐蒙版，
+        且对任意动态背景成立（纯色渐变叠层盖不住预烘焙模糊封面） */
+    in property <float> view-height: 0.0;
     /** 本代平均行距：景深衰减长度（对齐 Vue 的 pitch = 行中心距） */
     in property <float> avg-row-h: 88.0;
     /** 激活行几何上报（行下标 + 行中心内容系 y）；舞台据此算弹簧目标 */
@@ -59,8 +63,20 @@ component LyricLine inherits Rectangle {
     property <float> dist:
         Math.abs(center-y - view-center-y) / Math.max(avg-row-h, 1.0);
     property <float> depth-o: Math.max(0.34, 1 - 0.132 * dist);
+    // 上下缘 alpha 衰减（本任务点名替代渐变色带）：可见区上/下缘 =
+    // view-center-y ∓ view-height/2；行中心到最近缘的距离不足 fade-range
+    // 时渐进透明，视口硬裁切处 alpha≈0 不可见。fade-range ≈ 0.9 行距
+    // （48–96px 钳制）；view-height 未喂（0）或歌词不足以滚动时
+    // （首尾 pad 45%/52% 保证行心离缘 > fade-range）不衰减。
+    property <float> fade-range: clamp(avg-row-h * 0.9, 48.0, 96.0);
+    property <float> edge-fade: view-height > 0.0
+        ? clamp(Math.min(
+                center-y - (view-center-y - view-height / 2),
+                (view-center-y + view-height / 2) - center-y) / fade-range,
+            0.0, 1.0)
+        : 1.0;
     // hover 快速提亮找行、移出慢速沉回景深（Vue :hover → max(--line-o, 0.85)）
-    opacity: row-touch.has-hover ? Math.max(depth-o, 0.85) : depth-o;
+    opacity: (row-touch.has-hover ? Math.max(depth-o, 0.85) : depth-o) * edge-fade;
     animate opacity {
         duration: row-touch.has-hover ? Theme.duration-fast : 150ms;
         easing: linear;
@@ -525,6 +541,7 @@ export component NowPlayingOverlay inherits Rectangle {
                                         timestamp-ms: line.timestamp-ms;
                                         is-active: i == NowPlaying.active-line;
                                         view-center-y: stage-rect.follow-x + stage-rect.lyr-view-h / 2;
+                                        view-height: stage-rect.lyr-view-h;
                                         avg-row-h: stage-rect.avg-row-h;
                                         report-center(idx, cy) => {
                                             stage-rect.report-center(idx, cy);
@@ -558,22 +575,6 @@ export component NowPlayingOverlay inherits Rectangle {
                                         horizontal-alignment: center;
                                     }
                                 }
-                            }
-
-                            // 上下缘软边：Slint 无 mask，以 40px 渐变叠层近似
-                            // Vue 的 mask-image 渐隐（端色→透明）；无 TouchArea
-                            // 不挡滚动/点击，放视口外层不随歌词内容滚走
-                            Rectangle {
-                                y: 0;
-                                width: parent.width;
-                                height: 40px;
-                                background: @linear-gradient(180deg, TrackPalette.grad-to, transparent);
-                            }
-                            Rectangle {
-                                y: parent.height - self.height;
-                                width: parent.width;
-                                height: 40px;
-                                background: @linear-gradient(180deg, transparent, TrackPalette.grad-to);
                             }
                         }
                     }
@@ -1021,10 +1022,13 @@ export component NowPlayingOverlay inherits Rectangle {
                                 }
                             }
                         }
+                        // 门控对齐 PlayerBar：空队列/队首禁用（0.35 透明 + 不可点），
+                        // 否则点了 no-op 无反馈读作「失效按钮」
                         prev-touch := TouchArea {
                             width: 40px;
                             height: 40px;
                             y: (parent.height - self.height) / 2;
+                            enabled: Player.can-previous;
                             mouse-cursor: pointer;
                             clicked => {
                                 Player.previous();
@@ -1033,7 +1037,8 @@ export component NowPlayingOverlay inherits Rectangle {
                                 width: parent.width;
                                 height: parent.height;
                                 border-radius: Theme.pill(self.height);
-                                background: prev-touch.has-hover ? TrackPalette.accent-soft : transparent;
+                                background: prev-touch.has-hover && Player.can-previous ? TrackPalette.accent-soft : transparent;
+                                opacity: Player.can-previous ? 1 : 0.35;
                                 animate background {
                                     duration: Theme.duration-fast;
                                     easing: cubic-bezier(0.2, 0, 0, 1);
@@ -1082,6 +1087,7 @@ export component NowPlayingOverlay inherits Rectangle {
                             width: 40px;
                             height: 40px;
                             y: (parent.height - self.height) / 2;
+                            enabled: Player.can-next;
                             mouse-cursor: pointer;
                             clicked => {
                                 Player.next();
@@ -1090,7 +1096,8 @@ export component NowPlayingOverlay inherits Rectangle {
                                 width: parent.width;
                                 height: parent.height;
                                 border-radius: Theme.pill(self.height);
-                                background: next-touch.has-hover ? TrackPalette.accent-soft : transparent;
+                                background: next-touch.has-hover && Player.can-next ? TrackPalette.accent-soft : transparent;
+                                opacity: Player.can-next ? 1 : 0.35;
                                 animate background {
                                     duration: Theme.duration-fast;
                                     easing: cubic-bezier(0.2, 0, 0, 1);
@@ -1247,28 +1254,5 @@ export component NowPlayingOverlay inherits Rectangle {
         }
     }
 
-    // —— 收起键：裸 chevron 向下，墨色随环境对比度 ——
-    // 声明在 slide 末尾（最顶层）：page 的 Flickable 对按下无条件 GrabMouse，
-    // 排在其前点击永远到不了这里；y 让开顶部 32px 自绘标题栏命中带
-    //（overlay 覆盖全窗后标题栏在其下）
-    collapse-touch := TouchArea {
-        x: Theme.space-4;
-        y: Theme.title-bar-height + Theme.space-2;
-        width: 36px;
-        height: 36px;
-        mouse-cursor: pointer;
-        clicked => {
-            Player.hide-overlay();
-        }
-        AppIcon {
-            source: Icons.expand_more;
-            icon-color: collapse-touch.has-hover
-                ? TrackPalette.on-ambient : TrackPalette.on-ambient.transparentize(0.25);
-            width: 22px;
-            height: 22px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-        }
-    }
     } // slide
 }

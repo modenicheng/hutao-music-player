@@ -1,11 +1,16 @@
 // 自绘标题栏（无边框窗口壳；桌面端新增——Vue 版跑在浏览器里没有对应物）：
 // 左侧窗口标题 + 右侧 Windows 风格最小化/最大化(还原)/关闭钮；
+// 沉浸态（播放页 overlay）最左侧渲染收起键（关闭折角并入标题栏带）；
 // 空白区按住拖动移窗、双击切换最大化（Windows 惯例）。
 //
 // 拖动本体走 WinChrome.drag()：Slint 语言层没有窗口移动原语（1.17 已无
 // WindowDragArea），由 Rust 经 winit 句柄发起系统级移动循环——拖到屏缘
 // 的贴靠/半屏分列也由系统原生处理；testing/非 winit 后端未接线时空操作。
 import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { AppIcon } from "primitives.slint";
+// 曲目层前景色（收起键随专辑环境对比度取色；stores 无反向依赖，无循环导入）
+import { TrackPalette } from "stores.slint";
 
 /** Rust 侧接线的窗口操作桥（main.rs：WinitWindowAccessor::with_winit_window） */
 export global WinChrome {
@@ -52,9 +57,14 @@ export component TitleBar inherits Rectangle {
     in property <bool> maximized: false;
     /** 沉浸态（播放页 overlay 覆盖全窗时）：隐藏左侧标题文字，窗口钮/拖拽保留 */
     in property <bool> immersive: false;
+    /** 沉浸态渲染最左侧收起键（播放页 overlay 的关闭折角并入标题栏带，
+        与窗口钮同一水平带；非沉浸态不渲染、拖拽区几何与常态完全一致） */
+    in property <bool> show-collapse: false;
     callback minimize-request();
     callback toggle-maximize-request();
     callback close-request();
+    /** 收起键点击（app.slint 接 Player.hide-overlay） */
+    callback collapse-request();
 
     height: Theme.title-bar-height;
     background: transparent;
@@ -69,13 +79,14 @@ export component TitleBar inherits Rectangle {
         visible: !root.immersive;
     }
 
-    // 拖拽/双击命中区（右侧按钮列除外）。阈值起拖：4px 内的纯点击不打扰
-    // 双击判定；起拖后系统的 SC_MOVE 模态循环会吞掉 release，TouchArea
-    // 卡在按住态——下次按下 pointer-event(down) 重置 drag-armed 即恢复。
+    // 拖拽/双击命中区（右侧按钮列除外；show-collapse 时让开最左收起键）。
+    // 阈值起拖：4px 内的纯点击不打扰双击判定；起拖后系统的 SC_MOVE 模态
+    // 循环会吞掉 release，TouchArea 卡在按住态——下次按下 pointer-event(down)
+    // 重置 drag-armed 即恢复。
     title-hit := TouchArea {
-        x: 0;
+        x: root.show-collapse ? 40px : 0;
         y: 0;
-        width: parent.width - caption-row.width;
+        width: parent.width - caption-row.width - self.x;
         height: parent.height;
         property <bool> drag-armed: false;
         pointer-event(event) => {
@@ -93,6 +104,36 @@ export component TitleBar inherits Rectangle {
         }
         double-clicked => {
             root.toggle-maximize-request();
+        }
+    }
+
+    // 收起键（仅 show-collapse 渲染；条件实例保证非沉浸态零命中区）：
+    // 命中区 40×32 与窗口钮同带（x:0 顶满，flush 语言）；裸 chevron 向下
+    // 20px 居中，glyph 中心 y=16px 与窗口钮精确同线。历史上这枚键长在
+    // now-playing 里、整体让开标题栏带而"偏下"——TitleBar 本就压在 overlay
+    // 与队列抽屉最顶，层级问题层级解法，键并入标题栏带。
+    if root.show-collapse: TouchArea {
+        x: 0;
+        y: 0;
+        width: 40px;
+        height: parent.height;
+        mouse-cursor: pointer;
+        clicked => {
+            root.collapse-request();
+        }
+        AppIcon {
+            source: Icons.expand_more;
+            icon-color: parent.has-hover
+                ? TrackPalette.on-ambient
+                : TrackPalette.on-ambient.transparentize(0.25);
+            animate icon-color {
+                duration: Theme.duration-fast;
+                easing: cubic-bezier(0.2, 0, 0, 1);
+            }
+            width: 20px;
+            height: 20px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
         }
     }
 

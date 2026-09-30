@@ -295,6 +295,10 @@ export component AppWindow inherits Window {
             height: Theme.title-bar-height;
             maximized: root.maximized;
             immersive: Player.overlay-visible;
+            show-collapse: Player.overlay-visible;
+            collapse-request => {
+                Player.hide-overlay();
+            }
             minimize-request => {
                 root.minimized = true;
             }

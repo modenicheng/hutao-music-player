@@ -40,6 +40,7 @@ export component LibraryPage inherits Rectangle {
                 padding-top: Theme.space-4;
                 padding-bottom: Theme.space-4;
                 spacing: Theme.space-4;
+                cross-axis-alignment: center;
 
                 // 与侧栏"喜欢的收藏"封面同一渐变，保持身份一致
                 Rectangle {
@@ -92,7 +93,6 @@ export component LibraryPage inherits Rectangle {
                     icon-size: 17.6px;
                     text: "播放全部";
                     height: 32px;
-                    y: (parent.height - self.height) / 2;
                     clicked => {
                         Player.play-tracks(Data.liked, 0);
                     }

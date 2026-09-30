@@ -99,12 +99,8 @@ export component TopPage inherits Rectangle {
 
         PageHeader {
             title: "排行榜";
-        }
 
-        // 页头动作区（独立行；加载中不显示文案，避免与下方加载块双文案）
-        HorizontalLayout {
-            alignment: end;
-
+            // 页面级主动作放页头动作区（加载中不显示，避免与下方加载块双文案）
             if Data.top-state != 1: Button {
                 text: "刷新";
                 variant: ButtonVariant.outline;

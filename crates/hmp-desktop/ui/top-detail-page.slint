@@ -2,6 +2,7 @@
 // TopDetailGet IPC（免登录）。Nav.param 携带 top id。
 // 内容自撑高度（Scroll 约定，禁 parent.height）。
 import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
 import { Button, ButtonVariant } from "primitives.slint";
 import { PageHeader } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
@@ -29,15 +30,15 @@ export component TopDetailPage inherits Rectangle {
             meta-items: !Data.top-detail-found ? []
                 : Data.top-detail-update == "" ? [Data.top-detail-total + " 首"]
                 : [Data.top-detail-total + " 首", "更新 " + Data.top-detail-update];
-        }
 
-        // 页头动作区（独立行；仅有内容时显示）
-        if Data.top-detail-found && Data.top-detail-tracks.length > 0: HorizontalLayout {
-            alignment: end;
-
-            Button {
-                text: "播放全部";
+            // 页面级主动作放页头动作区（右上，与标题同行；规格同歌单/音乐库页）
+            if Data.top-detail-found && Data.top-detail-tracks.length > 0: Button {
                 variant: ButtonVariant.default;
+                small: true;
+                icon: Icons.play_arrow;
+                icon-size: 17.6px;
+                text: "播放全部";
+                height: 32px;
                 clicked => {
                     Player.play-tracks(Data.top-detail-tracks, 0);
                 }

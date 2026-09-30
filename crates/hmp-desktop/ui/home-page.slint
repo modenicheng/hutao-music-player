@@ -2,7 +2,7 @@
 // GuessGet/DiscoverGet 数据；发现页加载后同源展示。
 // 内容自撑高度（Scroll 约定，禁 parent.height）。
 import { Theme } from "theme.slint";
-import { Button, ButtonVariant } from "primitives.slint";
+import { Button, ButtonVariant, TextLink } from "primitives.slint";
 import { SectionHeader, CoverCardGrid } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
 import { Nav, Route } from "nav.slint";
@@ -22,6 +22,7 @@ export component HomePage inherits Rectangle {
         HorizontalLayout {
             height: 56px;
             spacing: Theme.space-4;
+            cross-axis-alignment: center;
 
             Text {
                 text: "首页";
@@ -35,7 +36,6 @@ export component HomePage inherits Rectangle {
             Button {
                 text: "去发现";
                 variant: ButtonVariant.outline;
-                y: (parent.height - self.height) / 2;
                 clicked => {
                     Nav.navigate(Route.discover, "");
                 }
@@ -44,7 +44,6 @@ export component HomePage inherits Rectangle {
             Button {
                 text: "看榜单";
                 variant: ButtonVariant.outline;
-                y: (parent.height - self.height) / 2;
                 clicked => {
                     Nav.navigate(Route.top, "");
                 }
@@ -81,10 +80,24 @@ export component HomePage inherits Rectangle {
                 }
             }
 
-            if Data.guess-state == 4: Text {
-                text: "加载失败";
-                color: Theme.muted-foreground;
-                font-size: 13px;
+            // 失败态给重试入口（Data.refresh-guess → bridge 重发 GuessGet），
+            // 否则失败即死路，回调也成死声明
+            if Data.guess-state == 4: HorizontalLayout {
+                spacing: Theme.space-3;
+                cross-axis-alignment: center;
+
+                Text {
+                    text: "加载失败";
+                    color: Theme.muted-foreground;
+                    font-size: 13px;
+                }
+                TextLink {
+                    text: "重试";
+                    font-size: 13px;
+                    clicked => {
+                        Data.refresh-guess();
+                    }
+                }
             }
 
             if Data.guess-state == 2 && Data.guess-tracks.length > 0: TrackTable {

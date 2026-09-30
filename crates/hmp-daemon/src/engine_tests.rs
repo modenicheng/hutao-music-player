@@ -12,6 +12,35 @@ use tokio::sync::{broadcast, watch};
 /// 它们的曲目无 RG，配置误读不影响断言）。
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 隔离配置目录的 RAII 守卫：断言默认配置（replaygain 开启）语义的测试用。
+/// 引擎 `apply_gain` 每次实时读 `hmp_storage::Config::load()`（无缓存），
+/// 不隔离时会读到开发机真实 config.toml——真实配置关闭 RG 时套件红 4 个
+/// （2026-09-29 Windows 真机，`replaygain=false` + 3 个 PoisonError 级联）。
+/// 必须持有 TEST_ENV_LOCK 后使用（改 env 的测试互斥串行，Drop 恢复）。
+struct IsolatedConfig {
+    _dir: tempfile::TempDir,
+}
+
+impl IsolatedConfig {
+    fn new() -> Self {
+        let dir = tempfile::TempDir::new().unwrap();
+        // SAFETY: 调用方持有 TEST_ENV_LOCK，改 env 的测试已互斥串行。
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        }
+        Self { _dir: dir }
+    }
+}
+
+impl Drop for IsolatedConfig {
+    fn drop(&mut self) {
+        // SAFETY: 同 new（panic 路径也恢复，不再毒化后续测试）。
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+    }
+}
+
 /// 记录 load 的 uri 与装载代际（uri, load_gen）与收到的命令。
 pub struct FakeDriver {
     pub state_tx: watch::Sender<PlaybackState>,
@@ -604,6 +633,7 @@ async fn preload_consumed_on_eos() {
 #[allow(clippy::await_holding_lock)]
 async fn replaygain_applied_on_load() {
     let _guard = TEST_ENV_LOCK.lock().unwrap();
+    let _cfg = IsolatedConfig::new(); // 默认配置语义（replaygain 开）
     let (driver, _sr, _er) = FakeDriver::new();
     let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
     resolver
@@ -663,6 +693,7 @@ async fn replaygain_applied_on_load() {
 #[allow(clippy::await_holding_lock)]
 async fn replaygain_clamps_extreme_values() {
     let _guard = TEST_ENV_LOCK.lock().unwrap();
+    let _cfg = IsolatedConfig::new(); // 默认配置语义（replaygain 开）
     let (driver, _sr, _er) = FakeDriver::new();
     let resolver = FakeResolver::new(vec![vec![TrackId::new("a")]]);
     resolver
@@ -693,13 +724,11 @@ async fn replaygain_clamps_extreme_values() {
 #[allow(clippy::await_holding_lock)]
 async fn replaygain_disabled_by_config() {
     let _guard = TEST_ENV_LOCK.lock().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let cfg_dir = dir.path().join("hmp");
+    // 隔离配置目录内写 replaygain=false（RAII 恢复 env，panic 路径也不泄漏）。
+    let cfg = IsolatedConfig::new();
+    let cfg_dir = cfg._dir.path().join("hmp");
     std::fs::create_dir_all(&cfg_dir).unwrap();
     std::fs::write(cfg_dir.join("config.toml"), "[audio]\nreplaygain = false\n").unwrap();
-    unsafe {
-        std::env::set_var("XDG_CONFIG_HOME", dir.path());
-    }
     let (driver, _sr, _er) = FakeDriver::new();
     let resolver = FakeResolver::new(vec![vec![TrackId::new("a")]]);
     resolver
@@ -718,9 +747,6 @@ async fn replaygain_disabled_by_config() {
         (vol - 1.0).abs() < 1e-9,
         "replaygain=false 时不应补偿: {vol}"
     );
-    unsafe {
-        std::env::remove_var("XDG_CONFIG_HOME");
-    }
 }
 
 /// 打磨：DaemonState 携带当前曲 RG 增益（CLI status 展示用）。
@@ -729,6 +755,7 @@ async fn replaygain_disabled_by_config() {
 #[allow(clippy::await_holding_lock)]
 async fn state_exposes_replaygain_db() {
     let _guard = TEST_ENV_LOCK.lock().unwrap();
+    let _cfg = IsolatedConfig::new(); // 默认配置语义（replaygain 开）
     let (driver, _sr, _er) = FakeDriver::new();
     let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
     resolver

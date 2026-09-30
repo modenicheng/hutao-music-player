@@ -38,7 +38,6 @@ export component MusicLibraryPage inherits Rectangle {
                 text: "播放全部";
                 enabled: Data.local-tracks.length > 0;
                 height: 32px;
-                y: (parent.height - self.height) / 2;
                 clicked => {
                     // 播放的是当前过滤结果
                     Player.play-tracks(Data.local-tracks, 0);
@@ -51,7 +50,6 @@ export component MusicLibraryPage inherits Rectangle {
                 enabled: false;
                 tool-tip: "桌面端接入本地索引后可用";
                 height: 32px;
-                y: (parent.height - self.height) / 2;
             }
         }
 
@@ -69,7 +67,6 @@ export component MusicLibraryPage inherits Rectangle {
                     enabled: false;
                     tool-tip: "桌面端接入本地索引后可用";
                     height: 32px;
-                    y: (parent.height - self.height) / 2;
                 }
             }
 
@@ -94,13 +91,13 @@ export component MusicLibraryPage inherits Rectangle {
                             padding-left: 12px;
                             padding-right: 12px;
                             spacing: Theme.space-4;
+                            cross-axis-alignment: center;
 
                             AppIcon {
                                 source: Icons.folder;
                                 icon-color: Data.selected-folder == index ? Theme.foreground : Theme.muted-foreground;
                                 width: 20px;
                                 height: 20px;
-                                y: (parent.height - self.height) / 2;
                             }
 
                             Text {
@@ -136,7 +133,6 @@ export component MusicLibraryPage inherits Rectangle {
                     text: "显示全部";
                     font-size: 13.6px;
                     height: 20px;
-                    y: (parent.height - self.height) / 2;
                     clicked => {
                         Data.filter-folder(-1);
                     }
