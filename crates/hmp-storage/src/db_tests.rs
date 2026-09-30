@@ -19,7 +19,7 @@ fn row() -> TrackRow {
 #[test]
 fn migration_creates_v1() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 5); // v5：本地意图幽灵行合并
+    assert_eq!(db.version().unwrap(), 6); // v6：歌单封面列
     let mut db = db;
     assert_eq!(db.track_id("qq", "mid123").unwrap(), None);
 }
@@ -169,7 +169,7 @@ fn migration_v2_migrates_favorites_into_relations() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
     // favorites 表已删除；数据在 relations（track/liked，synced）。
     let count: i64 = conn
@@ -697,7 +697,7 @@ fn mark_pending_with_delete_op_rolls_back_on_op_failure() {
 #[test]
 fn migration_v3_adds_columns_and_tables() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 5);
+    assert_eq!(db.version().unwrap(), 6);
     let cols: Vec<String> = db
         .conn
         .prepare("PRAGMA table_info(local_files)")
@@ -771,7 +771,7 @@ fn migration_v2_to_v3_upgrades_in_place() {
         .conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 5);
+    assert_eq!(v, 6);
     db.conn
         .execute("UPDATE tracks SET genre='Rock' WHERE id=1", [])
         .unwrap();
@@ -1205,4 +1205,43 @@ fn merge_ghost_local_tracks_remaps_relations_and_playlists() {
             .unwrap(),
         1
     );
+}
+
+/// CoverGet 本地产物回写：按远程 URL 匹配改写 cover_uri（同 URL 多曲全改；
+/// 已是目标值时幂等零写）。
+#[test]
+fn rebind_cover_url_rewrites_matching_tracks() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let row = |key: &str, url: &str| crate::TrackRow {
+        source: "qq".into(),
+        source_key: key.into(),
+        title: "晴天".into(),
+        cover_uri: Some(url.into()),
+        ..Default::default()
+    };
+    let url_x = "https://y.gtimg.cn/music/photo_new/T002R300x300M000X.jpg";
+    let url_y = "https://y.gtimg.cn/music/photo_new/T002R300x300M000Y.jpg";
+    let a = db.upsert_track(&row("a", url_x)).unwrap();
+    let b = db.upsert_track(&row("b", url_x)).unwrap();
+    let c = db.upsert_track(&row("c", url_y)).unwrap();
+
+    let local = format!("file://{}", "C:/Users/u/AppData/Local/hmp/covers/aa.jpg");
+    let n = db.rebind_cover_url(url_x, &local).unwrap();
+    assert_eq!(n, 2, "同 URL 两行全改");
+    for tid in [a, b] {
+        let uri: String = db
+            .conn
+            .query_row("SELECT cover_uri FROM tracks WHERE id = ?1", params![tid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uri, local, "回写为本地产物 URI");
+    }
+    let other: String = db
+        .conn
+        .query_row("SELECT cover_uri FROM tracks WHERE id = ?1", params![c], |r| r.get(0))
+        .unwrap();
+    assert_eq!(other, url_y, "其他 URL 不受影响");
+
+    // 幂等：已是目标值 → 零行写入
+    let n2 = db.rebind_cover_url(url_x, &local).unwrap();
+    assert_eq!(n2, 0, "重复回写幂等");
 }

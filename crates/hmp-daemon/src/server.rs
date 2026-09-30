@@ -606,7 +606,19 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
         Ok(Request::CoverGet { url }) => {
             let resp = match &handle.content {
                 Some(svc) => match svc.cover(&url).await {
-                    Ok(path) => Response::Cover(path),
+                    Ok(path) => {
+                        // 本地产物回写媒体库：播放解析落库的是远程 https URL，
+                        // UI 禁直连 HTTP——回写后队列/列表投影直接读盘渲染
+                        // （按 URL 匹配幂等；失败仅丢回写不影响本次返回）。
+                        if let Some(library) = &handle.library {
+                            if let Ok(mut db) = library.lock() {
+                                if let Err(e) = db.rebind_cover_url(&url, &path) {
+                                    tracing::warn!(%e, "cover rebind failed");
+                                }
+                            }
+                        }
+                        Response::Cover(path)
+                    }
                     Err(message) => Response::Err {
                         code: IpcErrorCode::Internal,
                         message,

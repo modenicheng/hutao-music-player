@@ -29,7 +29,7 @@ const COVER_HOSTS: [&str; 3] = ["y.gtimg.cn", "qpic.y.qq.com", "music-file.y.qq.
 
 /// 校验并归一封面 URL：host 必须在允许域内；scheme 一律升级 https
 /// （三个域均实测支持；上游常给 http 形式的 qpic 链接）。
-fn normalize_cover_url(url: &str) -> Option<String> {
+pub(crate) fn normalize_cover_url(url: &str) -> Option<String> {
     let rest = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))?;
@@ -365,9 +365,8 @@ impl ContentService {
     /// QQ 封面取本地产物（AUDIT §8.4）：下载进 `<data_dir>/covers/<hash>.jpg`
     /// （persist_cover 内容哈希去重，二次请求零网络），返回 `file://` URI。
     pub async fn cover(&self, url: &str) -> Result<String, String> {
-        let url = normalize_cover_url(url).ok_or_else(|| {
-            format!("cover url host not allowed (expect one of {COVER_HOSTS:?})")
-        })?;
+        let url = normalize_cover_url(url)
+            .ok_or_else(|| format!("cover url host not allowed (expect one of {COVER_HOSTS:?})"))?;
         let bytes = hmp_media::cdn_client()
             .get(url)
             .send()
@@ -730,7 +729,10 @@ mod tests {
         );
         // 域外 / 伪装 host / 非 http scheme / 空串：拒绝
         assert_eq!(normalize_cover_url("https://evil.example.com/a.jpg"), None);
-        assert_eq!(normalize_cover_url("https://y.gtimg.cn.evil.com/a.jpg"), None);
+        assert_eq!(
+            normalize_cover_url("https://y.gtimg.cn.evil.com/a.jpg"),
+            None
+        );
         assert_eq!(normalize_cover_url("file:///etc/passwd"), None);
         assert_eq!(normalize_cover_url(""), None);
     }

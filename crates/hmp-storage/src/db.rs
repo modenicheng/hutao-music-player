@@ -156,6 +156,8 @@ pub struct PlaylistRow {
     pub last_sync_error: Option<String>,
     /// 最近一次状态变更时间（退避节流用）。
     pub updated_at: Option<i64>,
+    /// 封面本地产物 URI（`file://…`；reconcile 取得后回写，NULL = 尚未获取）。
+    pub cover_uri: Option<String>,
 }
 
 /// 本地歌单内曲目。
@@ -885,6 +887,55 @@ impl LibraryDb {
         Ok(())
     }
 
+    /// 远程封面 URL → 本地产物 URI 回写（daemon `CoverGet` 下载成功后调用）：
+    /// 播放解析落库的是远程 https URL，UI 禁直连 HTTP，列表/队列
+    /// 投影从此读盘渲染。按 URL 匹配（同封面多曲一改全改）；目标已相同
+    /// 时零行写入（幂等，重复下载不产生写放大）。不改媒体库代际——封面
+    /// 补齐不触发整页重查，UI 队列行由桌面端取图回包原地更新。
+    pub fn rebind_cover_url(
+        &mut self,
+        remote_url: &str,
+        local_uri: &str,
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE tracks SET cover_uri = ?2
+             WHERE cover_uri = ?1 AND cover_uri <> ?2",
+            params![remote_url, local_uri],
+        )
+    }
+
+    /// 歌单封面回写（reconcile 取得本地产物后调用；仅未设置时写入——
+    /// 已有封面不回退，远端换封面待后续轮次再议）。
+    pub fn set_playlist_cover(
+        &mut self,
+        remote_id: &str,
+        cover_uri: &str,
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE playlists SET cover_uri = ?2
+             WHERE provider = 'qq' AND remote_id = ?1 AND (cover_uri IS NULL OR cover_uri = '')",
+            params![remote_id, cover_uri],
+        )
+    }
+
+    /// 尚无封面的 QQ 歌单（remote_id 列表；封面补抓的输入）。
+    pub fn qq_playlists_missing_cover(&mut self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT remote_id FROM playlists WHERE provider = 'qq' AND remote_id IS NOT NULL AND (cover_uri IS NULL OR cover_uri = '')")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    /// 标题仍为 mid 的 QQ 曲（stub 元数据修复的输入；逐批限额）。
+    pub fn qq_stub_title_keys(&mut self, limit: i64) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_key FROM tracks WHERE source = 'qq' AND title = source_key LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
     /// 写入完整元数据（tracks 行 + track_artists 重写）。
     fn apply_local_meta(
         &mut self,
@@ -1570,7 +1621,7 @@ impl LibraryDb {
     pub fn playlists_pending(&mut self) -> rusqlite::Result<Vec<PlaylistRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.id, p.name, p.created_at, p.provider, p.remote_id, p.relation, \
-             p.sync_state, p.retry_count, p.last_sync_error, p.updated_at,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
+             p.sync_state, p.retry_count, p.last_sync_error, p.updated_at, p.cover_uri,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
              FROM playlists p WHERE p.relation != 'local' AND p.sync_state != 'synced' \
              ORDER BY p.updated_at",
         )?;
@@ -1586,7 +1637,8 @@ impl LibraryDb {
                 retry_count: r.get(7)?,
                 last_sync_error: r.get(8)?,
                 updated_at: r.get(9)?,
-                track_count: r.get(10)?,
+                cover_uri: r.get(10)?,
+                track_count: r.get(11)?,
             })
         })?;
         rows.collect()
@@ -1813,7 +1865,7 @@ impl LibraryDb {
     pub fn list_playlists(&mut self) -> rusqlite::Result<Vec<PlaylistRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.id, p.name, p.created_at, p.provider, p.remote_id, p.relation, \
-             p.sync_state, p.retry_count, p.last_sync_error, p.updated_at,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
+             p.sync_state, p.retry_count, p.last_sync_error, p.updated_at, p.cover_uri,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
              FROM playlists p ORDER BY p.created_at",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1828,7 +1880,8 @@ impl LibraryDb {
                 retry_count: r.get(7)?,
                 last_sync_error: r.get(8)?,
                 updated_at: r.get(9)?,
-                track_count: r.get(10)?,
+                cover_uri: r.get(10)?,
+                track_count: r.get(11)?,
             })
         })?;
         rows.collect()
@@ -2168,8 +2221,27 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
             }
         }
     }
+    if current < 6 {
+        // v6：歌单封面 URI（reconcile 取本地产物后回写；NULL = 尚未获取）。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute_batch(MIGRATION_V6)?;
+            conn.pragma_update(None, "user_version", 6)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+    }
     Ok(())
 }
+
+/// v6：playlists 封面 URI。
+const MIGRATION_V6: &str = "ALTER TABLE playlists ADD COLUMN cover_uri TEXT;";
 
 /// v2：统一关系表（收藏/订阅 = durable outbox 一体）+ 歌单远端身份 +
 /// owned 歌单曲目操作 outbox + QQ numeric song id（comment biz_id 映射）。
