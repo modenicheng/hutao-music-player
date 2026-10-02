@@ -14,7 +14,6 @@
 //! - local_files 的 file_size/format/mtime 列无读 API → 容量按现文件 stat 聚合，
 //!   格式取源键路径扩展名（与 local_files.format 同源），last_scan 诚实显示 "—"。
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -23,7 +22,6 @@ use hmp_storage::{LibraryDb, TrackMeta};
 use slint::Image;
 
 use crate::TrackRow;
-use crate::covers::cover_image;
 use crate::format::{format_bytes, format_long_duration};
 
 /// 最近播放页装载条数（页头统计与表格同一份；预览由桥侧截取前 5）。
@@ -725,17 +723,11 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 impl SongRow {
-    /// SongRow → TrackRow。封面分流：`file://` 本地封面读盘（按路径缓存，
-    /// 失败回退程序化封面）；QQ http 封面/无封面 → 程序化占位（seed = 源键，
-    /// 缺键回退标题，保证同实体各处同图、UI 零 HTTP）。
+    /// SongRow → TrackRow。表格行不带封面（TrackRow 已剥 `cover` 字段）：
+    /// 12+ 个表格模型每行背全尺寸位图是 RSS 2.4GB 的根因之一，表格只承担
+    /// 文本列；侧栏/详情头图/卡片的封面由行外消费点各自取图，队列行走
+    /// QueueRow（player_bridge 队列投影）。
     pub fn to_track_row(&self) -> TrackRow {
-        let seed = if self.mid.is_empty() {
-            &self.title
-        } else {
-            &self.mid
-        };
-        let cover =
-            local_cover_image(self.cover_uri.as_deref()).unwrap_or_else(|| cover_image(seed));
         TrackRow {
             mid: self.mid.clone().into(),
             source: self.source,
@@ -748,31 +740,21 @@ impl SongRow {
             album_mid: self.album.clone().into(),
             duration_ms: self.duration_ms,
             quality: self.quality.clone().into(),
-            cover,
         }
     }
 }
 
-/// 本地封面读盘（`file://` URI）。缓存按 URI（即路径）去重——同一专辑封面
-/// 被多条曲目复用。注意 slint::Image 非 Send/Sync（covers.rs 同款约束），
-/// `Mutex<HashMap>` 编译不过 → thread_local；装载与 UI 消费同在主线程。
+/// 本地封面读盘（`file://` URI）→ cover_cache 256 桶（对外签名不变，契约第 5
+/// 条；bridge.rs 侧栏/详情/卡片调用点自动受益于降采样）。同一专辑封面被多条
+/// 曲目复用：file_uri_to_path 后同路径同 key，cover_cache（(路径, 桶) 加权
+/// LRU）天然去重。QQ http 封面：项目原则禁 HTTP，不绕。
 pub fn local_cover_image(uri: Option<&str>) -> Option<Image> {
     let uri = uri?;
     if !uri.starts_with("file://") {
-        return None; // QQ http 封面：项目原则禁 HTTP，不绕
+        return None;
     }
-    thread_local! {
-        static CACHE: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new());
-    }
-    CACHE.with(|cache| {
-        if let Some(hit) = cache.borrow().get(uri) {
-            return Some(hit.clone());
-        }
-        let path = crate::covers::file_uri_to_path(uri)?;
-        let image = Image::load_from_path(Path::new(&path)).ok()?;
-        cache.borrow_mut().insert(uri.to_owned(), image.clone());
-        Some(image)
-    })
+    let path = crate::covers::file_uri_to_path(uri)?;
+    crate::cover_cache::get_or_load(&path, 256)
 }
 
 #[cfg(test)]

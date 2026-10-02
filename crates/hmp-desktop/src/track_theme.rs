@@ -24,10 +24,16 @@
 //! 的 `watch([coverUrl, theme.resolved])` —— 取色随封面与主题亮暗重算，
 //! 结果整族写入 TrackPalette global（M6 播放页 overlay 消费），环境层底图
 //! 写入 Player.ambient-cover。
+//!
+//! 内存纪律：每次换曲全图只物化一次 —— decode_cover_bounded 把 to_rgba8
+//! 的完整位图立即压到最长边 ≤480 的 RGBA 缓冲，环境层底图与取色采样都从
+//! 这份缓冲派生；Applied 状态只保留去重 key 与 64×64 采样（≤16KB），
+//! 不再常驻全尺寸封面位图（旧实现 `sample_pixels` 与 `ambient_image` 各做
+//! 一次全图 to_rgba8，且 Applied 持有整张封面 Image 副本 4-36MB）。
 
 use std::cell::RefCell;
 
-use slint::{Color, ComponentHandle, Global, Image, Rgba8Pixel, SharedPixelBuffer, Weak};
+use slint::{Color, Global, Image, Rgba8Pixel, SharedPixelBuffer, Weak};
 
 use crate::{AppWindow, Player, Theme};
 // 与本模块的取色结果结构体 TrackPalette 同名的 slint global，别名引入
@@ -569,52 +575,63 @@ fn rgb_color(rgb: [u8; 3]) -> Color {
 // 采样与环境层底图（对应 Vue adapter 的 canvas 路径；Slint 侧为像素级重写）
 // ---------------------------------------------------------------------------
 
-/// 把任意 slint::Image 压到 size×size 的 RGBA8 平铺像素（面积平均降采样，
-/// 纵横比不保持——对应 Vue adapter 的 canvas drawImage(img,0,0,64,64)）。
-/// 非 RGBA8 嵌入位图（to_rgba8() 拿不到缓冲）返回 None。
-pub fn sample_pixels(image: &Image, size: u32) -> Option<Vec<u8>> {
-    if size == 0 {
-        return None;
-    }
-    let buffer = image.to_rgba8()?;
-    let (w, h) = (buffer.width(), buffer.height());
-    if w == 0 || h == 0 {
-        return None;
-    }
-    Some(resample_area_average(buffer.as_bytes(), w, h, size, size))
+/// 换曲路径唯一一次全图物化的产物：to_rgba8 解出的完整位图被立即压到
+/// 最长边 ≤ AMBIENT_MAX_SIDE 的 RGBA 缓冲，全尺寸副本随即释放。
+/// 环境层底图与取色采样都从这份缓冲派生（旧实现两处各自物化一次全图）。
+struct DecodedCover {
+    width: u32,
+    height: u32,
+    /// RGBA8 平铺像素，len == width * height * 4
+    rgba: Vec<u8>,
 }
 
-/// 环境层模糊底图：保持纵横比降采样（最长边 ≤ 480，面积平均），
-/// 3 趟盒滤波（半径随源宽等比 ~5%）近似高斯，饱和度 ×1.2（对应 CSS blur(80px) saturate(1.2)
-/// 的预烘焙替代——Slint 无滤镜），输出 RGBA8 slint::Image。无法取像素返回 None。
-/// 源图刻意偏大：显示区 ~1600px、软件渲染器（离屏 QA 宿主）是最近邻采样，
-/// 480 源把最近邻块压到 ~3px、GPU 双线性则完全连续（128 源在最近邻下呈 12px 块）。
-pub fn ambient_image(image: &Image) -> Option<Image> {
-    let src = image.to_rgba8()?;
-    let (w, h) = (src.width(), src.height());
+/// 封面 Image → 有界解码缓冲（全图 to_rgba8 只发生在这里）。
+/// 非 RGBA8 嵌入位图（to_rgba8() 拿不到缓冲）或空图返回 None，调用方走回退。
+fn decode_cover_bounded(image: &Image) -> Option<DecodedCover> {
+    let full = image.to_rgba8()?;
+    let (w, h) = (full.width(), full.height());
     if w == 0 || h == 0 {
         return None;
     }
     let (dw, dh) = ambient_target_size(w, h);
-    let mut data: Vec<f64> = resample_area_average(src.as_bytes(), w, h, dw, dh)
-        .into_iter()
-        .map(f64::from)
-        .collect();
+    let rgba = resample_area_average(full.as_bytes(), w, h, dw, dh);
+    Some(DecodedCover {
+        width: dw,
+        height: dh,
+        rgba,
+    })
+}
+
+/// 把有界解码缓冲压到 size×size 的 RGBA8 平铺像素（面积平均降采样，
+/// 纵横比不保持——对应 Vue adapter 的 canvas drawImage(img,0,0,64,64)）。
+/// 从 480px 源取 64×64 采样对调色板质量绰绰有余。
+fn sample_pixels(source: &DecodedCover, size: u32) -> Vec<u8> {
+    resample_area_average(&source.rgba, source.width, source.height, size, size)
+}
+
+/// 环境层模糊底图：输入是有界解码缓冲（解码时已面积平均降采样到最长边 ≤ 480），
+/// 3 趟盒滤波（半径随源宽等比 ~5%）近似高斯，饱和度 ×1.2（对应 CSS blur(80px) saturate(1.2)
+/// 的预烘焙替代——Slint 无滤镜），输出 RGBA8 slint::Image。
+/// 源图刻意偏大：显示区 ~1600px、软件渲染器（离屏 QA 宿主）是最近邻采样，
+/// 480 源把最近邻块压到 ~3px、GPU 双线性则完全连续（128 源在最近邻下呈 12px 块）。
+fn ambient_image(source: &DecodedCover) -> Image {
+    let (w, h) = (source.width as usize, source.height as usize);
+    let mut data: Vec<f64> = source.rgba.iter().map(|v| f64::from(*v)).collect();
     // 模糊半径随源宽等比（≈5%）：对应 CSS blur(80px) 在 ~1600px 显示区的相对强度，
     // 源图大小不一（程序化 256 / 真图 ≤480）时观感一致
-    let radius = ((dw as f64) * AMBIENT_BLUR_RATIO).round() as usize;
+    let radius = ((source.width as f64) * AMBIENT_BLUR_RATIO).round() as usize;
     let radius = radius.clamp(AMBIENT_BLUR_MIN_RADIUS, AMBIENT_MAX_SIDE as usize);
     for _ in 0..AMBIENT_BLUR_PASSES {
-        box_blur_pass(&mut data, dw as usize, dh as usize, radius, false);
-        box_blur_pass(&mut data, dw as usize, dh as usize, radius, true);
+        box_blur_pass(&mut data, w, h, radius, false);
+        box_blur_pass(&mut data, w, h, radius, true);
     }
     saturate_gamma(&mut data, AMBIENT_SATURATION);
 
-    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(dw, dh);
+    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(source.width, source.height);
     for (out, v) in buffer.make_mut_bytes().iter_mut().zip(data) {
         *out = v.round().clamp(0.0, 255.0) as u8;
     }
-    Some(Image::from_rgba8(buffer))
+    Image::from_rgba8(buffer)
 }
 
 const AMBIENT_MAX_SIDE: u32 = 480;
@@ -726,8 +743,10 @@ enum Applied {
     None,
     /// 品牌回退族（无曲 / 无彩色封面）
     Fallback,
-    /// 胜出封面（key = `mid|url` 或 `mid|prog`）
-    Cover { key: String, cover: Image },
+    /// 胜出封面（key = `mid|url` 或 `mid|prog`）。只留 64×64 取色采样
+    /// （≤16KB，主题翻转免解码重算整族）——不再常驻全尺寸封面位图；
+    /// 环境层底图与亮暗无关，由 Player.ambient-cover 属性持有即可。
+    Cover { key: String, sample: Vec<u8> },
 }
 
 thread_local! {
@@ -752,20 +771,23 @@ pub fn apply_cover(ui_weak: &Weak<AppWindow>, cover_key: &str, cover: &Image) {
         return;
     }
 
-    // Vue adapter：canvas 采样失败（跨域/纹理）不抛错 → 回退族；此处为
-    // 非 RGBA8 嵌入位图（to_rgba8 拿不到缓冲）走同一回退
-    let palette = match sample_pixels(cover, SAMPLE_SIZE) {
-        Some(pixels) => extract(&pixels, dark),
+    // 每次换曲只解码一次：全图物化 → 立即压到 ≤480px 有界缓冲，环境层
+    // 底图与取色采样都从它派生。解码失败（非 RGBA8 嵌入位图，对应 Vue
+    // adapter canvas 采样的跨域/纹理失败）→ 回退族 + 空环境层
+    let source = decode_cover_bounded(cover);
+    let sample = source.as_ref().map(|s| sample_pixels(s, SAMPLE_SIZE));
+    let palette = match &sample {
+        Some(pixels) => extract(pixels, dark),
         None => extract(&[], dark),
     };
-    let ambient = ambient_image(cover).unwrap_or_default();
+    let ambient = source.as_ref().map(ambient_image).unwrap_or_default();
     write_palette(&ui, &palette);
     Player::get(&ui).set_ambient_cover(ambient);
     APPLIED.with(|cell| {
         *cell.borrow_mut() = (
             Applied::Cover {
                 key: cover_key.to_owned(),
-                cover: cover.clone(),
+                sample: sample.unwrap_or_default(),
             },
             dark,
         );
@@ -803,7 +825,15 @@ pub fn reapply_for_theme(ui: &AppWindow) {
     match taken {
         Applied::None => {}
         Applied::Fallback => apply_fallback(ui),
-        Applied::Cover { key, cover } => apply_cover(&ui.as_weak(), &key, &cover),
+        Applied::Cover { key, sample } => {
+            // 环境层底图与亮暗无关（Player.ambient-cover 保持现值），
+            // 只需从缓存的 64×64 采样免解码重算调色板整族
+            let palette = extract(&sample, dark);
+            write_palette(ui, &palette);
+            APPLIED.with(|cell| {
+                *cell.borrow_mut() = (Applied::Cover { key, sample }, dark);
+            });
+        }
     }
 }
 
@@ -987,7 +1017,8 @@ mod tests {
     #[test]
     fn sample_pixels_downscales_solid() {
         let image = solid_image(8, 8, 200, 60, 40);
-        let pixels = sample_pixels(&image, 4).expect("embedded rgba8 is sampleable");
+        let source = decode_cover_bounded(&image).expect("embedded rgba8 is decodable");
+        let pixels = sample_pixels(&source, 4);
 
         assert_eq!(pixels.len(), 4 * 4 * 4);
         for px in pixels.chunks_exact(4) {
@@ -996,11 +1027,25 @@ mod tests {
     }
 
     #[test]
+    fn decode_cover_bounded_caps_longest_side() {
+        // 960×480 → 最长边压到 480（面积平均等比）；≤480 的源原样保留（不放大）
+        let big = solid_image(960, 480, 10, 20, 30);
+        let source = decode_cover_bounded(&big).expect("embedded rgba8 is decodable");
+        assert_eq!((source.width, source.height), (480, 240));
+        assert_eq!(source.rgba.len(), 480 * 240 * 4);
+
+        let small = solid_image(8, 8, 10, 20, 30);
+        let source = decode_cover_bounded(&small).expect("embedded rgba8 is decodable");
+        assert_eq!((source.width, source.height), (8, 8));
+    }
+
+    #[test]
     fn ambient_image_blurs_solid_to_same_color() {
         // 纯红：盒滤波对均匀图是恒等（clamp 语义），饱和度 ×1.2 后
         // r 越界 clamp 回 255、g/b 负值 clamp 回 0 → 仍是纯红
         let image = solid_image(8, 8, 255, 0, 0);
-        let ambient = ambient_image(&image).expect("embedded rgba8 has ambient");
+        let source = decode_cover_bounded(&image).expect("embedded rgba8 is decodable");
+        let ambient = ambient_image(&source);
 
         let size = ambient.size();
         assert!(size.width > 0 && size.width <= 128);

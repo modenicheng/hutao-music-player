@@ -1,33 +1,26 @@
-//! 在线内容页封面装载（M4）：daemon CoverGet 换本地产物 + 线程本地 Image 缓存。
+//! 在线内容页封面装载（M4）：daemon CoverGet 换本地产物 + cover_cache 统一缓存。
 //!
 //! 借鉴 `player_bridge::spawn_cover_fetch` 的去重/竞态防护，但目标是
 //! `Data.discover-playlists` 模型内的卡片（按歌单 id 定位），非当前曲。
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use slint::{Global, Image, Model, Weak};
+use slint::{Global, Model, Weak};
 
 use crate::{AppWindow, Data};
 
 thread_local! {
     /// 已发起过的 (kind, id, url) 三元组；同图不重复出网。
     static REQUESTED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-    /// 本地产物路径 → Image（与 player_bridge 的 load_cover_cached 同策略）。
-    static IMAGE_CACHE: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new());
 }
 
-/// 载入本地产物（路径缓存；不存在返回 None）。
-fn load_image(path: &str) -> Option<Image> {
-    IMAGE_CACHE.with(|cache| {
-        if let Some(hit) = cache.borrow().get(path) {
-            return Some(hit.clone());
-        }
-        let image = Image::load_from_path(std::path::Path::new(path)).ok()?;
-        cache.borrow_mut().insert(path.to_owned(), image.clone());
-        Some(image)
-    })
+/// 载入本地产物（cover_cache 256 桶：卡片封面消费方 ≤ 百px 级；不存在返回
+/// None）。原线程本地 `HashMap<String, Image>` 无界缓存（内存治理工作③）
+/// 已并入统一字节加权 LRU。
+fn load_image(path: &str) -> Option<slint::Image> {
+    crate::cover_cache::get_or_load(path, 256)
 }
 
 /// 把 `Data.discover-playlists` 中封面对应的模型项替换为真实图片。
@@ -107,7 +100,6 @@ fn apply_playlist_cover(ui_weak: Weak<AppWindow>, id: &str, path: &str) {
 ///
 /// `CoverCardData` 不携带 URL（Slint 结构保持窄），Rust 侧以并发安全
 /// 的 side-table 保存 id→url；`spawn_discover_load` 落模型时同步登记。
-use std::sync::Mutex;
 static PLAYLIST_COVERS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 /// 登记一批歌单封面 URL（discover 响应落地时调用）。

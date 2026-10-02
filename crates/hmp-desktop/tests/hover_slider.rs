@@ -97,7 +97,6 @@ fn hover_slider_chain_reports_and_clears() {
                 album_mid: "".into(),
                 duration_ms: 200_000,
                 quality: "".into(),
-                cover: slint::Image::default(),
             })
             .collect();
         data.set_liked(slint::ModelRc::new(slint::VecModel::from(rows)));

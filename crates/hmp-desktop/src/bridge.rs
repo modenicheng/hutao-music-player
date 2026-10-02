@@ -98,7 +98,8 @@ fn quality_alias_tier(mode: &str) -> Option<i32> {
     }
 }
 
-/// 搜索结果行（smartbox 窄投影：无专辑/时长 → 对应列收起，mid 程序化封面）。
+/// 搜索结果行（smartbox 窄投影：无专辑/时长 → 对应列收起）。表格行不带
+/// 封面（TrackRow 已剥 `cover`，队列行走 QueueRow）。
 fn search_track_row(song: &hmp_core::SearchSong) -> TrackRow {
     TrackRow {
         mid: song.mid.as_str().into(),
@@ -110,7 +111,6 @@ fn search_track_row(song: &hmp_core::SearchSong) -> TrackRow {
         album_mid: "".into(),
         duration_ms: 0,
         quality: "".into(),
-        cover: crate::covers::cover_image(&format!("album:{}", song.mid)),
     }
 }
 
@@ -126,7 +126,6 @@ fn discover_track_row(s: &hmp_core::DiscoverNewSong) -> TrackRow {
         album_mid: "".into(),
         duration_ms: (s.interval * 1000) as i32,
         quality: "".into(),
-        cover: crate::covers::cover_image(&format!("album:{}", s.mid)),
     }
 }
 
@@ -194,7 +193,6 @@ fn spawn_discover_load(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::B
                     crate::online_covers::refresh_discover_covers(ui.as_weak(), &runtime);
                     // 新歌行封面预取（DiscoverNewSong.picurl 是套好模板的完整地址）
                     crate::track_covers::prefetch_tracks(
-                        &ui,
                         &runtime,
                         page.new_songs
                             .iter()
@@ -279,7 +277,6 @@ fn spawn_top_detail_load(
                     data.set_top_detail_state(2);
                     // 榜单行封面预取（同 discover 新歌行：picurl 已是完整地址）
                     crate::track_covers::prefetch_tracks(
-                        &ui,
                         &rt2,
                         page.songs
                             .iter()
@@ -570,7 +567,6 @@ fn apply_snapshot(
     // 曲目封面预取：QQ 行 remote_cover 批量经 daemon CoverGet 换本地产物
     // （打开列表即取图，命中 daemon 盘缓存零出网；回包广播回填各列表）。
     crate::track_covers::prefetch_tracks(
-        ui,
         runtime,
         crate::track_covers::targets_from_rows(&snap.liked)
             .into_iter()
@@ -723,7 +719,6 @@ fn apply_detail(
             // 打开歌单即预取曲目封面（用户预期：进列表就该看到封面而非
             // 占位盘）；daemon 盘缓存命中零出网，回包广播回填。
             crate::track_covers::prefetch_tracks(
-                ui,
                 runtime,
                 crate::track_covers::targets_from_rows(&detail.tracks),
             );
@@ -754,7 +749,6 @@ fn apply_detail(
                 detail.tracks.iter().map(SongRow::to_track_row).collect(),
             ));
             crate::track_covers::prefetch_tracks(
-                ui,
                 runtime,
                 crate::track_covers::targets_from_rows(&detail.tracks),
             );
@@ -774,7 +768,6 @@ fn apply_detail(
                 detail.tracks.iter().map(SongRow::to_track_row).collect(),
             ));
             crate::track_covers::prefetch_tracks(
-                ui,
                 runtime,
                 crate::track_covers::targets_from_rows(&detail.tracks),
             );
@@ -1168,7 +1161,6 @@ pub fn bind(
                             data.set_guess_state(2);
                             // 猜你喜欢行封面预取（同 discover 新歌行）
                             crate::track_covers::prefetch_tracks(
-                                &ui,
                                 &rt2,
                                 page.songs
                                     .iter()
@@ -1219,7 +1211,6 @@ pub fn bind(
                             data.set_guess_state(2);
                             // 登录后自动触发的猜你喜欢装载同款预取
                             crate::track_covers::prefetch_tracks(
-                                &ui,
                                 &rt2,
                                 page.songs
                                     .iter()
@@ -1299,6 +1290,7 @@ mod tests {
         assert_eq!(row.artists, "周杰伦");
         assert_eq!(row.album, "");
         assert_eq!(row.duration_ms, 0);
-        assert!(row.cover.size().width > 0, "封面程序化占位非空");
+        // TrackRow 已剥 cover（表格行不背位图，MEMFIX 工作②）：无封面断言可做，
+        // 字段层面的占位图职责移交 QueueRow（player_bridge 队列投影）
     }
 }

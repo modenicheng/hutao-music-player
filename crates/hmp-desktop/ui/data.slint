@@ -1,7 +1,9 @@
 // UI 数据结构（契约对齐 apps/hmp-tauri/src/lib/api/types.ts，DESIGN.md §4）。
 // Slint struct 无嵌套数组：多人合唱的歌手串为展示文本，链接统一指向主歌手（PORTING.md 决策 5）。
 
-/** 曲目表/队列行（SongRef 摊平）。播放态经 Player.queue-current-mid 比对 mid */
+/** 曲目表行（SongRef 摊平）。播放态经 Player.queue-current-mid 比对 mid。
+    无 cover 字段：表格行不背位图（12+ 个表格模型每行全尺寸封面是内存
+    根因之一），封面由行外消费点（侧栏/详情头图/卡片）各自取图 */
 export struct TrackRow {
     /** 源键：QQ 曲目 = songmid；本地曲目 = `local:<路径>`（PlayRequest 映射用） */
     mid: string,
@@ -17,6 +19,26 @@ export struct TrackRow {
     duration-ms: int,
     /** 音质徽章文案，如 "FLAC · 44.1kHz"；无损以下为空 */
     quality: string,
+}
+
+/** 队列行（Player.queue 专用）：TrackRow 全字段 + cover（唯一消费方
+    queue-drawer 36×36 行封面；字段名与 TrackRow 逐一同名，仅多 cover） */
+export struct QueueRow {
+    /** 源键：QQ 曲目 = songmid；本地曲目 = `local:<路径>`（PlayRequest 映射用） */
+    mid: string,
+    /** 源：0=QQ，1=本地（`hmp_core::PlayRequest` 分流） */
+    source: int,
+    title: string,
+    /** 展示串："白栖遥 / 陈屿帆"（点击整体跳主歌手页，PORTING.md 决策 5） */
+    artists: string,
+    /** 主歌手 mid */
+    artist-mid: string,
+    album: string,
+    album-mid: string,
+    duration-ms: int,
+    /** 音质徽章文案，如 "FLAC · 44.1kHz"；无损以下为空 */
+    quality: string,
+    /** 行封面（cover_cache 装载/降采样；真图缺失为程序化占位） */
     cover: image,
 }
 

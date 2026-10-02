@@ -6,6 +6,7 @@ import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, Equalizer, HoverGroup, HoverItem, TextLink } from "primitives.slint";
 import { TrackRow } from "data.slint";
+import { Viewport } from "viewport.slint";
 import { Nav, Route } from "nav.slint";
 import { Player } from "stores.slint";
 
@@ -20,6 +21,33 @@ export component TrackTable inherits Rectangle {
     horizontal-stretch: 1;
 
     property <length> row-height: 39px;
+
+    // —— 窗口化虚拟化（MEMFIX ④a，Viewport 全局）———
+    // 本组件可能深埋页面布局，直接读父级几何必成环；改经 app.slint 顶层
+    // Scroll 写入的 Viewport 全局做窗口换算，本组件只读。
+    property <length> row-pitch: root.row-height + 2px;
+    property <int> overscan: 8;
+    // 视口顶在内容系的 y（scroll-offset 恒 ≤ 0）
+    property <length> visible-top: -Viewport.y;
+    // 表顶在内容系的 y：absolute-position 是窗口系且含滚动偏移（活依赖），
+    // 减 origin-y 与 Viewport.y 恰好抵消滚动位移——结果为恒定内容坐标，
+    // 逐帧自动重算
+    property <length> table-top: self.absolute-position.y - Viewport.origin-y - Viewport.y;
+    // 可见窗首行绝对索引与行数。view-h <= 0（TestingBackend/无头环境未绑定
+    // Viewport）时全量渲染，退化为旧的常驻实例化行为。依赖链单向：窗口量
+    // 只依赖 Viewport 与模型长度；下方行容器高度只依赖模型长度——绝不反向
+    // 掺入窗口变量，否则与 Viewport.y 绑定成环。
+    property <int> window-start: Viewport.view-h <= 0px ? 0
+        : clamp(
+            Math.floor((visible-top - table-top) / row-pitch) - overscan,
+            0,
+            max(tracks.length - 1, 0),
+        );
+    property <int> window-count: Viewport.view-h <= 0px ? tracks.length
+        : min(
+            tracks.length - window-start,
+            Math.ceil(Viewport.view-h / row-pitch) + 2 * overscan,
+        );
 
     // Vue 网格一次定列（2.5rem | 1.4fr | 0.8fr | 4rem，gap 16px，行内距 12px）：
     // Slint 每行是独立布局，stretch 会按各行内容首选宽漂移，必须按根宽算定宽。
@@ -92,16 +120,36 @@ export component TrackTable inherits Rectangle {
             indicator-width: 40px;
             indicator-icon-size: 16px;
             indicator-align-start: true;
+            // 高度必须显式钉住：hg 是根布局子元素，普通 Rectangle 子元素的
+            // 显式 height 不进 preferred 链（repeater 无固有尺寸）→ 布局把
+            // hg 压成 0 高 + clip → 整表不可见不可点（截图实测）。旧写法的
+            // VerticalLayout 子元素会主动上报 preferred 高度，故无此问题。
+            height: tracks.length > 0 ? tracks.length * row-pitch - 2px : 0px;
 
-            VerticalLayout {
-                spacing: 2px;
+            // 行窗口容器：固定高只依赖模型长度（N×行距 − 末行后无 spacing），
+            // 行按绝对索引绝对定位。宽度必须显式钉住：非布局父级下默认宽由
+            // 子 preferred 宽推导，而行 width=parent.width 反向引用容器 →
+            // 循环解出 0 宽 → 整表不可命中（drag 回归实测）。整表占位高度
+            // 与旧全量实例化一致，Scroll 内容高度/滚动条几何不变；只实例化
+            // 可见窗（window-count）行。
+            Rectangle {
+                x: 0;
+                width: parent.width;
+                height: tracks.length > 0 ? tracks.length * row-pitch - 2px : 0px;
 
-                for row[index] in tracks: hover-item := HoverItem {
+                // 整数即模型（Slint 无 `0..N` 区间 for）：offset ∈ 0..window-count
+                for offset in root.window-count: hover-item := HoverItem {
                     group-id: hg.group-id;
+                    x: 0;
+                    width: parent.width;
                     height: root.row-height;
-                    suppress-indicator: Player.queue-current-mid == row.mid;
+                    y: (root.window-start + offset) * root.row-pitch;
+                    // 行数据经命名属性取模型绝对行（loop 变量 offset 只是窗口内
+                    // 序号；`row` 名在 for 体内不可作属性名，改 rowd）
+                    property <TrackRow> rowd: root.tracks[root.window-start + offset];
+                    suppress-indicator: Player.queue-current-mid == rowd.mid;
                     clicked => {
-                        Player.play-tracks(root.tracks, index);
+                        Player.play-tracks(root.tracks, root.window-start + offset);
                     }
 
                     HorizontalLayout {
@@ -117,16 +165,16 @@ export component TrackTable inherits Rectangle {
                                 paused: !Player.playing;
                                 x: 0;
                                 y: (parent.height - self.height) / 2;
-                                visible: Player.queue-current-mid == row.mid;
+                                visible: Player.queue-current-mid == rowd.mid;
                             }
                             Text {
-                                text: "\{index + 1}";
+                                text: "\{root.window-start + offset + 1}";
                                 color: Theme.muted-foreground;
                                 font-size: 13.6px;
                                 vertical-alignment: center;
                                 x: 0;
                                 width: parent.width;
-                                visible: Player.queue-current-mid != row.mid;
+                                visible: Player.queue-current-mid != rowd.mid;
                                 opacity: hover-item.hovered ? 0 : 1;
                                 animate opacity {
                                     duration: Theme.duration-fast;
@@ -144,15 +192,15 @@ export component TrackTable inherits Rectangle {
                                 alignment: LayoutAlignment.start;
 
                                 title-text := Text {
-                                    text: row.title;
-                                    color: Player.queue-current-mid == row.mid ? Theme.track-accent : Theme.foreground;
+                                    text: rowd.title;
+                                    color: Player.queue-current-mid == rowd.mid ? Theme.track-accent : Theme.foreground;
                                     font-size: 15.2px;
-                                    font-weight: Player.queue-current-mid == row.mid ? 650 : 400;
+                                    font-weight: Player.queue-current-mid == rowd.mid ? 650 : 400;
                                     vertical-alignment: center;
                                     overflow: elide;
                                 }
                                 Text {
-                                    text: row.artists;
+                                    text: rowd.artists;
                                     color: Theme.muted-foreground;
                                     font-size: 12.8px;
                                     vertical-alignment: center;
@@ -166,31 +214,31 @@ export component TrackTable inherits Rectangle {
                             TouchArea {
                                 x: title-text.width + 6px;
                                 width: parent.width - self.x;
-                                enabled: row.artist-mid != "";
-                                mouse-cursor: row.artist-mid != "" ? pointer : default;
+                                enabled: rowd.artist-mid != "";
+                                mouse-cursor: rowd.artist-mid != "" ? pointer : default;
                                 clicked => {
-                                    Nav.navigate(Route.artist, row.artist-mid);
+                                    Nav.navigate(Route.artist, rowd.artist-mid);
                                 }
                             }
                         }
 
                         // 专辑（可点跳专辑页；窄窗由 show-album 收起；
                         // 无参数 → 退化纯文本，不渲染死链接）
-                        if root.show-album && row.album-mid != "": TextLink {
+                        if root.show-album && rowd.album-mid != "": TextLink {
                             width: root.album-w;
                             // 撑满行高：TextLink 组件内固定高 20px 会被行布局
                             // 顶对齐（交叉轴默认顶对齐），专辑文字随之上浮。
                             // 不能写 parent.height（布局子元素引用父高成环）
                             height: root.row-height;
-                            text: row.album;
+                            text: rowd.album;
                             font-size: 13.4px;
                             clicked => {
-                                Nav.navigate(Route.album, row.album-mid);
+                                Nav.navigate(Route.album, rowd.album-mid);
                             }
                         }
-                        if root.show-album && row.album-mid == "": Text {
+                        if root.show-album && rowd.album-mid == "": Text {
                             width: root.album-w;
-                            text: row.album;
+                            text: rowd.album;
                             color: Theme.muted-foreground;
                             font-size: 13.4px;
                             vertical-alignment: center;
@@ -198,11 +246,11 @@ export component TrackTable inherits Rectangle {
                         }
 
                         // 时长列与表头同一开关：数据源无时长（如 smartbox 搜索）整列收起，
-                        // 不再渲染右缘 64px 的 "—"；条件元素在布局里须显式给几何
+                        // 不再渲染右缘 64px 的 "—"；条件元素在布局里须显式几何
                         if root.show-duration: Text {
                             width: 64px;
                             height: root.row-height;
-                            text: root.format-duration(row.duration-ms);
+                            text: root.format-duration(rowd.duration-ms);
                             color: Theme.muted-foreground;
                             font-size: 13.4px;
                             horizontal-alignment: right;

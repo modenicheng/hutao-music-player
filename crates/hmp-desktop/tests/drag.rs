@@ -145,7 +145,6 @@ fn drag_progress_and_scroll_thumb() {
                 album_mid: "".into(),
                 duration_ms: 200_000,
                 quality: "".into(),
-                cover: slint::Image::default(),
             })
             .collect();
         let count = rows.len() as i32;

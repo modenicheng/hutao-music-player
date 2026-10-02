@@ -431,8 +431,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// DiscoverNewSong → TrackRow（--discover-live 专用；与 bridge 同投影，
-/// 封面程序化占位——列表行不做逐行网络取图）。
+/// DiscoverNewSong → TrackRow（--discover-live 专用；与 bridge 同投影）。
 fn discover_row(s: &hmp_core::DiscoverNewSong) -> hmp_desktop::TrackRow {
     hmp_desktop::TrackRow {
         mid: s.mid.as_str().into(),
@@ -444,7 +443,6 @@ fn discover_row(s: &hmp_core::DiscoverNewSong) -> hmp_desktop::TrackRow {
         album_mid: "".into(),
         duration_ms: (s.interval * 1000) as i32,
         quality: "".into(),
-        cover: hmp_desktop::covers::cover_image(&format!("album:{}", s.mid)),
     }
 }
 

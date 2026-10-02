@@ -14,10 +14,28 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let player = hmp_desktop::Player::get(&ui);
+        // 队列投影改 QueueRow（带 cover）后，Data.liked 的 TrackRow 需逐行
+        // 升格：冒烟只求"有行可渲染"，封面走程序化占位（与队列缺图回退同源）。
         let liked = hmp_desktop::Data::get(&ui).get_liked();
-        if let Some(first) = (0..liked.row_count()).find_map(|i| liked.row_data(i)) {
-            player.set_queue(liked);
-            player.set_queue_current_mid(first.mid);
+        let queue: Vec<hmp_desktop::QueueRow> = (0..liked.row_count())
+            .filter_map(|i| liked.row_data(i))
+            .map(|row| hmp_desktop::QueueRow {
+                cover: hmp_desktop::covers::cover_image(&format!("album:{}", row.album)),
+                mid: row.mid,
+                source: row.source,
+                title: row.title,
+                artists: row.artists,
+                artist_mid: row.artist_mid,
+                album: row.album,
+                album_mid: row.album_mid,
+                duration_ms: row.duration_ms,
+                quality: row.quality,
+            })
+            .collect();
+        if let Some(first) = queue.first() {
+            let first_mid = first.mid.clone();
+            player.set_queue(slint::ModelRc::new(slint::VecModel::from(queue)));
+            player.set_queue_current_mid(first_mid);
             player.set_playing(true);
         }
         // 抽屉常开：复核头部按钮（清空/关闭）图标渲染

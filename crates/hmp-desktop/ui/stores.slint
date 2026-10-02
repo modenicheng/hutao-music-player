@@ -1,6 +1,6 @@
 // 应用状态 globals（player.ts / qualityStore.ts 的 Slint 对应物）。
 // 状态属性由 Rust 权威写入；回调发命令给 Rust（模拟播放桥，M8 换真实后端）。
-import { TrackRow, CoverCardData, FolderRow, PlaylistCover, LyricRow, CommentRow, TopCardData, TopGroupData } from "data.slint";
+import { TrackRow, QueueRow, CoverCardData, FolderRow, PlaylistCover, LyricRow, CommentRow, TopCardData, TopGroupData } from "data.slint";
 import { Theme } from "theme.slint";
 
 export global Player {
@@ -44,7 +44,9 @@ export global Player {
     in-out property <bool> queue-visible: false;
 
     // —— 队列 ———
-    in-out property <[TrackRow]> queue;
+    /** 队列行走 QueueRow（带 cover：抽屉 36×36 是行封面唯一消费方；
+        表格 TrackRow 不背图） */
+    in-out property <[QueueRow]> queue;
     in-out property <string> queue-current-mid: "";
     /** 抽屉元信息（Rust 侧格式化）："13 首 · 58 分钟" */
     in-out property <string> queue-meta: "";
