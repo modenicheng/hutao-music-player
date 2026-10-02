@@ -349,6 +349,11 @@ pub struct DaemonState {
     /// 播放引擎阶段。
     #[serde(default)]
     pub phase: EnginePhase,
+    /// daemon 构建指纹（hmp-daemon `BUILD_CODE`）。桌面端据此识别「运行中
+    /// daemon 是陈旧构建」（重建不替换长驻进程，AUDIT §18）并自动重启后端；
+    /// 旧 daemon 缺字段 → 空串必然与新桌面不一致 → 同样触发重启。
+    #[serde(default)]
+    pub backend_build: String,
 }
 
 /// 歌单写操作（本地先提交 + outbox；spec §3.3/§5）。
@@ -857,6 +862,7 @@ mod tests {
             }),
             replaygain_db: Some(-6.5),
             phase: EnginePhase::Playing,
+            backend_build: "build-x".into(),
         };
         let frame = encode_frame(&st).unwrap();
         let back: DaemonState = decode_frame(&frame).unwrap();
@@ -886,6 +892,7 @@ mod tests {
         assert_eq!(st.last_error, None);
         assert_eq!(st.replaygain_db, None);
         assert_eq!(st.phase, EnginePhase::Idle);
+        assert_eq!(st.backend_build, "");
     }
 
     /// 订阅流主帧型 `Event::StateChanged` 完整往返（守护 wire 兼容改动
@@ -903,6 +910,7 @@ mod tests {
             }),
             replaygain_db: Some(-3.0),
             phase: EnginePhase::Loading,
+            backend_build: "build-y".into(),
         });
         let frame = encode_frame(&ev).unwrap();
         let back: Event = decode_frame(&frame).unwrap();

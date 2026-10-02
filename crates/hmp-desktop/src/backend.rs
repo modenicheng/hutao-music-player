@@ -19,6 +19,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// spawn 后等待 daemon 就绪：~10 次 × 300ms（CLI `wait_for_socket` 同量级）。
 const SPAWN_RETRIES: u32 = 10;
 const RETRY_INTERVAL: Duration = Duration::from_millis(300);
+/// 优雅退出等待：Quit 后轮询端点消失，~40 次 × 300ms（引擎要处理完 Quit、
+/// 落盘播放态才退；卡住则由 obtain_stream 重试与单实例裁决兜底）。
+const DAEMON_EXIT_RETRIES: u32 = 40;
 /// 订阅断线（daemon 退出/重启）后的重连间隔。
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 /// 队列分页单页大小（帧上限 1MB，远未触及；大队列自动翻页）。
@@ -33,6 +36,9 @@ pub enum BackendError {
     NoBackendBinary,
     /// daemon 拉起后在退避窗口内未就绪。
     SpawnTimeout,
+    /// daemon 构建指纹与本进程不一致，且重启后仍不一致（磁盘上的 hmp 后端
+    /// 二进制本身是旧构建——重启解决不了，须重建/重装）。
+    StaleBackend,
     /// 协议错误（畸形帧/连接中断）。
     Protocol(String),
 }
@@ -46,6 +52,11 @@ impl std::fmt::Display for BackendError {
                 "找不到可拉起的 hmp 后端二进制（current_exe 同目录与 PATH 均无）"
             ),
             Self::SpawnTimeout => write!(f, "daemon 启动超时"),
+            Self::StaleBackend => write!(
+                f,
+                "daemon 为陈旧构建且重启后仍不一致：请重新构建/安装 hmp 后端二进制\
+                 （开发环境 `cargo build --release --workspace` 后重启应用）"
+            ),
             Self::Protocol(m) => write!(f, "protocol error: {m}"),
         }
     }
@@ -101,7 +112,19 @@ async fn connect() -> Result<IpcStream, BackendError> {
 /// ENOENT / ECONNREFUSED → 解析 `hmp` 二进制（current_exe 同目录 → PATH），
 /// 经 `serve::spawn_detached_exe` 拉起 `hmp serve --background`，退避重试；
 /// 找不到二进制或重试耗尽 → Err（调用方降级离线模式）。
+///
+/// 就绪后核对 daemon 构建指纹（`DaemonState.backend_build` vs 本进程链接的
+/// `hmp_daemon::BUILD_CODE`）：不一致 = 运行中的 daemon 是陈旧构建——daemon
+/// 是长驻进程，重新编译不会替换它（§16 零号发现；§18 再次实锤：桌面端已含
+/// 新报错归因，旧 daemon 仍按旧格式报 `result=104003`）→ 优雅退出后重新拉起
+/// 再核对一次；仍不一致 → `StaleBackend`（磁盘二进制本身过旧，重启无用）。
 pub async fn connect_or_spawn() -> Result<IpcStream, BackendError> {
+    let stream = obtain_stream().await?;
+    verify_backend_generation(stream).await
+}
+
+/// 连接（必要时拉起 + 退避重试）到就绪的 daemon。
+async fn obtain_stream() -> Result<IpcStream, BackendError> {
     match connect().await {
         Ok(stream) => Ok(stream),
         Err(BackendError::Io(e))
@@ -125,6 +148,41 @@ pub async fn connect_or_spawn() -> Result<IpcStream, BackendError> {
             Err(BackendError::SpawnTimeout)
         }
         Err(e) => Err(e),
+    }
+}
+
+/// 构建指纹核对（详见 `connect_or_spawn`）。Status 探测失败保守放行：
+/// 断线由订阅循环既有的重连路径处置，不在此重复。
+async fn verify_backend_generation(stream: IpcStream) -> Result<IpcStream, BackendError> {
+    let running = match request(Request::Status).await {
+        // 旧 daemon 的应答缺该字段（serde default 空串）→ 同样判定陈旧。
+        Ok(Response::Status(state)) => state.backend_build,
+        Ok(_) => return Err(BackendError::Protocol("Status 应答类型不符".into())),
+        Err(_) => return Ok(stream),
+    };
+    if running == hmp_daemon::BUILD_CODE {
+        return Ok(stream);
+    }
+    restart_backend().await;
+    let stream = obtain_stream().await?;
+    match request(Request::Status).await {
+        Ok(Response::Status(state)) if state.backend_build == hmp_daemon::BUILD_CODE => Ok(stream),
+        _ => Err(BackendError::StaleBackend),
+    }
+}
+
+/// 优雅退出运行中 daemon（引擎处理完 Quit、播放态落盘后退出）并从磁盘重新
+/// 拉起；端点释放等待有界，超时则由 obtain_stream 重试/单实例裁决兜底。
+async fn restart_backend() {
+    let _ = request(Request::Quit).await;
+    for _ in 0..DAEMON_EXIT_RETRIES {
+        if connect().await.is_err() {
+            break;
+        }
+        tokio::time::sleep(RETRY_INTERVAL).await;
+    }
+    if let Some(exe) = resolve_backend_binary() {
+        let _ = hmp_daemon::serve::spawn_detached_exe(&exe, &["serve", "--background"]);
     }
 }
 
@@ -487,6 +545,21 @@ async fn read_frame(stream: &mut IpcStream) -> std::io::Result<Option<Vec<u8>>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_backend_error_names_problem_and_remedy() {
+        let msg = BackendError::StaleBackend.to_string();
+        assert!(msg.contains("陈旧构建"), "{msg}");
+        assert!(msg.contains("重新构建"), "{msg}");
+    }
+
+    #[test]
+    fn build_code_present_and_self_consistent() {
+        // build.rs 注入的指纹必须非空且与本进程链接值恒等（否则每轮启动都会
+        // 误触发后端重启）。
+        assert!(!hmp_daemon::BUILD_CODE.is_empty());
+        assert_eq!(hmp_daemon::BUILD_CODE, hmp_daemon::BUILD_CODE);
+    }
 
     #[test]
     fn find_hmp_in_dirs_picks_existing_file() {

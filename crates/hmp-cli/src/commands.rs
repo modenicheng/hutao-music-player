@@ -465,6 +465,7 @@ mod tests {
             last_error: None,
             replaygain_db: Some(6.0),
             phase: hmp_core::EnginePhase::Playing,
+            backend_build: String::new(),
         };
         let s = format_status(&st);
         assert!(s.contains("稻香"));
@@ -551,6 +552,7 @@ mod tests {
             last_error: None,
             replaygain_db: None,
             phase: hmp_core::EnginePhase::Idle,
+            backend_build: String::new(),
         }
     }
 

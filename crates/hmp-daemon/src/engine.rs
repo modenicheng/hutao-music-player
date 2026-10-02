@@ -525,6 +525,7 @@ impl PlaybackEngine {
             last_error: self.last_error.clone(),
             replaygain_db: self.current_rg_db,
             phase: self.phase,
+            backend_build: crate::BUILD_CODE.to_string(),
         };
         let _ = self.state_tx.send(state);
         if self.last_queue_rev != self.queue.revision() {
