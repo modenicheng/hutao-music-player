@@ -10,12 +10,17 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use hmp_core::{
-    DaemonState, ErrorInfo, IpcErrorCode, LoadRequest, PlayRequest, PlaybackCapabilities,
-    PlaybackState, PlaybackStatus, PlayerCommand, PlayerEvent, QueueSnapshot, Request, TrackId,
+    AudioQuality, DaemonState, ErrorInfo, IpcErrorCode, LoadRequest, PlayRequest,
+    PlaybackCapabilities, PlaybackState, PlaybackStatus, PlayerCommand, PlayerEvent, QueueSnapshot,
+    Request, TrackId,
 };
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::player::{EngineError, PlaybackDriver, ResolvedTrack, SourceResolver};
+
+/// 装载失败降档重试的硬上限（§16 回退链每档至多装载一次；文档化链 6 档，
+/// 留余量防病理解析器不断给出新档导致无界重试）。
+const MAX_LOAD_DEGRADES: usize = 8;
 
 /// 会话持久化文件内容（`$XDG_DATA_HOME/hmp/playback_state.json`）。
 /// 恢复 queue/volume/position；恢复后不自动播放，首次 Play 时续播（里程碑 D）。
@@ -992,64 +997,132 @@ impl PlaybackEngine {
         // 预解析缓存（G2）：代际匹配 + 曲目 id 相符 → 直接消费（跳过网络解析）。
         // 注意：消费条件**不含队列 revision**——skip_next/advance_on_eos 本身会
         // bump revision，若纳入则缓存永远无法命中；id 校验已保证不消费错曲。
-        let cached = {
+        let mut cached: Option<ResolvedTrack> = {
             let mut slot = self.preload_slot.lock().await;
             match slot.as_ref() {
                 Some(s) if s.key.1 == self.current_gen && s.id == id => slot.take().map(|s| s.res),
                 _ => None,
             }
         };
-        let res = match cached {
-            Some(res) => res,
-            None => match self.resolver.resolve_track(&id).await {
-                Ok(res) => res,
+        // 捕获上一装载与旧位置（回滚与历史用；降档重试期间不得触碰状态）。
+        let prev = self.last_load.clone();
+        let prev_position = self.state_rx.borrow().position;
+        // §16 开放项（解码期失败不降档）修复：装载期驱动 Error（打开/解码
+        // 失败，如某档加密流解密出非音频垃圾、编解码器不支持）→ 排除该档
+        // 重新解析降档重试。`Timeout`（驱动静默卡死）不降档——重试只会
+        // 成倍拉长「点了没反应」窗口。循环有界：重试守卫（下）保证失败档
+        // 不会被再次装载——解析器复现已失败档（无视排除集，如 fake/本地
+        // 解析器）或失败档数达上限时立即按失败收口，不装载注定失败的
+        // 同一份坏数据。
+        let mut decode_failed: Vec<AudioQuality> = Vec::new();
+        let mut last_load_failure: Option<String> = None;
+        let (res, source, load_gen) = loop {
+            let res = match cached.take() {
+                Some(res) => res,
+                None => {
+                    // 首次解析走常规路径（与既有解析器契约一致）；仅降档重试
+                    // 才排除已失败档（§16：失败档不得再次解析出来）。
+                    let result = if decode_failed.is_empty() {
+                        self.resolver.resolve_track(&id).await
+                    } else {
+                        self.resolver
+                            .resolve_track_excluding(&id, &decode_failed)
+                            .await
+                    };
+                    match result {
+                        Ok(res) => res,
+                        Err(e) => {
+                            tracing::error!(%e, "resolve failed: {id}");
+                            // 队列位置保持；错误详情进入复合状态（Finding 2）；阶段 → Failed。
+                            // 降档重试中的解析失败（排除集耗尽回退链，如
+                            // QualityUnavailable "every quality already failed
+                            // loading"）：此前已有失败装载（真实驱动
+                            // perform_load 先 sink.clear()，旧曲音频已被清掉）
+                            // → 必须回滚旧曲并复原代际，否则用户只剩静音、
+                            // 旧曲 EOS 被当旧代过滤。首次解析失败则尚未触碰
+                            // 驱动（decode_failed 为空 ⇔ 无装载发生），保持
+                            // 原语义不回滚。
+                            if !decode_failed.is_empty() {
+                                if let Some(p) = prev.clone() {
+                                    self.current_gen = p.load_gen;
+                                    self.rollback_load(p, prev_position).await;
+                                }
+                            }
+                            self.last_error = Some(error_info(&e));
+                            self.phase = hmp_core::EnginePhase::Failed;
+                            self.publish();
+                            return Err(e);
+                        }
+                    }
+                }
+            };
+            let quality = res.quality.clone();
+            // 重试守卫：解析器复现已失败档（排除集被无视）或失败档数达上限
+            // （病理解析器不断给出新档）→ 重试装载注定同样失败/无界，按失败
+            // 收口（回滚旧曲、Failed、发布错误）。首轮 decode_failed 为空，
+            // 守卫不会误触发。
+            if decode_failed.contains(&quality) || decode_failed.len() >= MAX_LOAD_DEGRADES {
+                let reason = last_load_failure.unwrap_or_else(|| "load failed".into());
+                let alias = quality.to_alias();
+                tracing::warn!(alias, %reason, "no untried quality left; giving up");
+                let e = EngineError::LoadFailed(reason);
+                if let Some(p) = prev.clone() {
+                    // 复原代际：回滚后旧曲重新成为当前代（driver loaded_gen
+                    // 已重载为 prev.load_gen），其 EOS/Error 不得再被误判为
+                    // 旧代忽略（否则播完不续播、会话不闭合）。
+                    self.current_gen = p.load_gen;
+                    self.rollback_load(p, prev_position).await;
+                }
+                self.last_error = Some(error_info(&e));
+                self.phase = hmp_core::EnginePhase::Failed;
+                self.publish();
+                return Err(e);
+            }
+            let uri = res.uri.clone();
+            // 进程内源随 LoadRequest 递给驱动（播放路径优先于 uri）。
+            // 引擎无需单独保活：reader（驱动 sink 持有）存活即源存活；
+            // 装载失败时 load 任务 abort 自动释放，`res.media` 随作用域丢弃。
+            let source = res.media.as_ref().and_then(|m| m.source.clone());
+            let expected = res.track.id.clone();
+            self.current_gen += 1;
+            let load_gen = self.current_gen;
+            self.driver.load(LoadRequest {
+                track: res.track.clone(),
+                uri,
+                quality: quality.clone(),
+                load_gen,
+                stream: source.clone(),
+            });
+            self.driver.play();
+            // 等待驱动应用装载（真实驱动为异步管道）：完成前发布的复合状态
+            // 不得携带旧曲目（Bug 2：play-next 后显示旧曲）。超时/通道断开 →
+            // 失败路径（调用方回滚队列、保留旧曲；不创建播放历史）。
+            match self.wait_current_applied(&expected, load_gen).await {
+                Ok(()) => break (res, source, load_gen),
+                Err(EngineError::LoadFailed(reason)) => {
+                    let alias = quality.to_alias();
+                    tracing::warn!(alias, %reason, "load failed; degrading to next quality");
+                    last_load_failure = Some(reason);
+                    decode_failed.push(quality);
+                    continue;
+                }
                 Err(e) => {
-                    tracing::error!(%e, "resolve failed: {id}");
-                    // 队列位置保持；错误详情进入复合状态（Finding 2）；阶段 → Failed。
+                    if let Some(p) = prev.clone() {
+                        // 复原代际：回滚后旧曲重新成为当前代（driver loaded_gen
+                        // 已重载为 prev.load_gen），其 EOS/Error 不得再被误判为
+                        // 旧代忽略（否则播完不续播、会话不闭合）。失败装载 b 的
+                        // 迟到事件 gen=N+1 恰好被过滤，语义正确。
+                        self.current_gen = p.load_gen;
+                        self.rollback_load(p, prev_position).await;
+                    }
                     self.last_error = Some(error_info(&e));
                     self.phase = hmp_core::EnginePhase::Failed;
                     self.publish();
                     return Err(e);
                 }
-            },
-        };
-        // 捕获上一装载与旧位置（回滚与历史用；此时尚未触碰任何状态）。
-        let prev = self.last_load.clone();
-        let prev_position = self.state_rx.borrow().position;
-        let uri = res.uri.clone();
-        let quality = res.quality;
-        // 进程内源随 LoadRequest 递给驱动（播放路径优先于 uri）。
-        // 引擎无需单独保活：reader（驱动 sink 持有）存活即源存活；
-        // 装载失败时 load 任务 abort 自动释放，`res.media` 随作用域丢弃。
-        let source = res.media.as_ref().and_then(|m| m.source.clone());
-        let expected = res.track.id.clone();
-        self.current_gen += 1;
-        let load_gen = self.current_gen;
-        self.driver.load(LoadRequest {
-            track: res.track.clone(),
-            uri,
-            quality: quality.clone(),
-            load_gen,
-            stream: source.clone(),
-        });
-        self.driver.play();
-        // 等待驱动应用装载（真实驱动为异步管道）：完成前发布的复合状态
-        // 不得携带旧曲目（Bug 2：play-next 后显示旧曲）。超时/通道断开 →
-        // 失败路径（调用方回滚队列、保留旧曲；不创建播放历史）。
-        if let Err(e) = self.wait_current_applied(&expected, load_gen).await {
-            if let Some(p) = prev {
-                // 复原代际：回滚后旧曲重新成为当前代（driver loaded_gen 已
-                // 重载为 prev.load_gen），其 EOS/Error 不得再被误判为旧代
-                // 忽略（否则播完不续播、会话不闭合）。失败装载 b 的迟到
-                // 事件 gen=N+1 恰好被过滤，语义正确。
-                self.current_gen = p.load_gen;
-                self.rollback_load(p, prev_position).await;
             }
-            self.last_error = Some(error_info(&e));
-            self.phase = hmp_core::EnginePhase::Failed;
-            self.publish();
-            return Err(e);
-        }
+        };
+        let quality = res.quality.clone();
         // ACK 成功才提交：记录装载（含进程内源，回滚重建 LoadRequest 用）、
         // 进入播放阶段、开启播放会话。`res.media`（PreparedMedia 壳）随作用域
         // 释放；source 的 Arc 由驱动的 reader 与 last_load 继续持有。
@@ -1194,9 +1267,9 @@ impl PlaybackEngine {
                 ev = events.recv() => {
                     match ev {
                         Ok(PlayerEvent::Error { load_gen: ev_gen, error }) if ev_gen == load_gen => {
-                            return Err(EngineError::Internal(format!(
-                                "driver load error: {error}"
-                            )));
+                            // 装载期驱动错误（打开/解码失败）：专用变体供
+                            // load_and_play 触发音质降档重试（§16 开放项）。
+                            return Err(EngineError::LoadFailed(error.to_string()));
                         }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1296,6 +1369,7 @@ fn error_info(e: &EngineError) -> ErrorInfo {
         EngineError::TrackNotFound => IpcErrorCode::TrackNotFound,
         EngineError::PlaylistNotFound(_) => IpcErrorCode::PlaylistNotFound,
         EngineError::QualityUnavailable(_) => IpcErrorCode::QualityUnavailable,
+        EngineError::LoadFailed(_) => IpcErrorCode::Internal,
         EngineError::Timeout => IpcErrorCode::Internal,
         EngineError::Internal(_) => IpcErrorCode::Internal,
     };

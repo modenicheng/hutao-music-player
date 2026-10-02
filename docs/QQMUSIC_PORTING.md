@@ -97,7 +97,14 @@
 ### 取流实测记录（2026-08-06）
 
 - 免登录：`RS02`（试听）返回 `purl`+`vkey`；`M500`/`C400` 等完整音质返回 `104003`（无权限，需登录态）；
-- 完整音质需调用方传入 `credential`（`str_musicid` 注入 `uin` 参数）。
+- 完整音质需调用方传入 `credential`（`str_musicid` 注入 `uin` 参数）；
+- **实测记录（2026-10-02，逐档探针）**：存量凭证**全档**（AIM0/Q0M0/F0M0/C600/M800/M500）
+  一律 `104003` 而免登录 `RS02` 正常 → 「连仅需登录的档都被拒 + 免登录档可用」即登录态
+  整体失效（`Expiry: expired`）的服务端签名，与音质档位/权限无关；daemon 据此把全链
+  鉴权类错误码归因 `NotLoggedIn`（混合失败才逐档报 `QualityUnavailable`，归因规则见
+  hmp-daemon `player.rs::is_auth_result_code`）。同批实机 dump 核对 `models::File`
+  字段逐键对齐，补建模 `size_hires`（Hi-Res 档；线上另有 b_30s/hires_bitdepth/
+  size_360ra 等未建模键，serde 忽略无害）。
 
 ### 加密取流（阶段 D 补充，2026-08-06）
 

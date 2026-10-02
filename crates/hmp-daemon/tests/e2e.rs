@@ -181,6 +181,11 @@ fn urls_ok(filename: &str, purl: &str) -> Value {
 
 /// 取流响应：单个文件授权失败（加密音质/低品质不可用 → 触发回退）。
 fn urls_fail() -> Value {
+    urls_fail_with(104003)
+}
+
+/// 取流响应：单个文件授权失败，业务码可指定（鉴权分类回归用）。
+fn urls_fail_with(result: i64) -> Value {
     json!({
         "code": 0,
         "req_0": {
@@ -191,7 +196,7 @@ fn urls_fail() -> Value {
                     "songmid": TRACK_MID,
                     "filename": "",
                     "purl": "",
-                    "result": 104003,
+                    "result": result,
                 }]
             }
         }
@@ -627,6 +632,176 @@ async fn resolve_track_respects_fixed_quality_config() {
         vec!["F0M0"],
         "固定 FLAC 只应尝试 F0M0，实际: {prefixes:?}"
     );
+}
+
+/// 2026-10-02「远程曲目无法播放」根因回归：凭证过期（服务端拒签，每档
+/// `result=104003`，2026-10-02 实机复现）时必须上报 `NotLoggedIn`（可操作：
+/// 重新登录）而非 `QualityUnavailable`——后者正是用户看到的「音质不存在」
+/// 误导文案。回退链本身照常逐档尝试（6 档全试后仍全鉴权失败才归鉴权）。
+#[tokio::test]
+async fn resolve_track_reports_not_logged_in_when_all_qualities_require_reauth() {
+    let _lock = CONFIG_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::install(dir.path());
+    let store: Store = store_from_env();
+    store
+        .save(&Credential {
+            uin: "10001".into(),
+            music_id: "10001".into(),
+            music_key: "expired-key".into(),
+            refresh_key: None,
+            raw_cookie: String::new(),
+            str_musicid: "10001".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/cgi-bin/musicu.fcg"))
+        .and(|req: &wiremock::Request| req0(req)["method"] == json!("get_song_detail_yqq"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(detail_ok()))
+        .mount(&server)
+        .await;
+    // 加密取流（GetEVkey）：Master/HiRes(AIM0)/Atmos(Q0M0)/Flac(F0M0) 全 104003。
+    for prefix in ["AIM0", "Q0M0", "F0M0"] {
+        let prefix = prefix.to_owned();
+        Mock::given(method("POST"))
+            .and(path("/cgi-bin/musicu.fcg"))
+            .and(move |req: &wiremock::Request| {
+                let body = req0(req);
+                let filename = body["param"]["filename"][0].as_str().unwrap_or("");
+                body["module"] == json!("music.vkey.GetEVkey") && filename.starts_with(&prefix)
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(urls_fail()))
+            .mount(&server)
+            .await;
+    }
+    // 明文取流（GetVkey）：320/128 也全 104003（过期凭证连免 VIP 档都拒签）。
+    for prefix in ["M800", "M500"] {
+        let prefix = prefix.to_owned();
+        Mock::given(method("POST"))
+            .and(path("/cgi-bin/musicu.fcg"))
+            .and(move |req: &wiremock::Request| {
+                let body = req0(req);
+                let filename = body["param"]["filename"][0].as_str().unwrap_or("");
+                filename.starts_with(&prefix)
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(urls_fail()))
+            .mount(&server)
+            .await;
+    }
+
+    let resolver = QqSourceResolver::new(client_for(&server.uri()), store);
+    let err = resolver
+        .resolve_track(&TrackId::new(TRACK_MID))
+        .await
+        .expect_err("全链 104003 应返回错误");
+    assert!(
+        matches!(err, EngineError::NotLoggedIn),
+        "全链鉴权失败应上报 NotLoggedIn，实际 {err:?}"
+    );
+    // 回退链确实逐档尝试过（6 档全发请求，而非第一档即放弃）。
+    let requested: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|r| {
+            let body = req0(r);
+            let module = body["module"].as_str()?.to_owned();
+            let f = body["param"]["filename"][0].as_str()?.to_owned();
+            Some((module, f))
+        })
+        .filter(|(m, _)| m == "music.vkey.GetEVkey" || m == "music.vkey.GetVkey")
+        .map(|(_, f)| f[..4].to_owned())
+        .collect();
+    assert_eq!(
+        requested,
+        vec!["AIM0", "AIM0", "Q0M0", "F0M0", "M800", "M500"],
+        "回退链应逐档尝试全部 6 档（Master/HiRes 同映射 AIM0 各一次），实际: {requested:?}"
+    );
+}
+
+/// 逐档错误聚合回归：混合鉴权（104003）与非鉴权（result=1）失败时上报
+/// `QualityUnavailable`，且消息逐档带档位标签——此前只留最后一档错误、
+/// 且取流响应缺 midurlinfo 时消息为空串（诊断黑洞）。
+#[tokio::test]
+async fn resolve_track_aggregates_per_quality_errors_in_message() {
+    let _lock = CONFIG_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::install(dir.path());
+    let store: Store = store_from_env();
+    store
+        .save(&Credential {
+            uin: "10001".into(),
+            music_id: "10001".into(),
+            music_key: "secret-key".into(),
+            refresh_key: None,
+            raw_cookie: String::new(),
+            str_musicid: "10001".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/cgi-bin/musicu.fcg"))
+        .and(|req: &wiremock::Request| req0(req)["method"] == json!("get_song_detail_yqq"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(detail_ok()))
+        .mount(&server)
+        .await;
+    // 加密档全部鉴权失败；明文档（320/128）业务码 1（非鉴权，如版权区域限制）。
+    for prefix in ["AIM0", "Q0M0", "F0M0"] {
+        let prefix = prefix.to_owned();
+        Mock::given(method("POST"))
+            .and(path("/cgi-bin/musicu.fcg"))
+            .and(move |req: &wiremock::Request| {
+                let body = req0(req);
+                let filename = body["param"]["filename"][0].as_str().unwrap_or("");
+                body["module"] == json!("music.vkey.GetEVkey") && filename.starts_with(&prefix)
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(urls_fail()))
+            .mount(&server)
+            .await;
+    }
+    for prefix in ["M800", "M500"] {
+        let prefix = prefix.to_owned();
+        Mock::given(method("POST"))
+            .and(path("/cgi-bin/musicu.fcg"))
+            .and(move |req: &wiremock::Request| {
+                let body = req0(req);
+                let filename = body["param"]["filename"][0].as_str().unwrap_or("");
+                filename.starts_with(&prefix)
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(urls_fail_with(1)))
+            .mount(&server)
+            .await;
+    }
+
+    let resolver = QqSourceResolver::new(client_for(&server.uri()), store);
+    let err = resolver
+        .resolve_track(&TrackId::new(TRACK_MID))
+        .await
+        .expect_err("全档失败应返回错误");
+    match err {
+        EngineError::QualityUnavailable(msg) => {
+            // 存在非鉴权失败 → 不得误报 NotLoggedIn。
+            assert!(
+                msg.contains("master: result=104003"),
+                "消息应含 master 档鉴权失败，实际: {msg}"
+            );
+            assert!(
+                msg.contains("320: result=1"),
+                "消息应含 320 档业务码失败，实际: {msg}"
+            );
+            assert!(
+                msg.contains("128: result=1"),
+                "消息应含 128 档业务码失败，实际: {msg}"
+            );
+        }
+        other => panic!("混合失败应报 QualityUnavailable，实际 {other:?}"),
+    }
 }
 
 /// 流式 `PreparedMedia` 契约（daemon 侧）：`prepare_media` 对支持 Range 的
