@@ -11,8 +11,8 @@
 //! （DESIGN.md §1.2 v0.4）相悖。
 //!
 //! SVG 字符串确定性生成；栅格化经 resvg（slint svg 特性同款依赖），
-//! 结果按 seed 缓存为 [`slint::Image`]。tiny-skia 像素是预乘 alpha，
-//! Slint 需要直 alpha，拷贝时反预乘。
+//! 结果按占位图标类型缓存为 [`slint::Image`]（至多 3 条，见 `cover_image`）。
+//! tiny-skia 像素是预乘 alpha，Slint 需要直 alpha，拷贝时反预乘。
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -171,20 +171,36 @@ pub fn file_uri_to_path(uri: &str) -> Option<String> {
     Some(rest.to_string())
 }
 
+// slint::Image 非 Send/Sync：缓存放 thread_local（UI 消费全程在主线程）。
+// key = 占位图标类型（三类 &'static str），条目封顶 3（理由见 cover_image doc）。
+thread_local! {
+    static COVER_CACHE: RefCell<HashMap<&'static str, Image>> = RefCell::new(HashMap::new());
+}
+
 /// 确定性封面图（seed 同 covers.ts：专辑用 `album:{mid}`）。
-/// slint::Image 非 Send/Sync：缓存放 thread_local（UI 消费全程在主线程）
+///
+/// 缓存 key = 占位**图标类型**（`icon_path_for` 的 playlist/artist/album 三类
+/// `&'static str`），不是 seed：2026-09-30 改版后同类占位像素逐字节相同
+/// （`cover_svg_is_deterministic_and_typed` 断言 album 前缀下不同 seed 同图），
+/// 按 seed 缓存是纯重复。内存审计：占位封面按曲目 mid 播种，同像素位图
+/// 逐曲复制（256×256 RGBA = 256KB/条，1 万曲 ≈ 2.5GB）；按类型缓存后条目
+/// 封顶 3。对外签名 `cover_image(seed)` 不变，调用点零改动。
 pub fn cover_image(seed: &str) -> Image {
-    thread_local! {
-        static CACHE: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new());
-    }
-    CACHE.with(|cache| {
-        if let Some(image) = cache.borrow().get(seed) {
+    let kind = icon_path_for(seed);
+    COVER_CACHE.with(|cache| {
+        if let Some(image) = cache.borrow().get(kind) {
             return image.clone();
         }
         let image = svg_to_image(&cover_svg(seed));
-        cache.borrow_mut().insert(seed.to_owned(), image.clone());
+        cache.borrow_mut().insert(kind, image.clone());
         image
     })
+}
+
+/// 当前线程 [`COVER_CACHE`] 的条目数（测试观测「条目 ≤ 3」用，仅测试构建）。
+#[cfg(test)]
+fn cover_cache_len() -> usize {
+    COVER_CACHE.with(|cache| cache.borrow().len())
 }
 
 #[cfg(test)]
@@ -252,5 +268,20 @@ mod tests {
     fn cover_image_renders_opaque() {
         let image = cover_image("album:al01");
         assert!(image.size().width > 0);
+    }
+
+    #[test]
+    fn cover_image_cache_is_capped_by_icon_kind() {
+        // 大量不同 seed 灌入：缓存按图标类型而非 seed，条目数封顶 3
+        for i in 0..64 {
+            let _ = cover_image(&format!("album:gen{i}"));
+            let _ = cover_image(&format!("playlist:gen{i}"));
+            let _ = cover_image(&format!("artist:gen{i}"));
+            let _ = cover_image(&format!("liked:gen{i}")); // 无 playlist/artist 前缀 → album 类
+        }
+        let len = cover_cache_len();
+        assert!(len <= 3, "缓存条目应封顶 3，实际 {len}");
+        // 四种 seed 形态恰好落到三类图标上
+        assert_eq!(len, 3);
     }
 }
