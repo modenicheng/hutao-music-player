@@ -297,10 +297,16 @@ mod tests {
     fn secret_service_status_reports_clearly_when_unavailable() {
         // 无 Secret Service 环境：应为明确的 Storage 错误；有则 Ok。
         // 此测试在两个分支下都应通过（不 panic），验证错误映射而非后端本身。
+        // Err 分支只在 Linux 无密钥环环境执行（Windows Credential Manager
+        // 恒可用走 Ok），断言对象 = secret_service_error 的英文引导文案
+        // （全仓错误信息惯例为英文）：须点名问题并给出补救路径。
         match SecretServiceStore::status() {
             Ok(()) => {}
             Err(HmpError::Storage(msg)) => {
-                assert!(msg.contains("密钥环"), "error should guide user: {msg}");
+                assert!(
+                    msg.contains("keyring unavailable") && msg.contains("HMP_CREDENTIAL_BACKEND"),
+                    "error should name the problem and guide user: {msg}"
+                );
             }
             Err(other) => panic!("unexpected error type: {other:?}"),
         }
