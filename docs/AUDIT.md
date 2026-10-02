@@ -582,3 +582,70 @@ daemon 依然运行」的另一个形态。
 Quit → 断言 Shutdown 帧先于 EOF，容忍其前的中间状态推送）+
 `event_shutdown_roundtrips_through_frame`（ipc.rs 序列化往返）。
 EOF 语义不变：非优雅死亡依旧无事件。
+
+## §20 桌面前端内存治理（2026-10-03，btop 实测桌面 RSS 2.4G vs 播放核心 18M）
+
+**现象**：hmp-desktop 常驻内存 2.4GB 且随浏览单调增长不回落；同链路的 hmp
+播放核心仅 18MB——增长源全部在 UI 进程。
+
+**根因四项**（三路只读子代理审计 + 逐点代码核实）：
+1. **四套「只进不出」的 `HashMap<String, slint::Image>` 线程本地缓存**钉住解码
+   位图：covers.rs 占位封面（按 seed）、library_view.rs 本地封面（按 URI）、
+   player_bridge.rs 磁盘封面（按路径）、online_covers.rs 发现页封面。关键放大
+   器：`Image::load_from_path` 本走 Slint 内部 5MB 权重 LRU，但应用层强引用
+   把解码位图永久钉住，LRU 形同虚设；且 URI/路径/seed 三套 key 互不相通，同一
+   封面文件最多被解码并钉住两份。
+2. **占位封面按曲目 mid 播种**：2026-09-30 改版后同类占位像素逐字节相同
+   （covers.rs 测试自己断言），但每曲仍按 seed 各存一份 256×256 RGBA
+   （256KB/条）——1 万行收藏 ≈ 2.5GB，单项即可解释观测值。
+3. **`TrackRow.cover` 是纯死重**：`ui/track-table.slint` 全文无 image 元素，
+   12+ 个表格模型（收藏/最近/本地/下载/已购/搜索/榜单/队列）每行背一张全尺寸
+   封面，唯一消费方是 queue-drawer 36×36 缩略——为一张 36px 图付 8-36MB/行。
+4. **零虚拟化**：全部列表 `for` repeater 全量实例化（4566 行 × 15-20 元素）。
+
+**修复四项**（linked worktree fix/desktop-mem-2.4g，四子代理契约并行 + 主代理
+集成；隔离自并行改封面的另一会话线）：
+1. **占位封面缓存按图标类型收口**（covers.rs）：key = `icon_path_for(seed)` 三
+   类静态串，条目封顶 3；`cover_image(seed)` 签名不变。测试 `cover_image_cache
+   _is_capped_by_icon_kind`。
+2. **统一 cover_cache（新 src/cover_cache.rs）**：字节加权 LRU，key=(路径，
+   max_side 桶)，CAP 64MB 超限逐最久未用；装载即 `image` 解码 → thumbnail
+   降采样 → rgba8——缓存的与交给 UI 的都是小图。三处旧缓存删除并路由：
+   library_view（256）、player_bridge（队列行 256 / 当前曲 512）、online_covers
+   （256）；`local_cover_image` 对外签名不变（bridge 侧栏/详情/卡片调用点自动
+   受益）。LRU 逐出/命中/降采样 ×4 测试。
+3. **TrackRow 剥 cover + QueueRow 分型**（data.slint/stores.slint）：表格行不
+   背位图；队列行走 QueueRow（TrackRow 全字段 + cover，消费方仅 queue-drawer）；
+   `play-tracks([TrackRow],int)` 契约不变；搜索/发现行与 `to_track_row` 删封面
+   构造，bridge 侧栏/详情/卡片封面保留。to_track_row 的 mid 播种 256KB/曲 复
+   制路径就此消失。
+4. **曲目表窗口化虚拟化**（新 ui/viewport.slint 全局 + track-table 行窗口）：
+   顶层 Scroll 把滚动状态经 property 声明处双向别名 + changed/init 命令式回写
+   进 Viewport 全局（y/view-h/origin-y）；TrackTable 只实例化可见窗
+   （ceil(view-h/pitch)+2×8 overscan）行，行按绝对索引绝对定位
+   （y=(window-start+offset)×pitch），占位高度=N×pitch 不变（滚动条几何不变）；
+   view-h≤0（无头/未回写）退化全量渲染。**集成实测踩三坑**（已录 PORTING 坑位）：
+   ①非布局父级容器必须显式钉 width+height（显式 height 不进 preferred 链 +
+   repeater 无固有尺寸 → HoverGroup 被 layout 压成 0 高 + clip → 整表不可见
+   不可点，take_snapshot 截图定位）；②语句级全局绑定/别名均 parse error，唯
+   property 声明处双向别名合法；③for 整数即模型、无 `0..N` 区间、for 体内
+   `row` 不可作属性名。
+   附：**track_theme 单次有界解码**（Applied 摘除全尺寸封面常驻，只留 64×64
+   采样 ≤16KB；sample/ambient 共享一次 to_rgba8→480px 有界缓冲，换曲瞬态
+   双份全图拷贝消失）。
+5. **hover × 虚拟滚动专项验证**（用户点名风险面）：testing backend + software
+   renderer 探针实测——滚动后 hover 上报正常；**被 hover 行被滚出窗口卸载时
+   HoverBus 自清**（HoverItem 退出自校验在实例几何跳变时自然触发 leave，比旧
+   行为的高亮滞留更干净）；微动指针恢复上报；跨窗口边界的块飞行/黏滞形变与
+   旧行为等价。drag 回归（thumb 跳转深滚后点行索引差 >20 行 + 1:1 拖拽比例）
+   全绿。
+
+**回归**：lib 66 测试全绿（含 cover_cache LRU×4、covers 封顶、track_theme 有界
+解码）；drag/hover_slider/hover_stretch/svg_icon 集成测试全绿；clippy
+`--all-targets` 零警告；`cargo fmt --check` 干净。内存水位验证留待真机长跑
+（预期：RSS 有界于 64MB cover_cache + 模型字符串 + GPU 纹理，不再随浏览单调
+增长）。
+
+**已知边界**：滚动中 hover 块位置仍是上报时刻快照（旧行为即如此，鼠标微动即
+刷新）；队列行 cover 取 256 桶（36px 缩略余量充足）；占位图三类共享同一位图
+句柄（Slint 纹理单份）；远端 URL 封面仍走程序化占位（UI 零 HTTP 原则不变）。
