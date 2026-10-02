@@ -316,6 +316,12 @@ impl LibraryDb {
         merge_ghost_local_tracks(&self.conn)
     }
 
+    /// v7 迁移步骤（幂等）：合并非规范键本地扫描行
+    /// （见 [`merge_noncanonical_local_tracks`]）。独立暴露供迁移测试直接驱动。
+    pub fn merge_noncanonical_local_tracks(&mut self) -> rusqlite::Result<()> {
+        merge_noncanonical_local_tracks(&self.conn)
+    }
+
     /// 幂等写入/更新曲目元数据；返回 track id。
     pub fn upsert_track(&mut self, t: &TrackRow) -> rusqlite::Result<i64> {
         let source_key = canonical_local_key(t.source, &t.source_key);
@@ -2138,6 +2144,98 @@ pub(crate) fn merge_ghost_local_tracks(conn: &Connection) -> rusqlite::Result<()
     Ok(())
 }
 
+/// v7：合并非规范键的本地扫描行。写路径归一化（`canonical_local_key`，
+/// 2026-09-26）之前，resolve_local/add_local_file 以原始拼写入库——Windows
+/// 上是 canonicalize 产出的 `local:\\?\C:\...`。归一化后同一文件会另建规范键
+/// 行，旧 verbatim 行沦为永久重复（cover_uri 恒 NULL 的库页双卡，§18 实锤：
+/// 同一文件两行一有一无封面）。v5 只合并没有 local_files 子行的意图幽灵；
+/// 本迁移处理**带 local_files 的 verbatim 扫描行**：规范行在场 → 搬迁
+/// relations/歌单链接后删除 verbatim 行（连同其 local_files）；规范行缺席 →
+/// 就地改键（tracks.source_key 与 local_files.path 同步，后续扫描/播放命中
+/// 同一行不再衍生重复）。路径已不存在（盘移除/已删）→ canonicalize 失败键不
+/// 变 → 跳过等下次（幂等）。
+pub(crate) fn merge_noncanonical_local_tracks(conn: &Connection) -> rusqlite::Result<()> {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id, source_key FROM tracks WHERE source = 'local'")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (tid, key) in rows {
+        let canon = canonical_local_key("local", &key);
+        if canon == key {
+            continue;
+        }
+        // 目标规范行在场（扫描行或残余意图行）→ 整行合并后删除。
+        let target: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM tracks WHERE source = 'local' AND source_key = ?1 AND id <> ?2",
+                params![canon, tid],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(target) = target {
+            // relations：意图搬到规范键；规范键已有同 relation 行则弃旧保既有。
+            let rels: Vec<(String, i64)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT relation, desired_state FROM relations \
+                     WHERE entity_type = 'track' AND provider = 'local' AND entity_key = ?1",
+                )?;
+                let mapped = stmt.query_map(params![key], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (relation, desired) in rels {
+                conn.execute(
+                    "INSERT INTO relations (entity_type, provider, entity_key, relation, \
+                     desired_state, sync_state, last_remote_state, updated_at) \
+                     VALUES ('track', 'local', ?1, ?2, ?3, 'synced', ?3, ?4) \
+                     ON CONFLICT(entity_type, provider, entity_key, relation) DO NOTHING",
+                    params![canon, relation, desired, now_unix()],
+                )?;
+                conn.execute(
+                    "DELETE FROM relations WHERE entity_type = 'track' AND provider = 'local' \
+                     AND entity_key = ?1 AND relation = ?2",
+                    params![key, relation],
+                )?;
+            }
+            // 歌单链接重指向（表无 (playlist_id, track_id) 唯一约束，直接 UPDATE）。
+            conn.execute(
+                "UPDATE playlist_tracks SET track_id = ?1 WHERE track_id = ?2",
+                params![target, tid],
+            )?;
+            // 播放历史并入存活行：verbatim 行由 resolve_local 播放创建，几乎
+            // 必然带 play_events，其 FK 无 CASCADE——不先搬走 DELETE tracks 会
+            // FK 失败、整个迁移回滚、开库失败回退内存库（§18 实机首跑即中招）。
+            conn.execute(
+                "UPDATE play_events SET track_id = ?1 WHERE track_id = ?2",
+                params![target, tid],
+            )?;
+            // verbatim 扫描行带 local_files 子行（v5 幽灵没有）：先删子行再删行。
+            conn.execute("DELETE FROM local_files WHERE track_id = ?1", params![tid])?;
+            conn.execute("DELETE FROM tracks WHERE id = ?1", params![tid])?;
+        } else {
+            // 规范行缺席 → 就地改键；local_files.path 唯一，孤儿残留冲突时放弃
+            // 本行（幂等，不砖化）。
+            let clean_path = canon.strip_prefix("local:").unwrap_or(&canon);
+            let conflict: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM local_files WHERE path = ?1 AND track_id <> ?2",
+                params![clean_path, tid],
+                |r| r.get(0),
+            )?;
+            if conflict == 0 {
+                conn.execute(
+                    "UPDATE tracks SET source_key = ?1 WHERE id = ?2",
+                    params![canon, tid],
+                )?;
+                conn.execute(
+                    "UPDATE local_files SET path = ?1 WHERE track_id = ?2",
+                    params![clean_path, tid],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 逐级迁移到最新 user_version。
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -2227,6 +2325,22 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         let result = (|| -> rusqlite::Result<()> {
             conn.execute_batch(MIGRATION_V6)?;
             conn.pragma_update(None, "user_version", 6)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+    }
+    if current < 7 {
+        // v7（Rust 迁移，需 fs::canonicalize）：合并非规范键本地扫描行（§18）。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            merge_noncanonical_local_tracks(conn)?;
+            conn.pragma_update(None, "user_version", 7)?;
             Ok(())
         })();
         match result {

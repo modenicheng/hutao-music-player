@@ -39,7 +39,7 @@ pub struct LocalMeta {
     pub disc_number: Option<u16>,
     pub year: Option<i64>,
     pub genre: Option<String>,
-    /// 内嵌封面原图（前 2MB；无封面 None）。
+    /// 内嵌封面原图（超过 32MB 丢弃；无封面 None）。
     pub cover: Option<Vec<u8>>,
     /// ReplayGain 曲目增益（dB；无标签 None）。
     pub replaygain_track_db: Option<f64>,
@@ -66,6 +66,10 @@ pub fn parse_rg_db(s: &str) -> Option<f64> {
     Some(v)
 }
 
+/// 内嵌封面字节上限：3000-4000px JPEG 封面 3-15MB 常见，旧 2MB 上限把高清
+/// 封面整张静默滤成「无封面」（§18）；仍保留上限防病态文件撑爆扫描内存/落盘。
+const MAX_COVER_BYTES: usize = 32 * 1024 * 1024;
+
 /// 读取标签元数据；无标签/不可解析 → None。
 pub fn read_meta(path: &Path) -> Option<LocalMeta> {
     let tagged = Probe::open(path).ok()?.read().ok()?;
@@ -78,13 +82,24 @@ pub fn read_meta(path: &Path) -> Option<LocalMeta> {
                 .collect()
         })
         .unwrap_or_default();
-    let cover = tag.and_then(|t| {
-        t.get_picture_type(PictureType::CoverFront)
-            .or_else(|| t.pictures().first())
-            .map(|p| p.data())
-            .filter(|d| !d.is_empty() && d.len() <= 2 * 1024 * 1024)
-            .map(|d| d.to_vec())
-    });
+    // 封面：primary tag 优先（CoverFront → 首图），primary 无图再扫其余 tag
+    // （歌词提取同款 primary → 全 tag 兜底语义）。
+    let cover = tagged
+        .primary_tag()
+        .map(|t| {
+            t.get_picture_type(PictureType::CoverFront)
+                .or_else(|| t.pictures().first())
+        })
+        .or_else(|| {
+            Some(tagged.tags().iter().find_map(|t| {
+                t.get_picture_type(PictureType::CoverFront)
+                    .or_else(|| t.pictures().first())
+            }))
+        })
+        .flatten()
+        .map(|p| p.data())
+        .filter(|d| !d.is_empty() && d.len() <= MAX_COVER_BYTES)
+        .map(|d| d.to_vec());
     Some(LocalMeta {
         title: tag
             .and_then(|t| t.title())

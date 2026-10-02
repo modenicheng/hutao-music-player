@@ -1108,9 +1108,14 @@ fn cover_seed(meta: &QueueRowMeta) -> String {
 fn cover_for_track(mid: &str, cover: Option<&hmp_core::CoverRef>) -> slint::Image {
     if let Some(url) = cover.map(|c| c.url.as_str()) {
         if !url.starts_with("http://") && !url.starts_with("https://") {
-            let path = url.strip_prefix("file://").unwrap_or(url);
-            if let Some(image) = load_cover_cached(path) {
-                return image;
+            // file:// 双形态（persist_cover 宽容形态 `file://C:\...` 与历史
+            // 规范形态 `file:///C:/...`）都收：裸剥前缀把规范形态解析成
+            // `/C:/...`（Windows 读不到）→ 盘上有图恒占位（§18 库行实锤）。
+            if let Some(path) = crate::covers::file_uri_to_path(url) {
+                if let Some(image) = load_cover_cached(&path) {
+                    return image;
+                }
+                tracing::debug!(path, "cover file unreadable; fallback to placeholder");
             }
         }
     }

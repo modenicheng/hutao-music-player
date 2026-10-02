@@ -19,7 +19,7 @@ fn row() -> TrackRow {
 #[test]
 fn migration_creates_v1() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 6); // v6：歌单封面列
+    assert_eq!(db.version().unwrap(), 7); // v7：非规范键本地行合并
     let mut db = db;
     assert_eq!(db.track_id("qq", "mid123").unwrap(), None);
 }
@@ -169,7 +169,7 @@ fn migration_v2_migrates_favorites_into_relations() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        6
+        7
     );
     // favorites 表已删除；数据在 relations（track/liked，synced）。
     let count: i64 = conn
@@ -697,7 +697,7 @@ fn mark_pending_with_delete_op_rolls_back_on_op_failure() {
 #[test]
 fn migration_v3_adds_columns_and_tables() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 6);
+    assert_eq!(db.version().unwrap(), 7);
     let cols: Vec<String> = db
         .conn
         .prepare("PRAGMA table_info(local_files)")
@@ -771,7 +771,7 @@ fn migration_v2_to_v3_upgrades_in_place() {
         .conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 6);
+    assert_eq!(v, 7);
     db.conn
         .execute("UPDATE tracks SET genre='Rock' WHERE id=1", [])
         .unwrap();
@@ -1205,6 +1205,204 @@ fn merge_ghost_local_tracks_remaps_relations_and_playlists() {
             .unwrap(),
         1
     );
+}
+
+/// v7 迁移：带 local_files 子行的非规范键扫描行（v5 幽灵谓词不命中的变体，
+/// §18 实锤的 verbatim 重复行）合并进规范键扫描行，relations/歌单链接跟随
+/// 重指向，verbatim 行连同 local_files 删除。幂等。
+#[test]
+fn merge_noncanonical_local_tracks_merges_scan_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("song.flac");
+    std::fs::write(&real, b"x").unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let meta = crate::local::LocalMeta {
+        title: "真标题".into(),
+        ..Default::default()
+    };
+    let tid = db.add_local_file(&real, Some(&meta)).unwrap();
+    let canon_key = format!("local:{}", real.display());
+
+    // 直接造 pre-fix 形态的 verbatim 扫描行（API 现已归一化，只能 raw SQL 造）：
+    // tracks.source_key 与 local_files.path 均带非规范拼写。
+    // Windows = canonicalize 的 \\?\ 前缀形态；Unix = 同目录 /./ 重复拼写。
+    #[cfg(windows)]
+    let raw = std::fs::canonicalize(&real).unwrap();
+    #[cfg(unix)]
+    let raw = dir.path().join(".").join("song.flac");
+    let ghost_key = format!("local:{}", raw.display());
+    assert_ne!(ghost_key, canon_key, "测试前置：ghost 键必须非规范");
+    db.conn
+        .execute(
+            "INSERT INTO tracks (source, source_key, title) VALUES ('local', ?1, ?1)",
+            params![ghost_key],
+        )
+        .unwrap();
+    let gid: i64 = db
+        .conn
+        .query_row(
+            "SELECT id FROM tracks WHERE source='local' AND source_key=?1",
+            params![ghost_key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO local_files (track_id, path) VALUES (?1, ?2)",
+            params![gid, raw.display().to_string()],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO relations (entity_type, provider, entity_key, relation, \
+             desired_state, sync_state, updated_at) \
+             VALUES ('track','local',?1,'liked',1,'synced',0)",
+            params![ghost_key],
+        )
+        .unwrap();
+    db.create_playlist("深夜循环").unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at) \
+             VALUES (1, ?1, 0, 0)",
+            params![gid],
+        )
+        .unwrap();
+    // 播放历史挂在 verbatim 行上（resolve_local 播放即建行；play_events FK 无
+    // CASCADE，不先并入会让 DELETE tracks 失败、迁移整体回滚——§18 实机首跑
+    // 即中招）。
+    db.conn
+        .execute(
+            "INSERT INTO play_events (track_id, started_at, listened_ms) VALUES (?1, 1, 60)",
+            params![gid],
+        )
+        .unwrap();
+
+    db.merge_noncanonical_local_tracks().unwrap();
+
+    // verbatim 行删除、行数回到 1；relation 与歌单链接都指向扫描行
+    let count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM tracks WHERE source = 'local'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(
+        db.relation_desired("track", "local", &canon_key, "liked")
+            .unwrap(),
+        Some(true)
+    );
+    let linked: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM playlist_tracks WHERE track_id = ?1",
+            params![tid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(linked, 1);
+    let history: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM play_events WHERE track_id = ?1",
+            params![tid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(history, 1, "播放历史应并入存活行而非阻塞删除");
+    let orphaned: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM local_files WHERE track_id = ?1",
+            params![gid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphaned, 0, "verbatim 行的 local_files 子行应一并删除");
+    // 幂等：再跑一遍零变化
+    db.merge_noncanonical_local_tracks().unwrap();
+    assert_eq!(
+        db.conn
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE source='local'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+/// v7 迁移 re-key 分支：规范行缺席 → tracks.source_key / local_files.path
+/// 就地归一；归一后 add_local_file 幂等命中同一行，不再衍生重复行。
+#[test]
+fn merge_noncanonical_local_tracks_rekeys_when_target_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("lonely.flac");
+    std::fs::write(&real, b"x").unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    #[cfg(windows)]
+    let raw = std::fs::canonicalize(&real).unwrap();
+    #[cfg(unix)]
+    let raw = dir.path().join(".").join("lonely.flac");
+    let ghost_key = format!("local:{}", raw.display());
+    db.conn
+        .execute(
+            "INSERT INTO tracks (source, source_key, title) VALUES ('local', ?1, ?1)",
+            params![ghost_key],
+        )
+        .unwrap();
+    let gid: i64 = db
+        .conn
+        .query_row(
+            "SELECT id FROM tracks WHERE source='local' AND source_key=?1",
+            params![ghost_key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO local_files (track_id, path) VALUES (?1, ?2)",
+            params![gid, raw.display().to_string()],
+        )
+        .unwrap();
+
+    db.merge_noncanonical_local_tracks().unwrap();
+
+    let canon_key = format!("local:{}", crate::canonical_display_path(&real).display());
+    let key: String = db
+        .conn
+        .query_row(
+            "SELECT source_key FROM tracks WHERE source='local'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(key, canon_key);
+    let path: String = db
+        .conn
+        .query_row(
+            "SELECT path FROM local_files WHERE track_id = ?1",
+            params![gid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(path, canon_key.strip_prefix("local:").unwrap());
+    // 归一后 add_local_file 幂等命中同一行（不衍生重复行）
+    let tid = db.add_local_file(&real, None).unwrap();
+    assert_eq!(tid, gid);
+    let count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM tracks WHERE source='local'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
 }
 
 /// CoverGet 本地产物回写：按远程 URL 匹配改写 cover_uri（同 URL 多曲全改；
