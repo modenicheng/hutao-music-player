@@ -22,7 +22,7 @@ fn main() -> Result<(), slint::PlatformError> {
         hmp_desktop::Quality::get(&ui).set_selected(loaded.quality);
     }
 
-    bridge::load_data(&ui);
+    bridge::load_data(&ui, &runtime);
     bridge::bind(&ui, Arc::clone(&prefs), Arc::clone(&runtime));
     // 播放桥：连接/拉起 daemon → 订阅状态推送；彻底失败降级离线
     // （Player 全空、命令 no-op），UI 照常打开。

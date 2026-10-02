@@ -192,6 +192,16 @@ fn spawn_discover_load(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::B
                     data.set_discover_state(if empty { 3 } else { 2 });
                     // 模型落地后补真图（占位渐变 → 真实封面）
                     crate::online_covers::refresh_discover_covers(ui.as_weak(), &runtime);
+                    // 新歌行封面预取（DiscoverNewSong.picurl 是套好模板的完整地址）
+                    crate::track_covers::prefetch_tracks(
+                        &ui,
+                        &runtime,
+                        page.new_songs
+                            .iter()
+                            .filter(|s| !s.picurl.is_empty())
+                            .map(|s| (s.mid.clone(), s.picurl.clone()))
+                            .collect(),
+                    );
                 }
                 _ => {
                     data.set_discover_state(4);
@@ -216,6 +226,7 @@ fn spawn_top_detail_load(
         return;
     };
     let weak = ui_weak;
+    let rt = Arc::clone(runtime);
     runtime.spawn(async move {
         // 置加载态在 tokio 线程（同 discover：事件循环栈内 invoke 会挂 TestingBackend 泵）
         let w0 = weak.clone();
@@ -234,6 +245,7 @@ fn spawn_top_detail_load(
             page: 1,
         })
         .await;
+        let rt2 = Arc::clone(&rt);
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
             let data = Data::get(&ui);
@@ -265,6 +277,16 @@ fn spawn_top_detail_load(
                     data.set_top_detail_total(total);
                     data.set_top_detail_found(true);
                     data.set_top_detail_state(2);
+                    // 榜单行封面预取（同 discover 新歌行：picurl 已是完整地址）
+                    crate::track_covers::prefetch_tracks(
+                        &ui,
+                        &rt2,
+                        page.songs
+                            .iter()
+                            .filter(|s| !s.picurl.is_empty())
+                            .map(|s| (s.mid.clone(), s.picurl.clone()))
+                            .collect(),
+                    );
                 }
                 Ok(hmp_core::Response::TopDetail(_)) => {
                     data.set_top_detail_state(3);
@@ -461,8 +483,8 @@ fn spawn_login_poll_loop(
 
 /// 把媒体库快照（直读 library.sqlite3，离线降级为空）装载进 Data global：
 /// 五个库页真数据；下载/已购两页后端无对应域，渲染为诚实空态。
-pub fn load_data(ui: &AppWindow) {
-    apply_snapshot(ui, &library_view::load_snapshot());
+pub fn load_data(ui: &AppWindow, runtime: &Arc<crate::backend::BackendRuntime>) {
+    apply_snapshot(ui, runtime, &library_view::load_snapshot());
 }
 
 /// 库变更刷新（`Event::LibraryChanged` 驱动，AUDIT §8.9）：防抖合并 + 后台
@@ -486,6 +508,7 @@ pub fn schedule_refresh(ui: &AppWindow, runtime: &Arc<crate::backend::BackendRun
             let route = nav.get_route();
             let param = nav.get_param();
             let ui_weak = ui_weak.clone();
+            let rt = Arc::clone(&runtime);
             runtime.spawn(async move {
                 // 阻塞 rusqlite 在 runtime 工作线程执行（与 backend 队列
                 // 投影同惯例；投影数据均为纯数据，满足 Send）。
@@ -495,15 +518,19 @@ pub fn schedule_refresh(ui: &AppWindow, runtime: &Arc<crate::backend::BackendRun
                     let Some(ui) = ui_weak.upgrade() else {
                         return;
                     };
-                    apply_snapshot(&ui, &snap);
-                    apply_detail(&ui, &detail);
+                    apply_snapshot(&ui, &rt, &snap);
+                    apply_detail(&ui, &rt, &detail);
                 });
             });
         });
     });
 }
 
-fn apply_snapshot(ui: &AppWindow, snap: &library_view::Snapshot) {
+fn apply_snapshot(
+    ui: &AppWindow,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    snap: &library_view::Snapshot,
+) {
     let data = Data::get(ui);
 
     // ——— 我喜欢 ———
@@ -539,6 +566,17 @@ fn apply_snapshot(ui: &AppWindow, snap: &library_view::Snapshot) {
     data.set_recent_count(snap.recent.len() as i32);
     data.set_recent_latest(snap.recent_latest.clone().into());
     data.set_recent_earliest(snap.recent_earliest.clone().into());
+
+    // 曲目封面预取：QQ 行 remote_cover 批量经 daemon CoverGet 换本地产物
+    // （打开列表即取图，命中 daemon 盘缓存零出网；回包广播回填各列表）。
+    crate::track_covers::prefetch_tracks(
+        ui,
+        runtime,
+        crate::track_covers::targets_from_rows(&snap.liked)
+            .into_iter()
+            .chain(crate::track_covers::targets_from_rows(&snap.recent))
+            .collect(),
+    );
 
     // ——— 音乐库（本地）：曲目表 + 扫描根聚合统计 ———
     let all_local_rows: Vec<TrackRow> = snap
@@ -627,8 +665,13 @@ fn apply_snapshot(ui: &AppWindow, snap: &library_view::Snapshot) {
 
 /// 路由落地后的详情装载（导航路径：单次同步读，单页查询量小；库变更刷新
 /// 路径走后台预计算 + [`apply_detail`]）。found=false → 页面诚实空态。
-fn apply_route(ui: &AppWindow, route: crate::Route, param: SharedString) {
-    apply_detail(ui, &load_detail(route, &param));
+fn apply_route(
+    ui: &AppWindow,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    route: crate::Route,
+    param: SharedString,
+) {
+    apply_detail(ui, runtime, &load_detail(route, &param));
 }
 
 /// 详情页数据（纯数据、Send——供库变更刷新在后台线程预算）。
@@ -655,7 +698,11 @@ fn load_detail(route: crate::Route, param: &str) -> DetailData {
     }
 }
 
-fn apply_detail(ui: &AppWindow, detail: &DetailData) {
+fn apply_detail(
+    ui: &AppWindow,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    detail: &DetailData,
+) {
     let data = Data::get(ui);
     match detail {
         DetailData::Playlist(param, Some(detail)) => {
@@ -673,6 +720,13 @@ fn apply_detail(ui: &AppWindow, detail: &DetailData) {
             data.set_playlist_tracks(model(
                 detail.tracks.iter().map(SongRow::to_track_row).collect(),
             ));
+            // 打开歌单即预取曲目封面（用户预期：进列表就该看到封面而非
+            // 占位盘）；daemon 盘缓存命中零出网，回包广播回填。
+            crate::track_covers::prefetch_tracks(
+                ui,
+                runtime,
+                crate::track_covers::targets_from_rows(&detail.tracks),
+            );
         }
         DetailData::Playlist(_, None) => data.set_playlist_found(false),
         DetailData::Album(Some(detail)) => {
@@ -699,6 +753,11 @@ fn apply_detail(ui: &AppWindow, detail: &DetailData) {
             data.set_album_tracks(model(
                 detail.tracks.iter().map(SongRow::to_track_row).collect(),
             ));
+            crate::track_covers::prefetch_tracks(
+                ui,
+                runtime,
+                crate::track_covers::targets_from_rows(&detail.tracks),
+            );
         }
         DetailData::Album(None) => data.set_album_found(false),
         DetailData::Artist(Some(detail)) => {
@@ -714,6 +773,11 @@ fn apply_detail(ui: &AppWindow, detail: &DetailData) {
             data.set_artist_tracks(model(
                 detail.tracks.iter().map(SongRow::to_track_row).collect(),
             ));
+            crate::track_covers::prefetch_tracks(
+                ui,
+                runtime,
+                crate::track_covers::targets_from_rows(&detail.tracks),
+            );
             data.set_artist_albums(model(
                 detail
                     .albums
@@ -772,7 +836,7 @@ pub fn bind(
             nav.set_route(route);
             nav.set_param(param.clone());
             nav.set_can_go_back(!history.lock().expect("nav history").is_empty());
-            apply_route(&ui, nav.get_route(), nav.get_param());
+            apply_route(&ui, &rt, nav.get_route(), nav.get_param());
             // M4 在线内容页进入时懒加载（免登录页自动拉，猜你喜欢需登录）
             match route {
                 crate::Route::Home => {
@@ -799,6 +863,7 @@ pub fn bind(
     {
         let history = Arc::clone(&history);
         let ui_weak: Weak<AppWindow> = ui.as_weak();
+        let rt = Arc::clone(&nav_rt);
         nav.on_back(move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -810,7 +875,7 @@ pub fn bind(
                 nav.set_param(param);
             }
             nav.set_can_go_back(!history.lock().expect("nav history").is_empty());
-            apply_route(&ui, nav.get_route(), nav.get_param());
+            apply_route(&ui, &rt, nav.get_route(), nav.get_param());
         });
     }
 
@@ -1078,6 +1143,7 @@ pub fn bind(
             }
             apply_state(1, ui_weak.clone());
             let weak = ui_weak.clone();
+            let rt2 = Arc::clone(&rt);
             rt.spawn(async move {
                 let result = crate::backend::request(hmp_core::Request::GuessGet { page: 1 }).await;
                 let _ = slint::invoke_from_event_loop(move || {
@@ -1100,6 +1166,16 @@ pub fn bind(
                             data.set_guess_tracks(model(tracks));
                             data.set_guess_cards(model(cards));
                             data.set_guess_state(2);
+                            // 猜你喜欢行封面预取（同 discover 新歌行）
+                            crate::track_covers::prefetch_tracks(
+                                &ui,
+                                &rt2,
+                                page.songs
+                                    .iter()
+                                    .filter(|s| !s.picurl.is_empty())
+                                    .map(|s| (s.mid.clone(), s.picurl.clone()))
+                                    .collect(),
+                            );
                         }
                         Ok(hmp_core::Response::Guess(_)) => {
                             data.set_guess_state(3);
@@ -1126,6 +1202,7 @@ pub fn bind(
                 }
             });
             let rt = Arc::clone(&rt_guess);
+            let rt2 = Arc::clone(&rt);
             rt.spawn(async move {
                 let result = crate::backend::request(hmp_core::Request::GuessGet { page: 1 }).await;
                 let _ = slint::invoke_from_event_loop(move || {
@@ -1140,6 +1217,16 @@ pub fn bind(
                                 page.songs.iter().map(discover_track_row).collect();
                             data.set_guess_tracks(model(tracks));
                             data.set_guess_state(2);
+                            // 登录后自动触发的猜你喜欢装载同款预取
+                            crate::track_covers::prefetch_tracks(
+                                &ui,
+                                &rt2,
+                                page.songs
+                                    .iter()
+                                    .filter(|s| !s.picurl.is_empty())
+                                    .map(|s| (s.mid.clone(), s.picurl.clone()))
+                                    .collect(),
+                            );
                         }
                         Ok(hmp_core::Response::Guess(_)) => {
                             data.set_guess_state(3);

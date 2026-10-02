@@ -19,7 +19,7 @@ fn row() -> TrackRow {
 #[test]
 fn migration_creates_v1() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 7); // v7：非规范键本地行合并
+    assert_eq!(db.version().unwrap(), 8); // v8：封面 URL → 本地产物索引
     let mut db = db;
     assert_eq!(db.track_id("qq", "mid123").unwrap(), None);
 }
@@ -169,7 +169,7 @@ fn migration_v2_migrates_favorites_into_relations() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        7
+        8
     );
     // favorites 表已删除；数据在 relations（track/liked，synced）。
     let count: i64 = conn
@@ -697,7 +697,7 @@ fn mark_pending_with_delete_op_rolls_back_on_op_failure() {
 #[test]
 fn migration_v3_adds_columns_and_tables() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 7);
+    assert_eq!(db.version().unwrap(), 8);
     let cols: Vec<String> = db
         .conn
         .prepare("PRAGMA table_info(local_files)")
@@ -771,7 +771,7 @@ fn migration_v2_to_v3_upgrades_in_place() {
         .conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 7);
+    assert_eq!(v, 8);
     db.conn
         .execute("UPDATE tracks SET genre='Rock' WHERE id=1", [])
         .unwrap();
@@ -1450,4 +1450,103 @@ fn rebind_cover_url_rewrites_matching_tracks() {
     // 幂等：已是目标值 → 零行写入
     let n2 = db.rebind_cover_url(url_x, &local).unwrap();
     assert_eq!(n2, 0, "重复回写幂等");
+}
+
+/// upsert 封面保护：已 rebind 的 file:// 行不被 reconcile/播放 upsert 携带的
+/// 远程 URL 打回；file:// 对 file://（扫描重提取换图）仍放行更新。
+#[test]
+fn upsert_cover_remote_url_never_demotes_local_file() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let url = "https://y.gtimg.cn/music/photo_new/T002R300x300M000X.jpg";
+    let rebound = "file://C:/Users/u/AppData/Local/hmp/covers/aa.jpg";
+
+    // QQ 行 NULL → 远程 URL 入库（reconcile 带封面入库的正常路径）
+    let id = db
+        .upsert_track(&TrackRow {
+            cover_uri: Some(url.into()),
+            ..row()
+        })
+        .unwrap();
+    // rebind 成本地产物
+    db.rebind_cover_url(url, rebound).unwrap();
+    // 再次 upsert 携带远程 URL（下一轮 reconcile）→ 不得降级
+    db.upsert_track(&TrackRow {
+        cover_uri: Some(url.into()),
+        ..row()
+    })
+    .unwrap();
+    let uri: String = db
+        .conn
+        .query_row(
+            "SELECT cover_uri FROM tracks WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(uri, rebound, "file:// 不被远程 URL 覆盖");
+
+    // 本地扫描重提取（内容哈希变 → 新 file:// 路径）→ 放行更新
+    let local_a = "file://C:/Users/u/AppData/Local/hmp/covers/old.jpg";
+    let local_id = db
+        .upsert_track(&TrackRow {
+            source: "local",
+            source_key: "local:C:/m/a.flac".into(),
+            title: "本地曲".into(),
+            cover_uri: Some(local_a.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let newer = "file://C:/Users/u/AppData/Local/hmp/covers/bb.jpg";
+    db.set_track_cover("local:C:/m/a.flac", newer).unwrap();
+    let local_uri: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT cover_uri FROM tracks WHERE id = ?1",
+            params![local_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(local_uri.as_deref(), Some(newer), "file:// 对 file:// 放行");
+
+    // upsert 不带封面（播放路径 stub）→ 保留既有值（COALESCE 原语义）
+    db.upsert_track(&TrackRow {
+        cover_uri: None,
+        ..row()
+    })
+    .unwrap();
+    let after: String = db
+        .conn
+        .query_row(
+            "SELECT cover_uri FROM tracks WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, rebound, "NULL upsert 保留既有封面");
+}
+
+/// cover_cache 索引（v8）：写后可读、重复写幂等覆盖、未命中 None。
+#[test]
+fn cover_cache_roundtrip() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let url = "https://y.gtimg.cn/music/photo_new/T002R300x300M000X.jpg";
+    assert_eq!(db.cover_cache_get(url).unwrap(), None, "未命中");
+
+    db.cover_cache_put(url, "file://covers/aa.jpg").unwrap();
+    assert_eq!(
+        db.cover_cache_get(url).unwrap().as_deref(),
+        Some("file://covers/aa.jpg")
+    );
+
+    // 同 URL 重复下载（不应发生，防御性）：幂等覆盖
+    db.cover_cache_put(url, "file://covers/bb.jpg").unwrap();
+    assert_eq!(
+        db.cover_cache_get(url).unwrap().as_deref(),
+        Some("file://covers/bb.jpg")
+    );
+    let n: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM cover_cache", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "同 URL 只占一行");
 }

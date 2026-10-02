@@ -45,7 +45,9 @@ pub(crate) fn normalize_cover_url(url: &str) -> Option<String> {
 
 /// 专辑 pmid → 封面 URL（T002R300x300M000 模板，与 daemon player.rs /
 /// 桌面 app.rs 同款；空 pmid → 空串，UI 保持程序化占位）。
-fn cover_url_from_pmid(pmid: &str) -> String {
+/// reconcile 入库（`qq_track_row`）同用：库内行从落地起就携带可回查的
+/// 封面 URL，CoverGet 盘缓存/桌面预取以此为键。
+pub(crate) fn cover_url_from_pmid(pmid: &str) -> String {
     if pmid.is_empty() {
         return String::new();
     }

@@ -73,9 +73,8 @@ fn live_daemon_playback_operations() {
 
     let ui = AppWindow::new().unwrap();
     ui.window().set_size(slint::PhysicalSize::new(1280, 800));
-    bridge::load_data(&ui);
-
     let runtime = Arc::new(backend::BackendRuntime::new().unwrap());
+    bridge::load_data(&ui, &runtime);
     let prefs = Arc::new(Mutex::new(prefs::load()));
     player_bridge::bind(&ui, Arc::clone(&runtime), prefs);
 

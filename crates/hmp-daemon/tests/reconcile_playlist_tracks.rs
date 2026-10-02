@@ -35,17 +35,28 @@ fn req0(req: &Request) -> serde_json::Value {
 
 /// 歌单快照响应（CgiGetDiss data）：给定的歌曲键值对按序入 songlist。
 fn diss_data(songs: &[(&str, &str)]) -> serde_json::Value {
+    diss_data_with_pmid(
+        &songs
+            .iter()
+            .map(|(mid, name)| (*mid, *name, ""))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// 同 [`diss_data`]，歌曲另带专辑封面 pmid（上游 `album.logo`）——封面
+/// 入库回归（reconcile 带封面落地）的输入形态。
+fn diss_data_with_pmid(songs: &[(&str, &str, &str)]) -> serde_json::Value {
     let songlist: Vec<serde_json::Value> = songs
         .iter()
         .enumerate()
-        .map(|(i, (mid, name))| {
+        .map(|(i, (mid, name, pmid))| {
             serde_json::json!({
                 "id": 1000 + i,
                 "mid": mid,
                 "name": name,
                 "type": 1,
                 "singer": [{"singerName": format!("歌手{i}")}],
-                "album": {"albumName": format!("专辑{i}")},
+                "album": {"albumName": format!("专辑{i}"), "logo": pmid},
                 "interval": 180 + i as i64,
             })
         })
@@ -259,6 +270,74 @@ fn owned_row(db: &mut LibraryDb) -> hmp_storage::PlaylistRow {
         .into_iter()
         .find(|p| p.relation == "owned")
         .expect("owned 歌单行应存在")
+}
+
+/// 封面入库回归（2026-10-03「大部分歌曲封面显示不出来」根因之一）：
+/// 快照歌曲带专辑 pmid → `tracks.cover_uri` 落 T002 模板 URL（此前恒 NULL，
+/// 库内曲目无任何封面线索，桌面列表只能程序化占位）；空 pmid → NULL。
+/// rebind 成 file:// 的行再次 reconcile 不得被远程 URL 降级（upsert CASE 保护）。
+#[tokio::test]
+async fn reconcile_tracks_carry_cover_url_and_rebind_survives_resync() {
+    let _lock = ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::install(dir.path());
+    save_credential(dir.path());
+
+    let server = MockServer::start().await;
+    mount_listings(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/cgi-bin/musicu.fcg"))
+        .and(diss_by_disstid(OWNED_TID))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(envelope(diss_data_with_pmid(&[
+                ("m-1", "歌一", "alPmid1"),
+                ("m-2", "歌二", ""),
+            ]))),
+        )
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server.uri());
+    let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+    let credential = {
+        let store: Box<dyn hmp_storage::credential::CredentialStore> =
+            hmp_storage::credential::store_from_env();
+        store.load().unwrap().expect("凭证已落盘")
+    };
+
+    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib).await;
+
+    let url_m1 = "https://y.gtimg.cn/music/photo_new/T002R300x300M000alPmid1.jpg";
+    let local = "file://C:/covers/aa.jpg";
+    {
+        let mut db = lib.lock().unwrap();
+        let meta = db.track_meta_batch("qq", &["m-1".to_owned(), "m-2".to_owned()]).unwrap();
+        assert_eq!(
+            meta.iter().find(|m| m.source_key == "m-1").unwrap().cover_uri.as_deref(),
+            Some(url_m1),
+            "pmid 应套 T002 模板入库"
+        );
+        assert!(
+            meta.iter()
+                .find(|m| m.source_key == "m-2")
+                .unwrap()
+                .cover_uri
+                .is_none(),
+            "空 pmid 不落封面"
+        );
+        // 模拟 UI 经 CoverGet 取图后的 rebind 回写
+        db.rebind_cover_url(url_m1, local).unwrap();
+    }
+
+    // 二轮 reconcile（同快照重放）→ file:// 不得被远程 URL 打回
+    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib).await;
+    let mut db = lib.lock().unwrap();
+    let meta = db.track_meta_batch("qq", &["m-1".to_owned()]).unwrap();
+    assert_eq!(
+        meta[0].cover_uri.as_deref(),
+        Some(local),
+        "rebind 后的本地产物在重放 reconcile 后仍保留"
+    );
 }
 
 #[tokio::test]

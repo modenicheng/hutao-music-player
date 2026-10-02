@@ -150,7 +150,7 @@ async fn repair_stub_metadata(client: &QqMusicClient, library: &Arc<Mutex<Librar
                     .join(", "),
             ),
             album: (!song.album.name.is_empty()).then(|| song.album.name.clone()),
-            cover_uri: None, // COALESCE 保留既有封面；远程 URL 由 CoverGet 回写接管
+            cover_uri: cover_uri_from_song(&song), // COALESCE/CASE 只补齐不降级
             ..Default::default()
         };
         match lib.upsert_track(&row) {
@@ -535,6 +535,8 @@ fn apply_playlist_track_snapshot(
 }
 
 /// 远端 `Song` → 全量元数据曲目行（入库后桌面/CLI 经 track_meta_batch 补全展示）。
+/// cover_uri 从落地起就带 T002 模板 URL（此前 None——库内 99% 曲目无任何封面
+/// 线索，桌面列表只能程序化占位；UI 侧经 CoverGet 盘缓存换本地产物）。
 fn qq_track_row(song: &Song) -> hmp_storage::TrackRow {
     hmp_storage::TrackRow {
         source: "qq",
@@ -549,10 +551,17 @@ fn qq_track_row(song: &Song) -> hmp_storage::TrackRow {
         }),
         album: (!song.album.name.is_empty()).then(|| song.album.name.clone()),
         duration_ms: (song.interval > 0).then(|| song.interval * 1000),
-        cover_uri: None, // 远程 URL 由 CoverGet 域守卫链路接管，不入库
+        cover_uri: cover_uri_from_song(song),
         qq_song_id: (song.id > 0).then_some(song.id),
         ..Default::default()
     }
+}
+
+/// Song → 封面 URI（专辑 pmid 套 T002 模板；空 pmid → None，upsert COALESCE
+/// 保留既有值）。file:// 已 rebind 的行由 upsert 的 CASE 分支保护不降级。
+fn cover_uri_from_song(song: &Song) -> Option<String> {
+    let url = crate::content::cover_url_from_pmid(&song.album.pmid);
+    (!url.is_empty()).then_some(url)
 }
 
 /// 收藏专辑 → relations(album, qq, album_id, liked)。

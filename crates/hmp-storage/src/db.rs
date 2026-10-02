@@ -336,7 +336,14 @@ impl LibraryDb {
                  album = COALESCE(excluded.album, tracks.album),
                  artist = COALESCE(excluded.artist, tracks.artist),
                  duration_ms = COALESCE(excluded.duration_ms, tracks.duration_ms),
-                 cover_uri = COALESCE(excluded.cover_uri, tracks.cover_uri),
+                 cover_uri = CASE
+                   -- 本地产物（file://）是终态：reconcile/播放 upsert 携带的
+                   -- 远程 URL 不得把已 rebind 的行打回远程形态（否则 UI 投影
+                   -- 退化回占位，还要再走一轮 CoverGet 才能恢复）。file:// 对
+                   -- file:// 仍放行——扫描重提取的内嵌图换图（内容哈希变路径）可生效。
+                   WHEN tracks.cover_uri LIKE 'file://%' AND excluded.cover_uri LIKE 'http%'
+                     THEN tracks.cover_uri
+                   ELSE COALESCE(excluded.cover_uri, tracks.cover_uri) END,
                  album_artist = COALESCE(excluded.album_artist, tracks.album_artist),
                  track_number = COALESCE(excluded.track_number, tracks.track_number),
                  disc_number = COALESCE(excluded.disc_number, tracks.disc_number),
@@ -908,6 +915,29 @@ impl LibraryDb {
              WHERE cover_uri = ?1 AND cover_uri <> ?2",
             params![remote_url, local_uri],
         )
+    }
+
+    /// 封面 URL → 本地产物索引读（v8，daemon `CoverGet` 盘级缓存：
+    /// 同一 URL 全生命周期只下载一次，命中零出网）。封面 URL 内嵌
+    /// 专辑 pmid，pmid 变则 URL 变——按 URL 缓存即内容寻址，无需 TTL。
+    pub fn cover_cache_get(&mut self, url: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT file_uri FROM cover_cache WHERE url = ?1",
+                params![url],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    /// 封面 URL → 本地产物索引写（下载落盘成功后调用；重复下载幂等覆盖）。
+    pub fn cover_cache_put(&mut self, url: &str, file_uri: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO cover_cache (url, file_uri, fetched_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(url) DO UPDATE SET file_uri = ?2, fetched_at = ?3",
+            params![url, file_uri, now_unix()],
+        )?;
+        Ok(())
     }
 
     /// 歌单封面回写（reconcile 取得本地产物后调用；仅未设置时写入——
@@ -2351,8 +2381,34 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
             }
         }
     }
+    if current < 8 {
+        // v8：封面 URL → 本地产物索引（daemon CoverGet 盘级缓存）。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute_batch(MIGRATION_V8)?;
+            conn.pragma_update(None, "user_version", 8)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+    }
     Ok(())
 }
+
+/// v8：封面 URL → 本地产物索引（daemon `CoverGet` 下载落盘后登记，
+/// 后续同 URL 请求直接命中，零出网）。
+const MIGRATION_V8: &str = r#"
+CREATE TABLE cover_cache (
+  url TEXT PRIMARY KEY,
+  file_uri TEXT NOT NULL,
+  fetched_at INTEGER NOT NULL
+);
+"#;
 
 /// v6：playlists 封面 URI。
 const MIGRATION_V6: &str = "ALTER TABLE playlists ADD COLUMN cover_uri TEXT;";

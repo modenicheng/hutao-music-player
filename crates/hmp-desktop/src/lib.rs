@@ -11,6 +11,7 @@ pub mod lyrics;
 pub mod online_covers;
 pub mod player_bridge;
 pub mod prefs;
+pub mod track_covers;
 pub mod track_theme;
 
 pub use lyrics::parse_lrc;

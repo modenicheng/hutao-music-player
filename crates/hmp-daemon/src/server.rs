@@ -619,30 +619,52 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             write_frame(wr, &resp).await?;
         }
         Ok(Request::CoverGet { url }) => {
-            let resp = match &handle.content {
-                Some(svc) => match svc.cover(&url).await {
-                    Ok(path) => {
-                        // 本地产物回写媒体库：播放解析落库的是远程 https URL，
-                        // UI 禁直连 HTTP——回写后队列/列表投影直接读盘渲染
-                        // （按 URL 匹配幂等；失败仅丢回写不影响本次返回）。
-                        if let Some(library) = &handle.library {
-                            if let Ok(mut db) = library.lock() {
-                                if let Err(e) = db.rebind_cover_url(&url, &path) {
-                                    tracing::warn!(%e, "cover rebind failed");
+            // 盘级索引优先（v8 cover_cache）：同 URL 已下载过 → 直接回本地产物，
+            // 零出网。URL 内嵌专辑 pmid（pmid 变则 URL 变），按 URL 缓存即内容寻址；
+            // 键取归一化形态，与 reconcile 入库/播放路径写入的模板 URL 同构。
+            let cache_key =
+                crate::content::normalize_cover_url(&url).unwrap_or_else(|| url.clone());
+            let cached = match &handle.library {
+                Some(library) => library.lock().ok().and_then(|mut db| {
+                    db.cover_cache_get(&cache_key).ok().flatten()
+                }),
+                None => None,
+            };
+            let resp = if let Some(path) = cached {
+                if let Some(library) = &handle.library {
+                    if let Ok(mut db) = library.lock() {
+                        let _ = db.rebind_cover_url(&cache_key, &path);
+                    }
+                }
+                Response::Cover(path)
+            } else {
+                match &handle.content {
+                    Some(svc) => match svc.cover(&url).await {
+                        Ok(path) => {
+                            // 本地产物回写媒体库：播放解析落库的是远程 https URL，
+                            // UI 禁直连 HTTP——回写后队列/列表投影直接读盘渲染
+                            // （按 URL 匹配幂等；失败仅丢回写不影响本次返回）。
+                            // 同步登记盘级索引，下次同 URL 直接命中。
+                            if let Some(library) = &handle.library {
+                                if let Ok(mut db) = library.lock() {
+                                    let _ = db.cover_cache_put(&cache_key, &path);
+                                    if let Err(e) = db.rebind_cover_url(&cache_key, &path) {
+                                        tracing::warn!(%e, "cover rebind failed");
+                                    }
                                 }
                             }
+                            Response::Cover(path)
                         }
-                        Response::Cover(path)
-                    }
-                    Err(message) => Response::Err {
-                        code: IpcErrorCode::Internal,
-                        message,
+                        Err(message) => Response::Err {
+                            code: IpcErrorCode::Internal,
+                            message,
+                        },
                     },
-                },
-                None => Response::Err {
-                    code: IpcErrorCode::Internal,
-                    message: "content service unavailable".into(),
-                },
+                    None => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message: "content service unavailable".into(),
+                    },
+                }
             };
             write_frame(wr, &resp).await?;
         }

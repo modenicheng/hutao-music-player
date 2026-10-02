@@ -54,9 +54,12 @@ pub struct SongRow {
     pub duration_ms: i32,
     /// 音质徽章文案；无损以下为空（对齐 mock 纪律）。
     pub quality: String,
-    /// 本地封面 URI（`file://…`，扫描期 extract 落盘）；QQ http 封面不落 UI
-    /// （项目原则禁 HTTP）→ None，渲染时走程序化封面。
+    /// 本地封面 URI（`file://…`，扫描提取/rebind 回写产物）；缺失 → 渲染时
+    /// 走程序化封面。QQ http 封面不落此列（项目原则禁 HTTP）。
     pub cover_uri: Option<String>,
+    /// QQ 远程封面 URL（库内 tracks.cover_uri 的 http 形态，预取输入）：
+    /// UI 禁直连 HTTP，交列表预取器经 daemon CoverGet 换本地产物后原地补图。
+    pub remote_cover: Option<String>,
     /// 命中的扫描根（本地行；监视文件夹过滤的分组归属，来自 root 前缀匹配）。
     pub folder: Option<String>,
 }
@@ -214,20 +217,8 @@ fn liked_rows(
         favs.into_iter()
             .map(|f| match f.source.as_str() {
                 "local" => match local_by_key.get(f.source_key.as_str()) {
-                    Some(t) => SongRow {
-                        mid: t.source_key.clone(),
-                        source: 1,
-                        title: t.title.clone(),
-                        artists: t.artist.clone().unwrap_or_default(),
-                        album: t.album.clone().unwrap_or_default(),
-                        duration_ms: t.duration_ms.unwrap_or(0) as i32,
-                        quality: quality_text(format_of_key(&t.source_key)),
-                        cover_uri: t
-                            .album
-                            .as_deref()
-                            .and_then(|album| album_covers.get(album).cloned()),
-                        folder: None,
-                    },
+                    // 与详情投影共用口径（时长/音质/封面按专辑聚合）
+                    Some(t) => song_row_from_local(t, album_covers),
                     // 收藏先于扫描入库（无 local_files 行）：稀疏行诚实展示。
                     None => SongRow {
                         mid: f.source_key.clone(),
@@ -238,11 +229,12 @@ fn liked_rows(
                         duration_ms: 0,
                         quality: quality_text(format_of_key(&f.source_key)),
                         cover_uri: None,
+                        remote_cover: None,
                         folder: None,
                     },
                 },
-                // QQ 行：时长/歌手/专辑走 track_meta_batch 库内缓存（http 封面
-                // UI 禁网）→ 程序化占位。
+                // QQ 行：时长/歌手/专辑/封面走 track_meta_batch 库内缓存
+                // （远程封面 URL 交预取器，见 song_row_from_qq）。
                 _ => song_row_from_qq(&f.source_key, f.title, qq_meta.get(f.source_key.as_str())),
             })
             .collect(),
@@ -287,6 +279,7 @@ fn recent_rows(
                             .album
                             .as_deref()
                             .and_then(|album| album_covers.get(album).cloned()),
+                        remote_cover: None,
                         folder: None,
                     },
                     None => {
@@ -300,6 +293,7 @@ fn recent_rows(
                             duration_ms: 0,
                             quality,
                             cover_uri: None,
+                            remote_cover: None,
                             folder: None,
                         }
                     }
@@ -350,6 +344,7 @@ fn local_rows(
                     .album
                     .as_deref()
                     .and_then(|album| album_covers.get(album).cloned()),
+                remote_cover: None,
                 folder: root_idx.map(|i| roots[i].clone()),
             }
         })
@@ -467,6 +462,7 @@ fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
                     duration_ms: 0,
                     quality: quality_text(format_of_key(&row.source_key)),
                     cover_uri: None,
+                    remote_cover: None,
                     folder: None,
                 },
             },
@@ -640,13 +636,22 @@ fn song_row_from_local(t: &LibraryTrackRow, album_covers: &HashMap<String, Strin
             .album
             .as_deref()
             .and_then(|album| album_covers.get(album).cloned()),
+        remote_cover: None,
         folder: None,
     }
 }
 
-/// QQ 行 → SongRow：时长/歌手/专辑走 track_meta_batch 库内缓存（reconcile
-/// 曲目缓存与播放路径写入）；音质/封面无数据源 → 诚实置空。
+/// QQ 行 → SongRow：时长/歌手/专辑/封面走 track_meta_batch 库内缓存（reconcile
+/// 曲目缓存与播放路径写入）。封面分流：`file://`（rebind 回写产物）直接读盘；
+/// 远程 URL 是预取输入（UI 禁直连 HTTP），交列表预取器经 daemon CoverGet 换图；
+/// 全缺 → 程序化占位。此前 cover_uri 无条件置空——库里明明有 rebind 产物，
+/// 列表页也永远显示占位（2026-10-03 封面审计三断点之一）。
 fn song_row_from_qq(source_key: &str, title: String, meta: Option<&TrackMeta>) -> SongRow {
+    let (cover_uri, remote_cover) = match meta.and_then(|m| m.cover_uri.clone()) {
+        Some(uri) if uri.starts_with("http") => (None, Some(uri)),
+        Some(uri) => (Some(uri), None),
+        None => (None, None),
+    };
     SongRow {
         mid: source_key.to_string(),
         source: 0,
@@ -657,7 +662,8 @@ fn song_row_from_qq(source_key: &str, title: String, meta: Option<&TrackMeta>) -
         // 曲目缓存/播放路径写入）——此前恒 0，详情页"总时长"永远 0:00。
         duration_ms: meta.and_then(|m| m.duration_ms).unwrap_or(0) as i32,
         quality: String::new(),
-        cover_uri: None,
+        cover_uri,
+        remote_cover,
         folder: None,
     }
 }
@@ -1135,6 +1141,44 @@ mod tests {
         // 无缓存行/无时长列 → 诚实 0。
         let row = song_row_from_qq("mid-none", "无时长".into(), None);
         assert_eq!(row.duration_ms, 0);
+    }
+
+    /// QQ 行封面投影（2026-10-03 封面审计回归：此前无条件置空——库里已有
+    /// rebind 产物列表页也显示占位）：file:// → cover_uri 直读盘；http →
+    /// remote_cover 预取输入；两者按 cover_uri 形态分流。
+    #[test]
+    fn qq_row_splits_cover_into_local_and_remote() {
+        let meta = |cover: Option<&str>| hmp_storage::TrackMeta {
+            source: "qq".into(),
+            source_key: "mid".into(),
+            title: "曲".into(),
+            artist: None,
+            album: None,
+            duration_ms: None,
+            cover_uri: cover.map(String::from),
+        };
+        let rebound = song_row_from_qq(
+            "mid",
+            "曲".into(),
+            Some(&meta(Some("file://C:/covers/aa.jpg"))),
+        );
+        assert_eq!(rebound.cover_uri.as_deref(), Some("file://C:/covers/aa.jpg"));
+        assert_eq!(rebound.remote_cover, None, "本地产物不再预取");
+
+        let remote = song_row_from_qq(
+            "mid",
+            "曲".into(),
+            Some(&meta(Some("https://y.gtimg.cn/music/photo_new/T002R300x300M000x.jpg"))),
+        );
+        assert_eq!(remote.cover_uri, None, "http 封面不落 UI 直读列（禁网）");
+        assert_eq!(
+            remote.remote_cover.as_deref(),
+            Some("https://y.gtimg.cn/music/photo_new/T002R300x300M000x.jpg")
+        );
+
+        let none = song_row_from_qq("mid", "曲".into(), Some(&meta(None)));
+        assert_eq!(none.cover_uri, None);
+        assert_eq!(none.remote_cover, None);
     }
 
     /// 专辑详情：按名精确（NOCASE）命中组行与曲目；子串名不误命中。

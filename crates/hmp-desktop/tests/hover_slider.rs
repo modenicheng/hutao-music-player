@@ -54,7 +54,12 @@ fn hover_slider_chain_reports_and_clears() {
 
     let ui = hmp_desktop::AppWindow::new().unwrap();
     ui.window().set_size(slint::PhysicalSize::new(1280, 800));
-    hmp_desktop::bridge::load_data(&ui);
+    hmp_desktop::bridge::load_data(
+        &ui,
+        &std::sync::Arc::new(
+            hmp_desktop::backend::BackendRuntime::new().unwrap(),
+        ),
+    );
 
     // 侧栏歌单区已接真数据（Data.sidebar-*）：测试环境无库为空 → 手动播种，
     // 让歌单行 hover 链路的结构覆盖与媒体库数据来源解耦。

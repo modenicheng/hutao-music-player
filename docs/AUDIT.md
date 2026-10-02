@@ -582,3 +582,49 @@ daemon 依然运行」的另一个形态。
 Quit → 断言 Shutdown 帧先于 EOF，容忍其前的中间状态推送）+
 `event_shutdown_roundtrips_through_frame`（ipc.rs 序列化往返）。
 EOF 语义不变：非优雅死亡依旧无事件。
+
+## §20 封面链路四断点总修 + 列表封面预取（2026-10-03，用户报「大部分歌曲封面显示不出来」+「打开列表就应请求封面并缓存」）
+
+**量化证据**（实机库直查）：4172 首 QQ 曲目中 4167 首 `tracks.cover_uri IS NULL`
+（99.9%），covers/ 目录仅 37 个文件——封面链路实质上只对「恰好播放过的曲 +
+发现页歌单卡」工作，列表页全线占位。
+
+**四个断点**（上游到 UI）：
+1. **入库丢封面**：reconcile `qq_track_row`/`repair_stub_metadata` 手握
+   `song.album.pmid`（API 模型早有该字段）却写 `cover_uri: None`，注释还写着
+   「远程 URL 由 CoverGet 域守卫链路接管」——域守卫只是校验器，不生产 URL。
+   只有「恰好播放过」的曲经播放路径（player.rs T002 模板）落过 URL → 5/4172。
+   → 两处 upsert 带 `cover_url_from_pmid`（T002R300x300M000 模板，与播放路径
+   同款）；空 pmid → None（COALESCE 保留既有）。
+2. **投影丢列**：桌面 `song_row_from_qq` 把 `track_meta_batch` 读出的
+   `cover_uri` 无条件置空（注释「http 封面 UI 禁网 → 程序化占位」）——把
+   「禁直连」错当「禁用」，库里明明有 rebind 回写的 file:// 产物也看不到。
+   → SongRow 拆双列：`cover_uri`（file:// 直读盘）/ `remote_cover`（http，
+   预取输入，UI 不直连）。
+3. **无盘级缓存**：CoverGet 每次请求都出网下载，persist_cover 只按内容去重
+   文件，URL→文件映射只在 tracks.cover_uri 一个地方（还是 NULL）。
+   → v8 迁移 `cover_cache(url PK, file_uri, fetched_at)`：CoverGet 命中索引
+   零出网直接回本地产物（URL 内嵌专辑 pmid，pmid 变则 URL 变，按 URL 缓存即
+   内容寻址，无需 TTL）；下载成功双写索引 + `rebind_cover_url`。
+4. **无预取**：只有 discover 歌单卡与当前播放曲有异步补图，歌曲行列表
+   （歌单详情/我喜欢/榜单/猜你喜欢/最近播放）从不发 CoverGet。
+   → 新模块 `track_covers`：列表落地即按 (mid, url) 清单批量预取（信号量
+   8 并发；进程内 mid|url 去重，失败不重试——下次进页面盘缓存毫秒回）；
+   URL→Image 旁路缓存让刷新重建模型立即拿到图（discover 刷新回退占位的
+   已知缺陷不再复现）；回包广播全部 8 个曲目列表模型（同曲多列表在途竞态
+   一并覆盖）。挂接点：apply_snapshot（我喜欢+最近播放）、歌单/专辑/歌手
+   详情、discover 新歌/榜单/猜你喜欢。
+
+**配套防御**：upsert 的 cover_uri 分支加 CASE——已 rebind 的 `file://` 行
+不得被下一轮 reconcile 携带的远程 URL 打回（否则投影退化回占位还要再走一轮
+CoverGet）；file:// 对 file:// 仍放行（扫描重提取换图可生效）。
+
+**回归**：storage `cover_cache_roundtrip` /
+`upsert_cover_remote_url_never_demotes_local_file`；daemon wiremock
+`reconcile_tracks_carry_cover_url_and_rebind_survives_resync`（pmid 落库 +
+空 pmid 不落 + rebind 存活重放）；desktop `qq_row_splits_cover_into_local_and_remote`、
+`targets_from_rows_keeps_qq_remote_only`、`all_slots_are_distinct_and_complete`。
+
+**已知边界**：存量库的 URL 回填靠 daemon 首轮 reconcile 全量 upsert（4566
+条歌单链接，分钟级）；远端换封面（同 pmid 换图）不会自动失效盘缓存——QQ
+封面 pmid 与图片内容绑定，实际不发生；排行榜分类页头图、歌手照片仍无数据源。

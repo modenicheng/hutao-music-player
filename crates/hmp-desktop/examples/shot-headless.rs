@@ -196,7 +196,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui = hmp_desktop::AppWindow::new()?;
     ui.window().set_size(slint::PhysicalSize::new(1280, 800));
 
-    hmp_desktop::bridge::load_data(&ui);
+    hmp_desktop::bridge::load_data(&ui, &runtime);
     hmp_desktop::bridge::bind(&ui, Arc::clone(&prefs), Arc::clone(&runtime));
     hmp_desktop::player_bridge::bind(&ui, runtime, prefs);
 

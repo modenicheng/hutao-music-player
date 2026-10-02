@@ -7,7 +7,10 @@ use slint::{ComponentHandle, Global, Model};
 fn main() -> Result<(), slint::PlatformError> {
     let ui = hmp_desktop::AppWindow::new()?;
 
-    hmp_desktop::bridge::load_data(&ui);
+    // 装载/回调挂接的 runtime 依赖（本冒烟无 daemon，快照为空 → 零预取任务）
+    let runtime =
+        std::sync::Arc::new(hmp_desktop::backend::BackendRuntime::new().expect("tokio runtime"));
+    hmp_desktop::bridge::load_data(&ui, &runtime);
 
     {
         let player = hmp_desktop::Player::get(&ui);
