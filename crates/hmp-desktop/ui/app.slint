@@ -26,6 +26,9 @@ import { DiscoverPage } from "discover-page.slint";
 import { TopPage } from "top-page.slint";
 import { TopDetailPage } from "top-detail-page.slint";
 import { Nav, Route } from "nav.slint";
+import { Viewport } from "viewport.slint";
+// 再导出：窗口化虚拟化的滚动状态单点出口，Rust 侧测试/探针需读回
+export { Viewport }
 import { Player, Data, Quality, NowPlaying, TrackPalette } from "stores.slint";
 import { Theme } from "theme.slint";
 import { TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData } from "data.slint";
@@ -58,6 +61,14 @@ export component AppWindow inherits Window {
     changed width => {
         Theme.win-width = self.width;
     }
+
+    // —— 顶层 Scroll 滚动状态的对外出口（MEMFIX ④a）———
+    // 双向别名到 Viewport 全局（Slint 全局桥接的唯一合法位：property 声明处）；
+    // page-scroll 的 changed 回调命令式回写，深处组件（track-table 窗口化）
+    // 只读。TestingBackend/无头环境不触发回写 → view-h 保持 0 → 全量渲染回退。
+    property <length> vp-y <=> Viewport.y;
+    property <length> vp-view-h <=> Viewport.view-h;
+    property <length> vp-origin-y <=> Viewport.origin-y;
 
     // —— 侧栏收起状态机（MainLayout.vue：手动切换优先，跨断点回自动）———
     property <int> manual-collapsed: -1; // -1=自动 0=展开 1=收起
@@ -116,11 +127,31 @@ export component AppWindow inherits Window {
             clip: true;
             background: Theme.surface-2;
 
-            Scroll {
+            page-scroll := Scroll {
                 x: 0;
                 y: 0;
                 width: parent.width;
                 height: parent.height;
+
+                // 滚动状态单点出口（MEMFIX ④a）：曲目表窗口化虚拟化只读消费。
+                // 写法注记：Slint 全局属性不能在元素作用域做语句级绑定/别名
+                // （`Viewport.y: ...;` 与 `Viewport.y <=> ...;` 均 parse error），
+                // 只能经 property 声明处的双向别名桥接；origin-y 是 Scroll
+                // 窗口系 y（pad + title-bar-height 常量链，窗口内恒定），init
+                // 赋值一次即可。
+                changed scroll-offset => {
+                    root.vp-y = self.scroll-offset;
+                }
+                changed view-height => {
+                    root.vp-view-h = self.view-height;
+                }
+                init => {
+                    root.vp-origin-y = self.absolute-position.y;
+                    // changed 回调不保证初值触发：初值在此落账（布局就绪后的
+                    // 真实 view-height 仍由 changed 跟进）
+                    root.vp-y = self.scroll-offset;
+                    root.vp-view-h = self.view-height;
+                }
 
                 if Nav.route == Route.library: LibraryPage {
                     width: parent.width;

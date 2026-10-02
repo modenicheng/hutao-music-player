@@ -1,0 +1,12 @@
+// Viewport 全局（曲目表窗口化虚拟化，MEMFIX ④a）：顶层 Scroll 滚动状态的
+// 单点出口。Slint 组件无法引用自身父级几何（成环），故由 app.slint 的顶层
+// Scroll 实例把三个量回写进全局，深处组件只读：
+// - y：scroll-offset（= viewport-y，内容系视口顶，滚动后恒 ≤ 0）
+// - origin-y：Scroll 自身窗口系顶（不含滚动偏移，绝对定位链稳定）
+// - view-h：视口高（flick.height）；TestingBackend/无头环境未绑定时为 0，
+//   消费方据此退化为全量渲染
+export global Viewport {
+    in-out property <length> y;
+    in-out property <length> origin-y;
+    in-out property <length> view-h;
+}
