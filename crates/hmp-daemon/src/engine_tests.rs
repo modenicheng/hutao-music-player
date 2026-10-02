@@ -105,6 +105,10 @@ impl FakeDriver {
 }
 
 impl PlaybackDriver for FakeDriver {
+    // fetch_update 在 rustc 1.99 改名 try_update（纯更名，语义不变）；try_update
+    // 本身不存在于工作区 MSRV 1.85，升 MSRV 前只能留旧名 + 压弃用告警
+    // （CI RUSTFLAGS=-D warnings 会把它判死）。
+    #[allow(deprecated)]
     fn load(&self, request: LoadRequest) {
         self.stream_seen
             .lock()
@@ -1369,6 +1373,8 @@ impl DeferredDriver {
 }
 
 impl PlaybackDriver for DeferredDriver {
+    // 同 FakeDriver::load：MSRV 1.85 无 try_update，压 fetch_update 弃用告警。
+    #[allow(deprecated)]
     fn load(&self, request: LoadRequest) {
         self.inner
             .stream_seen
