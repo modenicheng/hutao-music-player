@@ -18,11 +18,15 @@ yanked = "warn"
 #   本项目仅经 zbus 解析本地会话总线 introspection XML，非攻击者输入。
 # - RUSTSEC-2026-0009 time：修复版 0.3.47+ 要求 rust ≥1.88（本工作区 MSRV 1.85）；
 #   cookie 解析仅用于出站 HTTP 响应，本地播放器场景风险低。
+# - RUSTSEC-2024-0370 proc-macro-error（unmaintained）：gtk-rs 0.18 线
+#   glib-macros / gtk3-macros 传递依赖，经 tray-icon→libappindicator→gtk 传入；
+#   无兼容修复（gtk3-macros 0.18 仍绑定 syn 1 生态），需上游 gtk-rs 升级才能根除。
 # 若后续提升 MSRV（≥1.88），应优先 `cargo update -p time -p zbus_xml` 再移除对应 ignore。
 ignore = [
     "RUSTSEC-2021-0139",
     "RUSTSEC-2024-0375",
     "RUSTSEC-2024-0436",
+    "RUSTSEC-2024-0370",
     "RUSTSEC-2026-0192",
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
@@ -43,6 +47,8 @@ allow = [
     "BSD-2-Clause", # arrayref / rav1e / av1-grain / v_frame（image→ravif→rav1e）
     "BSL-1.0", # clipboard-win / error-code（copypasta 剪贴板，winit 依赖）
     "Unlicense", # ksni 0.2.2 / 0.3.6（系统托盘）
+    "CC0-1.0", # notify 6.1.1（文件监听，公共领域豁免式许可）
+    "MPL-2.0", # symphonia 0.5.x 音频解码全家桶 + option-ext（dirs→notify），文件级 copyleft，与 GPLv3 兼容
     "CDLA-Permissive-2.0", # webpki-roots 1.0.9（reqwest TLS 根证书，自 1.0 起改此许可）
     "Apache-2.0 WITH LLVM-exception", # target-lexicon（system-deps / cfg-expr）
     "NCSA", # libfuzzer-sys：license 为 (MIT OR Apache-2.0) AND NCSA，MIT/Apache-2.0 已允许

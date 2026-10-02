@@ -29,15 +29,18 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # 原生依赖的 dev 包：dbus（ksni 托盘）、
-      # fontconfig（slint 字体栈 fontique→yeslogic-fontconfig-sys）、
-      # wayland（winit→wayland-backend client_system）。缺一个都会在
-      # pkg-config 阶段失败（dbus-1/fontconfig/wayland-client.pc）。
+      # 原生依赖的 dev 包：alsa（rodio→cpal→alsa-sys 音频输出，ubuntu-24.04
+      # runner 镜像不预装，缺它整个构建在 alsa-sys build script 挂）、
+      # dbus（ksni 托盘）、gtk-3（tray-icon Linux 侧→gtk-sys 走
+      # system-deps/pkg-config）、fontconfig（slint 字体栈
+      # fontique→yeslogic-fontconfig-sys）、wayland（winit→wayland-backend
+      # client_system）。缺一个都会在 pkg-config 阶段失败（alsa.pc /
+      # dbus-1.pc / gtk+-3.0.pc / fontconfig.pc / wayland-client.pc）。
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config \
-            libdbus-1-dev libfontconfig1-dev libwayland-dev
+          sudo apt-get install -y pkg-config libasound2-dev \
+            libdbus-1-dev libgtk-3-dev libfontconfig1-dev libwayland-dev
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
@@ -47,12 +50,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # 编译需 dev 包（dbus-1.pc / fontconfig.pc / wayland-client.pc）。
+      # 编译需 dev 包（alsa.pc / dbus-1.pc / gtk+-3.0.pc / fontconfig.pc /
+      # wayland-client.pc），清单与 clippy job 保持一致。
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config \
-            libdbus-1-dev libfontconfig1-dev libwayland-dev
+          sudo apt-get install -y pkg-config libasound2-dev \
+            libdbus-1-dev libgtk-3-dev libfontconfig1-dev libwayland-dev
       - run: cargo test --workspace
       - run: cargo doc --no-deps --workspace
 
