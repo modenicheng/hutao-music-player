@@ -65,7 +65,7 @@ playerctl -p hmp ...  │   (Unix socket / Windows 命名管道，127.0.0.1 本�
 - **单实例保证**：Unix `flock` 锁文件（`<socket>.lock`）/ Windows `FILE_FLAG_FIRST_PIPE_INSTANCE` 原子抢占；后启动的实例检测到已在运行即退出。
 - **状态单一来源**：daemon 发布 `DaemonState`（播放状态 + 队列 + 能力），CLI/tray/MPRIS 均只读它。
 - **wire 兼容**：daemon 是常驻单例，升级窗口内旧进程仍占端点——响应/事件结构体新增字段一律带 `#[serde(default)]`，桌面订阅对解码失败断线重连不静默（CLI 解码失败会提示 `hmp quit` 后重试）。
-- **退出**：`hmp quit` 或托盘「退出」→ 停止播放、清理 socket、释放 MPRIS、关闭 tray，进程退出；SIGINT/SIGTERM 同样处理。
+- **退出**：`hmp quit` 或托盘「退出」→ 停止播放、清理 socket、释放 MPRIS、关闭 tray，进程退出；SIGINT/SIGTERM 同样处理。优雅退出前向所有订阅客户端广播 `Event::Shutdown` 优雅关闭消息——桌面端收到后随之关窗退出，不留离线僵尸窗口；非优雅死亡（崩溃/kill -9）没有该事件，桌面端仍走离线重连。
 
 ## 4. 命令参考（完整）
 
@@ -188,7 +188,7 @@ cargo run --release -p hmp-desktop --bin hmp-desktop
 
 - 启动时自动连接常驻 daemon（`$XDG_RUNTIME_DIR/hmp.sock`）；未运行则自动拉起 `hmp serve --background`——与 `hmp play`/CLI 遥控共用同一后端、同一播放状态源（MPRIS/托盘同源生效）。连接就绪后核对 daemon 构建指纹：发现运行中的 daemon 是旧构建（重建桌面端而 daemon 未重建时旧进程会驻留）会自动退出旧进程并重新拉起；磁盘二进制本身过旧则明确报「陈旧构建」错误（见 §8）。
 - 库页（我喜欢/最近播放/音乐库/歌单）在启动时直读媒体库（`$XDG_DATA_HOME/hmp/library.sqlite3`）：先 `hmp scan ~/Music` 入库本地曲目；QQ 侧登录后 `hmp library sync` 同步歌单/收藏**并缓存歌单曲目**（歌单卡计数、歌单详情与 `playlist:<id>` 播放全部读这份本地缓存；远端增删在下次 sync 时差集合入，每轮每歌单上限 2000 首）。
-- 播放条/队列与 CLI 同源：CLI 换歌桌面即时可见，反之亦然；`hmp quit` 后界面保持打开但呈离线空态，不会自动拉活后端。
+- 播放条/队列与 CLI 同源：CLI 换歌桌面即时可见，反之亦然；daemon 优雅退出（托盘「退出」/`hmp quit`/SIGINT）会广播 `Event::Shutdown`，桌面端收到即随之关窗退出；daemon 非优雅死亡（崩溃）时界面保持打开呈离线空态，不会自动拉活后端（关闭窗口后重开桌面端即恢复）。
 - 空数据是诚实状态：未扫描/未同步时对应页面为空，音乐库页"扫描本地音乐"按钮在桌面端禁用（走 `hmp scan`）。
 - 已知边界（docs/AUDIT.md §8）：下载/已购两页后端无对应域（诚实空态）；远端内容卡跳详情仍按展示名查本地库。内容页（发现/排行榜/猜你喜欢/搜索）、歌词页与封面（daemon CoverGet：远程三域白名单 + 本地产物回写 + 歌单封面，无源时中性占位）均已接入。
 

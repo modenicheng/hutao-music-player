@@ -148,6 +148,21 @@ async fn handle_connection(stream: IpcStream, mut handle: EngineHandle) -> std::
                     handle.library_rx.borrow_and_update();
                     write_frame(&mut wr, &Event::LibraryChanged).await?;
                 }
+                // 优雅退出广播（AUDIT §19）：引擎 terminated 翻转 → 推一帧
+                // `Event::Shutdown` 后断开，订阅客户端（桌面 UI）据此自行优雅
+                // 退出而不落离线重连。先 borrow 再 changed 与 serve.rs
+                // term_wait 同形，覆盖「连接建立时引擎已终止」（宽限窗口内
+                // 新到订阅）的即时触发；watch::changed 取消安全（已见版本记
+                // 在 receiver 上），本臂被抢占后下一轮重建 future 不丢通知。
+                // 仅订阅连接（未订阅的短连接以响应/EOF 收尾）。
+                _ = async {
+                    if !*handle.terminated.borrow() {
+                        let _ = handle.terminated.changed().await;
+                    }
+                }, if subscribed => {
+                    let _ = write_frame(&mut wr, &Event::Shutdown).await;
+                    break;
+                }
             }
         }
         Ok(())
@@ -931,6 +946,61 @@ mod tests {
         let mut buf = vec![0u8; 65536];
         let n = stream.read(&mut buf).await.unwrap();
         decode_frame::<Response>(&buf[..n]).unwrap()
+    }
+
+    /// daemon 优雅退出广播（AUDIT §19）：订阅连接在引擎 terminated 翻转后
+    /// 收到 `Event::Shutdown`，随后被服务端断开（EOF）——桌面端据此优雅关窗，
+    /// 不落离线重连。quit 路径若发布中间状态，允许先到若干 StateChanged。
+    #[tokio::test]
+    async fn quit_broadcasts_shutdown_to_subscribers() {
+        let (sock, listener) = temp_socket().await;
+        let handle = test_engine(true).await;
+        tokio::spawn(async move { serve(listener, handle).await });
+
+        // 订阅：初始快照帧先到。
+        let mut stream = IpcStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(&encode_frame(&Request::Subscribe).unwrap())
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 65536];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+            .await
+            .expect("等待初始快照超时")
+            .unwrap();
+        let snap: Event = decode_frame(&buf[..n]).unwrap();
+        assert!(matches!(snap, Event::StateChanged(_)));
+
+        // 另一条短连接发 Quit（与 CLI `hmp quit` / tray 退出同源）。
+        let mut quitter = IpcStream::connect(&sock).await.unwrap();
+        quitter
+            .write_all(&encode_frame(&Request::Quit).unwrap())
+            .await
+            .unwrap();
+        let m = tokio::time::timeout(std::time::Duration::from_secs(5), quitter.read(&mut buf))
+            .await
+            .expect("等待 Quit 应答超时")
+            .unwrap();
+        assert!(matches!(decode_frame::<Response>(&buf[..m]).unwrap(), Response::Ok));
+
+        // 订阅连接：Shutdown 帧（容忍其前的中间状态推送）。
+        loop {
+            let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+                .await
+                .expect("等待 Shutdown 帧超时")
+                .unwrap();
+            assert!(n > 0, "连接在 Shutdown 前被断开");
+            match decode_frame::<Event>(&buf[..n]).unwrap() {
+                Event::Shutdown => break,
+                _ => continue,
+            }
+        }
+        // 随后 EOF（服务端断开；EOF 语义保留给非优雅死亡）。
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+            .await
+            .expect("等待 EOF 超时")
+            .unwrap();
+        assert_eq!(n, 0, "Shutdown 后应立即断开");
     }
 
     #[tokio::test]

@@ -324,6 +324,11 @@ pub enum Event {
     /// 媒体库内容变更（扫描/监听/reconcile/写命令落库后触发；
     /// 客户端按直读契约重查 sqlite，AUDIT §8.9）。
     LibraryChanged,
+    /// daemon 正在优雅退出（`Request::Quit` / 托盘退出 / SIGINT-SIGTERM 已被
+    /// 引擎受理并完成收尾）。订阅客户端收到后应自行优雅退出（如桌面端关窗），
+    /// 而不是落入离线重连——daemon 不会再回来。断流（EOF）语义不变：非优雅
+    /// 死亡（崩溃/kill -9）没有本事件，客户端仍走既有离线重连路径。
+    Shutdown,
 }
 
 /// 后端复合状态（单一状态出口，spec §4.2 `daemon.rs`）。
@@ -915,6 +920,15 @@ mod tests {
         let frame = encode_frame(&ev).unwrap();
         let back: Event = decode_frame(&frame).unwrap();
         assert_eq!(back, ev);
+    }
+
+    /// 新事件变体 `Shutdown`（daemon 优雅退出广播）往返序列化：旧客户端收到
+    /// 会因 unknown variant 断线重连（升级窗口内可接受），新客户端据此退出。
+    #[test]
+    fn event_shutdown_roundtrips_through_frame() {
+        let frame = encode_frame(&Event::Shutdown).unwrap();
+        let back: Event = decode_frame(&frame).unwrap();
+        assert_eq!(back, Event::Shutdown);
     }
 
     /// 新响应变体（Created / CommentList）往返序列化。

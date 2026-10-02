@@ -3,14 +3,23 @@
 //! 组装顺序：单实例裁决 + 端点绑定（flock / connect 探测 /
 //! first_pipe_instance）→ daemon（引擎 + Rust 音频驱动 + QQ 解析器）→
 //! Unix socket 控制服务器 + tray/MPRIS/SMTC；SIGINT/SIGTERM → 引擎 Quit
-//! → 引擎退出（sticky watch）→ 停服务器 → 清理 socket → 关桌面集成后退出。
+//! → 引擎退出（sticky watch）→ 订阅广播宽限（各订阅连接推 `Event::Shutdown`
+//! 优雅退出消息，AUDIT §19）→ 停服务器 → 清理 socket → 关桌面集成后退出。
 
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::daemon::{Daemon, DaemonConfig};
 use crate::server;
+
+/// 优雅退出的订阅广播宽限：引擎 terminated 翻转后，各订阅连接任务推
+/// `Event::Shutdown` 并断开（桌面端据此优雅关窗）。本任务与连接任务并发
+/// 调度，须留窗口保证帧送达后才退出进程——否则进程退出先杀掉连接任务，
+/// 客户端只见 EOF，退回离线重连僵尸态（AUDIT §19）。回环链路一帧极小，
+/// 1s 足够；到期不强制（进程本就要退出）。
+const SUBSCRIBER_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 /// 前台运行（调试；Ctrl+C 优雅退出）。也是后台 detached 子进程的 daemon 循环。
 pub async fn run_foreground() -> Result<(), Box<dyn std::error::Error>> {
@@ -200,6 +209,9 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
         let _ = term.changed().await;
     };
     term_wait.await;
+    // 订阅广播宽限（见 SUBSCRIBER_SHUTDOWN_GRACE）：先让订阅连接把
+    // `Event::Shutdown` 送出，再停服务器、退出进程。
+    tokio::time::sleep(SUBSCRIBER_SHUTDOWN_GRACE).await;
     // 停服务器（监听关闭）+ 清理 + 关 tray / 释放 MPRIS bus 名（优雅退出，spec §6）。
     server_handle.abort();
     #[cfg(unix)]

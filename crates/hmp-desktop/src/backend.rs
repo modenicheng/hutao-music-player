@@ -292,7 +292,13 @@ pub struct QueueRowMeta {
 }
 
 /// 订阅循环：首连走 [`connect_or_spawn`]（拉起 daemon）；后续断线重连只做
-/// 普通连接——用户显式 `hmp quit` 后 UI 不得反复把 daemon 拉活。
+/// 普通连接——用户显式 `hmp quit` 后 UI 不得反复把 daemon 拉活。拉起资格
+/// 以「本进程是否曾成功连上」判定（`ever_connected`）：若按「未观测到
+/// 队列 revision」判定，daemon 在 Subscribe 与首帧之间退出（EOF 竞态）会
+/// 误判为首连，把用户刚退出的 daemon 复活。收到 [`Event::Shutdown`]（daemon
+/// 优雅退出：托盘退出 / `hmp quit` / SIGINT）即退出 Slint 事件循环整个关窗
+/// ——daemon 是被有意停掉的，不会回来，窗口留着只会是离线僵尸（AUDIT §19）；
+/// 非优雅死亡（崩溃/kill）无此事件，仍走既有离线重连路径。
 /// 每条 `Event::StateChanged` 投递一次回调（经 `invoke_from_event_loop` 在
 /// UI 线程执行）；连接失败周期性投递离线事件（状态翻转时一次，不重复刷写）。
 /// 事件帧解码失败：记 error 日志并断线走退避重连（协议版本错配/帧损坏
@@ -303,15 +309,20 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
         // 队列结构版本（QueueSummary.revision：结构变更 +1，position tick 不动）。
         let mut last_revision: Option<u64> = None;
         let mut offline_reported = false;
+        // 本进程曾成功连上 daemon ⇒ 之后断线只重连、不再拉起。
+        let mut ever_connected = false;
         loop {
-            // 首连（last_revision 尚无观测）允许自动拉起 daemon，其余只重连。
-            let connected = if last_revision.is_none() {
-                connect_or_spawn().await
-            } else {
+            // 首连（尚无成功连接）允许自动拉起 daemon，其余只重连。
+            let connected = if ever_connected {
                 connect().await
+            } else {
+                connect_or_spawn().await
             };
             let mut stream = match connected {
-                Ok(stream) => stream,
+                Ok(stream) => {
+                    ever_connected = true;
+                    stream
+                }
                 Err(_) => {
                     if !offline_reported {
                         offline_reported = true;
@@ -329,13 +340,11 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                 }
             };
             offline_reported = false;
-            // 订阅：server 先推初始快照；重连后首帧强制重建队列模型
-            // （daemon 重启后 revision 归零，仅靠版本比对会漏重建）。
+            // 订阅：server 先推初始快照。
             if write_frame(&mut stream, &Request::Subscribe).await.is_err() {
                 tokio::time::sleep(RECONNECT_INTERVAL).await;
                 continue;
             }
-            last_revision = None;
             while let Ok(Some(frame)) = read_frame(&mut stream).await {
                 // 解码失败一律断线重连（break 走循环尾的既有退避路径），不
                 // 静默跳过：单帧损坏无法界定损伤范围，而 `missing field` /
@@ -367,6 +376,14 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                             },
                         );
                     }
+                    Event::Shutdown => {
+                        // daemon 优雅退出广播：整个退出（关事件循环，ui.run()
+                        // 返回、进程收尾），不再重连（见本函数 doc）。quit_event_loop
+                        // 可跨线程调用；运行时随 main 结束销毁，订阅任务一并终止。
+                        tracing::info!("daemon graceful shutdown; exiting UI");
+                        let _ = slint::quit_event_loop();
+                        return;
+                    }
                     Event::StateChanged(state) => {
                         // 队列结构变化 → 重拉队列并投影（revision 不随 position tick 前进）。
                         let queue_rows = if last_revision != Some(state.queue.revision) {
@@ -386,7 +403,10 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                     }
                 }
             }
-            // EOF（daemon 退出）/ 读错误：断线，退避重连。
+            // EOF（daemon 退出）/ 读错误：断线，退避重连。重置已观测的
+            // revision：重连后首帧必重建队列模型（daemon 重启后 revision
+            // 归零，仅靠版本比对会漏重建）。
+            last_revision = None;
             tokio::time::sleep(RECONNECT_INTERVAL).await;
         }
     });

@@ -545,3 +545,40 @@ aeb2437（明文无 Range 回退）提交于其后 22:36、**从未进入任何�
    `clip: true`——Slint 圆角只裁自身背景、不裁子 Image。宽窄两栏两处封面按
    queue-drawer 缩略图同款模板补齐 clip + `background: Theme.muted` +
    `image-fit: ImageFit.cover`。
+
+## §19 优雅退出全链路广播（2026-10-02，用户报「托盘退出后 desktop 还在运行」）
+
+**现象**：托盘「退出」（或 `hmp quit` / SIGINT）后 daemon 正常退出，但桌面窗口
+仍开着——订阅流只是断流（EOF），桌面端落入既有离线路径（窗口保持、每 2s 重
+连、播放操作全部 no-op），成为离线僵尸；两进程间没有优雅关闭消息，退出只对
+daemon 单方面生效。
+
+**根因两点**：①协议层没有「daemon 正在优雅退出」的事件——EOF 既表示优雅退出
+也表示崩溃，客户端无从区分，只能按「可能恢复」走重连；②桌面订阅循环的拉起
+资格按 `last_revision.is_none()` 判定，daemon 在 Subscribe 与首帧之间的窗口内
+退出（EOF 竞态）会被误判为首连，把用户刚退出的 daemon 复活——即「tray 退出但
+daemon 依然运行」的另一个形态。
+
+**修复**（发送方 + 接收方 + 时序三段收口）：
+1. 协议：`Event::Shutdown` 新变体（hmp-core ipc.rs；serde unknown variant 对旧
+   客户端 = 解码失败断线重连，升级窗口内退化为既有行为，wire 兼容不变）。
+2. daemon server：订阅连接 select 臂监听引擎 `terminated`（sticky watch，与
+   state/library 两臂同形；先 borrow 再 changed 覆盖宽限窗口内新到订阅的即时
+   触发）→ 推 `Event::Shutdown` 后断开。`watch::changed` 取消安全，臂被抢占
+   后下一轮重建 future 不丢通知。未订阅短连接不受影响（响应/EOF 收尾）。
+3. daemon serve：`term_wait` 后新增 1s 订阅广播宽限（`SUBSCRIBER_SHUTDOWN_GRACE`）
+   ——编排任务与各连接任务并发调度，进程退出会先杀掉连接任务，不留窗口客户端
+   只见 EOF。回环链路一帧极小，1s 足够且不强制。
+4. 桌面 backend：收到 `Event::Shutdown` → `slint::quit_event_loop()` 整窗退出
+   （可跨线程调用；runtime 随 main 结束销毁，订阅任务一并终止），不再重连；
+   拉起资格改 `ever_connected`（本进程曾成功连上即永不拉起），EOF 竞态复活
+   daemon 的窗口就此关闭。
+5. 语义边界：崩溃/kill -9 等非优雅死亡没有 Shutdown 事件，桌面端仍走离线重连
+   （不自动拉活，与「用户显式退出后不得复活」的既有契约一致）；陈旧构建重启
+   流程（§18）中桌面端自己发 Quit 时无订阅在场（首连阶段），不会误触发自杀；
+   若另有订阅中的旧桌面实例，会随旧 daemon 一起退出（单实例卫生，可接受）。
+
+**回归**：`quit_broadcasts_shutdown_to_subscribers`（server.rs：订阅 → 短连接
+Quit → 断言 Shutdown 帧先于 EOF，容忍其前的中间状态推送）+
+`event_shutdown_roundtrips_through_frame`（ipc.rs 序列化往返）。
+EOF 语义不变：非优雅死亡依旧无事件。
