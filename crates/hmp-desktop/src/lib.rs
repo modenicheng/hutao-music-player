@@ -4,6 +4,7 @@ slint::include_modules!();
 
 pub mod backend;
 pub mod bridge;
+pub mod cover_cache;
 pub mod covers;
 pub mod format;
 pub mod library_view;

@@ -16,7 +16,7 @@ use hmp_core::ipc::{DaemonState, Request, Response};
 use hmp_core::{AudioQuality, LoopMode, PlaybackState, PlaybackStatus, PlayerCommand, TrackId};
 
 use crate::backend::{BackendRuntime, QueueRowMeta, UiStateEvent};
-use crate::{AppWindow, CommentRow, LyricRow, NowPlaying, Player, TrackRow};
+use crate::{AppWindow, CommentRow, LyricRow, NowPlaying, Player, QueueRow};
 
 /// seek 落点确认容忍：daemon 推送位置与目标差 ≤ 此值视为已生效
 /// （播放中位置持续前进，容忍取推送周期量级）。
@@ -482,7 +482,7 @@ fn apply_event(
     if let Some(rows) = &event.queue_rows {
         let mids: Vec<String> = rows.iter().map(|row| row.mid.clone()).collect();
         *queue_mids.lock().expect("queue mids") = mids;
-        let track_rows: Vec<TrackRow> = rows.iter().map(row_from_meta).collect();
+        let track_rows: Vec<QueueRow> = rows.iter().map(row_from_meta).collect();
         let total_ms: u64 = rows.iter().map(|row| row.duration_ms.max(0) as u64).sum();
         player.set_queue_meta(
             format!(
@@ -891,7 +891,9 @@ fn spawn_cover_fetch(
                 return;
             };
             let player = Player::get(&ui);
-            let Some(image) = load_cover_cached(&path) else {
+            // 当前曲取图回包落 512 桶（播放页大图）；同一 Image 句柄原地
+            // 复用进队列行（QueueRow.cover），无额外位图拷贝。
+            let Some(image) = crate::cover_cache::get_or_load(&path, 512) else {
                 return;
             };
             // 队列抽屉行内原地换图：与当前曲无关——迟到的封面同样更新抽屉行
@@ -907,10 +909,10 @@ fn spawn_cover_fetch(
     });
 }
 
-/// 队列模型中同 mid 行的封面原地更新（抽屉渲染 TrackRow.cover）。
+/// 队列模型中同 mid 行的封面原地更新（抽屉渲染 QueueRow.cover）。
 fn update_queue_row_cover(player: &Player, mid: &str, image: slint::Image) {
     let model = player.get_queue();
-    let Some(vec_model) = model.as_any().downcast_ref::<slint::VecModel<TrackRow>>() else {
+    let Some(vec_model) = model.as_any().downcast_ref::<slint::VecModel<QueueRow>>() else {
         return;
     };
     for i in 0..vec_model.iter().count() {
@@ -1040,10 +1042,12 @@ fn quality_tier(quality: &AudioQuality) -> i32 {
     }
 }
 
-/// 队列投影行 → TrackRow（UI 线程：slint::Image 只能在此构造）。
+/// 队列投影行 → QueueRow（UI 线程：slint::Image 只能在此构造）。
+/// 队列抽屉是 TrackRow.cover 唯一消费方（36×36），故队列行单独走带 cover 的
+/// QueueRow，表格 TrackRow 不再背图（MEMFIX-CONTRACT 第 1/2 条）。
 /// 歌手/专辑 mid 在 IPC ID 投影里不存在（链接型列在队列抽屉未使用）。
-fn row_from_meta(meta: &QueueRowMeta) -> TrackRow {
-    let mut row = TrackRow {
+fn row_from_meta(meta: &QueueRowMeta) -> QueueRow {
+    let mut row = QueueRow {
         mid: meta.mid.as_str().into(),
         source: if hmp_core::TrackProvider::from_id(&meta.mid) == hmp_core::TrackProvider::Local {
             1
@@ -1077,13 +1081,14 @@ fn row_from_meta(meta: &QueueRowMeta) -> TrackRow {
 }
 
 /// 队列行封面：本地库 file:// 封面直接读盘（扩列投影带出；daemon 已把取到
-/// 的本地产物回写 cover_uri，播过的 QQ 曲同样命中）；远程 URL 程序化占位
-/// （逐行网络取图不做，当前曲取图回包另有原地换图补齐）。
+/// 的本地产物回写 cover_uri，播过的 QQ 曲同样命中）→ cover_cache 256 桶
+/// （抽屉行 36×36，行桶与表格/侧栏同档）；远程 URL 程序化占位（逐行网络
+/// 取图不做，当前曲取图回包另有原地换图补齐）。
 fn queue_cover(meta: &QueueRowMeta) -> slint::Image {
     if let Some(uri) = &meta.cover_uri {
         if !uri.starts_with("http://") && !uri.starts_with("https://") {
             if let Some(path) = crate::covers::file_uri_to_path(uri) {
-                if let Some(image) = load_cover_cached(&path) {
+                if let Some(image) = crate::cover_cache::get_or_load(&path, 256) {
                     return image;
                 }
             }
@@ -1102,7 +1107,8 @@ fn cover_seed(meta: &QueueRowMeta) -> String {
     }
 }
 
-/// 当前曲封面：本地路径 / `file://` → 磁盘图（按 URL 缓存）；
+/// 当前曲封面：本地路径 / `file://` → 磁盘图（cover_cache 512 桶——播放页
+/// 大图消费方最大 336px 逻辑像素，512 余量充足）；
 /// http(s)（UI 禁 HTTP 为项目原则，封面代理缺失）→ 按 mid 程序化占位；
 /// 无封面 → 程序化占位。
 fn cover_for_track(mid: &str, cover: Option<&hmp_core::CoverRef>) -> slint::Image {
@@ -1112,7 +1118,7 @@ fn cover_for_track(mid: &str, cover: Option<&hmp_core::CoverRef>) -> slint::Imag
             // 规范形态 `file:///C:/...`）都收：裸剥前缀把规范形态解析成
             // `/C:/...`（Windows 读不到）→ 盘上有图恒占位（§18 库行实锤）。
             if let Some(path) = crate::covers::file_uri_to_path(url) {
-                if let Some(image) = load_cover_cached(&path) {
+                if let Some(image) = crate::cover_cache::get_or_load(&path, 512) {
                     return image;
                 }
                 tracing::debug!(path, "cover file unreadable; fallback to placeholder");
@@ -1120,22 +1126,6 @@ fn cover_for_track(mid: &str, cover: Option<&hmp_core::CoverRef>) -> slint::Imag
         }
     }
     crate::covers::cover_image(&format!("album:{mid}"))
-}
-
-/// 磁盘封面按路径缓存（thread_local：slint::Image 非 Send，且本函数只在
-/// UI 线程被调用；与 covers.rs 的缓存策略一致）。
-fn load_cover_cached(path: &str) -> Option<slint::Image> {
-    thread_local! {
-        static CACHE: RefCell<HashMap<String, slint::Image>> = RefCell::new(HashMap::new());
-    }
-    CACHE.with(|cache| {
-        if let Some(image) = cache.borrow().get(path) {
-            return Some(image.clone());
-        }
-        let image = slint::Image::load_from_path(std::path::Path::new(path)).ok()?;
-        cache.borrow_mut().insert(path.to_owned(), image.clone());
-        Some(image)
-    })
 }
 
 #[cfg(test)]

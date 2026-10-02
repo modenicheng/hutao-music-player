@@ -98,7 +98,8 @@ fn quality_alias_tier(mode: &str) -> Option<i32> {
     }
 }
 
-/// 搜索结果行（smartbox 窄投影：无专辑/时长 → 对应列收起，mid 程序化封面）。
+/// 搜索结果行（smartbox 窄投影：无专辑/时长 → 对应列收起）。表格行不带
+/// 封面（TrackRow 已剥 `cover`，队列行走 QueueRow）。
 fn search_track_row(song: &hmp_core::SearchSong) -> TrackRow {
     TrackRow {
         mid: song.mid.as_str().into(),
@@ -110,7 +111,6 @@ fn search_track_row(song: &hmp_core::SearchSong) -> TrackRow {
         album_mid: "".into(),
         duration_ms: 0,
         quality: "".into(),
-        cover: crate::covers::cover_image(&format!("album:{}", song.mid)),
     }
 }
 
@@ -126,7 +126,6 @@ fn discover_track_row(s: &hmp_core::DiscoverNewSong) -> TrackRow {
         album_mid: "".into(),
         duration_ms: (s.interval * 1000) as i32,
         quality: "".into(),
-        cover: crate::covers::cover_image(&format!("album:{}", s.mid)),
     }
 }
 
@@ -1212,6 +1211,7 @@ mod tests {
         assert_eq!(row.artists, "周杰伦");
         assert_eq!(row.album, "");
         assert_eq!(row.duration_ms, 0);
-        assert!(row.cover.size().width > 0, "封面程序化占位非空");
+        // TrackRow 已剥 cover（表格行不背位图，MEMFIX 工作②）：无封面断言可做，
+        // 字段层面的占位图职责移交 QueueRow（player_bridge 队列投影）
     }
 }
