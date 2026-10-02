@@ -499,3 +499,49 @@ aeb2437（明文无 Range 回退）提交于其后 22:36、**从未进入任何�
    live 验证：22/22 歌单落库 4566 条链接，抽样三个歌单曲目数与远端 `total_song_num`
    全等。已知边界：远端重排序不回写本地 position；>2000 首歌单本轮放弃（用户最大
    1591 首，无实际影响）。
+
+## §18 陈旧 daemon 自动重启 + 本地封面三断点 + 侧栏圆角（2026-10-02，用户三报并行修复）
+
+1. **「无法播放远端音源，报 no available audio quality: result=104003」＝陈旧常驻
+   daemon 再度咬人**：报错文案逐字是 5c5429e 之前的旧格式（新代码全档鉴权失败只
+   可能报 `not logged in or credentials expired` 或带档位前缀的聚合串，e2e 锚定）
+   ——daemon 是脱离会话的长驻进程（单实例锁），重建只换了 hmp-desktop.exe
+   （18:42），daemon 实际跑的 `target/release/hmp.exe` 还是 10-01 产物（进程
+   18:54 才启动，二进制是旧的）。侧栏「已登录」只是本地存在性检查
+   （`account_status` 600s 缓存，不验服务端有效性），与 104003 并不矛盾。逐档
+   探针复核：存量凭证全档 104003、RS02 正常 → 服务端会话仍失效，用户侧尚未重新
+   扫码。修复（收口而非再绕）：①hmp-daemon 新增 build.rs 构建指纹（`src/**.rs`
+   + `Cargo.toml` 的 FNV-1a，自带实现跨工具链稳定；无 rerun-if 指令 → 包内变更
+   即重跑，桌面端依赖 daemon crate 必然连带重链、两侧取值恒同源），经
+   `DaemonState.backend_build`（serde default 兼容旧 daemon 缺字段 = 空串）随
+   状态推送；②桌面 `connect_or_spawn` 就绪后以 `Request::Status` 短连接核对指
+   纹，不一致（= 运行中 daemon 是旧代码）→ `Quit` 优雅退出 + 磁盘二进制重新拉
+   起 + 复核一次；仍不一致 → 新 `BackendError::StaleBackend`（磁盘二进制本身
+   过旧，报错点名「重新构建/重装」）。自愈闭环：新桌面 × 旧 daemon 进程 → 自动
+   换新；旧磁盘二进制 → 明确报错，不再「看着是新的跑着是旧的」。
+   **用户侧动作不变：远程播放真正恢复仍需 `hmp login` 重新扫码（本次会话实锤
+   凭证仍未续）。**
+2. **本地曲目播放无封面（三断点叠加，非单因）**：①桌面 `cover_for_track` 裸
+   `strip_prefix("file://")`——规范形态 `file:///C:/...` 被解析成 `/C:/...`
+   （Windows 读不到，covers.rs 注释早有记载的根因之一）→ 改用现成的
+   `covers::file_uri_to_path` 双形态解析，加载失败补 debug 日志（此前静默）；②
+   storage `read_meta` 内嵌封面 2MB 上限把 3000px JPEG（3-6MB 常见）整张静默滤
+   成「无封面」（LocalMeta 注释还写着「前 2MB」，与行为相悖）→ 上限抬到 32MB，
+   并补 primary tag 之外的全 tag 兜底（歌词提取同款 primary → 全 tag 语义）；
+   ③数据侧：8224023（2026-09-26）写路径归一化之前，旧 daemon 以
+   `local:\\?\C:\...` verbatim 键入库，归一化后同文件另建规范键行 → verbatim
+   行沦为永久重复（cover_uri 恒 NULL 的库页双卡；v5 `merge_ghost_local_tracks`
+   只认「无 local_files 的意图幽灵」，带子行的 verbatim 扫描行永远漏网）→ v7
+   迁移 `merge_noncanonical_local_tracks`：规范行在场 → relations/歌单链接/
+   **播放历史（play_events，FK 无 CASCADE，verbatim 行由播放创建几乎必然带子
+   行——本迁移实机首跑即因漏搬它 DELETE 失败回滚、daemon 回退内存库，教训：
+   动 tracks 行先盘 REFERENCES 子表）**搬迁后删行（含 local_files 子行）；缺席
+   → `source_key` 与 `local_files.path` 就地改键；路径不存在跳过等下次（幂等，
+   含两分支回归测试）。附：covers/ 目录
+   里两个被 DB 引用的本地封面文件丢失属历史数据损伤（全仓无 eviction 代码路
+   径，疑 2026-09-09 双数据目录事故遗毒）；`resolve_local` 每次解析都重提取重
+   落盘、scan 全量 `set_track_cover`，重播/重扫即自愈，不加代码。
+3. **侧栏歌单封面直角**：`border-radius: Theme.radius-sm` 早就设了，缺的是
+   `clip: true`——Slint 圆角只裁自身背景、不裁子 Image。宽窄两栏两处封面按
+   queue-drawer 缩略图同款模板补齐 clip + `background: Theme.muted` +
+   `image-fit: ImageFit.cover`。

@@ -269,11 +269,16 @@ export component Sidebar inherits Rectangle {
                                                 width: 28px;
                                                 height: 28px;
                                                 border-radius: Theme.radius-sm;
+                                                // 圆角只裁自身背景，不裁子 Image：不 clip 则
+                                                // 图片以直角溢出圆角（与 queue-drawer 缩略图同款）
+                                                clip: true;
+                                                background: Theme.muted;
                                                 y: (parent.height - self.height) / 2;
                                                 Image {
                                                     source: playlist.image;
                                                     width: parent.width;
                                                     height: parent.height;
+                                                    image-fit: ImageFit.cover;
                                                 }
                                             }
                                             Text {
@@ -374,12 +379,15 @@ export component Sidebar inherits Rectangle {
                                         width: 28px;
                                         height: 28px;
                                         border-radius: Theme.radius-sm;
+                                        clip: true;
+                                        background: Theme.muted;
                                         x: (parent.width - self.width) / 2;
                                         y: (parent.height - self.height) / 2;
                                         Image {
                                             source: playlist.image;
                                             width: parent.width;
                                             height: parent.height;
+                                            image-fit: ImageFit.cover;
                                         }
                                     }
                                 }

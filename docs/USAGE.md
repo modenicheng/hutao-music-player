@@ -161,6 +161,10 @@ hmp library history         # 最近播放（会话粒度：开始/结束/收听
 
 MPRIS `OpenUri`（`playerctl open file:///...`）经同一路径播放。
 
+本地封面：内嵌封面（≤32MB）提取落盘 `<data_dir>/covers/<hash>.jpg`（内容哈希
+去重）；封面文件丢失（清缓存等）后重新播放该曲或 `hmp scan` 重扫即自愈，无需
+手动清理。
+
 ## 7. 系统集成：MPRIS / 托盘
 
 - **MPRIS**：daemon 注册 `org.mpris.MediaPlayer2.hmp`；用标准工具控制：
@@ -182,7 +186,7 @@ cargo build --release
 cargo run --release -p hmp-desktop --bin hmp-desktop
 ```
 
-- 启动时自动连接常驻 daemon（`$XDG_RUNTIME_DIR/hmp.sock`）；未运行则自动拉起 `hmp serve --background`——与 `hmp play`/CLI 遥控共用同一后端、同一播放状态源（MPRIS/托盘同源生效）。
+- 启动时自动连接常驻 daemon（`$XDG_RUNTIME_DIR/hmp.sock`）；未运行则自动拉起 `hmp serve --background`——与 `hmp play`/CLI 遥控共用同一后端、同一播放状态源（MPRIS/托盘同源生效）。连接就绪后核对 daemon 构建指纹：发现运行中的 daemon 是旧构建（重建桌面端而 daemon 未重建时旧进程会驻留）会自动退出旧进程并重新拉起；磁盘二进制本身过旧则明确报「陈旧构建」错误（见 §8）。
 - 库页（我喜欢/最近播放/音乐库/歌单）在启动时直读媒体库（`$XDG_DATA_HOME/hmp/library.sqlite3`）：先 `hmp scan ~/Music` 入库本地曲目；QQ 侧登录后 `hmp library sync` 同步歌单/收藏**并缓存歌单曲目**（歌单卡计数、歌单详情与 `playlist:<id>` 播放全部读这份本地缓存；远端增删在下次 sync 时差集合入，每轮每歌单上限 2000 首）。
 - 播放条/队列与 CLI 同源：CLI 换歌桌面即时可见，反之亦然；`hmp quit` 后界面保持打开但呈离线空态，不会自动拉活后端。
 - 空数据是诚实状态：未扫描/未同步时对应页面为空，音乐库页"扫描本地音乐"按钮在桌面端禁用（走 `hmp scan`）。
@@ -194,6 +198,7 @@ cargo run --release -p hmp-desktop --bin hmp-desktop
 |---|---|
 | `hmp play` 报 `NotLoggedIn` | 先运行 `hmp login`；凭证过期同理 |
 | `后端启动超时` | daemon 拉起失败（见下）；可先手动 `hmp serve` 看前台错误 |
+| 报「daemon 为陈旧构建」 | 磁盘上的 hmp 后端二进制比桌面端旧：`cargo build --release --workspace`（或重装）后重启应用；桌面端对旧 daemon 进程会自动重启一次，此报错说明重启后磁盘二进制仍是旧的 |
 | 端口/socket 冲突或残留 | 删除 `$XDG_RUNTIME_DIR/hmp.sock*` 与 `/tmp/hmp-<uid>/` 后重试（flock 锁保证不会双实例） |
 | 无声音 | 确认系统存在默认音频输出设备；Linux 同时检查 ALSA/PipeWire 兼容层 |
 | 托盘不显示 | Linux：桌面需支持 StatusNotifierItem（GNOME 装 AppIndicator 扩展）；Windows：确认 explorer 通知区可见。无碍播放，`hmp quit` 等价退出 |
