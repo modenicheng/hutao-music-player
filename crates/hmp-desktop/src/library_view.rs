@@ -241,7 +241,8 @@ fn liked_rows(
                         folder: None,
                     },
                 },
-                // QQ 行：无时长/音质/封面读 API（http 封面 UI 禁网）→ 程序化占位。
+                // QQ 行：时长/歌手/专辑走 track_meta_batch 库内缓存（http 封面
+                // UI 禁网）→ 程序化占位。
                 _ => song_row_from_qq(&f.source_key, f.title, qq_meta.get(f.source_key.as_str())),
             })
             .collect(),
@@ -643,7 +644,8 @@ fn song_row_from_local(t: &LibraryTrackRow, album_covers: &HashMap<String, Strin
     }
 }
 
-/// QQ 行 → SongRow：无时长/音质/封面读 API（http 封面 UI 禁网）→ 诚实置空。
+/// QQ 行 → SongRow：时长/歌手/专辑走 track_meta_batch 库内缓存（reconcile
+/// 曲目缓存与播放路径写入）；音质/封面无数据源 → 诚实置空。
 fn song_row_from_qq(source_key: &str, title: String, meta: Option<&TrackMeta>) -> SongRow {
     SongRow {
         mid: source_key.to_string(),
@@ -651,7 +653,9 @@ fn song_row_from_qq(source_key: &str, title: String, meta: Option<&TrackMeta>) -
         title,
         artists: meta.and_then(|m| m.artist.clone()).unwrap_or_default(),
         album: meta.and_then(|m| m.album.clone()).unwrap_or_default(),
-        duration_ms: 0,
+        // 时长走库内缓存（track_meta_batch 读 tracks.duration_ms；reconcile
+        // 曲目缓存/播放路径写入）——此前恒 0，详情页"总时长"永远 0:00。
+        duration_ms: meta.and_then(|m| m.duration_ms).unwrap_or(0) as i32,
         quality: String::new(),
         cover_uri: None,
         folder: None,
@@ -870,7 +874,10 @@ mod tests {
         assert_eq!(qq.mid, "mid-9");
         assert_eq!(qq.artists, "周杰伦");
         assert_eq!(qq.album, "叶惠美");
-        assert_eq!(qq.duration_ms, 0, "QQ 行时长无读 API，诚实置 0");
+        assert_eq!(
+            qq.duration_ms, 269_000,
+            "QQ 行时长走 track_meta_batch 库内缓存"
+        );
         assert_eq!(qq.quality, "");
     }
 
@@ -1084,6 +1091,7 @@ mod tests {
             title: "晴天".into(),
             artist: Some("周杰伦".into()),
             album: Some("叶惠美".into()),
+            duration_ms: Some(200_000),
             ..Default::default()
         })
         .unwrap();
@@ -1094,14 +1102,39 @@ mod tests {
         let detail = playlist_detail_from(&mut db, p).expect("detail ok");
         assert_eq!(detail.name, "晚间循环");
         assert_eq!(detail.tracks.len(), 2);
-        assert_eq!(detail.total_ms, 180_000, "QQ 行 0ms，本地行 180s");
+        assert_eq!(
+            detail.total_ms, 380_000,
+            "QQ 行 200s（库内缓存时长）+ 本地行 180s"
+        );
         // position 序：先加的 QQ 行在前。
         assert_eq!(detail.tracks[0].mid, "mid-9");
         assert_eq!(detail.tracks[0].artists, "周杰伦");
+        assert_eq!(detail.tracks[0].duration_ms, 200_000, "QQ 行时长走缓存");
         assert_eq!(detail.tracks[1].mid, key);
         assert_eq!(detail.tracks[1].quality, "FLAC");
 
         assert!(playlist_detail_from(&mut db, p + 100).is_none());
+    }
+
+    /// QQ 行时长投影：track_meta_batch 的 duration_ms 流入 SongRow
+    /// （回归：此前恒 0，歌单详情页"总时长"永远 0:00）。
+    #[test]
+    fn qq_row_carries_cached_duration() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        db.upsert_track(&hmp_storage::TrackRow {
+            source: "qq",
+            source_key: "mid-dur".into(),
+            title: "有时长".into(),
+            duration_ms: Some(95_000),
+            ..Default::default()
+        })
+        .unwrap();
+        let meta = db.track_meta_batch("qq", &["mid-dur".to_owned()]).unwrap();
+        let row = song_row_from_qq("mid-dur", "有时长".into(), Some(&meta[0]));
+        assert_eq!(row.duration_ms, 95_000);
+        // 无缓存行/无时长列 → 诚实 0。
+        let row = song_row_from_qq("mid-none", "无时长".into(), None);
+        assert_eq!(row.duration_ms, 0);
     }
 
     /// 专辑详情：按名精确（NOCASE）命中组行与曲目；子串名不误命中。

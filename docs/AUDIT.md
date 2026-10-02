@@ -85,10 +85,14 @@
 2. **`list_favorites` INNER JOIN**：reconcile-only 的 QQ 收藏（未播放/未缓存过）不显示
    ——首次登录后「QQ 上几百首收藏，列表只有十几首」的观感。需要决定：LEFT JOIN +
    占位标题，或 reconcile 时补建 tracks 行。
+   **2026-10-02 大幅缓解**：`reconcile_playlist_tracks`（§17）为歌单曲目建了 tracks 行，
+   收藏曲目随之获得真实元数据；彻底关闭仍需 LEFT JOIN 决策。
 3. **播放路径创建的 local_files 行是二等行**（无 scan_root/generation）：daemon 关机期间
    删除的文件永不标记 missing，直到下次扫描。
-4. **`delete_playlists_absent` FK 地雷**：subscribed 歌单一旦有曲目缓存就会 FK 失败
-   （当前写路径拒绝 subscribed，暂不可达；缓存功能落地前必须先清理子行）。
+4. ~~**`delete_playlists_absent` FK 地雷**：subscribed 歌单一旦有曲目缓存就会 FK 失败~~
+   **已拆除**（2026-10-02）：歌单曲目缓存随 `reconcile_playlist_tracks` 落地（§17），
+   `purge_tracks_of_absent_playlists` 在删除歌单前按同一谓词清理子行（含 subscribed），
+   wiremock 集成测试覆盖远端取消收藏整行删除不炸 FK。
 5. ~~proxy 多区间 Range 返回 416；`stream_range_body` 对空流会挂起~~
    **已随回环代理整体删除而失效**（2026-09-30 进程内随机访问解密源取代，载体不存在）。
 6. ~~decrypt 全文件读取用 `std::fs::read` 在 async 上下文~~ **已失效**
@@ -464,8 +468,34 @@ aeb2437（明文无 Range 回退）提交于其后 22:36、**从未进入任何�
 - IPC：accept 循环一错即停摆无自愈（server.rs break）；单实例管道 + 1s BUSY 重试
   预算在连接风暴下可能耗尽（实测裸连 97% BUSY）；客户端读响应无超时。
 - 播放：中途读错误被 rodio 视为 EOS → 静默跳歌无 Error 态；`try_seek` 阻塞命令循环
-  最长 30s；音质回退链不覆盖解码期失败；预解析期无总超时。
+  最长 30s；~~音质回退链不覆盖解码期失败~~（**2026-10-02 关闭**，见 §17：engine 降档
+  循环覆盖装载与解码期失败，Timeout 不降档为有意边界）；预解析期无总超时。
 - 引擎命令循环内联 await 解析（歌单/专辑秒级）→ 播放控制命令排队，UI 感知「点了
   没反应几秒」。
-- 其余见 §4（footer 误报流式路径残余、INNER JOIN 收藏、local_files 二等行、FK 地雷）
+- 其余见 §4（footer 误报流式路径残余、INNER JOIN 收藏残余、local_files 二等行）
   与 PORTING.md（设备热插拔不迁移、逐字歌词、P9 喜欢键）。
+
+## §17 远程播放报错归因 + 歌单曲目缓存落地（2026-10-02，双代理并行修复）
+
+1. **远程曲目播放失败被误报为「音质不存在」**：逐档取流探针实锤——存量凭证连免 VIP
+   的 MP3_128 也 `104003`、免登录试听 RS02 正常 → 凭证被服务端判过期（`hmp auth`
+   Expiry: expired），**音质 map 本身无误**（SongFileType 常量 ↔ `quality_to_file_type`
+   ↔ `quality_from_file_type` ↔ `available_from_sizes` 三表逐一核对自洽；`models::File`
+   补建模 `size_hires`）。旧代码全链失败后返回 `QualityUnavailable("")`（取流响应缺
+   midurlinfo 时消息恒空，诊断黑洞）。修复：全链鉴权类错误码（104003 等，`is_auth_
+   result_code`）归因为 `NotLoggedIn`（可操作文案）；混合失败才逐档带标签报
+   `QualityUnavailable`；engine 降档重试守卫前移到装载前（复现已失败档/达
+   `MAX_LOAD_DEGRADES`=8 不再装载同一份坏数据）；降档中解析失败（链耗尽）必回滚旧曲
+   （真实驱动 `perform_load` 先 `sink.clear()`，不回滚=静音，含回归测试）。
+   **用户侧动作：`hmp login` 重新扫码恢复远程播放。** 风险：VIP-only 曲 + 有效非 VIP
+   凭证同码型，也会报 NotLoggedIn（上游码型无法区分，比空文案更可操作）。
+2. **歌单曲目数量恒 0**：reconcile 自始只写 playlists 行、从未写 playlist_tracks
+   （§4.4 所述「缓存功能未落地」缺口，非回归；API 层 live 核验零故障）。落地第四腿
+   `reconcile_playlist_tracks`：逐歌单 `CgiGetDiss` 快照差集合入（远端增/删/元数据
+   COALESCE 只升不降；页上限 20，超限视为不完整放弃落库防误删）；**owned 行
+   remote_id 存 dirid 而详情接口只认 tid** → listing 就地建 dirid→tid 映射（免二次
+   出网）；「我喜欢」（remote_id=201）特判走 `get_fav_song`；pending 意图在场本地
+   胜出零出网。§4.4 FK 地雷随之拆除，§4.2 INNER JOIN 收藏观感被顺带大幅缓解。
+   live 验证：22/22 歌单落库 4566 条链接，抽样三个歌单曲目数与远端 `total_song_num`
+   全等。已知边界：远端重排序不回写本地 position；>2000 首歌单本轮放弃（用户最大
+   1591 首，无实际影响）。
