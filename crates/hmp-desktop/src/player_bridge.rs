@@ -498,7 +498,12 @@ fn apply_event(
     let Some(state) = event.state else {
         apply_offline(&player, ui_weak);
         // 订阅只在在线↔离线翻转时投递一次空态：提示一次，不随重试刷屏。
-        show_feedback(ui_weak, "播放服务未连接，播放操作暂不可用".into());
+        // 可操作原因（陈旧构建/缺二进制等，自带修复指引）优先于笼统提示
+        // ——「点了没反应」式离线是排障黑洞（§21「前端不能播放」实锤）。
+        let reason = event
+            .offline_reason
+            .unwrap_or_else(|| "播放服务未连接，播放操作暂不可用".into());
+        show_feedback(ui_weak, reason);
         return;
     };
     let mids = queue_mids.lock().expect("queue mids").clone();

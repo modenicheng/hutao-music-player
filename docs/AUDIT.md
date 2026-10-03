@@ -703,3 +703,43 @@ UI 侧模型回填（`apply_cover` 广播 8 个表格模型行 + `COVER_IMAGES`/
 签名去 `ui` 参数（纯 IPC 派发）。另有：共享 target 目录被两 worktree 交替
 构建产出「幽灵编译错误」（daemon 直查绿、作依赖编译红，冷跑独立 target 即
 消失）——多 worktree 共享 CARGO_TARGET_DIR 不可靠，与 §20 前科同类。
+
+## §22 「前端又不能播放音频」——§20 后陈旧 hmp.exe 未重建 + StaleBackend 无限 churn（2026-10-03，用户报）
+
+**现象**：桌面前端完全无法播放（用户口径「前端又不能播放音频了」）。此前 §16
+零号发现、§18 已两度实锤「陈旧常驻 daemon」，本轮为同一陷阱的第三次复发，但
+形态升级：**磁盘上的二进制本身是旧的**，重启 daemon 解决不了。
+
+**根因链**（实锤证据）：
+1. §20（8f9d5b9，10-03 02:29）改了 hmp-daemon 三个源文件（content/reconcile/
+   server），但 release `hmp.exe` 停留在 10-02 21:57（edc304f 之后 8 分钟构建，
+   早于 §20）；`hmp-desktop.exe` 却在 10-03 10:44 重建——**桌面新、磁盘后端旧**
+   的错位组合。推测成因：只跑了 `cargo build --release -p hmp-desktop`（或等价
+   单包构建），§20 备注里「重建 release daemon+desktop」的后半句没落地。
+2. 指纹实锤：桌面 exe 内嵌 `BUILD_CODE=5c2c5827f3fd9a2c`（HEAD 构建），陈旧
+   daemon 按其源码必然报另一指纹 → `verify_backend_generation` Quit+重拉（同一
+   个旧 exe）→ 复核仍不一致 → `StaleBackend` → 订阅循环按离线降级，前端整体
+   不可播。§21 修复期只有桌面端被重建，指纹握手正确拦下了这次错位——机制
+   工作正常，但暴露出两个次生缺陷。
+3. **次生缺陷 A（本轮修复）**：`connect_or_spawn` 失败后订阅循环每 2s 重试，
+   每轮都对陈旧 daemon 执行 Quit+重拉——磁盘二进制不换就无限 churn，且把
+   CLI/托盘本可用的 daemon 反复杀起。修复：`verify_backend_generation` 记账
+   「重启后仍不一致」时的磁盘二进制形态（mtime+len，`STALE_BINARY_SEEN`），
+   磁盘未变则快速失败不再 Quit（daemon 存活，CLI 可用）；重建二进制（stamp
+   变化）自动恢复完整重启核对（自愈，无需重启桌面端）。纯决策逻辑
+   `restart_worthwhile` 单测钉死。
+4. **次生缺陷 B（本轮修复）**：离线原因从未到过用户眼前——toast 恒为「播放
+   服务未连接」，`StaleBackend` 的可操作文案（「请重新构建/安装 hmp 后端二进
+   制」）只进日志。修复：`UiStateEvent` 增 `offline_reason`（仅 StaleBackend/
+   NoBackendBinary/SpawnTimeout 三类可操作错误携带，IO/协议断连沿用笼统提示
+   防 OS 文案刷屏），离线翻转的一次性 toast 直接展示原因与修复指引。
+
+**验证**：`hmp status` 实测新 daemon `backend_build=5c2c5827f3fd9a2c` 与桌面端
+一致；本地曲（tone.wav）Playing 位置推进零错误；远程 QQ 曲以 Flac 全档播放
+（`hmp auth` 的「Expiry: expired」为陈旧标志，实际取流健康——与 §17 的
+104003 失效签名不同，勿混淆）。hmp-desktop lib 测试全绿（新增 3 例）。
+
+**教训**：①「重建」必须落到所有链接 hmp-daemon 的二进制（hmp.exe 与
+hmp-desktop 同源同指纹），单包构建是本仓库的高频事故源；②握手拦下错位只是
+兜底，UI 必须把拦下的事实说给用户（本次 toast 修复后，同类事故用户可自救）；
+③离线 churn 与静默原因叠加，把一次「重建一下」的环境事故放大成「前端坏了」。

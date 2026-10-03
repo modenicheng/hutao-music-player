@@ -8,8 +8,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime};
 
 use hmp_core::ipc::{DaemonState, Event, MAX_FRAME, Request, Response, decode_frame, encode_frame};
 use hmp_core::{QueueEntry, TrackProvider};
@@ -161,13 +161,66 @@ async fn verify_backend_generation(stream: IpcStream) -> Result<IpcStream, Backe
         Err(_) => return Ok(stream),
     };
     if running == hmp_daemon::BUILD_CODE {
+        *stale_backend_seen() = None;
         return Ok(stream);
+    }
+    // 磁盘二进制与上次「重启后指纹仍不一致」时相同 → 重启注定徒劳：快速
+    // 失败，不 Quit 在跑的 daemon。否则陈旧二进制存活期间，订阅循环每 2s
+    // 重试 connect_or_spawn 会无限杀起 daemon（§21「前端不能播放」实锤：
+    // UI 离线之外 CLI/托盘一起陪葬）。重建二进制（stamp 变化）后经既有
+    // 重试路径自动恢复完整重启核对（自愈，无需重启桌面端）。
+    let disk = resolve_backend_binary().and_then(|exe| binary_stamp(&exe).ok());
+    if !restart_worthwhile(disk, *stale_backend_seen()) {
+        return Err(BackendError::StaleBackend);
     }
     restart_backend().await;
     let stream = obtain_stream().await?;
     match request(Request::Status).await {
-        Ok(Response::Status(state)) if state.backend_build == hmp_daemon::BUILD_CODE => Ok(stream),
-        _ => Err(BackendError::StaleBackend),
+        Ok(Response::Status(state)) if state.backend_build == hmp_daemon::BUILD_CODE => {
+            *stale_backend_seen() = None;
+            Ok(stream)
+        }
+        _ => {
+            *stale_backend_seen() = disk;
+            Err(BackendError::StaleBackend)
+        }
+    }
+}
+
+/// 磁盘二进制形态（修改时刻 + 字节长）：重建至少改变其一。
+type BinaryStamp = (SystemTime, u64);
+
+/// 最近一次「重启后指纹仍不一致」时磁盘后端二进制的形态（进程级记账；
+/// 只有订阅循环触碰，锁内无 await）。
+static STALE_BINARY_SEEN: Mutex<Option<BinaryStamp>> = Mutex::new(None);
+
+fn stale_backend_seen() -> MutexGuard<'static, Option<BinaryStamp>> {
+    STALE_BINARY_SEEN.lock().expect("stale backend stamp")
+}
+
+/// 指纹不一致时是否值得重启后端：仅当磁盘二进制可得且形态与上次失败核对
+/// 不同（重建过）才重启。二进制缺失/stamp 读失败 → 跳过（Quit 了也没有
+/// exe 可拉，纯破坏；daemon 留给 CLI/托盘）。纯逻辑（static 读写由调用方
+/// 负责），回归测试钉此语义。
+fn restart_worthwhile(disk: Option<BinaryStamp>, seen: Option<BinaryStamp>) -> bool {
+    disk.is_some() && disk != seen
+}
+
+/// 磁盘后端二进制形态（修改时刻 + 长度）；读失败按「未知」处理（调用方
+/// 退回无条件重启路径）。
+fn binary_stamp(path: &Path) -> std::io::Result<BinaryStamp> {
+    let meta = std::fs::metadata(path)?;
+    Ok((meta.modified()?, meta.len()))
+}
+
+/// 离线原因的可操作子集：陈旧构建/缺二进制/拉起超时值得让用户看到
+/// （StaleBackend 展示串自带修复指引）；普通 IO 断连沿用笼统提示。
+pub fn offline_reason_text(e: &BackendError) -> Option<String> {
+    match e {
+        BackendError::StaleBackend | BackendError::NoBackendBinary | BackendError::SpawnTimeout => {
+            Some(e.to_string())
+        }
+        _ => None,
     }
 }
 
@@ -272,6 +325,9 @@ pub struct UiStateEvent {
     pub queue_rows: Option<Vec<QueueRowMeta>>,
     /// 媒体库内容变更（`Event::LibraryChanged`；UI 重查 sqlite 刷新库页）。
     pub library_changed: bool,
+    /// 离线原因（仅可操作错误：陈旧构建/缺二进制/拉起超时；普通 IO 断连
+    /// 为 `None`，沿用笼统提示）。在线事件恒 `None`。
+    pub offline_reason: Option<String>,
 }
 
 /// 队列行投影（IPC 纯 ID + 媒体库元数据）。`TrackRow` 组装在 UI 线程——
@@ -323,7 +379,7 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                     ever_connected = true;
                     stream
                 }
-                Err(_) => {
+                Err(e) => {
                     if !offline_reported {
                         offline_reported = true;
                         dispatch_ui(
@@ -332,6 +388,7 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                                 state: None,
                                 queue_rows: Some(Vec::new()),
                                 library_changed: false,
+                                offline_reason: offline_reason_text(&e),
                             },
                         );
                     }
@@ -373,6 +430,7 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                                 state: None,
                                 queue_rows: None,
                                 library_changed: true,
+                                offline_reason: None,
                             },
                         );
                     }
@@ -398,6 +456,7 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                                 state: Some(state),
                                 queue_rows,
                                 library_changed: false,
+                                offline_reason: None,
                             },
                         );
                     }
@@ -599,6 +658,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
         std::fs::create_dir_all(&empty).unwrap();
         assert_eq!(find_hmp_in_dirs([empty].into_iter()), None);
+    }
+
+    #[test]
+    fn restart_worthwhile_skips_only_while_disk_binary_unchanged() {
+        let old: Option<BinaryStamp> = Some((SystemTime::UNIX_EPOCH, 1));
+        let rebuilt: Option<BinaryStamp> = Some((SystemTime::UNIX_EPOCH, 2));
+        // 首次发现陈旧：执行重启核对。
+        assert!(restart_worthwhile(old, None));
+        // 重启后仍不一致（记账 old）→ 磁盘二进制未变，重启徒劳：跳过，
+        // 不 Quit 在跑的 daemon（churn 回归钉）。
+        assert!(!restart_worthwhile(old, old));
+        // 用户重建二进制（stamp 变化）→ 恢复完整重启核对（自愈）。
+        assert!(restart_worthwhile(rebuilt, old));
+        // 磁盘二进制不可得（stamp=None）→ 跳过（Quit 了也无 exe 可拉）。
+        assert!(!restart_worthwhile(None, old));
+    }
+
+    #[test]
+    fn stale_backend_stamp_roundtrips_through_static() {
+        // 记账路径（verify_backend_generation 失败/成功分支的读写语义）；
+        // 写后即擦，不与其他测试产生跨断言依赖。
+        let stamp: Option<BinaryStamp> = Some((SystemTime::UNIX_EPOCH, 7));
+        *stale_backend_seen() = stamp;
+        assert_eq!(*stale_backend_seen(), stamp);
+        *stale_backend_seen() = None;
+        assert_eq!(*stale_backend_seen(), None);
+    }
+
+    #[test]
+    fn offline_reason_only_for_actionable_errors() {
+        // 可操作错误带原因（StaleBackend 展示串自带修复指引）；
+        // IO/协议类沿用笼统提示，避免 OS 文案刷屏。
+        assert!(
+            offline_reason_text(&BackendError::StaleBackend)
+                .expect("stale backend carries reason")
+                .contains("陈旧构建")
+        );
+        assert!(offline_reason_text(&BackendError::NoBackendBinary).is_some());
+        assert!(offline_reason_text(&BackendError::SpawnTimeout).is_some());
+        assert!(offline_reason_text(&BackendError::Protocol("x".into())).is_none());
+        let io = BackendError::Io(std::io::Error::other("boom"));
+        assert!(offline_reason_text(&io).is_none());
     }
 
     #[test]
