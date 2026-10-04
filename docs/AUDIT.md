@@ -743,3 +743,44 @@ UI 侧模型回填（`apply_cover` 广播 8 个表格模型行 + `COVER_IMAGES`/
 hmp-desktop 同源同指纹），单包构建是本仓库的高频事故源；②握手拦下错位只是
 兜底，UI 必须把拦下的事实说给用户（本次 toast 修复后，同类事故用户可自救）；
 ③离线 churn 与静默原因叠加，把一次「重建一下」的环境事故放大成「前端坏了」。
+
+## §23 远端封面显示链路复审（2026-10-04，用户报「远端封面无法被正确显示」）
+
+**实机量化**（%LOCALAPPDATA%/hmp）：tracks 表 3935/4172 QQ 曲目已带 T002 模板
+远程 URL（§20 断点①修复生效），但 `cover_cache` 表 **0 行**、covers/ 目录
+38 个文件最后落盘 10-03 10:44（早于含修复的 release hmp.exe 11:44 构建）——
+**新 daemon 运行期间零封面下载**。直连探针实测 y.gtimg.cn 封面 URL 下载
+200/25KB 真 JPEG；手动拉起 HEAD daemon 后 IPC `CoverGet` 78ms 下载落盘、
+二次请求 510µs 盘缓存命中、`rebind_cover_url` 一条 URL 命中 62 行同封面曲目
+——**daemon 侧下载/落盘/盘缓存/rebind 全链路健康，断点在桌面端消费侧**。
+
+**两个断点**（上溯到 UI）：
+1. **队列抽屉非当前曲 QQ 行封面永不补图**：队列行封面在投影时固化
+   （`row_from_meta` → `queue_cover`，远程 URL 落程序化占位），daemon
+   `rebind_cover_url` 刻意不改媒体库代际（封面补齐不触发整页重查），队列
+   模型只在 `queue.revision` 变化时重建——预取（track_covers）回包又全部
+   丢弃（§21 语义合并时摘除回填）。组合结果：只有当前曲有
+   `spawn_cover_fetch` 原地换图，抽屉里其余 QQ 曲**整场会话占位**。
+   → `track_covers::prefetch_tracks_with`（带 `OnCover` 回包回调）：队列
+   落地（apply_event queue_rows 分支）对远程封面行发起预取，回包经
+   `invoke_from_event_loop` 落 256 桶 → `update_queue_row_cover` 原地换图。
+   预取/回填全走 daemon 盘缓存与 rebind，去重/并发语义不变。
+2. **三处进程级死去重「失败永不重试」**：`REQUESTED` 记账在发起时插入、
+   从不释放——冷启动窗口（daemon 未就绪 / StaleBackend 恢复中 / 网络瞬断）
+   内的请求全部失败且**永久在账**，该图整个会话占位（与 §22 的离线窗口
+   正面叠加：StaleBackend 期间列表落地 → 预取全灭 → daemon 恢复后 UI 仍
+   不再问）。→ 改「失败出账」：`track_covers`/`online_covers` 失败即移除
+   记账（触发源=进页面/队列重建，低频自然重试）；`spawn_cover_fetch` 由
+   10Hz 推送驱动，另加指数退避（2s 起步 ×2 封顶 60s，序列取自存储的时长
+   而非时刻差——重试总发生在上次时刻过期后，按时刻差翻倍会恒停最小值），
+   成功清除退避。三处触发纪律记录在各自模块 doc。
+
+**回归**：desktop lib 73 测试全绿（新增 `failed_request_releases_dedup_key`、
+`cover_retry_backoff_doubles_and_caps`）；clippy `--all-targets` 零警告。
+daemon 侧实测见上（探针法：起 HEAD daemon + 直发 CoverGet，观察首下/命中
+/rebind 行数）。
+
+**已知边界**：队列行预取失败的重试依赖下次队列重建（换曲/加歌/重开会话）
+——不换曲的静止队列不自动重试（当前曲除外，10Hz 退避重试兜底）；歌手照片、
+榜单头图仍无数据源（§20 已知边界不变）；队列行回填图 256 桶（≤256KB/行）
+与 §21「QueueRow 背 cover」契约一致，内存有界。

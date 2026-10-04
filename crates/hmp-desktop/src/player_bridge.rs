@@ -493,6 +493,29 @@ fn apply_event(
             .into(),
         );
         player.set_queue(ModelRc::new(VecModel::from(track_rows)));
+        // QQ 远程封面行预取 + 回包原地换图（2026-10-04 封面审计①）：队列行
+        // 封面在投影时固化，daemon rebind_cover_url 不触发队列重建——不回填
+        // 则抽屉里非当前曲整场会话占位。去重/失败出账在 track_covers。
+        let remote_covers: Vec<(String, String)> = rows
+            .iter()
+            .filter_map(|row| {
+                let uri = row.cover_uri.as_deref()?;
+                (uri.starts_with("http://") || uri.starts_with("https://"))
+                    .then(|| (row.mid.clone(), uri.to_string()))
+            })
+            .collect();
+        if !remote_covers.is_empty() {
+            let ui_weak = ui_weak.clone();
+            crate::track_covers::prefetch_tracks_with(
+                runtime,
+                remote_covers,
+                Some(Arc::new(move |mid, image| {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        update_queue_row_cover(&Player::get(&ui), &mid, image);
+                    }
+                })),
+            );
+        }
     }
 
     let Some(state) = event.state else {
@@ -862,6 +885,39 @@ fn like_count_text(count: i64) -> String {
     }
 }
 
+/// 失败重试退避下限/上限：10Hz 状态推送驱动重试，失败指数退避防打爆
+/// （daemon 在跑而 CDN 抖动时每帧重试 = 每帧一次真出网）。
+const COVER_RETRY_MIN: Duration = Duration::from_secs(2);
+const COVER_RETRY_MAX: Duration = Duration::from_secs(60);
+
+thread_local! {
+    /// mid → (最早可重试时刻, 当前退避时长)。失败翻倍封顶，成功即清除。
+    static COVER_RETRY: RefCell<HashMap<String, (Instant, Duration)>> =
+        RefCell::new(HashMap::new());
+}
+
+/// 退避窗口未过（该 mid 刚失败过）→ true。
+fn cover_fetch_backed_off(mid: &str) -> bool {
+    COVER_RETRY.with(|map| {
+        map.borrow()
+            .get(mid)
+            .is_some_and(|&(at, _)| Instant::now() < at)
+    })
+}
+
+/// 失败记账：退避翻倍（首次 COVER_RETRY_MIN，封顶 COVER_RETRY_MAX）。
+/// 重试总发生在上次时刻过期之后，指数序列取自存储的时长而非时刻差。
+fn cover_fetch_schedule_retry(mid: &str) {
+    COVER_RETRY.with(|map| {
+        let mut map = map.borrow_mut();
+        let backoff = map
+            .get(mid)
+            .map(|&(_, b)| (b * 2).min(COVER_RETRY_MAX))
+            .unwrap_or(COVER_RETRY_MIN);
+        map.insert(mid.to_owned(), (Instant::now() + backoff, backoff));
+    });
+}
+
 /// 异步取 QQ 封面本地产物（CoverGet）；完成时当前曲仍是发起曲才应用。
 fn spawn_cover_fetch(
     ui_weak: &Weak<AppWindow>,
@@ -869,11 +925,16 @@ fn spawn_cover_fetch(
     mid: String,
     url: String,
 ) {
-    // 去重：状态推送 ~10Hz，同一 mid 只发起一次（失败也不再重试，下一次
-    // 换曲回来时自然重试）。
+    // 去重：状态推送 ~10Hz，同一 mid 在途/已成功只发起一次。失败出账 +
+    // 指数退避（2026-10-04 封面审计⑤：冷启动 daemon 未就绪/StaleBackend
+    // 恢复窗口内的一次失败不再让该曲整个会话占位——退避窗口过后自动重试，
+    // daemon 命中盘缓存毫秒回）。
     thread_local! {
-        static REQUESTED: RefCell<std::collections::HashSet<String>> =
-            RefCell::new(std::collections::HashSet::new());
+        static REQUESTED: RefCell<HashSet<String>> =
+            RefCell::new(HashSet::new());
+    }
+    if cover_fetch_backed_off(&mid) {
+        return;
     }
     let first_request = REQUESTED.with(|set| set.borrow_mut().insert(mid.clone()));
     if !first_request {
@@ -884,33 +945,43 @@ fn spawn_cover_fetch(
     runtime.spawn(async move {
         // 取色键与同步路径一致（mid|url）：真图落地后下一帧推送同键零重算
         let cover_key = format!("{mid}|{url}");
-        let Ok(Response::Cover(uri)) = crate::backend::request(Request::CoverGet { url }).await
-        else {
-            return;
-        };
-        let path = crate::covers::file_uri_to_path(&uri).unwrap_or(uri);
-        let ui_weak = ui_weak.clone();
-        let mid = mid.clone();
-        let _ = slint::invoke_from_event_loop(move || {
-            let Some(ui) = ui_weak.upgrade() else {
-                return;
-            };
-            let player = Player::get(&ui);
-            // 当前曲取图回包落 512 桶（播放页大图）；同一 Image 句柄原地
-            // 复用进队列行（QueueRow.cover），无额外位图拷贝。
-            let Some(image) = crate::cover_cache::get_or_load(&path, 512) else {
-                return;
-            };
-            // 队列抽屉行内原地换图：与当前曲无关——迟到的封面同样更新抽屉行
-            // （daemon 已回写 cover_uri，此后队列重建直接读盘，此处补本次会话）
-            update_queue_row_cover(&player, &mid, image.clone());
-            if player.get_current_mid() != mid.as_str() {
-                return; // 换曲竞态：播放条/取色只认当前曲
+        match crate::backend::request(Request::CoverGet { url }).await {
+            Ok(Response::Cover(uri)) => {
+                COVER_RETRY.with(|map| {
+                    map.borrow_mut().remove(&mid);
+                });
+                let path = crate::covers::file_uri_to_path(&uri).unwrap_or(uri);
+                let ui_weak = ui_weak.clone();
+                let mid = mid.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = ui_weak.upgrade() else {
+                        return;
+                    };
+                    let player = Player::get(&ui);
+                    // 当前曲取图回包落 512 桶（播放页大图）；同一 Image 句柄原地
+                    // 复用进队列行（QueueRow.cover），无额外位图拷贝。
+                    let Some(image) = crate::cover_cache::get_or_load(&path, 512) else {
+                        return;
+                    };
+                    // 队列抽屉行内原地换图：与当前曲无关——迟到的封面同样更新抽屉行
+                    // （daemon 已回写 cover_uri，此后队列重建直接读盘，此处补本次会话）
+                    update_queue_row_cover(&player, &mid, image.clone());
+                    if player.get_current_mid() != mid.as_str() {
+                        return; // 换曲竞态：播放条/取色只认当前曲
+                    }
+                    player.set_cover(image.clone());
+                    // 真图取色覆写程序化占位的取色
+                    crate::track_theme::apply_cover(&ui_weak, &cover_key, &image);
+                });
             }
-            player.set_cover(image.clone());
-            // 真图取色覆写程序化占位的取色
-            crate::track_theme::apply_cover(&ui_weak, &cover_key, &image);
-        });
+            _ => {
+                // 失败：出账 + 指数退避，下一帧推送到达退避窗口末尾后自动重试
+                cover_fetch_schedule_retry(&mid);
+                REQUESTED.with(|set| {
+                    set.borrow_mut().remove(&mid);
+                });
+            }
+        }
     });
 }
 
@@ -1087,8 +1158,8 @@ fn row_from_meta(meta: &QueueRowMeta) -> QueueRow {
 
 /// 队列行封面：本地库 file:// 封面直接读盘（扩列投影带出；daemon 已把取到
 /// 的本地产物回写 cover_uri，播过的 QQ 曲同样命中）→ cover_cache 256 桶
-/// （抽屉行 36×36，行桶与表格/侧栏同档）；远程 URL 程序化占位（逐行网络
-/// 取图不做，当前曲取图回包另有原地换图补齐）。
+/// （抽屉行 36×36，行桶与表格/侧栏同档）；远程 URL 先程序化占位，队列落地
+/// 的预取回包原地换图（apply_event → track_covers::prefetch_tracks_with）。
 fn queue_cover(meta: &QueueRowMeta) -> slint::Image {
     if let Some(uri) = &meta.cover_uri {
         if !uri.starts_with("http://") && !uri.starts_with("https://") {
@@ -1143,6 +1214,34 @@ mod tests {
             position: Duration::from_millis(position_ms),
             ..PlaybackState::default()
         }
+    }
+
+    /// 失败退避序列（2026-10-04 封面审计⑤）：首次 2s，逐次翻倍，60s 封顶；
+    /// 退避窗口内 10Hz 推送不发起请求。
+    #[test]
+    fn cover_retry_backoff_doubles_and_caps() {
+        let mid = "backoff-test-mid";
+        assert!(!cover_fetch_backed_off(mid), "无失败史不退避");
+        let mut expect = COVER_RETRY_MIN;
+        for round in 1..=7 {
+            cover_fetch_schedule_retry(mid);
+            assert!(
+                cover_fetch_backed_off(mid),
+                "第 {round} 次失败后应进退避窗口"
+            );
+            let stored = COVER_RETRY.with(|m| m.borrow().get(mid).copied());
+            let Some((at, backoff)) = stored else {
+                panic!("第 {round} 次失败应记账");
+            };
+            assert_eq!(backoff, expect, "第 {round} 次失败退避时长");
+            assert!(at > Instant::now());
+            expect = (expect * 2).min(COVER_RETRY_MAX);
+        }
+        assert_eq!(expect, COVER_RETRY_MAX, "翻倍应在 60s 封顶");
+        COVER_RETRY.with(|m| {
+            m.borrow_mut().remove(mid);
+        });
+        assert!(!cover_fetch_backed_off(mid), "清除后退避解除");
     }
 
     #[test]

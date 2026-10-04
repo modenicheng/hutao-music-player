@@ -12,7 +12,7 @@ use slint::{Global, Model, Weak};
 use crate::{AppWindow, Data};
 
 thread_local! {
-    /// 已发起过的 (kind, id, url) 三元组；同图不重复出网。
+    /// 在账的 (kind, id, url)（在途或已成功；失败出账允许重试，进程级）。
     static REQUESTED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
@@ -48,15 +48,20 @@ pub fn refresh_discover_covers(
             continue;
         };
         let key = format!("discover|{id}|{url}");
-        if REQUESTED.with(|set| !set.borrow_mut().insert(key)) {
-            continue; // 已请求过（完成或失败均不重发）
+        if REQUESTED.with(|set| !set.borrow_mut().insert(key.clone())) {
+            continue; // 已请求过（在途或已成功）
         }
         let ui_weak = ui_weak.clone();
         let id = id.clone();
         runtime.spawn(async move {
+            // 失败出账（2026-10-04 封面审计⑤）：冷启动窗口一次失败不再让
+            // 卡片整个会话占位；重进 discover 页触发重试（触发源低频，无需退避）。
             let Ok(hmp_core::Response::Cover(uri)) =
                 crate::backend::request(hmp_core::Request::CoverGet { url }).await
             else {
+                REQUESTED.with(|set| {
+                    set.borrow_mut().remove(&key);
+                });
                 return;
             };
             let path = crate::covers::file_uri_to_path(&uri).unwrap_or(uri);

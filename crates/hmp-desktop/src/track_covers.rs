@@ -14,7 +14,11 @@
 //! 两个无界线程本地位图缓存随回填一并移除（正是被治理的病灶形态）。
 //!
 //! 去重纪律（online_covers / player_bridge 同款）：`REQUESTED`（mid|url 全局）
-//! 进程内同图只发一次，失败不重试——下次进页面由 daemon 盘缓存毫秒回。
+//! 进程内在途/已成只发一次；**失败出账**（2026-10-04 封面审计⑤）——冷启动
+//! 窗口（daemon 未就绪/StaleBackend 重启中）一次失败不该让该图整个会话
+//! 永远占位。重试节奏由触发源决定：本模块的触发源是进页面/队列重建
+//! （低频），失败出账即可自然重试；10Hz 高频触发源（当前曲）另带退避
+//! （player_bridge::spawn_cover_fetch）。
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -25,9 +29,25 @@ use std::sync::Arc;
 const MAX_INFLIGHT: usize = 8;
 
 thread_local! {
-    /// 已发起过的 mid|url（完成或失败均不重发，进程级）。
+    /// 在账的 mid|url（在途或已成功；失败即出账允许重试，进程级）。
     static REQUESTED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
+
+/// 记账：key 未在账则入账并返回 true（允许发起）。
+fn account(key: &str) -> bool {
+    REQUESTED.with(|set| set.borrow_mut().insert(key.to_owned()))
+}
+
+/// 出账：请求失败后调用，下一次触发源（进页面/队列重建）可重试。
+fn release(key: &str) {
+    REQUESTED.with(|set| {
+        set.borrow_mut().remove(key);
+    });
+}
+
+/// 每张图回包后的 UI 线程回调（(mid, 降采样图)）。slint::Image 非 Send，
+/// 转交发生在 invoke_from_event_loop 闭包内，回调本体只见到主线程产物。
+pub type OnCover = Arc<dyn Fn(String, slint::Image) + Send + Sync>;
 
 /// 列表落地后的预取入口（纯 IPC：出网与落库全在 daemon 侧，UI 线程只派发）。
 ///
@@ -36,6 +56,17 @@ thread_local! {
 pub fn prefetch_tracks(
     runtime: &Arc<crate::backend::BackendRuntime>,
     targets: Vec<(String, String)>,
+) {
+    prefetch_tracks_with(runtime, targets, None);
+}
+
+/// 带回包回填的预取：每张图落到本地产物后（UI 线程）调 `on_cover(mid, image)`
+/// ——队列抽屉行原地换图（2026-10-04 封面审计①：队列行封面在投影时固化，
+/// daemon rebind 不触发队列重建，不回填则非当前曲整场会话占位）。
+pub fn prefetch_tracks_with(
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    targets: Vec<(String, String)>,
+    on_cover: Option<OnCover>,
 ) {
     if targets.is_empty() {
         return;
@@ -46,17 +77,33 @@ pub fn prefetch_tracks(
         if mid.is_empty() || url.is_empty() {
             continue;
         }
-        // 进程内去重：同图只发一次（完成或失败均不重发）
+        // 进程内去重：在途/已成功只发一次（失败出账可重试）
         let key = format!("{mid}|{url}");
-        if REQUESTED.with(|set| !set.borrow_mut().insert(key)) {
+        if !account(&key) {
             continue;
         }
         let permits = semaphore.clone();
         let runtime = runtime.clone();
+        let on_cover = on_cover.clone();
         runtime.spawn(async move {
             let _permit = permits.acquire_owned().await.expect("semaphore open");
-            // 响应不回 UI（无图可回填）；daemon 侧完成盘缓存登记与 rebind
-            let _ = crate::backend::request(hmp_core::Request::CoverGet { url }).await;
+            match crate::backend::request(hmp_core::Request::CoverGet { url }).await {
+                Ok(hmp_core::Response::Cover(uri)) => {
+                    if let Some(on_cover) = &on_cover {
+                        let on_cover = Arc::clone(on_cover);
+                        let mid = mid.clone();
+                        // 降采样必须发生在 UI 线程（cover_cache 是 thread_local）
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let path = crate::covers::file_uri_to_path(&uri).unwrap_or(uri);
+                            if let Some(image) = crate::cover_cache::get_or_load(&path, 256) {
+                                on_cover(mid, image);
+                            }
+                        });
+                    }
+                    // 无回调时响应到此为止：daemon 侧已完成盘缓存登记与 rebind
+                }
+                _ => release(&key),
+            }
         });
         dispatched += 1;
     }
@@ -101,5 +148,17 @@ mod tests {
             targets,
             vec![("m1".into(), "https://y.gtimg.cn/a.jpg".into())]
         );
+    }
+
+    /// 失败出账语义（2026-10-04 封面审计⑤）：在账拦重复；release 后可再入账
+    /// ——冷启动窗口的一次失败不再让该图整个会话占位。
+    #[test]
+    fn failed_request_releases_dedup_key() {
+        let key = "test-mid|test-url";
+        assert!(account(key), "首次入账应放行");
+        assert!(!account(key), "在账应拦截重复请求");
+        release(key);
+        assert!(account(key), "出账后应允许重试");
+        release(key);
     }
 }
