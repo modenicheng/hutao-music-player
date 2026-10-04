@@ -10,6 +10,7 @@ import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, Button, Equalizer, HoverGroup, HoverItem, Scroll } from "primitives.slint";
 import { Player, TrackPalette } from "stores.slint";
+import { TrackMenu, MenuContext, TrackMenuPanel } from "context-menu.slint";
 
 export component QueueDrawer inherits Rectangle {
     background: transparent;
@@ -215,6 +216,30 @@ export component QueueDrawer inherits Rectangle {
                                 Player.play-at(index);
                             }
 
+                            // —— 统一右键菜单（queue 上下文：含"从队列移除"）———
+                            // 快照为 TrackRow 字面量（QueueRow 剥 cover——表格行
+                            // 不背位图契约，data.slint）；打开坐标走 TrackMenu
+                            // global（popup 自有属性禁止外层访问）
+                            context-enabled: TrackMenu.enabled;
+                            context-requested(mx, my) => {
+                                TrackMenu.context = MenuContext.queue;
+                                TrackMenu.index = index;
+                                TrackMenu.track = {
+                                    mid: row.mid,
+                                    source: row.source,
+                                    title: row.title,
+                                    artists: row.artists,
+                                    artist-mid: row.artist-mid,
+                                    album: row.album,
+                                    album-mid: row.album-mid,
+                                    duration-ms: row.duration-ms,
+                                    quality: row.quality,
+                                };
+                                TrackMenu.open-x = mx;
+                                TrackMenu.open-y = my;
+                                row-menu.show();
+                            }
+
                             HorizontalLayout {
                                 padding-left: Theme.space-4;
                                 padding-right: 17px;
@@ -311,6 +336,17 @@ export component QueueDrawer inherits Rectangle {
                                         clicked => {
                                             Player.remove-at(index);
                                         }
+                                        // 行内按钮对所有按键 grab（会吞右键）：
+                                        // 右键释放转发给行宿主打开菜单
+                                        pointer-event(event) => {
+                                            if (event.kind == PointerEventKind.up
+                                                && event.button == PointerEventButton.right) {
+                                                drawer-item.context-requested(
+                                                    self.absolute-position.x - drawer-item.absolute-position.x + self.mouse-x,
+                                                    self.absolute-position.y - drawer-item.absolute-position.y + self.mouse-y,
+                                                );
+                                            }
+                                        }
                                     }
                                     AppIcon {
                                         source: Icons.close;
@@ -319,6 +355,22 @@ export component QueueDrawer inherits Rectangle {
                                         height: 15px;
                                         x: (parent.width - self.width) / 2;
                                         y: (parent.height - self.height) / 2;
+                                    }
+                                }
+                            }
+
+                            // 行锚定菜单弹层（同 track-table：编译期摘除、点外/ESC
+                            // 默认关、行卸载自动关）；themed 态面板 hover 底经
+                            // TrackPalette.ctx-* 自动跟专辑色
+                            row-menu := PopupWindow {
+                                x: TrackMenu.open-x;
+                                y: TrackMenu.open-y + 4px;
+                                width: 216px;
+                                height: menu-panel.height;
+
+                                menu-panel := TrackMenuPanel {
+                                    dismissed => {
+                                        row-menu.close();
                                     }
                                 }
                             }

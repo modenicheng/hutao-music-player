@@ -72,6 +72,32 @@ thread_local! {
     static SENT_META: RefCell<HashMap<String, SentMeta>> = RefCell::new(HashMap::new());
 }
 
+/// 单曲命令（右键菜单下一首播放/加入队列）发送前的显示元数据登记：
+/// 与 [`dispatch_command`] 的 PlayList 同一覆盖层，新入队曲目若不在
+/// 库投影里，队列行标题不回退成 mid。须在 UI 线程调用（回调内即满足）。
+pub(crate) fn remember_meta(
+    mid: &str,
+    title: &str,
+    artists: &str,
+    album: &str,
+    duration_ms: i32,
+) {
+    if mid.is_empty() {
+        return;
+    }
+    SENT_META.with(|cell| {
+        cell.borrow_mut().insert(
+            mid.to_string(),
+            SentMeta {
+                title: title.to_string(),
+                artists: artists.to_string(),
+                album: album.to_string(),
+                duration_ms,
+            },
+        );
+    });
+}
+
 // 反馈条宿主 weak + 消退定时器（UI 线程独占；invoke_from_event_loop 落地）。
 thread_local! {
     static FEEDBACK_UI: RefCell<Weak<AppWindow>> = RefCell::new(Weak::default());
@@ -81,23 +107,60 @@ thread_local! {
 /// 命令派发（命令-查询分离 + 错误浮出）：受理（`Response::Ok`）即静默，
 /// 真实结果经状态推送呈现；被拒/传输失败 → 反馈条给用户可读的解释
 /// （未登录等用户可自救的错误给人话文案，其余透传 daemon 消息）。
-fn dispatch_command(runtime: &Arc<BackendRuntime>, ui_weak: &Weak<AppWindow>, req: Request) {
+pub(crate) fn dispatch_command(
+    runtime: &Arc<BackendRuntime>,
+    ui_weak: &Weak<AppWindow>,
+    req: Request,
+) {
+    let runtime = Arc::clone(runtime);
+    let ui_weak = ui_weak.clone();
+    runtime.spawn(async move {
+        report_command_result(&ui_weak, crate::backend::request(req).await);
+    });
+}
+
+/// [`dispatch_command`] 的受理回调变体：命令被 daemon 接受（`Response::Ok`）
+/// 后在 UI 线程执行钩子（右键菜单歌单写入后触发库刷新，让列表即时落账；
+/// 其余命令的真实结果本就走推送，无需钩子）。错误路径与 dispatch 一致。
+pub(crate) fn dispatch_command_on_ok(
+    runtime: &Arc<BackendRuntime>,
+    ui_weak: &Weak<AppWindow>,
+    req: Request,
+    on_ok: impl FnOnce(&AppWindow) + Send + 'static,
+) {
     let runtime = Arc::clone(runtime);
     let ui_weak = ui_weak.clone();
     runtime.spawn(async move {
         match crate::backend::request(req).await {
-            Ok(Response::Ok) => {}
-            Ok(Response::Err { code, message }) => {
-                show_feedback(&ui_weak, friendly_error(code, &message));
+            Ok(Response::Ok) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        on_ok(&ui);
+                    }
+                });
             }
-            // 查询型响应不会出现在命令路径；宽容忽略。
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("{e}: 播放命令未送达");
-                show_feedback(&ui_weak, "播放服务未连接，操作没有生效".into());
-            }
+            result => report_command_result(&ui_weak, result),
         }
     });
+}
+
+/// 命令响应 → 反馈条（受理静默；被拒/未连接给人话）。
+fn report_command_result(
+    ui_weak: &Weak<AppWindow>,
+    result: Result<Response, crate::backend::BackendError>,
+) {
+    match result {
+        Ok(Response::Ok) => {}
+        Ok(Response::Err { code, message }) => {
+            show_feedback(ui_weak, friendly_error(code, &message));
+        }
+        // 查询型响应不会出现在命令路径；宽容忽略。
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("{e}: 播放命令未送达");
+            show_feedback(ui_weak, "播放服务未连接，操作没有生效".into());
+        }
+    }
 }
 
 /// daemon 拒绝码 → 用户可读文案。

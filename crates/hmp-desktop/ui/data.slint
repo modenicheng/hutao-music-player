@@ -64,6 +64,9 @@ export struct PlaylistCover {
     /** 歌单 id：行点击跳歌单详情的导航参数（与库页歌单卡 mid 同一字符串形式） */
     id: string,
     name: string,
+    /** 歌单归属：`local`=纯本地，`owned`=QQ 自建（右键"加入播放列表"
+        按曲源兼容性预禁用：daemon 拒 owned 歌单收本地曲） */
+    relation: string,
     /** 占位封面图（中性底 + 歌单图标，covers 程序化生成；与库页歌单卡同源） */
     image: image,
 }

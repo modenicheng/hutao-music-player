@@ -83,6 +83,9 @@ pub struct PlaylistEntry {
     pub subtitle: String,
     /// QQ 歌单封面本地产物（reconcile 取得后回写；None → 程序化占位）。
     pub cover_uri: Option<String>,
+    /// 歌单归属：`local`=纯本地，`owned`=QQ 自建（右键"加入播放列表"
+    /// 按曲源兼容性预禁用用）。
+    pub relation: String,
 }
 
 /// 五个库页的一次性静态快照。
@@ -372,6 +375,7 @@ fn playlist_entries(db: &mut LibraryDb) -> Option<(Vec<PlaylistEntry>, Vec<Playl
             name: p.name,
             subtitle: format!("{} 首", p.track_count),
             cover_uri: p.cover_uri,
+            relation: p.relation.clone(),
         };
         if p.relation == "subscribed" {
             favorited.push(entry);

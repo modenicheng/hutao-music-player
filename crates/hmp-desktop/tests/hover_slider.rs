@@ -69,11 +69,13 @@ fn hover_slider_chain_reports_and_clears() {
             hmp_desktop::PlaylistCover {
                 id: "901".into(),
                 name: "测试歌单甲".into(),
+                relation: "local".into(),
                 image: hmp_desktop::covers::cover_image("playlist:901"),
             },
             hmp_desktop::PlaylistCover {
                 id: "902".into(),
                 name: "测试歌单乙".into(),
+                relation: "owned".into(),
                 image: hmp_desktop::covers::cover_image("playlist:902"),
             },
         ])));
@@ -81,6 +83,7 @@ fn hover_slider_chain_reports_and_clears() {
             hmp_desktop::PlaylistCover {
                 id: "903".into(),
                 name: "收藏歌单".into(),
+                relation: "subscribed".into(),
                 image: hmp_desktop::covers::cover_image("playlist:903"),
             },
         ])));

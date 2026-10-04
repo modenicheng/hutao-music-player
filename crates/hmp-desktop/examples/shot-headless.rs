@@ -219,11 +219,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hmp_desktop::PlaylistCover {
                 id: "1".into(),
                 name: "测试歌单甲".into(),
+                relation: "local".into(),
                 image: hmp_desktop::covers::cover_image("playlist:1"),
             },
             hmp_desktop::PlaylistCover {
                 id: "2".into(),
                 name: "测试歌单乙".into(),
+                relation: "owned".into(),
                 image: hmp_desktop::covers::cover_image("playlist:2"),
             },
         ])));

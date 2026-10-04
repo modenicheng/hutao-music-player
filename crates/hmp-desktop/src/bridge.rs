@@ -64,6 +64,8 @@ fn sidebar_cover(entry: &PlaylistEntry) -> PlaylistCover {
         // 字符串形式，歌单详情页按它 parse 成 i64 查库
         id: entry.id.clone().into(),
         name: entry.name.clone().into(),
+        // 归属随行透传：右键"加入播放列表"按曲源兼容性预禁用（owned 拒本地曲）
+        relation: entry.relation.clone().into(),
         image: local_cover_image(entry.cover_uri.as_deref())
             .unwrap_or_else(|| cover_image(&format!("playlist:{}", entry.id))),
     }
@@ -1251,11 +1253,13 @@ mod tests {
             name: "深夜循环".into(),
             subtitle: "12 首".into(),
             cover_uri: None,
+            relation: "local".into(),
         };
         let a = sidebar_cover(&entry);
         let b = sidebar_cover(&entry);
         assert_eq!(a.id, b.id, "同实体 id 稳定");
         assert_eq!(a.name, "深夜循环");
+        assert_eq!(a.relation, "local");
         assert_eq!(a.image.size().width, b.image.size().width, "占位封面确定性");
         assert!(a.image.size().width > 0, "占位封面图非空");
     }

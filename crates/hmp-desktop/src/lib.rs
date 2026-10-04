@@ -9,6 +9,7 @@ pub mod covers;
 pub mod format;
 pub mod library_view;
 pub mod lyrics;
+pub mod menu_bridge;
 pub mod online_covers;
 pub mod player_bridge;
 pub mod prefs;

@@ -205,6 +205,51 @@ export component DisabledSwitch inherits Rectangle {
     }
 }
 
+// —— 开关（布尔设置：右键菜单启停等）—— DisabledSwitch 的可交互版：
+// 同款 36×20 pill 轨 + 15.2px thumb + 阴影；checked 时轨道 primary、
+// thumb 换 primary-foreground 并滑至右端（fast 缓动与全仓一致）
+export component Switch inherits Rectangle {
+    in-out property <bool> checked: false;
+    callback toggled(bool);
+
+    width: 36px;
+    height: 20px;
+    border-radius: Theme.pill(self.height);
+    background: root.checked ? Theme.primary : Theme.muted;
+    border-width: 1px;
+    border-color: Theme.border;
+    accessible-role: checkbox;
+    accessible-checked: root.checked;
+    animate background {
+        duration: Theme.duration-fast;
+        easing: cubic-bezier(0.2, 0, 0, 1);
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+
+    Rectangle {
+        x: root.checked ? parent.width - self.width - 2.4px : 2.4px;
+        y: (parent.height - self.height) / 2;
+        width: 15.2px;
+        height: 15.2px;
+        border-radius: Theme.pill(self.height);
+        background: root.checked ? Theme.primary-foreground : Theme.surface-3;
+        drop-shadow-blur: 2px;
+        drop-shadow-color: #241F1B.transparentize(0.88);
+        drop-shadow-offset-y: 1px;
+        animate x {
+            duration: Theme.duration-fast;
+            easing: cubic-bezier(0.2, 0, 0, 1);
+        }
+    }
+}
+
 // —— 横向滑条（设置页默认音量）：4px 轨 + 12px thumb，整条命中直接跟随 ——
 export component HSlider inherits Rectangle {
     in property <float> value: 0.5;

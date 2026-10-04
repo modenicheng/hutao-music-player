@@ -9,6 +9,7 @@ import { TrackRow } from "data.slint";
 import { Viewport } from "viewport.slint";
 import { Nav, Route } from "nav.slint";
 import { Player } from "stores.slint";
+import { TrackMenu, MenuContext, TrackMenuPanel } from "context-menu.slint";
 
 export component TrackTable inherits Rectangle {
     in property <[TrackRow]> tracks;
@@ -151,6 +152,21 @@ export component TrackTable inherits Rectangle {
                     clicked => {
                         Player.play-tracks(root.tracks, root.window-start + offset);
                     }
+                    // —— 统一右键菜单（全局开关 TrackMenu.enabled 闸）———
+                    // 快照带绝对下标（虚拟化：窗口内 offset 不可作下标用）与
+                    // 整表模型引用（播放语义零拷贝）；歌单详情页 context 换挡。
+                    // 打开坐标走 TrackMenu global（popup 自有属性禁止外层访问）
+                    context-enabled: TrackMenu.enabled;
+                    context-requested(mx, my) => {
+                        TrackMenu.context = Nav.route == Route.playlist
+                            ? MenuContext.playlist : MenuContext.library;
+                        TrackMenu.index = root.window-start + offset;
+                        TrackMenu.track = rowd;
+                        TrackMenu.source-list = root.tracks;
+                        TrackMenu.open-x = mx;
+                        TrackMenu.open-y = my;
+                        row-menu.show();
+                    }
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -219,6 +235,18 @@ export component TrackTable inherits Rectangle {
                                 clicked => {
                                     Nav.navigate(Route.artist, rowd.artist-mid);
                                 }
+                                // 启用的 TouchArea 对所有按键 grab（会吞右键）：
+                                // 右键释放转发给行宿主打开菜单，坐标经窗口系
+                                // absolute-position 差值换算回行内
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.up
+                                        && event.button == PointerEventButton.right) {
+                                        hover-item.context-requested(
+                                            self.absolute-position.x - hover-item.absolute-position.x + self.mouse-x,
+                                            self.absolute-position.y - hover-item.absolute-position.y + self.mouse-y,
+                                        );
+                                    }
+                                }
                             }
                         }
 
@@ -232,8 +260,16 @@ export component TrackTable inherits Rectangle {
                             height: root.row-height;
                             text: rowd.album;
                             font-size: 13.4px;
+                            context-enabled: true;
                             clicked => {
                                 Nav.navigate(Route.album, rowd.album-mid);
+                            }
+                            // 行内链接右键转发（坐标换算同上：absolute 差值 + 链接内偏移）
+                            context-requested(lx, ly) => {
+                                hover-item.context-requested(
+                                    self.absolute-position.x - hover-item.absolute-position.x + lx,
+                                    self.absolute-position.y - hover-item.absolute-position.y + ly,
+                                );
                             }
                         }
                         if root.show-album && rowd.album-mid == "": Text {
@@ -255,6 +291,23 @@ export component TrackTable inherits Rectangle {
                             font-size: 13.4px;
                             horizontal-alignment: right;
                             vertical-alignment: center;
+                        }
+                    }
+
+                    // 行锚定菜单弹层：编译期 PopupWindow 从元素树摘除（不参与
+                    // 布局/hover），坐标相对本行、show 时钳制进窗口、滚动跟随锚、
+                    // 行卸载自动关；点外/ESC 关闭走 CloseOnClickOutside 默认策略。
+                    // 内容面板读 TrackMenu 全局快照——每行一个实例，仅 show 的生效
+                    row-menu := PopupWindow {
+                        x: TrackMenu.open-x;
+                        y: TrackMenu.open-y + 4px;
+                        width: 216px;
+                        height: menu-panel.height;
+
+                        menu-panel := TrackMenuPanel {
+                            dismissed => {
+                                row-menu.close();
+                            }
                         }
                     }
                 }

@@ -27,6 +27,7 @@ import { TopPage } from "top-page.slint";
 import { TopDetailPage } from "top-detail-page.slint";
 import { Nav, Route } from "nav.slint";
 import { Viewport } from "viewport.slint";
+import { TrackMenu, MenuContext } from "context-menu.slint";
 // 再导出：窗口化虚拟化的滚动状态单点出口，Rust 侧测试/探针需读回
 export { Viewport }
 import { Player, Data, Quality, NowPlaying, TrackPalette } from "stores.slint";
@@ -34,7 +35,7 @@ import { Theme } from "theme.slint";
 import { TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData } from "data.slint";
 
 // 供生成代码（Rust 侧）访问的 global 与数据结构（HoverBus/EqClock 供集成测试探针）
-export { Theme, Nav, Player, Quality, Data, NowPlaying, TrackPalette, Route, TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData, HoverBus, EqClock, WinChrome }
+export { Theme, Nav, Player, Quality, Data, NowPlaying, TrackPalette, Route, TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData, HoverBus, EqClock, WinChrome, TrackMenu, MenuContext }
 
 export component AppWindow inherits Window {
     title: "胡桃音乐";

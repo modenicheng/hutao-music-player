@@ -143,6 +143,10 @@ export component TextLink inherits Rectangle {
     in property <string> text;
     in property <length> font-size: 13px;
     in property <TextHorizontalAlignment> alignment: TextHorizontalAlignment.left;
+    /** 右键转发开关（行宿主右键菜单的行内链接路径，默认关） */
+    in property <bool> context-enabled: false;
+    /** 右键释放：参数 = 相对本链接的 x/y（宿主负责换算回行内坐标） */
+    callback context-requested(length, length);
     callback clicked;
 
     height: font-size * 1.5;
@@ -153,6 +157,14 @@ export component TextLink inherits Rectangle {
         mouse-cursor: pointer;
         clicked => {
             root.clicked();
+        }
+        // TouchArea 对所有按键 grab：不开转发的话行内链接会吞掉右键
+        pointer-event(event) => {
+            if (root.context-enabled
+                && event.kind == PointerEventKind.up
+                && event.button == PointerEventButton.right) {
+                root.context-requested(self.mouse-x, self.mouse-y);
+            }
         }
     }
 
@@ -535,7 +547,14 @@ export component HoverItem inherits Rectangle {
     in property <bool> suppress-indicator: false;
     /** 所属 HoverGroup 的 id（使用方以 hg.group-id 传入） */
     in property <int> group-id: -1;
+    /** 右键菜单接入开关（默认关 = 非列表宿主右键无动作；TrackMenu.enabled
+        常作全局闸，使用方属性再叠加逐列表选择） */
+    in property <bool> context-enabled: false;
     callback clicked;
+    /** 右键释放（菜单原生打开时机，clicked 不含右键）：参数 = 指针相对本行的 x/y。
+        检测在 item-touch 的 pointer-event 内（勿加覆盖 TouchArea：会以最顶层
+        命中截断行 hover 链，见 HoverGroup 注） */
+    callback context-requested(length, length);
     out property <bool> hovered: item-touch.has-hover;
     background: transparent;
 
@@ -552,6 +571,17 @@ export component HoverItem inherits Rectangle {
         mouse-cursor: pointer;
         clicked => {
             root.clicked();
+        }
+
+        // 右键检测：TouchArea 对所有按键在 Down/Up 都派发 pointer-event
+        // （i-slint-core input_items.rs；clicked 仅左键），右键 Down 会
+        // GrabMouse 保证释放落回本行。菜单在释放时打开（Windows 原生语义）。
+        pointer-event(event) => {
+            if (root.context-enabled
+                && event.kind == PointerEventKind.up
+                && event.button == PointerEventButton.right) {
+                root.context-requested(self.mouse_x, self.mouse_y);
+            }
         }
 
         changed has-hover => {

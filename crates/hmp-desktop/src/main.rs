@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use slint::{ComponentHandle, Global};
 
-use hmp_desktop::{backend, bridge, player_bridge, prefs};
+use hmp_desktop::{backend, bridge, menu_bridge, player_bridge, prefs};
 
 fn main() -> Result<(), slint::PlatformError> {
     let prefs = Arc::new(Mutex::new(prefs::load()));
@@ -20,6 +20,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let loaded = *prefs.lock().expect("prefs");
         hmp_desktop::Theme::get(&ui).set_mode(loaded.theme_mode);
         hmp_desktop::Quality::get(&ui).set_selected(loaded.quality);
+        hmp_desktop::TrackMenu::get(&ui).set_enabled(loaded.context_menu);
     }
 
     bridge::load_data(&ui, &runtime);
@@ -27,6 +28,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // 播放桥：连接/拉起 daemon → 订阅状态推送；彻底失败降级离线
     // （Player 全空、命令 no-op），UI 照常打开。
     player_bridge::bind(&ui, Arc::clone(&runtime), Arc::clone(&prefs));
+    // 右键菜单动作桥（启停持久化 + PlayNext/QueueAppend/PlaylistWrite 派发）
+    menu_bridge::bind(&ui, Arc::clone(&prefs), Arc::clone(&runtime));
 
     // 顶栏拖动桥（title-bar.slint）：Slint 语言层没有窗口移动原语，经 winit
     // 句柄发起系统级移动循环（拖到屏缘的贴靠/半屏分列由系统原生处理）。

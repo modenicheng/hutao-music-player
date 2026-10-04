@@ -15,6 +15,8 @@ pub struct Prefs {
     pub quality: i32,
     /// 0.0..1.0
     pub volume: f32,
+    /// 右键菜单总开关（TrackMenu.enabled）
+    pub context_menu: bool,
 }
 
 impl Default for Prefs {
@@ -23,6 +25,7 @@ impl Default for Prefs {
             theme_mode: 0,
             quality: 2,
             volume: 1.0,
+            context_menu: true,
         }
     }
 }
@@ -58,6 +61,7 @@ pub fn load() -> Prefs {
         theme_mode: value["theme_mode"].as_i64().unwrap_or(0) as i32,
         quality: value["quality"].as_i64().unwrap_or(2) as i32,
         volume: value["volume"].as_f64().unwrap_or(1.0) as f32,
+        context_menu: value["context_menu"].as_bool().unwrap_or(true),
     }
     .clamp()
 }
@@ -70,6 +74,7 @@ pub fn store(prefs: &Prefs) {
         "theme_mode": prefs.theme_mode,
         "quality": prefs.quality,
         "volume": prefs.volume,
+        "context_menu": prefs.context_menu,
     });
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -89,10 +94,12 @@ mod tests {
             theme_mode: 9,
             quality: -3,
             volume: f32::NAN,
+            context_menu: true,
         }
         .clamp();
         assert_eq!(prefs.theme_mode, 2);
         assert_eq!(prefs.quality, 0);
         assert_eq!(prefs.volume, 1.0);
+        assert!(prefs.context_menu);
     }
 }
