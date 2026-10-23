@@ -745,6 +745,55 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             };
             write_frame(wr, &resp).await?;
         }
+        // —— 远端详情三读（D2 内容动线；免登录只读，PLAN §③ D-3）———
+        Ok(Request::PlaylistDetailGet { id }) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.remote_playlist_detail(id).await {
+                    Ok(page) => Response::PlaylistDetail(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::AlbumDetailGet { mid }) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.remote_album_detail(&mid).await {
+                    Ok(page) => Response::AlbumDetail(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::ArtistDetailGet { mid }) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.remote_artist_detail(&mid).await {
+                    Ok(page) => Response::ArtistDetail(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
         // —— 音质偏好（AUDIT §8.7：daemon 落 config.toml，UI 只发意图）———
         Ok(Request::QualityGet) => {
             let q = hmp_storage::Config::load().quality;
