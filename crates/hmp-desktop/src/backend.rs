@@ -41,6 +41,10 @@ pub enum BackendError {
     StaleBackend,
     /// 协议错误（畸形帧/连接中断）。
     Protocol(String),
+    /// daemon 连上但 [`REQUEST_TIMEOUT`] 预算内未应答（挂死）。瞬时/可自愈态
+    /// （用户 `hmp quit` 或 daemon 恢复后订阅循环 2s 重连自愈），恢复指引
+    /// 在 Display 文案里，不进离线原因三元组（见 `offline_reason_text`）。
+    Timeout(Duration),
 }
 
 impl std::fmt::Display for BackendError {
@@ -58,6 +62,10 @@ impl std::fmt::Display for BackendError {
                  （开发环境 `cargo build --release --workspace` 后重启应用）"
             ),
             Self::Protocol(m) => write!(f, "protocol error: {m}"),
+            Self::Timeout(d) => write!(
+                f,
+                "daemon {d:?} 内未应答（可能已挂死）：请 `hmp quit` 终止后重试"
+            ),
         }
     }
 }
@@ -152,12 +160,18 @@ async fn obtain_stream() -> Result<IpcStream, BackendError> {
 }
 
 /// 构建指纹核对（详见 `connect_or_spawn`）。Status 探测失败保守放行：
-/// 断线由订阅循环既有的重连路径处置，不在此重复。
+/// 断线由订阅循环既有的重连路径处置，不在此重复。唯一例外是**超时**
+/// （daemon 挂死）：保守放行会让随后的 Subscribe 读永远无声挂起（订阅读
+/// 无超时且不该有），把可检测的挂死变成不可检测的冻结——传 Err 走订阅
+/// 循环既有离线 + 2s 退避重连（与 daemon 死亡同路径），且不触碰
+/// restart_backend（Quit/重启只在 Status 成功应答且指纹不符时触发，
+/// 无 churn）。
 async fn verify_backend_generation(stream: IpcStream) -> Result<IpcStream, BackendError> {
     let running = match request(Request::Status).await {
         // 旧 daemon 的应答缺该字段（serde default 空串）→ 同样判定陈旧。
         Ok(Response::Status(state)) => state.backend_build,
         Ok(_) => return Err(BackendError::Protocol("Status 应答类型不符".into())),
+        Err(e @ BackendError::Timeout(_)) => return Err(e),
         Err(_) => return Ok(stream),
     };
     if running == hmp_daemon::BUILD_CODE {
@@ -180,6 +194,10 @@ async fn verify_backend_generation(stream: IpcStream) -> Result<IpcStream, Backe
             *stale_backend_seen() = None;
             Ok(stream)
         }
+        // 复核超时同样传 Err 且不写 stale 记账：挂死不是「磁盘二进制陈旧」
+        // 的证据——落 `_` 会把挂死误报成 StaleBackend（toast 指引用户重建
+        // 二进制，错误补救），记账还会错误压制重建后的重启核对。
+        Err(e @ BackendError::Timeout(_)) => Err(e),
         _ => {
             *stale_backend_seen() = disk;
             Err(BackendError::StaleBackend)
@@ -220,6 +238,10 @@ pub fn offline_reason_text(e: &BackendError) -> Option<String> {
         BackendError::StaleBackend | BackendError::NoBackendBinary | BackendError::SpawnTimeout => {
             Some(e.to_string())
         }
+        // 挂死是瞬时/可自愈态（quit 或恢复后 2s 重连自愈），不是 §22 意义上
+        // 的环境性可操作错误：显式排除在三元组外，避免把「hmp quit 后重试」
+        // 上升为离线 toast 的修复指引；恢复动作留在 Display → 调用方 warn 日志。
+        BackendError::Timeout(_) => None,
         _ => None,
     }
 }
@@ -270,50 +292,78 @@ fn find_hmp_in_dirs<I: Iterator<Item = PathBuf>>(dirs: I) -> Option<PathBuf> {
 
 /// 单发请求-响应（每命令一条短连接，CLI `request()` 同模式）。
 /// 命令-查询分离：`Response::Ok` 仅代表受理，真实结果经订阅事件呈现。
+/// 全程（连接重试+写+读+解码）受 [`REQUEST_TIMEOUT`] 上界约束：daemon
+/// 连上但挂死（应答前卡住）时报错而非永久挂起（AUDIT §16 #3）。
+/// 订阅长连接不经此路径（推送流无应答语义，勿套请求超时）。
 ///
 /// 冷启动窗口重试：订阅循环首连经 `connect_or_spawn` 拉起 daemon 需
 /// ~0.3-3s，此窗口内的命令短连接会得到 NotFound/Refused——逐次退避重试
 /// （不拉起：daemon 生命周期归订阅循环，命令路径不重复 spawn），耗尽才
 /// 报错（调用方降级提示，不再静默丢弃点击）。
 pub async fn request(req: Request) -> Result<Response, BackendError> {
-    /// NotFound/Refused 的重试次数（×250ms ≈ 1s，覆盖常规冷启动窗口）。
-    const CONNECT_RETRIES: u32 = 4;
-    const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
-    let mut stream = None;
-    for attempt in 0..=CONNECT_RETRIES {
-        match connect().await {
-            Ok(s) => {
-                stream = Some(s);
-                break;
+    request_with_timeout(&hmp_daemon::server::socket_path(), req, REQUEST_TIMEOUT).await
+}
+
+/// 单请求全程硬上限（连接重试 + 写 + 读 + 解码；CLI `REQUEST_TIMEOUT`
+/// 同款同值）。30s 覆盖最慢合法路径 CoverGet：上游为 daemon
+/// ContentService → hmp_media `cdn_client()`（connect 10s + 按次读 30s，
+/// 封面图小、主体传输在单次读窗口内完成）；QQ API 类请求上游另有 15s
+/// 客户端超时（hmp-qqmusic-api config.rs）。桌面超时只是放弃**等待**：
+/// daemon handler 继续跑完并落盘缓存，封面消费方自带 COVER_RETRY 退避
+/// （player_bridge），重试即命中缓存。重试预算 1s 计入内：最坏合法路径
+/// 1s 重试 + CoverGet ≈ 仍余充足余量。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 带端点与预算的请求（单测注入临时端点/短超时；生产路径走 [`request`]，
+/// 端点 = `server::socket_path()`，参数注入而非 env 覆盖——env 是进程
+/// 全局态，与并行测试互扰）。
+async fn request_with_timeout(
+    endpoint: &Path,
+    req: Request,
+    timeout: Duration,
+) -> Result<Response, BackendError> {
+    tokio::time::timeout(timeout, async {
+        /// NotFound/Refused 的重试次数（×250ms ≈ 1s，覆盖常规冷启动窗口）。
+        const CONNECT_RETRIES: u32 = 4;
+        const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+        let mut stream = None;
+        for attempt in 0..=CONNECT_RETRIES {
+            match IpcStream::connect(endpoint).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e)
+                    if (e.kind() == std::io::ErrorKind::NotFound
+                        || e.kind() == std::io::ErrorKind::ConnectionRefused)
+                        && attempt < CONNECT_RETRIES =>
+                {
+                    tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
+                }
+                Err(e) => return Err(BackendError::Io(e)),
             }
-            Err(BackendError::Io(e))
-                if (e.kind() == std::io::ErrorKind::NotFound
-                    || e.kind() == std::io::ErrorKind::ConnectionRefused)
-                    && attempt < CONNECT_RETRIES =>
-            {
-                tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
-            }
-            Err(e) => return Err(e),
         }
-    }
-    let Some(mut stream) = stream else {
-        return Err(BackendError::Io(std::io::Error::new(
-            std::io::ErrorKind::ConnectionRefused,
-            "daemon unreachable after retries",
-        )));
-    };
-    write_frame(&mut stream, &req).await?;
-    let Some(frame) = read_frame(&mut stream).await? else {
-        return Err(BackendError::Protocol("daemon closed connection".into()));
-    };
-    let response =
-        decode_frame::<Response>(&frame).map_err(|e| BackendError::Protocol(e.to_string()));
-    if let Ok(Response::Err { code, message }) = &response {
-        // 拒绝型响应（未登录/越界等）此前被 `let _ =` 静默吞掉——UI「点了
-        // 没反应」的主要来源之一；至少留一条 warn 级日志可查。
-        tracing::warn!(?code, %message, "daemon rejected request");
-    }
-    response
+        let Some(mut stream) = stream else {
+            return Err(BackendError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "daemon unreachable after retries",
+            )));
+        };
+        write_frame(&mut stream, &req).await?;
+        let Some(frame) = read_frame(&mut stream).await? else {
+            return Err(BackendError::Protocol("daemon closed connection".into()));
+        };
+        let response =
+            decode_frame::<Response>(&frame).map_err(|e| BackendError::Protocol(e.to_string()));
+        if let Ok(Response::Err { code, message }) = &response {
+            // 拒绝型响应（未登录/越界等）此前被 `let _ =` 静默吞掉——UI「点了
+            // 没反应」的主要来源之一；至少留一条 warn 级日志可查。
+            tracing::warn!(?code, %message, "daemon rejected request");
+        }
+        response
+    })
+    .await
+    .map_err(|_| BackendError::Timeout(timeout))?
 }
 
 /// 订阅事件（跨线程投递到 UI 线程；全部字段 Send）。
@@ -700,6 +750,85 @@ mod tests {
         assert!(offline_reason_text(&BackendError::Protocol("x".into())).is_none());
         let io = BackendError::Io(std::io::Error::other("boom"));
         assert!(offline_reason_text(&io).is_none());
+        // 挂死是瞬时/可自愈态（quit/恢复后 2s 重连自愈），不进 §22 可操作
+        // 离线原因三元组——钉此语义，防止后续把它误升格成 toast 指引。
+        assert!(
+            offline_reason_text(&BackendError::Timeout(Duration::from_secs(30))).is_none(),
+            "Timeout 不携带离线原因"
+        );
+    }
+
+    /// 临时端点（仓库既有 pid 命名模式，不新增 tempfile dev-dep；Windows 上
+    /// 经 transport `pipe_name` 确定性映射 `\\.\pipe\hmp-<sanitized>` 管道名）。
+    fn test_endpoint(tag: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("hmp-desktop-{tag}-{}.sock", std::process::id()));
+        // Unix 上残留 socket 文件会让 bind 失败；Windows 管道不落盘、无碍。
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// 超时路径（AUDIT §16 #3，镜像 CLI `request_times_out_when_daemon_silent`）：
+    /// daemon 连上但读走请求后沉默（挂死语义）→ `request_with_timeout` 在
+    /// 预算附近返回 `BackendError::Timeout`，绝不永久挂起。端点用临时路径
+    /// 参数注入——生产 `request()` 走 `socket_path()`，不碰在跑的真 daemon。
+    #[tokio::test]
+    async fn request_times_out_when_daemon_silent() {
+        let endpoint = test_endpoint("timeout");
+        let mut listener = hmp_daemon::transport::IpcListener::bind(&endpoint).unwrap();
+        // 服务端任务：accept → 读走完整请求帧 → 不应答，连接挂起到底。
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut stream = listener.accept().await.unwrap();
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.unwrap();
+            let mut payload = vec![0u8; u32::from_le_bytes(len_buf) as usize];
+            stream.read_exact(&mut payload).await.unwrap();
+            let () = std::future::pending().await;
+        });
+        let start = std::time::Instant::now();
+        let err = request_with_timeout(&endpoint, Request::Status, Duration::from_millis(150))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, BackendError::Timeout(d) if *d == Duration::from_millis(150)),
+            "应返回 Timeout(150ms)，实际: {err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "超时须及时返回: {:?}",
+            start.elapsed()
+        );
+        server.abort();
+        let _ = std::fs::remove_file(&endpoint);
+    }
+
+    /// 预算内完成路径（守护 request→request_with_timeout 重构不破帧协议）：
+    /// 回声服务器读走请求帧后应答 `Response::Ok`，宽预算下正常往返。
+    #[tokio::test]
+    async fn request_completes_within_budget() {
+        let endpoint = test_endpoint("echo");
+        let mut listener = hmp_daemon::transport::IpcListener::bind(&endpoint).unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut stream = listener.accept().await.unwrap();
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.unwrap();
+            let mut payload = vec![0u8; u32::from_le_bytes(len_buf) as usize];
+            stream.read_exact(&mut payload).await.unwrap();
+            stream
+                .write_all(&encode_frame(&Response::Ok).unwrap())
+                .await
+                .unwrap();
+        });
+        let response =
+            request_with_timeout(&endpoint, Request::Status, Duration::from_secs(5)).await;
+        assert!(
+            matches!(response, Ok(Response::Ok)),
+            "回声应答应为 Ok，实际: {response:?}"
+        );
+        let _ = server.await;
+        let _ = std::fs::remove_file(&endpoint);
     }
 
     #[test]

@@ -26,8 +26,11 @@ pub enum CliError {
 }
 
 /// 单请求超时：写请求 + 读响应 + 解码全程的硬上限（daemon 挂死时报错
-/// 退出而非永久挂起，AUDIT §16 #3）。30s 为最慢合法路径（CoverGet 整图
-/// 下载等 daemon 出网请求）在上游 reqwest 自身 15s 超时之外留余量。
+/// 退出而非永久挂起，AUDIT §16 #3）。30s 覆盖最慢合法路径 CoverGet——
+/// 上游 daemon ContentService 走 hmp_media `cdn_client()`（connect 10s +
+/// 按次读 30s，封面图小、单次读窗口内完成）；QQ API 类请求另有 15s 客户端
+/// 超时（hmp-qqmusic-api config.rs），不覆盖封面下载（旧注释把 15s 归因成
+/// reqwest 自身超时、且以为覆盖 CoverGet，两处皆误，S7 更正）。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 与后端的一条连接。
