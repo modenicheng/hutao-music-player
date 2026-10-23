@@ -1950,6 +1950,95 @@ async fn unrelated_resolve_error_does_not_lock_error_treatment() {
     );
 }
 
+/// P1（独立审计）：降档失败回滚不清 `error_handled_gen` → 陈旧代际毒化。
+/// 序列：A 在播（gen1）→ Play B 装载 gen2 解码失败（标记 Some(2)）→ 降档
+/// 重试复现已失败档硬失败 → 回滚复原 current_gen=1 → Play C 恰又得 gen2
+/// 且成功 → C 播放中真实读错误 → 守卫 (c) Some(2)==current_gen(2) 误判
+/// 「已处理」抑制收口。回归：回滚复原代际时同步清除标记，后续同代播放
+/// 错误正常收口（last_error + Failed + 停在原曲，不静默跳歌）。
+#[tokio::test]
+async fn degrade_rollback_does_not_poison_error_collection() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![
+        vec![TrackId::new("a")],
+        vec![TrackId::new("b")],
+        vec![TrackId::new("c")],
+    ]);
+    let (handle, st) = start_engine(driver.clone(), resolver).await;
+    // ① A 起播（gen=1，回滚锚点 prev 建立）。
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().playback.current.as_ref().map(|t| t.id.as_ref()) == Some("a"),
+        "A 起播",
+    )
+    .await;
+
+    // ② Play B：装载 gen=2 解码失败（error_handled_gen=Some(2)）→ 降档
+    //    重试复现已失败档（FakeResolver 无档位概念，trait 默认无视排除）→
+    //    硬失败回滚 A（current_gen 复原为 1，loads: a(1)→b(2)✗→a(1)）。
+    driver.set_error_load(true);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            let loads_done = driver.loads.lock().unwrap().len() == 3;
+            loads_done
+                && st.borrow().last_error.is_some()
+                && st.borrow().phase == hmp_core::EnginePhase::Playing
+        },
+        "降档硬失败：错误发布 + 回滚重载 A 完成 + 阶段恢复 Playing",
+    )
+    .await;
+
+    // ③ Play C：current_gen 自 1 复推 → 恰得 gen=2（被毒化代际）且成功。
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("c"))))
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            st.borrow().playback.current.as_ref().map(|t| t.id.as_ref()) == Some("c")
+                && st.borrow().playback.status == PlaybackStatus::Playing
+        },
+        "C 起播",
+    )
+    .await;
+    let c_gen = driver.loads.lock().unwrap()[3].1;
+    assert_eq!(c_gen, 2, "前置：C 的装载代际恰为被降档失败毒化的 gen=2");
+
+    // ④ C 播放中真实读错误（同代 + 驱动 Error 态）→ 必须收口。
+    driver.emit_playback_error(c_gen);
+    wait_until(
+        || {
+            st.borrow()
+                .last_error
+                .as_ref()
+                .map(|e| e.message.contains("source read error"))
+                .unwrap_or(false)
+        },
+        "陈旧 error_handled_gen 不得抑制同代播放错误收口（P1）",
+    )
+    .await;
+    let s = st.borrow();
+    assert_eq!(s.phase, hmp_core::EnginePhase::Failed);
+    assert_eq!(
+        s.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("c"),
+        "错误后停在原曲"
+    );
+    drop(s);
+    assert_eq!(
+        driver.loads.lock().unwrap().len(),
+        4,
+        "收口不触发换曲装载（不静默跳歌）"
+    );
+}
+
 // ── §16 开放项 #1：解析移后台 FIFO worker（命令循环去阻塞） ──────────────
 
 /// 每次调用弹出一个延迟（耗尽后 0）的解析器包装——「慢先快后」与「解析

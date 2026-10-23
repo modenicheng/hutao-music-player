@@ -1349,6 +1349,13 @@ impl PlaybackEngine {
                             if !decode_failed.is_empty() {
                                 if let Some(p) = prev.clone() {
                                     self.current_gen = p.load_gen;
+                                    // P1（独立审计）：复原代际时同步清除已处理错误
+                                    // 标记——回滚后后续成功装载会重新经过降档失败
+                                    // 消费过的 gen 值，陈旧 Some(失败 gen) 会毒化
+                                    // run() 守卫 (c)、抑制那次装载的真实播放错误
+                                    // 收口。失败装载的缓冲事件已被守卫 (a) 过滤
+                                    // （gen > 复原值），清除安全。
+                                    self.error_handled_gen = None;
                                     self.rollback_load(p, prev_position).await;
                                 }
                             }
@@ -1375,6 +1382,10 @@ impl PlaybackEngine {
                     // 已重载为 prev.load_gen），其 EOS/Error 不得再被误判为
                     // 旧代忽略（否则播完不续播、会话不闭合）。
                     self.current_gen = p.load_gen;
+                    // P1（独立审计）：同步清除已处理错误标记，防陈旧代际毒化
+                    // 后续装载的播放错误收口（失败装载缓冲事件已被守卫 (a)
+                    // 过滤，清除安全；见上方降档解析失败路径同款注释）。
+                    self.error_handled_gen = None;
                     self.rollback_load(p, prev_position).await;
                 }
                 self.last_error = Some(error_info(&e));
@@ -1417,6 +1428,9 @@ impl PlaybackEngine {
                         // 旧代忽略（否则播完不续播、会话不闭合）。失败装载 b 的
                         // 迟到事件 gen=N+1 恰好被过滤，语义正确。
                         self.current_gen = p.load_gen;
+                        // P1（独立审计）：同步清除已处理错误标记，防陈旧代际
+                        // 毒化后续装载的播放错误收口（同上两处回滚）。
+                        self.error_handled_gen = None;
                         self.rollback_load(p, prev_position).await;
                     }
                     self.last_error = Some(error_info(&e));
