@@ -36,3 +36,4 @@ third_party/
 
 # 本地视觉 QA 截图（PORTING.md 只引用路径）
 /.shots/
+__pycache__/
