@@ -50,8 +50,9 @@ export component AppWindow inherits Window {
     // 8px = layout-gap——内容面板距窗缘恰有内距，命中带不吃面板点击
     resize-border-width: Theme.layout-gap;
 
-    // Equalizer 共享时钟驱动（0×0 不可见，见 primitives.slint）
-    EqClockHost { }
+    // Equalizer 共享时钟驱动（0×0 不可见，见 primitives.slint）；
+    // 播放门控（S9 R3）：暂停/停止期停表，播放期 33ms 常跑
+    EqClockHost { running: Player.playing; }
     background: Theme.surface-1;
     forward-focus: esc-scope;
 

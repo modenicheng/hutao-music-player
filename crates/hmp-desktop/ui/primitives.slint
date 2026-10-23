@@ -187,8 +187,12 @@ export component TextLink inherits Rectangle {
 // 所有实例同相位（对齐 Vue 负 delay 的跨实例相位一致）。33ms ≈ 30fps 采样：
 // 900ms 摆动周期的视觉足够，且把持续重绘压力压到 debug 构建可承受
 // （debug 全场景重绘 ~30fps，16ms 采样只会空转重绘；release 实测 ~200fps）。
-// 暂停的 EQ 走 paused 三元分支、不注册对 t 的依赖——无动画时零重绘开销，
-// 因此时钟常跑即可，无需播放门控。
+// 播放门控（S9 R3）：宿主 EqClockHost.running 接 Player.playing——暂停/停止
+// 期 Timer 停表（静止期 33ms 唤醒与 t 自增归零，不再整窗无谓重绘）；播放期
+// 行为不变。暂停 EQ 的视觉由 paused/frozen 机制冻结在暂停瞬间（changed
+// paused 复算 offset），恢复时 Timer 重启、EQ 按 EqClock.t 绝对相位续摆
+// （动画函数是绝对时间的纯函数，停表期间 t 不前进 = 暂停语义），恢复即时
+// 性与门控前完全一致。
 // 驱动 Timer 挂在宿主组件上（Slint 的 global 不能有子元素），见 app.slint。
 export global EqClock {
     in-out property <duration> t: 0ms;
@@ -196,12 +200,16 @@ export global EqClock {
 
 /** EqClock 驱动宿主：AppWindow 挂载一次即可 */
 export component EqClockHost inherits Rectangle {
+    // 播放门控（S9 R3）：false → Timer 停表，true → 从整间隔重启；
+    // 默认 true = 未接线时保持常跑动画（防呆）。
+    in property <bool> running: true;
     background: transparent;
     width: 0px;
     height: 0px;
 
     Timer {
         interval: 33ms;
+        running: root.running;
         triggered => {
             EqClock.t += 33ms;
         }
@@ -222,10 +230,13 @@ export component Equalizer inherits Rectangle {
     height: 14px;
     clip: true;
 
-    // 本地相位：暂停期间把 EqClock 的流逝量扣除，冻结在暂停瞬间
+    // 本地相位：暂停期间把 EqClock 的流逝量扣除，冻结在暂停瞬间。
+    // 可见性自门控（S9 R3/T3c）：非当前行实例（宿主绑 visible:false）不注册
+    // 对 EqClock.t 的依赖——播放期不再因不可见 EQ 的求值牵动整窗重绘；
+    // 重新可见时回到活分支 = 全局绝对相位（与当前行切换语义一致）。
     property <duration> offset: 0ms;
     property <duration> frozen: 0ms;
-    property <duration> t: root.paused ? root.frozen : EqClock.t - root.offset;
+    property <duration> t: (root.paused || !self.visible) ? root.frozen : EqClock.t - root.offset;
 
     changed paused => {
         if (self.paused) {
