@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use slint::{ComponentHandle, Global, Model, ModelRc, TimerMode, VecModel, Weak};
 
 use hmp_core::ipc::{DaemonState, Request, Response};
-use hmp_core::{AudioQuality, LoopMode, PlaybackState, PlaybackStatus, PlayerCommand, TrackId};
+use hmp_core::{
+    AudioQuality, LoopMode, PlaybackState, PlaybackStatus, PlayerCommand, TrackId, TrackProvider,
+};
 
 use crate::backend::{BackendRuntime, QueueRowMeta, UiStateEvent};
 use crate::{AppWindow, CommentRow, LyricRow, NowPlaying, Player, QueueRow};
@@ -187,6 +189,133 @@ fn show_feedback(ui_weak: &Weak<AppWindow>, message: String) {
                 });
         });
     });
+}
+
+// ————————————————————————————————————————————————————————————
+// 喜欢（收藏）：换曲回填 + 点击写（daemon Favorite，本地先提交 spec §3.3；
+// QQ 远端由 daemon SyncWorker 消费 outbox 异步同步，UI 只表达本地事实）
+// ———————————————————————————————————————————————————————————
+
+/// 收藏写未送达（守护进程不可达/拉起失败）反馈文案（report_command_result
+/// 「播放服务未连接」同句式）。
+const FAVORITE_UNREACHABLE_TEXT: &str = "收藏服务未连接，操作没有生效";
+
+/// 收藏写回包动作（纯逻辑决策表，单测钉行为）。
+#[derive(Debug, Clone, PartialEq)]
+enum FavoriteOutcome {
+    /// 受理：刷新库页（「我喜欢」即时落账）+ 回读库收敛心形。
+    Accepted,
+    /// 未生效：反馈条人话（携带最终文案）+ 回读库回滚心形。
+    Rejected(String),
+    /// 传输失败/离线：反馈条 + 回读库回滚心形。
+    Unreachable,
+}
+
+/// 回包 → 动作映射。查询型响应不会出现在收藏命令路径；意外形态按
+/// 「未生效」诚实收敛（与 report_command_result 的宽容忽略不同——收藏
+/// 路径有 UI 乐观态在途，任何非 Ok 都必须回读库对齐）。
+fn favorite_outcome(result: &Result<Response, crate::backend::BackendError>) -> FavoriteOutcome {
+    match result {
+        Ok(Response::Ok) => FavoriteOutcome::Accepted,
+        Ok(Response::Err { code, message }) => {
+            FavoriteOutcome::Rejected(friendly_error(*code, message))
+        }
+        Ok(_) => FavoriteOutcome::Rejected("操作未生效：守护进程应答异常".into()),
+        Err(_) => FavoriteOutcome::Unreachable,
+    }
+}
+
+/// source/key 分流（CLI `provider_of` 同语义：local → ("local", id 全串含
+/// `local:` 前缀)；qq → ("qq", mid)。本地键归一化由 storage
+/// `canonical_local_key` 内部统一，两侧无需预处理）。
+fn favorite_provider_of(id: &str) -> (&'static str, String) {
+    if TrackProvider::from_id(id) == TrackProvider::Local {
+        ("local", id.to_string())
+    } else {
+        ("qq", id.to_string())
+    }
+}
+
+/// 当前曲收藏态（本地事实视图；CLI `hmp favorite list` 同契约直读
+/// library.sqlite3）：库缺失/不可用 → None（调用方静默降级保持中性态）。
+fn liked_of(mid: &str) -> Option<bool> {
+    let path = hmp_storage::data_dir().join("library.sqlite3");
+    if !path.exists() {
+        return None;
+    }
+    let mut db = hmp_storage::LibraryDb::open(&path).ok()?;
+    Some(liked_in_db(&mut db, mid))
+}
+
+/// 库事实查询（纯逻辑，单测锚点）：relation_desired 按 (source, key) 直查；
+/// 无关系行 / 查询失败 → false（desired_state 才是本地事实，1=已收藏）。
+fn liked_in_db(db: &mut hmp_storage::LibraryDb, mid: &str) -> bool {
+    let (source, key) = favorite_provider_of(mid);
+    db.relation_desired("track", source, &key, "liked")
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
+/// 换曲收藏态回填：后台读库 → UI 线程按 current_mid 守卫写入（换曲/清空
+/// 在途的陈包必弃，spawn_comment_fetch 同构）。阻塞 rusqlite 毫秒级，
+/// runtime 工作线程执行（backend 队列投影同惯例）。
+fn spawn_liked_backfill(ui_weak: &Weak<AppWindow>, runtime: &Arc<BackendRuntime>, mid: String) {
+    let ui_weak = ui_weak.clone();
+    runtime.spawn(async move {
+        let liked = liked_of(&mid);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            if Player::get(&ui).get_current_mid() != mid.as_str() {
+                return; // 曲已切走：陈包丢弃
+            }
+            // 库不可用（None）保持中性 false（换曲时已先置 false）。
+            NowPlaying::get(&ui).set_liked(liked.unwrap_or(false));
+        });
+    });
+}
+
+/// 收藏写回包应用（UI 线程）：mid 守卫后按 favorite_outcome 决策执行。
+/// 受理与失败都回读库：daemon 在应答 Ok 前已同步落库（server.rs 无 await
+/// 间隔），失败路径即「诚实回滚到点击前」，多连点交错时收敛到库事实
+/// （最后到达 daemon 者胜出；backend 冷启动重试可致到达序 ≠ 点击序，
+/// 极端倒挂窗口下终值可能与最后一次点击意图相反——已知边界，不做在途
+/// 串行化）。
+fn apply_favorite_reply(
+    ui_weak: &Weak<AppWindow>,
+    runtime: &Arc<BackendRuntime>,
+    mid: String,
+    result: Result<Response, crate::backend::BackendError>,
+) {
+    let Some(ui) = ui_weak.upgrade() else {
+        return;
+    };
+    // 曲已切走：写已作用于旧曲（库页刷新交给 LibraryChanged 推送），
+    // 不回滚也不回填当前曲。
+    if Player::get(&ui).get_current_mid() != mid.as_str() {
+        return;
+    }
+    match favorite_outcome(&result) {
+        FavoriteOutcome::Accepted => {
+            // 「我喜欢」页即时落账：受理后主动刷新（与 daemon LibraryChanged
+            // 推送互补，推送丢失/离线窗口期不落空——menu_bridge 歌单写同款
+            // 双保险）。
+            crate::bridge::schedule_refresh(&ui, runtime);
+            // 心形收敛确认：读回应等于乐观值；在途交错时以库事实为准。
+            spawn_liked_backfill(ui_weak, runtime, mid);
+        }
+        FavoriteOutcome::Rejected(message) => {
+            show_feedback(ui_weak, message);
+            spawn_liked_backfill(ui_weak, runtime, mid);
+        }
+        FavoriteOutcome::Unreachable => {
+            tracing::warn!("收藏命令未送达（daemon 不可达）");
+            show_feedback(ui_weak, FAVORITE_UNREACHABLE_TEXT.into());
+            spawn_liked_backfill(ui_weak, runtime, mid);
+        }
+    }
 }
 
 /// 绑定 Player global 命令回调并挂载订阅任务（bootstrap：首连在订阅循环内
@@ -455,6 +584,50 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
         });
     }
 
+    {
+        // 喜欢键：乐观翻转 + daemon Favorite 写（本地先提交；QQ 远端由
+        // SyncWorker 异步同步）。回包三分支见 apply_favorite_reply——受理与
+        // 失败都回读库收敛，多连点终态 = 库事实（最后到达者胜出；到达序 ≠
+        // 点击序的极端倒挂窗口见其文档注释）。
+        let runtime = Arc::clone(&runtime);
+        let ui_weak = ui_weak.clone();
+        NowPlaying::get(ui).on_toggle_liked(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let player = Player::get(&ui);
+            let mid = player.get_current_mid().to_string();
+            if mid.is_empty() {
+                return; // 无曲不可收藏
+            }
+            let np = NowPlaying::get(&ui);
+            let desired = !np.get_liked();
+            np.set_liked(desired); // 乐观翻转（回包后回读库收敛/回滚）
+            let (source, key) = favorite_provider_of(&mid);
+            // 库外新行的建行标题：展示题缺失回退 id（CLI favorite add 同款）。
+            let shown_title = player.get_title().to_string();
+            let title = if shown_title.is_empty() {
+                mid.clone()
+            } else {
+                shown_title
+            };
+            let runtime_for_reply = Arc::clone(&runtime);
+            let ui_weak_for_reply = ui_weak.clone();
+            runtime.spawn(async move {
+                let result = crate::backend::request(Request::Favorite {
+                    source: source.to_string(),
+                    key,
+                    title,
+                    desired,
+                })
+                .await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    apply_favorite_reply(&ui_weak_for_reply, &runtime_for_reply, mid, result);
+                });
+            });
+        });
+    }
+
     bind_ui_toggles(ui, &runtime);
 
     // —— 订阅：DaemonState 推送 → Player global（UI 线程应用）———
@@ -531,6 +704,12 @@ fn apply_event(
     // 刷新库页与当前详情页（AUDIT §8.9；UI 线程只做模型落地，不再同步读库）。
     if event.library_changed {
         crate::bridge::schedule_refresh(&ui, runtime);
+        // 当前曲心形随库事实走：后台 reconcile / CLI 收藏写也反映到播放页。
+        // 与在途点击写交错时会瞬时读回旧值再由回包翻回——终态正确，仅闪动。
+        let mid = player.get_current_mid().to_string();
+        if !mid.is_empty() {
+            spawn_liked_backfill(&ui.as_weak(), runtime, mid);
+        }
         return;
     }
 
@@ -675,7 +854,7 @@ fn apply_daemon_state(
     player.set_duration_ms(duration);
     push_time_text(player, player.get_position_ms(), duration);
 
-    // 换曲检测：重置播放页 mock 态（喜欢回落）并重拉歌词/评论。
+    // 换曲检测：重置播放页瞬态（喜欢先熄灭、回填库事实）并重拉歌词/评论。
     let mid = track.id.0.clone();
     let mid_changed = PREV_MID.with(|cell| {
         let mut prev = cell.borrow_mut();
@@ -688,7 +867,9 @@ fn apply_daemon_state(
     if mid_changed {
         if let Some(ui) = ui_weak.upgrade() {
             let np = NowPlaying::get(&ui);
+            // 中性过渡先熄灭，真实收藏态由后台回填（库事实，陈包守卫）。
             np.set_liked(false);
+            spawn_liked_backfill(ui_weak, runtime, mid.clone());
             np.set_active_line(-1);
             LYRIC_STAMPS.with(|cell| cell.borrow_mut().clear());
             // 本地/QQ 同一歌词管线：本地曲 daemon 先读同目录 .lrc/内嵌标签，
@@ -1444,5 +1625,62 @@ mod tests {
         assert_eq!(row.title, "003Z3i2C");
         assert_eq!(row.quality, "", "音质未知 → 徽章留空");
         assert!(row.cover.size().width > 0, "封面回退程序化占位");
+    }
+
+    // —— 喜欢（收藏）接线 ——
+
+    /// source/key 分流与 CLI `provider_of` 同构（local 键保留 `local:` 前缀，
+    /// 归一化交 storage canonical_local_key）。
+    #[test]
+    fn favorite_provider_split_matches_cli() {
+        assert_eq!(
+            favorite_provider_of("local:/a/b.flac"),
+            ("local", "local:/a/b.flac".to_string())
+        );
+        assert_eq!(
+            favorite_provider_of("003aQm4F3GJHZq"),
+            ("qq", "003aQm4F3GJHZq".to_string())
+        );
+    }
+
+    /// 库事实真值表（in-memory 库）：无行 → false；收藏 → true；取消 → false；
+    /// 本地键写入/查询两侧同持 `local:` 前缀口径。
+    #[test]
+    fn liked_in_db_truth_table() {
+        let mut db = hmp_storage::LibraryDb::open_in_memory().unwrap();
+        assert!(!liked_in_db(&mut db, "mid-unknown"), "无关系行 → false");
+        db.add_favorite("qq", "mid-1", "晴天").unwrap();
+        assert!(liked_in_db(&mut db, "mid-1"));
+        db.set_relation("track", "qq", "mid-1", "liked", false)
+            .unwrap();
+        assert!(
+            !liked_in_db(&mut db, "mid-1"),
+            "取消（desired=false）→ false"
+        );
+        db.add_favorite("local", "local:/tmp/x.flac", "x").unwrap();
+        assert!(liked_in_db(&mut db, "local:/tmp/x.flac"));
+    }
+
+    /// 回包决策表：受理 / 被拒（携带人话文案）/ 未送达（离线）三行钉。
+    #[test]
+    fn favorite_outcome_decision_table() {
+        use hmp_core::IpcErrorCode;
+        assert_eq!(
+            favorite_outcome(&Ok(Response::Ok)),
+            FavoriteOutcome::Accepted
+        );
+        let rejected = favorite_outcome(&Ok(Response::Err {
+            code: IpcErrorCode::Internal,
+            message: "library unavailable".into(),
+        }));
+        assert!(
+            matches!(rejected, FavoriteOutcome::Rejected(ref msg) if msg.contains("操作未生效")),
+            "被拒应携带人话文案：{rejected:?}"
+        );
+        assert_eq!(
+            favorite_outcome(&Err(crate::backend::BackendError::NoBackendBinary)),
+            FavoriteOutcome::Unreachable
+        );
+        assert!(FAVORITE_UNREACHABLE_TEXT.contains("未连接"));
     }
 }

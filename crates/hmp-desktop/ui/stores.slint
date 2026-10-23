@@ -241,8 +241,11 @@ export global NowPlaying {
     in-out property <int> comment-sort: 0;
     callback request-comments();
 
-    // —— 喜欢（换曲回落未点亮，与原型一致；播放页直接写 liked）———
+    // —— 喜欢（真接线：换曲由 Rust 回填库事实，点击经 toggle-liked 发
+    // daemon Favorite 写；liked 值由 Rust 权威写入，UI 不本地翻转）———
     in-out property <bool> liked: false;
+    /** 心形点击：意图上报（Rust 侧乐观翻转 + IPC 写 + 失败回读库回滚） */
+    callback toggle-liked();
 }
 
 // —— 曲目层动态调色（Vue trackTheme.ts + lib/color 取色管线的对应物，M6）——
