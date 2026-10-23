@@ -791,3 +791,10 @@ daemon 侧实测见上（探针法：起 HEAD daemon + 直发 CoverGet，观察�
 2. **缺陷（高）：右键菜单「加入播放列表…」二级 picker 不可达**——track-table.slint:301 / queue-drawer.slint:365 的 PopupWindow 未设 close-policy，slint 1.17.1 默认 close-on-click（PORTING.md:188 原记载写反——缺陷漏网的认知根源，已更正）使弹层内任意完整点击（含禁用行）即关菜单。行为级证据：press-only/release-only 菜单存活、full-click 必关、picker.png≡picker-local.png（md5 同）。**修复：S7 流（close-on-click-outside）。**
 3. **缺陷（严重）：§21 内存有界性证伪（B 项 FAIL）**——隔离真机 21 分钟长跑（音量 0、独立管道/独立数据目录、守护进程对照正常 max WS 68MB）：WS 平台斜率 +9.2~+11.1MB/min（对口径不敏感）、双窗漂移 147MB、P4 静置 115s 无驱动爬升 +127MB（超 cover_cache 64MB CAP 两倍）、P5 重播起播 20s 内 PM 单刻暴增 +2.27GB 后桌面进程死亡（死亡机制不单独归因，暴增本身系进程自身分配行为）。独立审计从 CSV 重算全部数字精确重现、混杂排除（外部内存压力不可能造成 commit 增长；封面缓存冷填充不可解释静置期爬升）。**根因调查立项 S8（开放项最高优先级）。** 附：全量模式浏览代理 6min WS 平坦（41MB）——§21 根因 3（表格剥图）与模型重建方向有效；窗口化虚拟化无法无头代理（Viewport.y 在 window-start 公式自相消，方法学边界入册 PORTING）。
 4. 产物：docs/verify/2026-10-23/（REPORT、RSS 曲线 PNG+CSV、12 张截图、真机眼验 runbook）；QA 基建 examples/shot-menu.rs 入库。
+
+## §25 内存有界性根因与修复闭环（2026-10-23/24，S8 调查 + S9 修复 + E1 双臂复验，双代理验证）
+
+1. **根因（S8 只读调查，docs/verify/2026-10-23/mem-rca-FINDINGS.md）**：①平台斜率与双窗漂移 = 确定缺陷链「换曲/自动切曲 → 全量队列重投影 + 90 行 cover_cache(256) 装载 × miss 全尺寸 1200² 解码（6.5MB 触摸/条）> 64MB CAP → LRU 循环打爆」；③P4 静置爬升仓内穷尽排除（引擎/订阅/SyncWorker/watcher/定时器面全静默、daemon 同步增长）→ 系统态依赖；④P5 PM +2.27GB 超 app 侧核算 8~40 倍、PM:WS=13.6:1 签名 → GL/WDDM commit 放大相容。
+2. **修复（S9）**：R1b 队列封面异步逐行回填（16ms×6/tick、换装作废、热行 get_if_cached 同步零闪烁、探测不更新 LRU stamp）；R2 派生封面 `<hash>.512.jpg`（persist_cover 五调用点含 CLI scan 写侧、读侧三级回退、互锚 hmp-core::media::derived_cover_name、双向兼容独立回滚）；R3 EqClock 播放门控 + Equalizer paused||!visible 自门控（暂停冻结经绝对相位机制数学等价）。
+3. **E1 复验（docs/verify/2026-10-24-mem-e1/，同日同机双臂各 23.5min）**：fix 臂四判据全 PASS（max WS 246MB、斜率 -0.02MB/min、P5 36/36 存活、daemon 50MB 含迁移期、派生件 90 个 ≈23KB/张）；**基线臂当日亦有界（250MB/+0.166）——S6 失效签名跨日非平稳，主分量系系统态（当日内存压力）**，与 S8 排除论证闭环；修复全指标 ≤ 基线，机制级消灭由测试钉死（重建派发内解码 0 次/批恰 6/换装作废/门控往返）。真库护栏 94 文件前后零变化。
+4. **新登记**：①`hmp quit` 后桌面挂死成不可杀僵尸（两臂均有、基线同——退出路径死锁，**开放项 S10 候选**）；②backend_build 指纹只哈希 hmp-daemon/src/**（R2 落 hmp-storage 不入指纹，E1 两臂同指纹实锤）——依赖级陈旧检测失明，纪律防线不变；③E3 回填计数日志未落盘（stdout 未重定向，口径缺口）；④R1a（daemon revision 不 bump）留作远期候选；⑤播放期不可见行 EQ 求值残留（打磨项）。
