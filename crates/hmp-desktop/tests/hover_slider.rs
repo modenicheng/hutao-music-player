@@ -186,8 +186,12 @@ fn hover_slider_chain_reports_and_clears() {
     assert!(checked > 0, "内容页滚动后应仍能命中行（checked={checked}）");
     println!("scroll containment checked={checked} last={last_report:?}");
 
-    // Equalizer 共享时钟随 mock 时间推进（Timer→属性→绑定链路存活）
+    // Equalizer 共享时钟随 mock 时间推进（Timer→属性→绑定链路存活）。
+    // S9 R3 后 Timer 由 Player.playing 门控：`running` 绑定经 changed 回调
+    // 接线，而 mock_elapsed_time 内 run_change_handlers 在 Timer 激活之后
+    // 执行——置 playing 后先推一拍接线，再推进点火（真实事件循环无此可见性）。
     hmp_desktop::Player::get(&ui).set_playing(true);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
     let eq = hmp_desktop::EqClock::get(&ui);
     let t0 = eq.get_t();
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(100));
