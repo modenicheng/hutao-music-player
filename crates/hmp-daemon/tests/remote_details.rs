@@ -248,12 +248,15 @@ async fn remote_artist_detail_projects_photo_songs_and_albums() {
                 "Status": 0,
                 "Info": {
                     // 键形照抄 fixture homepage_header.json：`Info.Singer.Name`
-                    //（非 SingerName；HomepageSinger.name 别名 Name/singerName）
+                    //（非 SingerName；HomepageSinger.name 别名 Name/singerName）。
+                    // SingerPic 留空 + SingerPMid 带值 = 2026-10-23 真机实测的
+                    // live 形态（照片走 T001 模板回退，content.rs 实测记录）
                     "Singer": {
                         "SingerID": 4558,
                         "SingerMid": "smid",
                         "Name": "周杰伦",
-                        "SingerPic": "https://y.gtimg.cn/music/photo_new/T001R150x150M000x_11.jpg",
+                        "SingerPic": "",
+                        "SingerPMid": "smid_11",
                     },
                     "BaseInfo": {"Name": "周杰伦", "Avatar": "https://y.gtimg.cn/a.jpg"},
                 },
@@ -311,10 +314,11 @@ async fn remote_artist_detail_projects_photo_songs_and_albums() {
         .expect("artist detail ok");
     assert_eq!(page.mid, "smid");
     assert_eq!(page.name, "周杰伦");
-    // 歌手照片 = Info.Singer.SingerPic（§20/§23 边界闭合的数据源）
+    // 歌手照片：live 形态（SingerPic 空）→ T001 模板回退（§20/§23 边界
+    // 闭合的数据源；y.gtimg.cn 域内可过 CoverGet 守卫）
     assert_eq!(
         page.photo_url,
-        "https://y.gtimg.cn/music/photo_new/T001R150x150M000x_11.jpg"
+        "https://y.gtimg.cn/music/photo_new/T001R300x300M000smid_11.jpg"
     );
     assert_eq!(page.song_total, 1012);
     assert_eq!(page.album_total, 139);

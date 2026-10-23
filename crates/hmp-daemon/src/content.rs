@@ -830,7 +830,7 @@ fn project_artist_detail(
     hmp_core::RemoteArtistDetail {
         mid: mid.to_string(),
         name: header.singer.name.clone(),
-        photo_url: header.singer.singer_pic.clone(),
+        photo_url: singer_photo_url(header),
         song_total: songs.total_num,
         album_total: albums.total,
         tracks: songs.song_list.iter().map(project_song).collect(),
@@ -855,6 +855,21 @@ fn project_artist_detail(
     }
 }
 
+/// 歌手照片 URL：`singer_pic` 为空时（2026-10-23 真机实测：live 端点恒空、
+/// fixture 才有值）退 `T001R300x300M000` 模板（`singer_pmid`，y.gtimg.cn
+/// 域内，29KB 实测可取）；两者皆空 → 空串（UI 程序化占位，D-3 域外
+/// 回退口径）。`BaseInfo.avatar` 域为 y.qq.com 不在 `COVER_HOSTS`，不走。
+fn singer_photo_url(header: &hmp_qqmusic_api::singer::HomepageHeaderResponse) -> String {
+    if !header.singer.singer_pic.is_empty() {
+        return header.singer.singer_pic.clone();
+    }
+    let pmid = &header.singer.singer_pmid;
+    if pmid.is_empty() {
+        return String::new();
+    }
+    format!("https://y.gtimg.cn/music/photo_new/T001R300x300M000{pmid}.jpg")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,6 +892,27 @@ mod tests {
         let v = serde_json::json!({ "data": { "userinfo": { "nick": "胡桃" } } });
         assert_eq!(find_str(&v, "nick"), Some("胡桃"));
         assert_eq!(find_str(&v, "missing"), None);
+    }
+
+    /// 歌手照片 URL 三级回退：singer_pic 直通 → pmid T001 模板 → 空串。
+    /// （live 端点 SingerPic 恒空、模板 URL 29KB 实测可取——2026-10-23）
+    #[test]
+    fn singer_photo_url_prefers_pic_then_pmid_template() {
+        let mut header = hmp_qqmusic_api::singer::HomepageHeaderResponse::default();
+        header.singer.singer_pic =
+            "https://y.gtimg.cn/music/photo_new/T001R150x150M000x_1.jpg".into();
+        assert_eq!(
+            singer_photo_url(&header),
+            "https://y.gtimg.cn/music/photo_new/T001R150x150M000x_1.jpg"
+        );
+        header.singer.singer_pic = String::new();
+        header.singer.singer_pmid = "0025NhlN2yWrP4_11".into();
+        assert_eq!(
+            singer_photo_url(&header),
+            "https://y.gtimg.cn/music/photo_new/T001R300x300M0000025NhlN2yWrP4_11.jpg"
+        );
+        header.singer.singer_pmid = String::new();
+        assert_eq!(singer_photo_url(&header), "");
     }
 
     #[test]
