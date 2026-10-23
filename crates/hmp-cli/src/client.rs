@@ -21,7 +21,14 @@ pub enum CliError {
     Protocol(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("daemon did not respond within {0:?}; it may be wedged — try `hmp quit` and retry")]
+    Timeout(Duration),
 }
+
+/// 单请求超时：写请求 + 读响应 + 解码全程的硬上限（daemon 挂死时报错
+/// 退出而非永久挂起，AUDIT §16 #3）。30s 为最慢合法路径（CoverGet 整图
+/// 下载等 daemon 出网请求）在上游 reqwest 自身 15s 超时之外留余量。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 与后端的一条连接。
 pub struct DaemonClient {
@@ -61,22 +68,39 @@ impl DaemonClient {
         Ok(Self { stream })
     }
 
-    /// 发请求并收响应。
+    /// 发请求并收响应。整体包 30s 超时（`REQUEST_TIMEOUT`）——全部远端
+    /// 命令收口于此，超时对所有调用点生效（含 `hmp quit`：daemon 挂死时
+    /// 30s 报错而非挂死）。超时后连接即弃（DaemonClient 随之 drop，管道
+    /// 实例归还）；daemon 侧 handler 任务最多再等一次读 EOF 收场，无泄漏。
+    /// Subscribe 长连接不经此路径（推送无超时语义）。
     pub async fn request(&mut self, req: &Request) -> Result<Response, CliError> {
-        let frame = encode_frame(req).map_err(|e| CliError::Protocol(e.to_string()))?;
-        self.stream.write_all(&frame).await?;
-        let mut len_buf = [0u8; 4];
-        self.stream.read_exact(&mut len_buf).await?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-        if len == 0 || len > hmp_core::ipc::MAX_FRAME - 4 {
-            return Err(CliError::Protocol("invalid frame length".into()));
-        }
-        let mut payload = vec![0u8; len];
-        self.stream.read_exact(&mut payload).await?;
-        let mut frame = Vec::with_capacity(4 + len);
-        frame.extend_from_slice(&len_buf);
-        frame.extend_from_slice(&payload);
-        decode_frame::<Response>(&frame).map_err(|e| protocol_error(&e.to_string()))
+        self.request_with_timeout(req, REQUEST_TIMEOUT).await
+    }
+
+    /// 带可调预算的请求（测试注短超时用；生产路径走 [`Self::request`]）。
+    pub(crate) async fn request_with_timeout(
+        &mut self,
+        req: &Request,
+        timeout: Duration,
+    ) -> Result<Response, CliError> {
+        tokio::time::timeout(timeout, async {
+            let frame = encode_frame(req).map_err(|e| CliError::Protocol(e.to_string()))?;
+            self.stream.write_all(&frame).await?;
+            let mut len_buf = [0u8; 4];
+            self.stream.read_exact(&mut len_buf).await?;
+            let len = u32::from_le_bytes(len_buf) as usize;
+            if len == 0 || len > hmp_core::ipc::MAX_FRAME - 4 {
+                return Err(CliError::Protocol("invalid frame length".into()));
+            }
+            let mut payload = vec![0u8; len];
+            self.stream.read_exact(&mut payload).await?;
+            let mut frame = Vec::with_capacity(4 + len);
+            frame.extend_from_slice(&len_buf);
+            frame.extend_from_slice(&payload);
+            decode_frame::<Response>(&frame).map_err(|e| protocol_error(&e.to_string()))
+        })
+        .await
+        .map_err(|_| CliError::Timeout(timeout))?
     }
 }
 
@@ -147,5 +171,42 @@ mod tests {
             e.to_string(),
             "protocol error: frame shorter than the 4-byte length prefix"
         );
+    }
+
+    /// 超时路径（AUDIT §16 #3）：daemon 连上但读走请求后沉默（挂死语义）
+    /// → `request_with_timeout` 在预算附近返回 `CliError::Timeout`，绝不挂死。
+    /// 端点用临时路径、经模块内私有 `try_connect` 构造——`connect_existing`/
+    /// `connect_or_spawn` 会碰生产端点 `\\.\pipe\hmp`，禁用（审核可选项③）。
+    #[tokio::test]
+    async fn request_times_out_when_daemon_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cli-timeout.sock");
+        let mut listener = hmp_daemon::transport::IpcListener::bind(&path).unwrap();
+        // 服务端任务：accept → 读走完整请求帧 → 不应答，连接挂起到底。
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut stream = listener.accept().await.unwrap();
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.unwrap();
+            let mut payload = vec![0u8; u32::from_le_bytes(len_buf) as usize];
+            stream.read_exact(&mut payload).await.unwrap();
+            let () = std::future::pending().await;
+        });
+        let mut client = DaemonClient::try_connect(&path).await.unwrap();
+        let start = std::time::Instant::now();
+        let err = client
+            .request_with_timeout(&Request::Status, Duration::from_millis(150))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CliError::Timeout(d) if d == Duration::from_millis(150)),
+            "应返回 Timeout(150ms)，实际: {err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "超时须及时返回: {:?}",
+            start.elapsed()
+        );
+        server.abort();
     }
 }
