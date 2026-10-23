@@ -296,9 +296,14 @@ export component TrackTable inherits Rectangle {
 
                     // 行锚定菜单弹层：编译期 PopupWindow 从元素树摘除（不参与
                     // 布局/hover），坐标相对本行、show 时钳制进窗口、滚动跟随锚、
-                    // 行卸载自动关；点外/ESC 关闭走 CloseOnClickOutside 默认策略。
+                    // 行卸载自动关。close-policy 必须显式 close-on-click-outside：
+                    // slint 默认 close-on-click 连弹层内完整点击也一并关闭，
+                    // 「加入播放列表…」后的二级 picker 面板不可达（S6 缺陷 #1）；
+                    // 点外 press / ESC / 业务 dismissed→close() 三路关闭在
+                    // close-on-click-outside 下均不受影响。
                     // 内容面板读 TrackMenu 全局快照——每行一个实例，仅 show 的生效
                     row-menu := PopupWindow {
+                        close-policy: close-on-click-outside;
                         x: TrackMenu.open-x;
                         y: TrackMenu.open-y + 4px;
                         width: 216px;
