@@ -694,6 +694,10 @@ fn apply_route(
                 crate::remote_details::spawn_remote_playlist_load(ui.as_weak(), runtime, &param);
                 true
             }
+            (crate::Route::Album, Some(_)) => {
+                crate::remote_details::spawn_remote_album_load(ui.as_weak(), runtime, &param);
+                true
+            }
             _ => false,
         };
         if handled {
@@ -1472,5 +1476,24 @@ mod tests {
         assert_eq!(data.get_album_state(), 3);
         apply_detail(&ui, &runtime, &DetailData::Artist(None));
         assert_eq!(data.get_artist_state(), 3);
+
+        // 远端专辑（T5）：失败 → 4；本地命中复位 2（交替导航，M2 同款）
+        crate::remote_details::apply_album_response(
+            &ui.as_weak(),
+            &runtime,
+            crate::remote_details::current_album_generation(),
+            Err(crate::backend::BackendError::Protocol("offline".into())),
+        );
+        assert_eq!(data.get_album_state(), 4, "远端专辑失败态");
+        let album = DetailData::Album(Some(library_view::AlbumDetail {
+            name: "十一月的萧邦".into(),
+            artist: Some("周杰伦".into()),
+            year: Some(2005),
+            cover_uri: None,
+            tracks: vec![],
+            total_ms: 0,
+        }));
+        apply_detail(&ui, &runtime, &album);
+        assert_eq!(data.get_album_state(), 2, "本地专辑命中复位就绪态");
     }
 }

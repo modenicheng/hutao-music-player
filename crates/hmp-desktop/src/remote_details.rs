@@ -28,6 +28,8 @@ thread_local! {
     /// 远端歌单装载代数（读写都在事件循环线程，单线程计数即可；
     /// 导航进入远端歌单页即 bump，回包落地前比对，过期即弃）。
     static PLAYLIST_GENERATION: Cell<u64> = const { Cell::new(0) };
+    /// 远端专辑装载代数（同上）。
+    static ALBUM_GENERATION: Cell<u64> = const { Cell::new(0) };
 }
 
 /// 剥离 `qq:` 前缀（无前缀 → None；本地/远端分流判据，单测锚定）。
@@ -191,6 +193,138 @@ pub fn apply_playlist_response(
     }
 }
 
+// ————————————————————————————————————————————————
+// 远端专辑详情（D2b）
+// ————————————————————————————————————————————————
+
+/// 远端专辑 meta（T5 验收口径）：年份（发行日期前 4，无值 "—"）/ 公司 /
+/// 语种 / 流派 / 共 N 首（+ 超窗标注，D-4）。空值不占位。
+fn remote_album_meta(page: &hmp_core::RemoteAlbumDetail) -> Vec<SharedString> {
+    let mut items = vec![if page.time_public.len() >= 4 {
+        page.time_public[..4].to_string()
+    } else {
+        "—".into()
+    }];
+    for text in [&page.company, &page.language, &page.genre] {
+        if !text.is_empty() {
+            items.push(text.clone());
+        }
+    }
+    items.push(if page.has_more {
+        format!("共 {} 首（展示前 {} 首）", page.total, page.tracks.len())
+    } else {
+        format!("共 {} 首", page.total)
+    });
+    items.into_iter().map(SharedString::from).collect()
+}
+
+/// 远端专辑装载入口（UI 线程被调，O1）。`param` 形如 `qq:<albummid>`。
+pub fn spawn_remote_album_load(
+    ui_weak: Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    param: &str,
+) {
+    let Some((mid, generation)) = begin_album_load(&ui_weak, param) else {
+        return;
+    };
+    let weak = ui_weak;
+    let rt_apply = Arc::clone(runtime);
+    runtime.spawn(async move {
+        let result = crate::backend::request(hmp_core::Request::AlbumDetailGet { mid }).await;
+        let _ = slint::invoke_from_event_loop(move || {
+            apply_album_response(&weak, &rt_apply, generation, result);
+        });
+    });
+}
+
+/// 装载前半（纯 UI 线程部分）：置 state=1、校验参数、bump 代数。
+/// 前缀后为空 → state=4 并返回 None。
+pub fn begin_album_load(ui_weak: &Weak<AppWindow>, param: &str) -> Option<(String, u64)> {
+    let ui = ui_weak.upgrade()?;
+    let data = Data::get(&ui);
+    data.set_album_state(1);
+    let Some(mid) = remote_param(param).filter(|m| !m.is_empty()) else {
+        data.set_album_state(4);
+        return None;
+    };
+    Some((mid.to_string(), bump_album_generation()))
+}
+
+/// 当前远端专辑装载代数（迟到回包丢弃测试用）。
+pub fn current_album_generation() -> u64 {
+    ALBUM_GENERATION.with(|g| g.get())
+}
+
+fn bump_album_generation() -> u64 {
+    ALBUM_GENERATION.with(|g| {
+        let next = g.get().wrapping_add(1);
+        g.set(next);
+        next
+    })
+}
+
+/// 回包落地（invoke 闭包体，UI 线程）：代数过期即弃；not-found（3）与
+/// 失败（4）分态。歌手链接带 `qq:` 前缀（D-5，点击跳远端歌手页）。
+pub fn apply_album_response(
+    ui_weak: &Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    generation: u64,
+    result: Result<hmp_core::Response, crate::backend::BackendError>,
+) {
+    let Some(ui) = ui_weak.upgrade() else {
+        return;
+    };
+    if current_album_generation() != generation {
+        return; // 迟到回包：页已切走/已重新装载，丢弃防覆盖
+    }
+    let data = Data::get(&ui);
+    match result {
+        Ok(hmp_core::Response::AlbumDetail(page)) => {
+            data.set_album_name(page.name.as_str().into());
+            data.set_album_artist(if page.singer_mid.is_empty() {
+                SharedString::from("")
+            } else {
+                SharedString::from(format!("{REMOTE_PREFIX}{}", page.singer_mid))
+            });
+            data.set_album_meta_items(model_rc(remote_album_meta(&page)));
+            // hero 封面：程序化占位先行，picurl 非空 → CoverGet 异步换真图
+            data.set_album_cover(crate::covers::cover_image(&format!("album:{}", page.mid)));
+            let rows: Vec<TrackRow> = page.tracks.iter().map(remote_track_row).collect();
+            data.set_album_tracks(model_rc(rows));
+            data.set_album_state(2);
+            crate::track_covers::prefetch_tracks(
+                runtime,
+                page.tracks
+                    .iter()
+                    .filter(|s| !s.picurl.is_empty())
+                    .map(|s| (s.mid.clone(), s.picurl.clone()))
+                    .collect(),
+            );
+            if !page.picurl.is_empty() {
+                let key = format!("album-hero|{}|{}", page.mid, page.picurl);
+                crate::online_covers::fetch_cover(
+                    ui_weak.clone(),
+                    runtime,
+                    key,
+                    page.picurl.clone(),
+                    move |ui, image| {
+                        if current_album_generation() != generation {
+                            return;
+                        }
+                        Data::get(ui).set_album_cover(image);
+                    },
+                );
+            }
+        }
+        Ok(hmp_core::Response::Err { ref message, .. }) if is_not_found(message) => {
+            data.set_album_state(3);
+        }
+        _ => {
+            data.set_album_state(4);
+        }
+    }
+}
+
 fn model_rc<T: 'static + Clone>(items: Vec<T>) -> slint::ModelRc<T> {
     slint::ModelRc::new(slint::VecModel::from(items))
 }
@@ -198,6 +332,41 @@ fn model_rc<T: 'static + Clone>(items: Vec<T>) -> slint::ModelRc<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_album_meta_year_company_language_and_window() {
+        let mut page = hmp_core::RemoteAlbumDetail {
+            mid: "am-1".into(),
+            name: "十一月的萧邦".into(),
+            singer: "周杰伦".into(),
+            singer_mid: "sm-1".into(),
+            company: "杰威尔音乐".into(),
+            genre: "流行".into(),
+            language: "国语".into(),
+            desc: String::new(),
+            time_public: "2005-11-01".into(),
+            picurl: String::new(),
+            tracks: vec![hmp_core::DiscoverNewSong::default(); 12],
+            total: 12,
+            has_more: false,
+        };
+        let meta = remote_album_meta(&page);
+        assert_eq!(meta[0].as_str(), "2005");
+        assert_eq!(meta[1].as_str(), "杰威尔音乐");
+        assert_eq!(meta[2].as_str(), "国语");
+        assert_eq!(meta[3].as_str(), "流行");
+        assert_eq!(meta[4].as_str(), "共 12 首");
+
+        // 超窗标注 + 缺发行日期/公司 → "—" 与跳过空值
+        page.has_more = true;
+        page.total = 130;
+        page.time_public = String::new();
+        page.company = String::new();
+        let meta = remote_album_meta(&page);
+        assert_eq!(meta[0].as_str(), "—");
+        assert_eq!(meta[1].as_str(), "国语");
+        assert_eq!(meta.last().unwrap().as_str(), "共 130 首（展示前 12 首）");
+    }
 
     #[test]
     fn remote_param_strips_prefix_only() {
