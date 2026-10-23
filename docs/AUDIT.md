@@ -784,3 +784,10 @@ daemon 侧实测见上（探针法：起 HEAD daemon + 直发 CoverGet，观察�
 ——不换曲的静止队列不自动重试（当前曲除外，10Hz 退避重试兜底）；歌手照片、
 榜单头图仍无数据源（§20 已知边界不变）；队列行回填图 256 桶（≤256KB/行）
 与 §21「QueueRow 背 cover」契约一致，内存有界。
+
+## §24 桌面验收补账——右键菜单视觉验收 + §21 内存长跑证伪（2026-10-23，S6 流；发现与独立审计双代理验证）
+
+1. **右键菜单视觉验收（A 项）**：testing backend + software renderer 截 12 张（浅/暗 × 曲目表/队列/歌单上下文 × hover/禁用/钳制变体），9 PASS——面板几何（216 定宽/高度公式）、分隔线、禁用 opacity、hover 暖色、底右缘钳制逐张对照 context-menu.slint 内嵌规格实证；3 张（picker 系）转为缺陷证据。
+2. **缺陷（高）：右键菜单「加入播放列表…」二级 picker 不可达**——track-table.slint:301 / queue-drawer.slint:365 的 PopupWindow 未设 close-policy，slint 1.17.1 默认 close-on-click（PORTING.md:188 原记载写反——缺陷漏网的认知根源，已更正）使弹层内任意完整点击（含禁用行）即关菜单。行为级证据：press-only/release-only 菜单存活、full-click 必关、picker.png≡picker-local.png（md5 同）。**修复：S7 流（close-on-click-outside）。**
+3. **缺陷（严重）：§21 内存有界性证伪（B 项 FAIL）**——隔离真机 21 分钟长跑（音量 0、独立管道/独立数据目录、守护进程对照正常 max WS 68MB）：WS 平台斜率 +9.2~+11.1MB/min（对口径不敏感）、双窗漂移 147MB、P4 静置 115s 无驱动爬升 +127MB（超 cover_cache 64MB CAP 两倍）、P5 重播起播 20s 内 PM 单刻暴增 +2.27GB 后桌面进程死亡（死亡机制不单独归因，暴增本身系进程自身分配行为）。独立审计从 CSV 重算全部数字精确重现、混杂排除（外部内存压力不可能造成 commit 增长；封面缓存冷填充不可解释静置期爬升）。**根因调查立项 S8（开放项最高优先级）。** 附：全量模式浏览代理 6min WS 平坦（41MB）——§21 根因 3（表格剥图）与模型重建方向有效；窗口化虚拟化无法无头代理（Viewport.y 在 window-start 公式自相消，方法学边界入册 PORTING）。
+4. 产物：docs/verify/2026-10-23/（REPORT、RSS 曲线 PNG+CSV、12 张截图、真机眼验 runbook）；QA 基建 examples/shot-menu.rs 入库。
