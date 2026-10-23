@@ -53,7 +53,9 @@
 
 **真数据**：我喜欢 / 最近播放（真实时间戳文案）/ 音乐库（扫描根分组统计）/ 歌单（relation 分流，副标题 "N 首"）/ 侧栏歌单区（Data.sidebar-*，色对按 id 哈希确定性装饰）/ 播放条与队列（DaemonState → Player 单向映射，命令 → Request）。
 
-**M4.5 详情页接线（2026-09-07 第二轮）**：歌单/专辑/歌手三页详情 = 导航时同步直读 sqlite（`library_view::playlist_detail / album_detail / artist_detail`，`with_db` 单连接单投影，失败 → found=false 诚实空态）。**详情页参数约定**：歌单 = DB id；专辑/歌手 = 展示名（远端 mid 要等内容接口，AUDIT §8.2）——`SongRow::to_track_row` 把 `artist_mid/album_mid` 填成展示名，TrackTable 空参禁用链接；歌手页对含分隔符的展示串（如 "张韶涵/HOYO-MiX"）按 `library_artists` 名字做最长包含归一。装卸点 = `bridge::apply_route`（navigate/back 共用）。
+**M4.5 详情页接线（2026-09-07 第二轮；2026-10-23 D2 修订）**：歌单/专辑/歌手三页详情 = 导航时同步直读 sqlite（`library_view::playlist_detail / album_detail / artist_detail`，`with_db` 单连接单投影，失败 → 诚实空态）。**详情页参数约定（D-1 双寻址）**：本地 = 歌单 DB id / 专辑/歌手展示名；远端 = `qq:<disstid|albummid|singermid>` 前缀（daemon 三只读详情接口 `PlaylistDetailGet/AlbumDetailGet/ArtistDetailGet`，桌面 `src/remote_details.rs` 异步装载 + 每页代数计数器丢弃迟到回包）。分流点 = `bridge::apply_route`（本地投影 miss 且带前缀才走远端，本地事实优先）；`load_detail` 对远端参数返回 `DetailData::None`（LibraryChanged 重放 no-op，远端页不被误清）。本地行 `SongRow::to_track_row` 仍填展示名链接；远端行（`remote_track_row`）填 `qq:` 前缀 mid，TrackTable 既有链接零改动。歌手页对含分隔符的展示串（如 "张韶涵/HOYO-MiX"）按 `library_artists` 名字做最长包含归一；本地歌手投影 miss 判定 = 曲目空即 None（空页无信息量且拦远端分流，2026-10-23 起与专辑页口径一致）。三页状态机 `*-state`（0=初始 1=加载中 2=就绪 3=未找到 4=失败）本地/远端两路径共同维护；发现页歌单卡 mid/封面旁路表键统一经 `online_covers::playlist_card_key` 规范化（裸数字 → `qq:` 前缀，两侧同函数防封面静默失配）。
+
+**坑位（D2 轮新增）**：远端装载入口在 UI 线程被调（on_navigate 栈内）时 state=1 **直接 set**——勿套 `invoke_from_event_loop`（TestingBackend 下会挂起 mock 泵，`spawn_discover_load` 注释在案）；异步回包再走 invoke。`fetch_cover`（online_covers 通用取图核心）去重账本必须进程级（此前 thread_local + 跨线程 remove 删的是另一线程的账，失败出账从未生效——已改全局 Mutex）。
 
 **诚实空态**：下载/已购两页（后端无此域，AUDIT §8.5；2026-09-29 删除 mock.rs）。
 
@@ -65,7 +67,7 @@
 - 队列点歌 = `Play(该曲 id)`，整队被该单曲替换（无 PlayAt IPC，AUDIT §8.8）；
 - 队列行 QQ 曲目时长 0:00（`track_meta_batch` 无时长投影，AUDIT §8.11）；
 - 客户端音质偏好暂不生效（与 daemon config.toml 两处存储，AUDIT §8.7）；音量以 daemon 推送为准（含 RG 补偿语义，AUDIT §8.12）；
-- ~~歌手/专辑 mid 真数据行为空串~~（M4.5 收敛：详情页参数改用展示名，本地投影可跳转；QQ-only 歌手/专辑落"本地库无此内容"诚实空态，待内容接口换真 mid）；
+- ~~歌手/专辑 mid 真数据行为空串~~（M4.5 收敛：详情页参数改用展示名，本地投影可跳转；QQ-only 歌手/专辑落"本地库无此内容"诚实空态，待内容接口换真 mid）→ **2026-10-23 D2 闭合**：`qq:` 前缀远端寻址 + daemon 三只读详情接口，远端歌手/专辑/歌单页全量真数据；
 - 库页是启动静态快照（无 LibraryChanged 事件，AUDIT §8.9）。
 
 **后端缺口全集**：docs/AUDIT.md §8（12 条 + 汇总表）。
