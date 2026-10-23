@@ -34,7 +34,12 @@ fn press(ui: &hmp_desktop::AppWindow, x: f32, y: f32, button: slint::platform::P
     });
 }
 
-fn release(ui: &hmp_desktop::AppWindow, x: f32, y: f32, button: slint::platform::PointerEventButton) {
+fn release(
+    ui: &hmp_desktop::AppWindow,
+    x: f32,
+    y: f32,
+    button: slint::platform::PointerEventButton,
+) {
     ui.window().dispatch_event(WindowEvent::PointerReleased {
         position: LogicalPosition::new(x, y),
         button,
@@ -80,9 +85,8 @@ fn context_menu_snapshot_and_gates() {
     let player = hmp_desktop::Player::get(&ui);
 
     // —— 0. 左键标定：指针处行下标（play-tracks 回带）———
-    let plays: std::sync::Arc<std::sync::Mutex<Vec<i32>>> = std::sync::Arc::new(
-        std::sync::Mutex::new(Vec::new()),
-    );
+    let plays: std::sync::Arc<std::sync::Mutex<Vec<i32>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     {
         let plays = std::sync::Arc::clone(&plays);
         player.on_play_tracks(move |_tracks, start| {
@@ -99,8 +103,18 @@ fn context_menu_snapshot_and_gates() {
         .expect("左键应命中曲目行触发 play-tracks");
 
     // —— 1. 曲目行右键释放：快照与命中行一致 ———
-    press(&ui, ROW_X, ROW_Y, slint::platform::PointerEventButton::Right);
-    release(&ui, ROW_X, ROW_Y, slint::platform::PointerEventButton::Right);
+    press(
+        &ui,
+        ROW_X,
+        ROW_Y,
+        slint::platform::PointerEventButton::Right,
+    );
+    release(
+        &ui,
+        ROW_X,
+        ROW_Y,
+        slint::platform::PointerEventButton::Right,
+    );
     settle();
     assert!(
         matches!(menu.get_context(), hmp_desktop::MenuContext::Library),
@@ -116,16 +130,40 @@ fn context_menu_snapshot_and_gates() {
     // —— 2. 未接入宿主（侧栏行）右键：无动作 ———
     // 哨兵：把快照改写为非常规值，右键后不得被覆盖
     menu.set_index(-1);
-    press(&ui, SIDEBAR_X, SIDEBAR_Y, slint::platform::PointerEventButton::Right);
-    release(&ui, SIDEBAR_X, SIDEBAR_Y, slint::platform::PointerEventButton::Right);
+    press(
+        &ui,
+        SIDEBAR_X,
+        SIDEBAR_Y,
+        slint::platform::PointerEventButton::Right,
+    );
+    release(
+        &ui,
+        SIDEBAR_X,
+        SIDEBAR_Y,
+        slint::platform::PointerEventButton::Right,
+    );
     settle();
-    assert_eq!(menu.get_index(), -1, "侧栏右键不得写入快照（context-enabled 默认关）");
+    assert_eq!(
+        menu.get_index(),
+        -1,
+        "侧栏右键不得写入快照（context-enabled 默认关）"
+    );
 
     // —— 3. 全局开关关：已接入行右键也无动作 ———
     menu.set_enabled(false);
     menu.set_index(-2);
-    press(&ui, ROW_X, ROW_Y, slint::platform::PointerEventButton::Right);
-    release(&ui, ROW_X, ROW_Y, slint::platform::PointerEventButton::Right);
+    press(
+        &ui,
+        ROW_X,
+        ROW_Y,
+        slint::platform::PointerEventButton::Right,
+    );
+    release(
+        &ui,
+        ROW_X,
+        ROW_Y,
+        slint::platform::PointerEventButton::Right,
+    );
     settle();
     assert_eq!(menu.get_index(), -2, "全局关闸后曲目行右键不得写入快照");
 }
