@@ -75,13 +75,7 @@ thread_local! {
 /// 单曲命令（右键菜单下一首播放/加入队列）发送前的显示元数据登记：
 /// 与 [`dispatch_command`] 的 PlayList 同一覆盖层，新入队曲目若不在
 /// 库投影里，队列行标题不回退成 mid。须在 UI 线程调用（回调内即满足）。
-pub(crate) fn remember_meta(
-    mid: &str,
-    title: &str,
-    artists: &str,
-    album: &str,
-    duration_ms: i32,
-) {
+pub(crate) fn remember_meta(mid: &str, title: &str, artists: &str, album: &str, duration_ms: i32) {
     if mid.is_empty() {
         return;
     }
