@@ -58,6 +58,19 @@ pub fn get_or_load(path: &str, max_side: u32) -> Option<Image> {
     get_or_load_inner(path, max_side, CAP_BYTES)
 }
 
+/// 只探测不装载（S9 R1b，队列重建用）：命中返回克隆；未命中返回 None——
+/// **不解码、不记账、不更新 stamp**（探测不是「使用」：重建高频探测不应固化
+/// LRU 序，近因记账留给随后真正消费的 `get_or_load`——异步回填/当前曲路径）。
+pub fn get_if_cached(path: &str, max_side: u32) -> Option<Image> {
+    CACHE.with(|cell| {
+        let cache = &*cell.borrow();
+        cache
+            .map
+            .get(&(path.to_owned(), max_side))
+            .map(|entry| entry.image.clone())
+    })
+}
+
 fn get_or_load_inner(path: &str, max_side: u32, cap: u64) -> Option<Image> {
     CACHE.with(|cell| {
         // 先走出 RefMut 的 Deref：之后 cache.map / cache.next_stamp 等字段
@@ -240,5 +253,49 @@ mod tests {
     #[test]
     fn public_cap_constant_matches_contract() {
         assert_eq!(CAP_BYTES, 64 * 1024 * 1024);
+    }
+
+    /// 只探测不装载（S9 R1b）：miss 不解码不计数；hit 返回克隆；探测不更新
+    /// stamp（探测不是使用——LRU 近因记账留给 get_or_load）。
+    #[test]
+    fn get_if_cached_peeks_without_loading_or_refreshing() {
+        let dir = test_dir("peek");
+        let path = write_png(&dir, "peek.png", 64, 64);
+        let p = path.to_str().unwrap();
+        // 未装载过：None，且不产生 miss 计数（探测非装载）
+        assert!(get_if_cached(p, 256).is_none());
+        assert!(get_if_cached(p, 512).is_none());
+        let (len, _bytes, hits, misses) = cache_stats();
+        assert_eq!((len, hits, misses), (0, 0, 0), "探测不应装载/计数");
+        // 装载一次后：同桶命中克隆、异桶仍 None
+        assert!(get_or_load(p, 256).is_some());
+        assert!(get_if_cached(p, 256).is_some());
+        assert!(get_if_cached(p, 512).is_none());
+        let (len, _bytes, hits, misses) = cache_stats();
+        assert_eq!((len, hits, misses), (1, 0, 1), "仅 get_or_load 计一次 miss");
+        // 探测不刷新 stamp：cap 600KB 容 2 条 256KB；a→b→探测 a→c 应逐出 a
+        //（若探测刷新了 stamp，被逐出的会是 b）
+        let cap: u64 = 600 * 1024;
+        let a = write_png(&dir, "a.png", 256, 256);
+        let b = write_png(&dir, "b.png", 256, 256);
+        let c = write_png(&dir, "c.png", 256, 256);
+        let (pa, pb, pc) = (
+            a.to_str().unwrap().to_owned(),
+            b.to_str().unwrap().to_owned(),
+            c.to_str().unwrap().to_owned(),
+        );
+        // 独立小 cap 验证走 inner；peek 用公开 API（cap 无关，只查 map）
+        let _ = get_or_load_inner(&pa, 256, cap);
+        let _ = get_or_load_inner(&pb, 256, cap);
+        assert!(get_if_cached(&pa, 256).is_some(), "a 在缓存应可探测");
+        let _ = get_or_load_inner(&pc, 256, cap); // 逐出 stamp 最小者
+        let miss_before = cache_stats().3;
+        let _ = get_or_load_inner(&pa, 256, cap); // a 应已被逐出（探测未救它）
+        assert_eq!(
+            cache_stats().3,
+            miss_before + 1,
+            "a 应因探测不刷新 stamp 而被逐出"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
