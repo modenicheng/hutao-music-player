@@ -29,6 +29,151 @@ const MAX_LOAD_DEGRADES: usize = 8;
 /// 由既有「成功写缓存后清扫陈旧 tmp」（AUDIT §2）兜底。
 const PRELOAD_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// 列表解析每作业总超时默认（M4，§16 开放项 #1）：纯 API 分页无可 Legit
+/// 超过 60s 的形态（100 页 × ~0.5s ≈ 50s 封顶）。超时复用
+/// `EngineError::Internal("source resolution timed out")`（M5：不改
+/// daemon/player.rs 的错误变体面，IPC 映射与行为一致）。**不**适用于
+/// `load_and_play` 的单曲 `resolve_track`——无 Range CDN 的全量下载回退
+/// （分钟级）是合法播放路径，硬超时会弄坏它。
+const LIST_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 解析请求通道容量（§16 开放项 #1）：人在回路命令频率下绰绰有余；满了
+/// 说明 worker 已被慢作业拖死，`try_send` 快速失败优于排队。
+const RESOLVE_QUEUE_CAPACITY: usize = 16;
+
+/// 解析作业（§16 开放项 #1）：命令循环只投递，FIFO worker 串行执行。
+/// `token` 与引擎侧 `pending_resolves` 登记配对（Stop/Quit/QueueClear 弃置
+/// 后回包按 token 失效丢弃）。
+enum ResolveJob {
+    /// Play/PlayNext/QueueAppend/OpenUri：解析 PlayRequest（歌单/专辑分页）。
+    SourceIds { token: u64, src: PlayRequest },
+    /// PlayList：id → stub（库内批量投影快路径 + 未命中走解析器）。
+    IdStubs { token: u64, ids: Vec<TrackId> },
+}
+
+impl ResolveJob {
+    fn token(&self) -> u64 {
+        match self {
+            ResolveJob::SourceIds { token, .. } | ResolveJob::IdStubs { token, .. } => *token,
+        }
+    }
+}
+
+/// 解析回包（worker → run 循环；回包到达时按登记的类别提交）。
+struct ResolveReply {
+    token: u64,
+    result: Result<Vec<hmp_core::TrackStub>, EngineError>,
+}
+
+/// 在途解析登记的类别（run 循环收到回包后路由到对应提交分支）。
+#[derive(Clone)]
+enum ResolveKind {
+    /// Play/PlayNext/OpenUri（`play_source` 语义；回包提交不依赖 src 本身）。
+    Play { playnext: bool },
+    /// PlayList：回包提交需原始 ids（队列整表替换）与起播下标。
+    List { ids: Vec<TrackId>, start: usize },
+    /// QueueAppend（无附加状态；成功/失败均不推进 seq——旧语义）。
+    Append,
+}
+
+/// 解析 worker（§16 开放项 #1）：单任务 FIFO 串行——完成序 ≡ 派发序，
+/// 提交顺序与旧内联架构完全一致（Play A → QueueAppend B：A 的 replace
+/// 先提交，B 的 append 后到不丢失）。每作业：
+/// - 总超时（M4，`timeout`）：超时复用 `EngineError::Internal`（M5）；
+///   超时的子任务自灭，worker 继续消化后续作业。
+/// - 子任务隔离 panic（O2）：作业体 `tokio::spawn` + JoinHandle await——
+///   单作业 panic 限制在子任务内（`resolver panicked`），worker 存活
+///   （否则登记永久停在 Resolving）。不引入新依赖。
+///
+/// preload（`schedule_preload`）不走本 worker——独立 spawn + 自带超时，
+/// 不被列表解析排队（gapless 语义优先）。
+async fn resolver_worker(
+    mut jobs: mpsc::Receiver<ResolveJob>,
+    replies: mpsc::UnboundedSender<ResolveReply>,
+    resolver: Arc<dyn SourceResolver>,
+    library: Option<std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>>,
+    timeout: std::time::Duration,
+) {
+    while let Some(job) = jobs.recv().await {
+        let token = job.token();
+        let job_resolver = Arc::clone(&resolver);
+        let job_library = library.clone();
+        let task = tokio::spawn(async move {
+            match job {
+                ResolveJob::SourceIds { src, .. } => job_resolver.resolve_source_ids(&src).await,
+                ResolveJob::IdStubs { ids, .. } => {
+                    resolve_id_stubs(job_resolver.as_ref(), &job_library, &ids).await
+                }
+            }
+        });
+        let result = match tokio::time::timeout(timeout, task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(join_err)) if join_err.is_panic() => {
+                tracing::error!("resolver job panicked; worker continues");
+                Err(EngineError::Internal("resolver panicked".into()))
+            }
+            Ok(Err(join_err)) => Err(EngineError::Internal(format!(
+                "resolver task failed: {join_err}"
+            ))),
+            Err(_) => Err(EngineError::Internal("source resolution timed out".into())),
+        };
+        if replies.send(ResolveReply { token, result }).is_err() {
+            break; // 引擎已退出（run 循环结束）——通道关闭，worker 自灭。
+        }
+    }
+}
+
+/// 列表 id → stub：库内 id 批量投影（快路径），未命中走解析器逐个补。
+/// 解析器失败（如 QQ 未登录）整体失败——半截列表不提交队列。
+/// （§16 #1：自引擎方法提为自由函数，供解析 worker 调用；语义不变。）
+async fn resolve_id_stubs(
+    resolver: &dyn SourceResolver,
+    library: &Option<std::sync::Arc<std::sync::Mutex<hmp_storage::LibraryDb>>>,
+    ids: &[TrackId],
+) -> Result<Vec<hmp_core::TrackStub>, EngineError> {
+    let mut known: std::collections::HashMap<String, hmp_core::TrackStub> =
+        std::collections::HashMap::new();
+    if let Some(library) = library {
+        let mut qq_keys = Vec::new();
+        let mut local_keys = Vec::new();
+        for id in ids {
+            if hmp_core::TrackProvider::from_id(id.as_ref()) == hmp_core::TrackProvider::Local {
+                local_keys.push(id.to_string());
+            } else {
+                qq_keys.push(id.to_string());
+            }
+        }
+        let mut lib = library.lock().unwrap();
+        for source_meta in [("qq", &qq_keys), ("local", &local_keys)] {
+            let (source, keys) = source_meta;
+            for meta in lib.track_meta_batch(source, keys).unwrap_or_default() {
+                known.insert(
+                    meta.source_key.clone(),
+                    hmp_core::TrackStub {
+                        id: TrackId::new(meta.source_key.clone()),
+                        title: meta.title,
+                        artists: meta.artist.into_iter().collect(),
+                        album: meta.album,
+                        duration_ms: meta.duration_ms.map(|ms| ms.clamp(0, u32::MAX as i64)),
+                    },
+                );
+            }
+        }
+    }
+    let mut stubs = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(stub) = known.get(id.as_ref()) {
+            stubs.push(stub.clone());
+            continue;
+        }
+        let resolved = resolver
+            .resolve_source_ids(&PlayRequest::Track(id.clone()))
+            .await?;
+        stubs.extend(resolved);
+    }
+    Ok(stubs)
+}
+
 /// 会话持久化文件内容（`$XDG_DATA_HOME/hmp/playback_state.json`）。
 /// 恢复 queue/volume/position；恢复后不自动播放，首次 Play 时续播（里程碑 D）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -200,6 +345,16 @@ pub struct PlaybackEngine {
     current_rg_db: Option<f64>,
     /// 等待驱动应用装载的超时（测试注入短超时）。
     load_timeout: std::time::Duration,
+    /// 解析作业投递端（§16 #1：FIFO 单 worker；命令循环只 try_send；
+    /// 每作业总超时在 worker 启动时注入，见 [`resolver_worker`]）。
+    resolve_tx: mpsc::Sender<ResolveJob>,
+    /// worker 回包接收端（run 循环第 4 臂）。
+    resolve_reply_rx: mpsc::UnboundedReceiver<ResolveReply>,
+    /// 在途解析登记（§16 #1/M2）：token → 类别；Quit/QueueClear-all/
+    /// Command(Stop) 清空并按条数推进 seq。
+    pending_resolves: Vec<(u64, ResolveKind)>,
+    /// 下一个解析登记 token。
+    next_resolve_token: u64,
     /// G2 预解析总超时（AUDIT §16 开放项：预解析期无总超时——resolve 含
     /// 网络/无 Range 全量下载回退可分钟级挂起；超时静默放弃，播放时按需
     /// 解析兜底。测试注入短超时）。
@@ -246,12 +401,15 @@ impl PlaybackEngine {
             session_path,
             std::time::Duration::from_secs(5),
             PRELOAD_RESOLVE_TIMEOUT,
+            LIST_RESOLVE_TIMEOUT,
         )
     }
 
     /// 带装载超时注入的启动（测试用短超时驱动失败路径）。
     /// `session_path`：会话持久化路径（None = 不持久化）；`persist_throttle`：
-    /// 位置写盘节流；`preload_timeout`：G2 预解析总超时（测试注入短值）。
+    /// 位置写盘节流；`preload_timeout`：G2 预解析总超时（测试注入短值）；
+    /// `list_resolve_timeout`：列表解析每作业总超时（M4，§16 #1；测试注入
+    /// 短值）。
     // 测试专用注入缝：参数逐项注入（load/preload/list 超时等），调用点全在
     // engine_tests.rs，超出 7 参阈值为有意取舍（生产入口走 start_with_library）。
     #[allow(clippy::too_many_arguments)]
@@ -264,6 +422,7 @@ impl PlaybackEngine {
         session_path: Option<std::path::PathBuf>,
         persist_throttle: std::time::Duration,
         preload_timeout: std::time::Duration,
+        list_resolve_timeout: std::time::Duration,
     ) -> EngineHandle {
         // 启动恢复：队列/音量/位置（不自动播放；Play 时续播，里程碑 D）。
         // 同步读取（run 开始前），避免与首帧发布竞态。
@@ -307,6 +466,19 @@ impl PlaybackEngine {
         let (term_tx, term_rx) = watch::channel(false);
         // 库变更代际（daemon 层可整体替换为贯穿 watcher/sync 的通道）。
         let (library_tx, library_rx) = watch::channel(0u64);
+        // 解析 worker（§16 #1）：FIFO 单任务 + 有界请求通道（满则 try_send
+        // 快速失败）+ 无界回包（run 循环消费；引擎退出后回包 send 失败、
+        // 请求通道关闭，worker 自灭——无僵尸任务）。
+        let (resolve_tx, resolve_rx) = mpsc::channel::<ResolveJob>(RESOLVE_QUEUE_CAPACITY);
+        let (resolve_reply_tx, resolve_reply_rx) = mpsc::unbounded_channel::<ResolveReply>();
+        let worker_resolver = Arc::clone(&resolver);
+        tokio::spawn(resolver_worker(
+            resolve_rx,
+            resolve_reply_tx,
+            worker_resolver,
+            library.clone(),
+            list_resolve_timeout,
+        ));
         let queue_rev_after_restore = queue.revision();
         let mut engine = Self {
             driver,
@@ -330,6 +502,10 @@ impl PlaybackEngine {
             rg_factor: 1.0,
             current_rg_db: None,
             load_timeout,
+            resolve_tx,
+            resolve_reply_rx,
+            pending_resolves: Vec::new(),
+            next_resolve_token: 0,
             preload_timeout,
             queue_tx,
             last_queue_rev: 0,
@@ -377,29 +553,24 @@ impl PlaybackEngine {
                 Some(req) = self.cmd_rx.recv() => {
                     match req {
                         Request::Quit => {
+                            // M2（§16 #1）：弃置在途解析登记（迟到的回包按
+                            // token 失效丢弃），按丢弃条数推进 seq——被弃命令
+                            // 获得「结果已可见」边界（旧内联架构命令必然串行
+                            // 完成、seq 必然推进，此契约须保）。
+                            self.drop_pending_resolves();
                             self.end_session("quit");
                             self.driver.shutdown();
+                            self.publish();
                             break;
                         }
                         Request::Command(cmd) => self.handle_player_command(cmd).await,
-                        Request::Play(src) => self.play_source(src, false).await,
-                        Request::PlayList { ids, start } => self.play_list(ids, start).await,
-                        Request::PlayNext(src) => self.play_source(src, true).await,
-                        Request::QueueAppend(src) => {
-                            match self.resolver.resolve_source_ids(&src).await {
-                                Ok(stubs) => {
-                                    self.cache_stubs(&stubs);
-                                    let ids: Vec<TrackId> =
-                                        stubs.into_iter().map(|s| s.id).collect();
-                                    self.queue.append(ids);
-                                    self.publish();
-                                }
-                                Err(e) => {
-                                    self.last_error = Some(error_info(&e));
-                                    self.publish();
-                                }
-                            }
-                        }
+                        // §16 #1：解析移后台 worker（FIFO），命令循环只投递
+                        // （Resolving 中间发布保持旧 seq）；回包在
+                        // resolve_reply 臂按登记提交。
+                        Request::Play(src) => self.dispatch_play(src, false),
+                        Request::PlayList { ids, start } => self.dispatch_play_list(ids, start),
+                        Request::PlayNext(src) => self.dispatch_play(src, true),
+                        Request::QueueAppend(src) => self.dispatch_queue_append(src),
                         Request::QueueRemove(i) => {
                             // 移除当前曲 = 播放接替曲（或空队列停止）。事务式（P1）：
                             // 先装载接替曲，成功后才关旧会话；装载失败回滚队列，
@@ -451,8 +622,12 @@ impl PlaybackEngine {
                                 self.last_error = None;
                                 self.enter_idle();
                                 self.driver.stop();
+                                // M2（§16 #1）：整队清空语义覆盖在途的队列性
+                                // 作业（追加/替换）——弃置登记并推进 seq。
+                                self.drop_pending_resolves();
                             } else {
                                 // 保留当前曲：清除待播曲目，播放/会话不受影响。
+                                // 不弃置在途解析（FIFO 语义已保证正确性）。
                                 self.queue.clear_pending();
                             }
                             self.publish();
@@ -484,7 +659,7 @@ impl PlaybackEngine {
                                         "local:{}",
                                         path.display()
                                     )));
-                                    self.play_source(src, false).await;
+                                    self.dispatch_play(src, false);
                                 }
                                 None => {
                                     self.last_error = Some(ErrorInfo {
@@ -502,6 +677,16 @@ impl PlaybackEngine {
                 }
                 _ = self.state_rx.changed() => {
                     self.publish();
+                }
+                reply = self.resolve_reply_rx.recv() => {
+                    // §16 #1 第 4 臂：解析回包——token 失效（Stop/Quit/
+                    // QueueClear 已清登记）则丢弃，否则按登记类别提交
+                    // （装载仍内联：§6 记录的已知边界，装载状态机化列后续）。
+                    let Some(reply) = reply else {
+                        tracing::warn!("resolver reply channel closed; worker likely dead");
+                        continue;
+                    };
+                    self.apply_resolve_reply(reply).await;
                 }
                 ev = events_rx.recv() => {
                     match ev {
@@ -656,6 +841,10 @@ impl PlaybackEngine {
                 self.end_session("stop");
                 self.driver.command(PlayerCommand::Stop);
                 self.phase = hmp_core::EnginePhase::Idle;
+                // M2（§16 #1）：Stop 弃置在途解析登记（含 server 转发的
+                // Command(Stop) 直通）；按丢弃条数推进 seq，紧随的 publish
+                // 发布边界。worker 侧作业仍会跑完，回包因 token 失效被丢。
+                self.drop_pending_resolves();
                 self.publish();
             }
             PlayerCommand::LoadAndPlay(_) => {
@@ -758,29 +947,158 @@ impl PlaybackEngine {
         }
     }
 
-    /// Play / PlayNext：解析源 → 替换/插入队列 → 加载当前。
+    /// Play / PlayNext / OpenUri 的解析投递（§16 开放项 #1）：登记 token +
+    /// `try_send` 后**立即**回到命令循环（不 await）——解析窗口内
+    /// Pause/Seek/Volume/Next 照常处理（此前内联 await 分页拉取秒级冻结
+    /// 全部播放命令）。seq 语义不变：受理不推进、提交完成才推进
+    /// （engine_tests 钉死的 CLI 边界）；Resolving 中间发布保持旧 seq。
+    fn dispatch_play(&mut self, src: PlayRequest, playnext: bool) {
+        self.phase = hmp_core::EnginePhase::Resolving;
+        self.publish();
+        let token = self.next_resolve_token();
+        match self
+            .resolve_tx
+            .try_send(ResolveJob::SourceIds { token, src })
+        {
+            Ok(()) => self
+                .pending_resolves
+                .push((token, ResolveKind::Play { playnext })),
+            Err(_) => self.reject_dispatch_full(true),
+        }
+    }
+
+    /// `Request::PlayList` 的解析投递（§16 #1，同 [`Self::dispatch_play`]）：
+    /// 原始 `ids` 与 `start` 存入登记（回包提交时整表替换需要）。
+    fn dispatch_play_list(&mut self, ids: Vec<TrackId>, start: usize) {
+        if ids.is_empty() {
+            // 空列表确定性失败（旧逻辑保留在投递前）：CLI 不用等到超时。
+            self.last_error = Some(ErrorInfo {
+                code: IpcErrorCode::Internal,
+                message: "play list is empty".into(),
+            });
+            self.restore_phase_after_failure();
+            self.seq += 1;
+            self.publish();
+            return;
+        }
+        self.phase = hmp_core::EnginePhase::Resolving;
+        self.publish();
+        let token = self.next_resolve_token();
+        let job_ids = ids.clone();
+        match self.resolve_tx.try_send(ResolveJob::IdStubs {
+            token,
+            ids: job_ids,
+        }) {
+            Ok(()) => self
+                .pending_resolves
+                .push((token, ResolveKind::List { ids, start })),
+            Err(_) => self.reject_dispatch_full(true),
+        }
+    }
+
+    /// `Request::QueueAppend` 的解析投递（§16 #1）：不置 Resolving 阶段
+    /// （追加不改变当前播放，旧语义如此）。
+    fn dispatch_queue_append(&mut self, src: PlayRequest) {
+        let token = self.next_resolve_token();
+        match self
+            .resolve_tx
+            .try_send(ResolveJob::SourceIds { token, src })
+        {
+            Ok(()) => self.pending_resolves.push((token, ResolveKind::Append)),
+            Err(_) => self.reject_dispatch_full(false),
+        }
+    }
+
+    /// 下一个解析登记 token（单调递增）。
+    fn next_resolve_token(&mut self) -> u64 {
+        self.next_resolve_token += 1;
+        self.next_resolve_token
+    }
+
+    /// 投递拒绝（请求通道满）：worker 已被慢作业拖死，快速失败优于排队。
+    /// `advance_seq`（O4 裁决）：Play/PlayList 有确定性失败结果——推进 seq
+    /// （CLI 需要「结果已可见」边界）+ 阶段恢复；QueueAppend 对齐既有解析
+    /// 失败路径不推进 seq（受理与失败都不产生代际变化）。
+    fn reject_dispatch_full(&mut self, advance_seq: bool) {
+        self.last_error = Some(ErrorInfo {
+            code: IpcErrorCode::Internal,
+            message: "resolver queue full".into(),
+        });
+        if advance_seq {
+            self.restore_phase_after_failure();
+            self.seq += 1;
+        }
+        self.publish();
+    }
+
+    /// M2（§16 #1）：弃置全部在途解析登记并**按丢弃条数推进 seq**——每个
+    /// 被弃命令获得「结果已可见」边界（否则 CLI `await_playing` 类轮询会等
+    /// 到超时；旧内联架构命令必然串行完成、seq 必然推进，这是新架构引入的
+    /// 契约回归面）。调用方紧随其后 publish。worker 侧作业仍会跑完（60s
+    /// 内自灭），回包因 token 失效被 [`Self::apply_resolve_reply`] 丢弃。
+    fn drop_pending_resolves(&mut self) {
+        let dropped = self.pending_resolves.len();
+        if dropped > 0 {
+            self.pending_resolves.clear();
+            self.seq += dropped as u64;
+            tracing::debug!(dropped, "弃置在途解析登记（Stop/Quit/QueueClear）");
+        }
+    }
+
+    /// 解析回包提交（§16 #1，run 第 4 臂调用）：token 过期（登记已被
+    /// Stop/Quit/QueueClear 弃置）→ 丢弃；否则按类别路由到 apply 分支。
+    async fn apply_resolve_reply(&mut self, reply: ResolveReply) {
+        let Some(pos) = self
+            .pending_resolves
+            .iter()
+            .position(|(token, _)| *token == reply.token)
+        else {
+            tracing::debug!(token = reply.token, "丢弃过期解析回包（登记已弃置）");
+            return;
+        };
+        let (_, kind) = self.pending_resolves.remove(pos);
+        match kind {
+            ResolveKind::Play { playnext } => match reply.result {
+                Ok(stubs) => self.apply_play_stubs(stubs, playnext).await,
+                Err(e) => {
+                    // 解析失败（含 M4 超时/O2 panic）：错误详情 + 推进代际 +
+                    // 阶段恢复（与旧内联失败路径一致）。
+                    self.last_error = Some(error_info(&e));
+                    self.restore_phase_after_failure();
+                    self.seq += 1;
+                    self.publish();
+                }
+            },
+            ResolveKind::List { ids, start } => match reply.result {
+                Ok(stubs) => self.apply_play_list(stubs, ids, start).await,
+                Err(e) => {
+                    self.last_error = Some(error_info(&e));
+                    self.restore_phase_after_failure();
+                    self.seq += 1;
+                    self.publish();
+                }
+            },
+            ResolveKind::Append => match reply.result {
+                Ok(stubs) => self.apply_queue_append(stubs),
+                // O4：QueueAppend 解析失败不推进 seq（旧路径如此，受理亦不推进）。
+                Err(e) => {
+                    self.last_error = Some(error_info(&e));
+                    self.publish();
+                }
+            },
+        }
+    }
+
+    /// Play/PlayNext 回包提交（§16 #1：解析已由 worker 完成）。
     ///
-    /// seq 在**命令完成后**（解析+装载结束，无论成败）推进并发布：
-    /// CLI 以 seq 前进作为「本命令结果已可见」的边界。中间发布保持旧 seq，
-    /// 避免 CLI 在解析/装载窗口误判（Bug 1：Empty 误报；Bug 2：旧曲目确认）。
+    /// seq 在**命令完成后**（装载结束，无论成败）推进并发布：CLI 以 seq
+    /// 前进作为「本命令结果已可见」的边界。
     ///
     /// **事务式换曲**（P1）：先装载（队列与会话不动），装载成功后才提交
     /// 队列变更与会话切换；装载失败则保持旧队列/旧会话/旧曲继续播放，
-    /// 仅发布错误——CLI 不再把旧曲目当成新请求成功。
-    async fn play_source(&mut self, src: PlayRequest, playnext: bool) {
-        self.phase = hmp_core::EnginePhase::Resolving;
-        let stubs = match self.resolver.resolve_source_ids(&src).await {
-            Ok(stubs) => stubs,
-            Err(e) => {
-                // 解析失败 → 发布错误详情（Finding 2）+ 推进命令代际；
-                // 阶段恢复：旧曲仍在播 → Playing，否则 Idle。
-                self.last_error = Some(error_info(&e));
-                self.restore_phase_after_failure();
-                self.seq += 1;
-                self.publish();
-                return;
-            }
-        };
+    /// 仅发布错误。`old_session`/`old_position` 在**提交时**捕获——解析
+    /// 窗口内发生的换曲先闭合，再提交新装载（§16 #1 设计要点）。
+    async fn apply_play_stubs(&mut self, stubs: Vec<hmp_core::TrackStub>, playnext: bool) {
         if stubs.is_empty() {
             // 空源是确定性失败：携带错误，CLI 不用等到超时。
             self.last_error = Some(ErrorInfo {
@@ -841,40 +1159,20 @@ impl PlaybackEngine {
         }
     }
 
-    /// `Request::PlayList`（GUI 列表入口）：显式曲目列表整表替换 + 起播下标，
-    /// 与 [`play_source`] 同一事务式流程——起播曲装载成功才提交
-    /// `queue.replace(ids, start)`；装载/解析失败保持旧队列/旧曲，仅发布错误。
-    ///
-    /// stub 解析走两路：id 已在媒体库（GUI 列表本身来自库投影）→ 批量读库
-    /// 构建（免逐文件 read_meta，大列表「全部播放」不卡引擎命令循环）；
-    /// 未命中才走解析器（本地读标签、QQ 落 id stub——库行标题不为 mid 所覆写，
-    /// 显示层元数据由客户端 overlay 兜底）。seq 同 play_source：命令完成后推进。
-    async fn play_list(&mut self, ids: Vec<TrackId>, start: usize) {
-        if ids.is_empty() {
-            self.last_error = Some(ErrorInfo {
-                code: IpcErrorCode::Internal,
-                message: "play list is empty".into(),
-            });
-            self.restore_phase_after_failure();
-            self.seq += 1;
-            self.publish();
-            return;
-        }
-        self.phase = hmp_core::EnginePhase::Resolving;
-        let stubs = match self.resolve_id_stubs(&ids).await {
-            Ok(stubs) => stubs,
-            Err(e) => {
-                self.last_error = Some(error_info(&e));
-                self.restore_phase_after_failure();
-                self.seq += 1;
-                self.publish();
-                return;
-            }
-        };
+    /// PlayList 回包提交（§16 #1）：起播曲装载成功才提交
+    /// `queue.replace(ids, start)`；装载/解析失败保持旧队列/旧曲，仅发布
+    /// 错误。stub 解析已在 worker 完成（库内快路径 + 未命中走解析器，见
+    /// [`resolve_id_stubs`]）。seq 同 [`Self::apply_play_stubs`]。
+    async fn apply_play_list(
+        &mut self,
+        stubs: Vec<hmp_core::TrackStub>,
+        ids: Vec<TrackId>,
+        start: usize,
+    ) {
         self.cache_stubs(&stubs);
         let start = start.min(ids.len() - 1);
         let first_id = ids[start].clone();
-        // 装载前捕获旧会话与旧位置（与 play_source 同模式）。
+        // 装载前捕获旧会话与旧位置（与 apply_play_stubs 同模式）。
         let old_session = self.session.clone();
         let old_position = self.state_rx.borrow().position;
         match self.load_and_play(first_id.clone()).await {
@@ -883,7 +1181,7 @@ impl PlaybackEngine {
                     self.close_session(&old, "manual", old_position.as_millis() as i64);
                 }
                 self.queue.replace(ids, start);
-                // 会话恢复续播（与 play_source 同语义）：起播曲命中恢复曲 → seek。
+                // 会话恢复续播（与 apply_play_stubs 同语义）：起播曲命中恢复曲 → seek。
                 if let Some(r) = self.restored.take() {
                     if first_id == r.current {
                         self.driver
@@ -905,54 +1203,13 @@ impl PlaybackEngine {
         }
     }
 
-    /// 列表 id → stub：库内 id 批量投影（快路径），未命中走解析器逐个补。
-    /// 解析器失败（如 QQ 未登录）整体失败——半截列表不提交队列。
-    async fn resolve_id_stubs(
-        &self,
-        ids: &[TrackId],
-    ) -> Result<Vec<hmp_core::TrackStub>, EngineError> {
-        let mut known: std::collections::HashMap<String, hmp_core::TrackStub> =
-            std::collections::HashMap::new();
-        if let Some(library) = &self.library {
-            let mut qq_keys = Vec::new();
-            let mut local_keys = Vec::new();
-            for id in ids {
-                if hmp_core::TrackProvider::from_id(id.as_ref()) == hmp_core::TrackProvider::Local {
-                    local_keys.push(id.to_string());
-                } else {
-                    qq_keys.push(id.to_string());
-                }
-            }
-            let mut lib = library.lock().unwrap();
-            for source_meta in [("qq", &qq_keys), ("local", &local_keys)] {
-                let (source, keys) = source_meta;
-                for meta in lib.track_meta_batch(source, keys).unwrap_or_default() {
-                    known.insert(
-                        meta.source_key.clone(),
-                        hmp_core::TrackStub {
-                            id: TrackId::new(meta.source_key.clone()),
-                            title: meta.title,
-                            artists: meta.artist.into_iter().collect(),
-                            album: meta.album,
-                            duration_ms: meta.duration_ms.map(|ms| ms.clamp(0, u32::MAX as i64)),
-                        },
-                    );
-                }
-            }
-        }
-        let mut stubs = Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Some(stub) = known.get(id.as_ref()) {
-                stubs.push(stub.clone());
-                continue;
-            }
-            let resolved = self
-                .resolver
-                .resolve_source_ids(&PlayRequest::Track(id.clone()))
-                .await?;
-            stubs.extend(resolved);
-        }
-        Ok(stubs)
+    /// QueueAppend 回包提交（§16 #1）：追加不推进 seq（旧语义：受理与
+    /// 成功均不产生代际变化）。
+    fn apply_queue_append(&mut self, stubs: Vec<hmp_core::TrackStub>) {
+        self.cache_stubs(&stubs);
+        let ids: Vec<TrackId> = stubs.into_iter().map(|s| s.id).collect();
+        self.queue.append(ids);
+        self.publish();
     }
 
     async fn on_ended(&mut self) {
