@@ -6,10 +6,22 @@
 //! 管道名归一。连接双端各自独占读写（单帧请求-响应 / 订阅推送），
 //! 需要并发读写的一侧用 `tokio::io::split`（NamedPipeServer/Client 均实现
 //! AsyncRead+AsyncWrite，无内建 into_split）。
+//! Windows 服务端为预创建待命实例池（`PIPE_STANDBY`）：实例自 `CreateNamedPipe`
+//! 起即 listening，池即并发连接坑位，单 accept 循环即可吸收并发连接
+//! （AUDIT §16：单待命实例是裸连风暴 97% BUSY 的根因）；客户端在全部实例
+//! 忙（ERROR_PIPE_BUSY）时于预算内指数退避。
 
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
+
+#[cfg(windows)]
+use std::collections::VecDeque;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{
+    ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+};
 
 /// 平台无关的 IPC 连接（duplex 字节流）。
 pub struct IpcStream(IpcStreamInner);
@@ -33,20 +45,67 @@ enum IpcListenerInner {
     Pipe(PipeListener),
 }
 
+/// Windows 管道监听器：预创建待命实例池。
+///
+/// 管道实例自 `CreateNamedPipe` 起即处 listening 态（客户端 CreateFile 可
+/// 直接占坑，无需服务端先 await connect）——池中每个实例都是一个并发连接
+/// 坑位，单 accept 循环即可吸收并发连接。池按创建序存放、`accept` 取最老
+/// （`pop_front`）；实例分配假设客户端 CreateFile 命中「最老」listening
+/// 实例（FIFO，无官方文档佐证——由 transport/server 测试的「满池空闲态
+/// 单客户端首连」场景守护，非 FIFO 会当场挂死，见 PLAN §2.2）。
 #[cfg(windows)]
 struct PipeListener {
     name: String,
-    /// 当前待 accept 的实例；accept 后立即补建下一个实例，保证任意时刻
-    /// 至少有一个可连接实例（客户端几乎不会见到 ERROR_PIPE_BUSY）。
-    current: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
+    standby: VecDeque<NamedPipeServer>,
 }
 
+/// Windows 待命实例池深：桌面峰值并发（封面预取信号量 8 + 主订阅连接 +
+/// CLI 偶发命令）的瞬时风暴由「池坑位 + 客户端 5s busy 退避」吸收。
+#[cfg(windows)]
+pub(crate) const PIPE_STANDBY: usize = 4;
+
+/// 尽力补池至 [`PIPE_STANDBY`]。
+/// - 补建失败但池非空：降级续跑（warn + 缩池）——资源紧张时缩容、缓解后
+///   下一轮 accept 自动回满，这是监听器的自愈路径。
+/// - 补建失败且池已空：返回原始错误（保留错误码供上层 fatal 分类，如
+///   管道名被夺的 ACCESS_DENIED），监听器保持可重用——重试即再补建。
+#[cfg(windows)]
+fn refill_standby(name: &str, standby: &mut VecDeque<NamedPipeServer>) -> io::Result<()> {
+    while standby.len() < PIPE_STANDBY {
+        match ServerOptions::new().create(name) {
+            Ok(server) => standby.push_back(server),
+            Err(e) => {
+                if standby.is_empty() {
+                    return Err(e);
+                }
+                tracing::warn!(%e, len = standby.len(), "pipe standby pool refill degraded");
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Windows 客户端 BUSY 重试总预算（ERROR_PIPE_BUSY = 全部实例忙）。
+/// 服务端池化（[`PIPE_STANDBY`]）为主修复，本预算为纵深：极端并发下排队
+/// 重试而非即刻失败。serve.rs 单例探测用更短预算（见 `connect_with_budget`）。
+const CONNECT_BUDGET: Duration = Duration::from_secs(5);
+
 impl IpcStream {
-    /// 连接 daemon 端点。Windows 上管道实例全忙时短暂重试
-    /// （serve 端 accept 后立即补建实例，busy 只是瞬态）。
+    /// 连接 daemon 端点。Windows 上管道实例全忙（ERROR_PIPE_BUSY）时在
+    /// 5s 预算内指数退避重试；其余错误（NotFound 等）即时返回，语义不变。
     pub async fn connect(path: &Path) -> io::Result<Self> {
+        Self::connect_with_budget(path, CONNECT_BUDGET).await
+    }
+
+    /// 带预算的连接（crate 内部）。serve.rs 的单例探测用 250ms 短预算：
+    /// 探测期间若他 daemon 的实例全部忙（池深 4 下罕见但存在），短退避后
+    /// 即失败 → 走 bind → `first_pipe_instance` 撞 ACCESS_DENIED → 既有
+    /// 「already running; exiting」让位路径，结果不变、路径更快。
+    pub(crate) async fn connect_with_budget(path: &Path, budget: Duration) -> io::Result<Self> {
         #[cfg(unix)]
         {
+            let _ = budget; // Unix 无 busy 概念（backlog 排队），预算不适用
             Ok(Self(IpcStreamInner::Unix(
                 tokio::net::UnixStream::connect(path).await?,
             )))
@@ -54,20 +113,47 @@ impl IpcStream {
         #[cfg(windows)]
         {
             let name = pipe_name(path)?;
-            const BUSY: i32 = 231; // ERROR_PIPE_BUSY
-            const BUSY_RETRIES: u32 = 40; // 40 × 25ms ≈ 1s
-            for attempt in 0..BUSY_RETRIES {
-                match tokio::net::windows::named_pipe::ClientOptions::new().open(&name) {
-                    Ok(client) => return Ok(Self(IpcStreamInner::PipeClient(client))),
-                    Err(e) if e.raw_os_error() == Some(BUSY) && attempt + 1 < BUSY_RETRIES => {
-                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            unreachable!("retry loop always returns")
+            Ok(Self(IpcStreamInner::PipeClient(
+                open_pipe_with_budget(&name, budget).await?,
+            )))
         }
     }
+}
+
+/// ERROR_PIPE_BUSY。
+#[cfg(windows)]
+const BUSY: i32 = 231;
+
+/// Windows 管道客户端：open 撞 BUSY 则按 [`busy_backoff`] 退避重试，总
+/// 预算内仍忙才放弃（返回原始 BUSY 错误）；其余错误即时返回（NotFound
+/// 语义不变——`hmp quit` 的幂等路径与 quit_no_spawn 回归依赖）。
+#[cfg(windows)]
+async fn open_pipe_with_budget(name: &str, budget: Duration) -> io::Result<NamedPipeClient> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut attempt: u32 = 0;
+    loop {
+        match ClientOptions::new().open(name) {
+            Ok(client) => return Ok(client),
+            Err(e) if e.raw_os_error() == Some(BUSY) => {
+                let backoff = busy_backoff(attempt);
+                if tokio::time::Instant::now() + backoff > deadline {
+                    return Err(e); // 预算耗尽：上抛原始 BUSY 错误
+                }
+                tokio::time::sleep(backoff).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// BUSY 退避序列（纯函数，钉死策略）：10ms 起 ×2，封顶 250ms
+/// （10/20/40/80/160/250/250/…）。shift 夹 5 仅防 `<<` 溢出且不改序列
+/// （10<<5=320ms 已超封顶，外层 min 真正生效）。
+#[cfg(windows)]
+fn busy_backoff(attempt: u32) -> Duration {
+    let shift = attempt.min(5);
+    Duration::from_millis(10u64 << shift).min(Duration::from_millis(250))
 }
 
 impl IpcListener {
@@ -84,13 +170,19 @@ impl IpcListener {
         #[cfg(windows)]
         {
             let name = pipe_name(path)?;
-            let server = tokio::net::windows::named_pipe::ServerOptions::new()
+            // 首实例持 first_pipe_instance（单实例裁决语义不变：已有 daemon 时
+            // 返回 ERROR_ACCESS_DENIED，serve 层据此优雅退出）；首实例必须最先进
+            // 池——池按创建序、accept 取最老，与客户端 FIFO 命中（见 PipeListener
+            // 文档）对应。
+            let first = ServerOptions::new()
                 .first_pipe_instance(true)
                 .create(&name)?;
-            Ok(Self(IpcListenerInner::Pipe(PipeListener {
-                name,
-                current: Some(server),
-            })))
+            let mut standby = VecDeque::with_capacity(PIPE_STANDBY);
+            standby.push_back(first);
+            // 尽力补满池：失败仅降级池深（bind 时池 ≥1，单实例语义只系于首个
+            // 实例，故 bind 不因补建失败而失败）。
+            let _ = refill_standby(&name, &mut standby);
+            Ok(Self(IpcListenerInner::Pipe(PipeListener { name, standby })))
         }
     }
 
@@ -106,15 +198,23 @@ impl IpcListener {
         };
         #[cfg(windows)]
         let stream = match inner {
-            IpcListenerInner::Pipe(PipeListener { name, current }) => {
-                let server = current
-                    .take()
-                    .expect("pipe listener instance consumed twice");
-                server.connect().await?;
-                // 立刻补建下一个实例再返回，连接处理与下一客户端等待互不阻塞。
-                *current =
-                    Some(tokio::net::windows::named_pipe::ServerOptions::new().create(name)?);
-                IpcStreamInner::PipeServer(server)
+            IpcListenerInner::Pipe(PipeListener { name, standby }) => {
+                // 先补池（尽力）：上一轮取走/丢弃的实例在此回补；池空且补建
+                // 失败时原始错误上抛，监听器保持可重用——serve 的退避重试会
+                // 再次补建（自愈）。
+                refill_standby(name, standby)?;
+                let server = standby
+                    .pop_front()
+                    .ok_or_else(|| io::Error::other("pipe standby pool empty"))?;
+                match server.connect().await {
+                    // 实例自创建起 listening：客户端早已 CreateFile 占坑的场合
+                    // connect 立即返回（ERROR_PIPE_CONNECTED → Ok），正常负载
+                    // 零等待。
+                    Ok(()) => IpcStreamInner::PipeServer(server),
+                    // connect 失败：实例随本臂 drop（不回池），serve 重试取下一
+                    // 待命实例——实例级自愈。
+                    Err(e) => return Err(e),
+                }
             }
         };
         Ok(IpcStream(stream))
@@ -241,10 +341,9 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// 第二条连接：accept 后监听端仍可用（Windows 补建实例路径）。
-    /// 空闲实例同一时刻只有一个（accept 时补建下一个），服务端 accept 前
-    /// 并发第二条连接会 busy——真实调用方靠 connect 的 busy 重试兜底，
-    /// 测试里逐条往返验证监听端复用。
+    /// 第二条连接：accept 后监听端仍可用（Windows 池化路径：accept 取走一
+    /// 个坑位、下一轮补回）。真实调用方靠池坑位 + busy 退避吸收并发，测试里
+    /// 逐条往返验证监听端复用。
     #[tokio::test]
     async fn listener_accepts_multiple_connections() {
         let dir = tempfile::tempdir().unwrap();
@@ -258,6 +357,119 @@ mod tests {
             drop(stream);
             drop(client);
         }
+    }
+
+    /// 池化核心语义（AUDIT §16 97% BUSY 主修复）：bind 后**不调用 accept**，
+    /// 并发连接全部立即占坑成功（Windows：实例自 CreateNamedPipe 起即
+    /// listening，池深即坑位数；Unix：backlog 排队）。旧单实例实现在
+    /// Windows 上第二个连接起耗尽 busy 预算失败。随后顺序 accept 收齐全部。
+    /// 顺序 accept 侧同时守护「客户端命中最老 listening 实例（FIFO）」假设
+    /// （PLAN §2.2）：若内核按 LIFO 分配，单客户端首连场景会挂死。
+    #[tokio::test]
+    async fn standby_pool_absorbs_concurrent_connects_without_accept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transport-pool.sock");
+        let mut listener = IpcListener::bind(&path).unwrap();
+        #[cfg(windows)]
+        let count = PIPE_STANDBY;
+        #[cfg(unix)]
+        let count = 4; // Unix 无池：backlog 语义下同样应全部立连
+        let mut clients = Vec::new();
+        for _ in 0..count {
+            let client = tokio::time::timeout(Duration::from_secs(2), IpcStream::connect(&path))
+                .await
+                .expect("并发连接应在 2s 内占坑成功（池化失效？）")
+                .unwrap();
+            clients.push(client);
+        }
+        // 顺序 accept 收齐：每个已占坑实例 connect() 立即返回。
+        for i in 0..count {
+            let accepted = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+            assert!(
+                accepted.is_ok(),
+                "accept 未在 2s 内收齐已占坑连接（第 {i} 个）"
+            );
+            accepted.unwrap().unwrap();
+        }
+        drop(clients);
+    }
+
+    /// 单实例裁决不被池化破坏：同名管道二次 bind 撞 first_pipe_instance →
+    /// ERROR_ACCESS_DENIED（serve.rs「already running; exiting」依赖）。
+    /// （tokio 1.53 的 create 需 reactor 上下文，用 #[tokio::test]。）
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bind_denies_second_daemon_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transport-single.sock");
+        let _first = IpcListener::bind(&path).unwrap();
+        let err = match IpcListener::bind(&path) {
+            Ok(_) => panic!("二次 bind 不应成功（单实例裁决被池化破坏？）"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.raw_os_error(),
+            Some(5), // ERROR_ACCESS_DENIED
+            "二次 bind 应撞 first_pipe_instance: {err:?}"
+        );
+    }
+
+    /// BUSY 退避序列（纯函数钉死策略，PLAN T2）：10ms 起 ×2、封顶 250ms、
+    /// 大 attempt 不溢出。
+    #[cfg(windows)]
+    #[test]
+    fn busy_backoff_progression() {
+        assert_eq!(busy_backoff(0), Duration::from_millis(10));
+        assert_eq!(busy_backoff(1), Duration::from_millis(20));
+        assert_eq!(busy_backoff(2), Duration::from_millis(40));
+        assert_eq!(busy_backoff(3), Duration::from_millis(80));
+        assert_eq!(busy_backoff(4), Duration::from_millis(160));
+        assert_eq!(
+            busy_backoff(5),
+            Duration::from_millis(250),
+            "320 应封顶 250"
+        );
+        assert_eq!(
+            busy_backoff(1000),
+            Duration::from_millis(250),
+            "大 attempt 钉在 250"
+        );
+    }
+
+    /// 预算耗尽语义：占满全部待命实例（无 accept）→ 后续 open 全数 BUSY，
+    /// 短预算内放弃并返回**原始 BUSY 错误**（错误码不吞）。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn busy_budget_gives_up_and_returns_busy_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transport-busy.sock");
+        let name = pipe_name(&path).unwrap();
+        let listener = IpcListener::bind(&path).unwrap(); // 满池
+        let mut hogs = Vec::new();
+        for _ in 0..PIPE_STANDBY {
+            hogs.push(ClientOptions::new().open(&name).unwrap()); // 占坑不 accept
+        }
+        let start = std::time::Instant::now();
+        let err = open_pipe_with_budget(&name, Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.raw_os_error(),
+            Some(231),
+            "预算耗尽应返回原始 BUSY: {err:?}"
+        );
+        assert!(
+            start.elapsed() >= Duration::from_millis(100),
+            "应经历退避而非立即放弃: {:?}",
+            start.elapsed()
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "应在预算附近放弃: {:?}",
+            start.elapsed()
+        );
+        drop(hogs);
+        drop(listener);
     }
 
     #[cfg(windows)]

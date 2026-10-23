@@ -4,6 +4,7 @@
 //! `EngineHandle.state_rx` 同步应答；Subscribe 后推送 `Event` 帧。
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use hmp_core::ipc::{
     Event, IpcErrorCode, LoginQrState, MAX_FRAME, Request, Response, decode_frame, encode_frame,
@@ -46,11 +47,51 @@ pub fn socket_path() -> PathBuf {
     }
 }
 
+/// accept 连续失败上限：按 [`accept_backoff`] 封顶 1s 退避，64 次失败的
+/// 退避总和 ≈ 60s——持续一分钟不可 accept 即事实上不可服务，放弃并优雅
+/// 退出（CLI 侧 `connect_or_spawn` 自然拉起全新实例，优于带病续命）。
+const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 64;
+
+/// accept 错误是否不可恢复（继续重试无意义或有害）。仅两类情形终止：
+/// - Windows：`ERROR_ACCESS_DENIED`（5）——我们不再持有任何管道实例、名字
+///   已被另一 daemon 以 first_pipe_instance 占走；续命只会把自己挂到别人
+///   的管道上，正确行为是让位退出。
+/// - 持续失败达 [`MAX_CONSECUTIVE_ACCEPT_FAILURES`]（serve 循环内判定）。
+///
+/// 其余错误（含 Unix 的 EMFILE/ENFILE/ECONNABORTED 等瞬时错误）退避重试。
+#[cfg(windows)]
+fn accept_failure_is_fatal(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(5) // ERROR_ACCESS_DENIED
+}
+#[cfg(unix)]
+fn accept_failure_is_fatal(_: &std::io::Error) -> bool {
+    // 持 flock 期间 UnixListener 没有不可恢复的 accept 错误类，等待即可。
+    false
+}
+
+/// accept 重试退避：25ms × 2^n 封顶 1s（序列 25/50/100/200/400/800/1000ms
+/// 后钉在 1s）。shift 夹 6 仅防 `<<` 溢出且不改序列（25<<6=1.6s 已超封顶，
+/// 外层 min 真正生效——审核 M2：去掉旧式内层夹 5，封顶才是真 1s，与
+/// 「64 次 ≈60s」估算自洽）。
+fn accept_backoff(consecutive: u32) -> Duration {
+    let shift = consecutive.min(6);
+    Duration::from_millis(25u64 << shift).min(Duration::from_secs(1))
+}
+
 /// 启动服务器（accept 循环；由 daemon 编排退出时机）。
+///
+/// 自愈（AUDIT §16 #1）：accept 错误不再一击退出（旧行为 break 后 daemon
+/// 成「活着但永久不可达」的僵尸，桌面/CLI 均受害）——瞬时错误分类 + 指数
+/// 退避重试；仅 fatal 分类或连续失败达上限才终止，且终止走**优雅退出**：
+/// 发 `Request::Quit`（与 SIGINT / tray / `hmp quit` 同一引擎入口）→ 引擎
+/// 置位 terminated → §19 Shutdown 广播宽限 → serve.rs `server_handle.abort()`
+/// 终止本任务 → 进程退出。不产生任何「活着但不可达」窗口。
 pub async fn serve(mut listener: IpcListener, handle: EngineHandle) {
+    let mut consecutive_failures: u32 = 0;
     loop {
         match listener.accept().await {
             Ok(stream) => {
+                consecutive_failures = 0;
                 let handle = handle.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, handle).await {
@@ -59,8 +100,26 @@ pub async fn serve(mut listener: IpcListener, handle: EngineHandle) {
                 });
             }
             Err(e) => {
-                tracing::error!(%e, "accept failed");
-                break;
+                if accept_failure_is_fatal(&e)
+                    || consecutive_failures >= MAX_CONSECUTIVE_ACCEPT_FAILURES
+                {
+                    tracing::error!(
+                        %e,
+                        consecutive = consecutive_failures,
+                        "accept unrecoverable; requesting graceful shutdown"
+                    );
+                    let _ = handle.command_tx.send(Request::Quit);
+                    return;
+                }
+                let delay = accept_backoff(consecutive_failures);
+                tracing::warn!(
+                    %e,
+                    consecutive = consecutive_failures,
+                    ?delay,
+                    "accept failed; retrying"
+                );
+                tokio::time::sleep(delay).await;
+                consecutive_failures += 1;
             }
         }
     }
@@ -1490,6 +1549,68 @@ mod tests {
         unsafe {
             std::env::remove_var("HMP_IPC_ENDPOINT");
         }
+    }
+
+    /// accept 自愈决策函数（PLAN T3）：退避序列按审核 M2 修正——25ms×2^n
+    /// 封顶**真** 1s（序列 25/50/100/200/400/800/1000ms），64 次累计 ≈60s
+    /// 与放弃阈值量纲自洽；大 n 不溢出、钉在 1s。
+    #[test]
+    fn accept_backoff_progression_and_cap() {
+        assert_eq!(accept_backoff(0), Duration::from_millis(25));
+        assert_eq!(accept_backoff(1), Duration::from_millis(50));
+        assert_eq!(accept_backoff(2), Duration::from_millis(100));
+        assert_eq!(accept_backoff(3), Duration::from_millis(200));
+        assert_eq!(accept_backoff(4), Duration::from_millis(400));
+        assert_eq!(accept_backoff(5), Duration::from_millis(800));
+        assert_eq!(
+            accept_backoff(6),
+            Duration::from_secs(1),
+            "25<<6=1.6s 应封顶 1s（M2：外层 min 真正生效）"
+        );
+        assert_eq!(
+            accept_backoff(MAX_CONSECUTIVE_ACCEPT_FAILURES),
+            Duration::from_secs(1)
+        );
+        assert_eq!(accept_backoff(1_000), Duration::from_secs(1), "大 n 不溢出");
+        let total: Duration = (0..MAX_CONSECUTIVE_ACCEPT_FAILURES)
+            .map(accept_backoff)
+            .sum();
+        assert!(
+            total >= Duration::from_secs(59) && total < Duration::from_secs(61),
+            "64 次退避总和应 ≈60s: {total:?}"
+        );
+    }
+
+    /// fatal 分类（Windows）：仅 ACCESS_DENIED（管道名被夺让位退出）；
+    /// 其余（含 BUSY、NotFound、池空合成错误）均为可重试。
+    #[cfg(windows)]
+    #[test]
+    fn accept_failure_is_fatal_only_for_access_denied() {
+        assert!(accept_failure_is_fatal(&std::io::Error::from_raw_os_error(
+            5
+        )));
+        assert!(!accept_failure_is_fatal(
+            &std::io::Error::from_raw_os_error(231)
+        ));
+        assert!(!accept_failure_is_fatal(
+            &std::io::Error::from_raw_os_error(2)
+        ));
+        assert!(!accept_failure_is_fatal(&std::io::Error::other(
+            "pool empty"
+        )));
+    }
+
+    /// fatal 分类（Unix）：恒否——持 flock 期间无不可恢复 accept 错误类，
+    /// EMFILE/EACCES 等一律退避重试。
+    #[cfg(unix)]
+    #[test]
+    fn accept_failure_is_fatal_never_on_unix() {
+        assert!(!accept_failure_is_fatal(
+            &std::io::Error::from_raw_os_error(13)
+        ));
+        assert!(!accept_failure_is_fatal(
+            &std::io::Error::from_raw_os_error(24)
+        ));
     }
 }
 

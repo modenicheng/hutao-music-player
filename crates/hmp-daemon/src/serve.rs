@@ -117,7 +117,14 @@ async fn run_inner(cfg: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> 
     // 否则会干扰运行中 daemon 的数据库与会话。探测能连 → 有活 daemon，退出。
     // Unix 另清理残留 socket 文件（上次异常退出可能留下；持锁者才执行，
     // 无 TOCTOU 竞争）；Windows 管道随进程消失，无残留可清。
-    if crate::transport::IpcStream::connect(&path).await.is_ok() {
+    // 单例探测用 250ms 短预算（transport::connect_with_budget）：探测期间若
+    // 他 daemon 的实例全部忙（池深 4 下罕见但存在），短退避后即失败 → 走
+    // bind → first_pipe_instance 撞 ACCESS_DENIED → 既有让位路径——结果
+    // 不变、路径更快（5s 全预算只留给真正的客户端连接）。
+    if crate::transport::IpcStream::connect_with_budget(&path, Duration::from_millis(250))
+        .await
+        .is_ok()
+    {
         eprintln!("daemon already running; exiting");
         return Ok(());
     }
