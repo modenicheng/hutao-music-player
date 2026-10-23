@@ -200,6 +200,73 @@ pub fn refresh_artist_album_covers(
     }
 }
 
+/// 搜索结果卡换图（C6/D-7）：搜索响应与模型落地同线程同帧，URL 随调用
+/// 直传（无 side-table）；mid 传裸 albummid/singermid，匹配前拼 `qq:`
+/// 前缀（卡投影同式）。迟到图无匹配行（新搜索已重建模型）即丢弃。
+pub fn refresh_search_covers(
+    ui_weak: Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    album_entries: Vec<(String, String)>,
+    artist_entries: Vec<(String, String)>,
+) {
+    for (mid, url) in album_entries {
+        let key = format!("search-album|{mid}|{url}");
+        let needle = format!("{}{mid}", crate::remote_details::REMOTE_PREFIX);
+        fetch_cover(ui_weak.clone(), runtime, key, url, move |ui, image| {
+            swap_search_album_cover(ui, &needle, image);
+        });
+    }
+    for (mid, url) in artist_entries {
+        let key = format!("search-artist|{mid}|{url}");
+        let needle = format!("{}{mid}", crate::remote_details::REMOTE_PREFIX);
+        fetch_cover(ui_weak.clone(), runtime, key, url, move |ui, image| {
+            swap_search_artist_cover(ui, &needle, image);
+        });
+    }
+}
+
+/// 搜索专辑卡换图（search-albums 模型按 mid 定位；无匹配即丢弃）。
+fn swap_search_album_cover(ui: &AppWindow, mid: &str, image: slint::Image) {
+    let model = Data::get(ui).get_search_albums();
+    let Some(vec_model) = model
+        .as_any()
+        .downcast_ref::<slint::VecModel<crate::CoverCardData>>()
+    else {
+        return;
+    };
+    for i in 0..vec_model.iter().count() {
+        let Some(mut card) = vec_model.row_data(i) else {
+            continue;
+        };
+        if card.mid.as_str() == mid {
+            card.cover = image;
+            vec_model.set_row_data(i, card);
+            return;
+        }
+    }
+}
+
+/// 搜索歌手卡换图（search-artists 模型按 mid 定位；无匹配即丢弃）。
+fn swap_search_artist_cover(ui: &AppWindow, mid: &str, image: slint::Image) {
+    let model = Data::get(ui).get_search_artists();
+    let Some(vec_model) = model
+        .as_any()
+        .downcast_ref::<slint::VecModel<crate::ArtistCardData>>()
+    else {
+        return;
+    };
+    for i in 0..vec_model.iter().count() {
+        let Some(mut card) = vec_model.row_data(i) else {
+            continue;
+        };
+        if card.mid.as_str() == mid {
+            card.cover = image;
+            vec_model.set_row_data(i, card);
+            return;
+        }
+    }
+}
+
 /// 歌单 id → 远程封面 URL（来自 discover 原始响应的旁路表）。
 ///
 /// `CoverCardData` 不携带 URL（Slint 结构保持窄），Rust 侧以并发安全

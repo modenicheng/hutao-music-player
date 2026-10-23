@@ -1,6 +1,6 @@
 // 应用状态 globals（player.ts / qualityStore.ts 的 Slint 对应物）。
 // 状态属性由 Rust 权威写入；回调发命令给 Rust（模拟播放桥，M8 换真实后端）。
-import { TrackRow, QueueRow, CoverCardData, FolderRow, PlaylistCover, LyricRow, CommentRow, TopCardData, TopGroupData } from "data.slint";
+import { TrackRow, QueueRow, CoverCardData, ArtistCardData, FolderRow, PlaylistCover, LyricRow, CommentRow, TopCardData, TopGroupData } from "data.slint";
 import { Theme } from "theme.slint";
 
 export global Player {
@@ -175,11 +175,16 @@ export global Data {
     in-out property <[TrackRow]> artist-tracks;
     in-out property <[CoverCardData]> artist-albums;
     // —— 搜索页（daemon Search IPC；时长 smartbox 不回 → 表格隐藏时长列）———
-    /** 0=初始 1=搜索中 2=有结果 3=无结果 4=失败 */
+    /** 0=初始 1=搜索中 2=有结果 3=无结果（三组全空） 4=失败 */
     in-out property <int> search-state: 0;
     in-out property <string> search-query: "";
     in-out property <[TrackRow]> search-results;
+    /** 歌曲组计数（「共 N 条」行，现有总数语义不动，M4；tab 徽章直接绑模型长度） */
     in-out property <int> search-count: 0;
+    /** 结果分区：0=歌曲 1=专辑 2=歌手（C6 三 tab） */
+    in-out property <int> search-tab: 0;
+    in-out property <[CoverCardData]> search-albums;
+    in-out property <[ArtistCardData]> search-artists;
     callback search(string);
     // —— 账号（设置页；daemon AccountStatus IPC）———
     /** 0=读取中 1=已读 2=离线失败（daemon 不可达，区别于未登录） */

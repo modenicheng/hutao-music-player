@@ -131,6 +131,36 @@ fn discover_track_row(s: &hmp_core::DiscoverNewSong) -> TrackRow {
     }
 }
 
+/// 搜索专辑卡（SearchAlbum → CoverCardData；C6）。mid 带 `qq:` 前缀——
+/// 点击直达远端专辑详情（D-1）；副标题 = 歌手名。
+fn search_album_card(a: &hmp_core::SearchAlbum) -> CoverCardData {
+    CoverCardData {
+        mid: format!("{}{}", crate::remote_details::REMOTE_PREFIX, a.mid).into(),
+        title: a.name.as_str().into(),
+        subtitle: a.singer.as_str().into(),
+        cover: cover_image(&format!("album:{}", a.mid)),
+    }
+}
+
+/// 搜索歌手卡（SearchSinger → ArtistCardData；C6）。mid 带 `qq:` 前缀；
+/// 占位 seed artist:{mid} 与歌手页 hero 同源同图。
+fn search_singer_card(s: &hmp_core::SearchSinger) -> crate::ArtistCardData {
+    crate::ArtistCardData {
+        mid: format!("{}{}", crate::remote_details::REMOTE_PREFIX, s.mid).into(),
+        name: s.name.as_str().into(),
+        cover: cover_image(&format!("artist:{}", s.mid)),
+    }
+}
+
+/// 搜索有结果判定（C6）：歌曲/专辑/歌手**三组全空**才算无结果（state=3）。
+fn search_has_results(
+    rows: &[TrackRow],
+    albums: &[CoverCardData],
+    artists: &[crate::ArtistCardData],
+) -> bool {
+    !(rows.is_empty() && albums.is_empty() && artists.is_empty())
+}
+
 /// 发现页歌单卡片（DiscoverPlaylist → CoverCardData；封面经 covers 程序化占位，
 /// 真实封面 URL 经 CoverGet 异步补齐——online_covers 旁路表 + 换图）。
 /// mid 带 `qq:` 前缀（D-1）：点击即走远端歌单详情装载（本地 DB id 参数
@@ -1066,8 +1096,10 @@ pub fn bind(
                 data.set_search_state(1);
             }
             let ui_weak = ui_weak.clone();
+            let rt2 = Arc::clone(&runtime);
             runtime.spawn(async move {
                 let result = crate::backend::request(hmp_core::Request::Search { keyword }).await;
+                let rt2 = Arc::clone(&rt2);
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = ui_weak.upgrade() else {
                         return;
@@ -1082,10 +1114,36 @@ pub fn bind(
                         Ok(hmp_core::Response::Search(page)) => {
                             let rows: Vec<TrackRow> =
                                 page.songs.iter().map(search_track_row).collect();
-                            let found = !rows.is_empty();
+                            // C6：专辑/歌手组同帧落地（此前消费侧丢弃）；
+                            // 计数徽章由 UI 直接绑模型长度（M4 零桥接成本）
+                            let albums: Vec<CoverCardData> =
+                                page.albums.iter().map(search_album_card).collect();
+                            let artists: Vec<crate::ArtistCardData> =
+                                page.singers.iter().map(search_singer_card).collect();
+                            // 无结果 = 三组全空（C6；此前只看歌曲组）
+                            let found = search_has_results(&rows, &albums, &artists);
+                            // search-count 保持歌曲组总数语义（「共 N 条」行）
                             data.set_search_count(rows.len() as i32);
                             data.set_search_results(model(rows));
+                            data.set_search_albums(model(albums));
+                            data.set_search_artists(model(artists));
                             data.set_search_state(if found { 2 } else { 3 });
+                            // 专辑/歌手卡换图：响应同帧落地模型，URL 随投影持有
+                            // （无 side-table；迟到图无匹配行即丢弃）
+                            crate::online_covers::refresh_search_covers(
+                                ui.as_weak(),
+                                &rt2,
+                                page.albums
+                                    .iter()
+                                    .filter(|a| !a.pic.is_empty())
+                                    .map(|a| (a.mid.clone(), a.pic.clone()))
+                                    .collect(),
+                                page.singers
+                                    .iter()
+                                    .filter(|s| !s.pic.is_empty())
+                                    .map(|s| (s.mid.clone(), s.pic.clone()))
+                                    .collect(),
+                            );
                         }
                         // 离线/daemon 错误/协议错误统一失败态（页面文案覆盖）。
                         _ => data.set_search_state(4),
@@ -1378,6 +1436,35 @@ mod tests {
         assert_eq!(row.duration_ms, 0);
         // TrackRow 已剥 cover（表格行不背位图，MEMFIX 工作②）：无封面断言可做，
         // 字段层面的占位图职责移交 QueueRow（player_bridge 队列投影）
+    }
+
+    /// C6：搜索专辑/歌手卡投影（qq: 前缀直达远端详情）与三组全空判定。
+    #[test]
+    fn search_cards_prefix_links_and_all_empty_verdict() {
+        let album = hmp_core::SearchAlbum {
+            mid: "002albUMZTyiKq".into(),
+            name: "范特西".into(),
+            singer: "周杰伦".into(),
+            pic: String::new(),
+        };
+        let singer = hmp_core::SearchSinger {
+            mid: "0025NhlN2yWrP4".into(),
+            name: "周杰伦".into(),
+            pic: String::new(),
+        };
+        let album_card = search_album_card(&album);
+        assert_eq!(album_card.mid.as_str(), "qq:002albUMZTyiKq");
+        assert_eq!(album_card.title.as_str(), "范特西");
+        assert_eq!(album_card.subtitle.as_str(), "周杰伦");
+        let singer_card = search_singer_card(&singer);
+        assert_eq!(singer_card.mid.as_str(), "qq:0025NhlN2yWrP4");
+        assert_eq!(singer_card.name.as_str(), "周杰伦");
+
+        // 三组全空才判无结果（C6；此前只看歌曲组）
+        assert!(search_has_results(&[TrackRow::default()], &[], &[]));
+        assert!(search_has_results(&[], &[album_card], &[]));
+        assert!(search_has_results(&[], &[], &[singer_card]));
+        assert!(!search_has_results(&[], &[], &[]));
     }
 
     /// D-1 分流：远端参数（qq:）→ `DetailData::None`（导航分流信号 + 库变更
