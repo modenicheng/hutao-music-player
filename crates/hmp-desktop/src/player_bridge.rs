@@ -5,7 +5,7 @@
 //! 命令 no-op。全部 UI 写发生在 UI 线程（回调与订阅投递闭包内）。
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -718,7 +718,13 @@ fn apply_event(
     if let Some(rows) = &event.queue_rows {
         let mids: Vec<String> = rows.iter().map(|row| row.mid.clone()).collect();
         *queue_mids.lock().expect("queue mids") = mids;
-        let track_rows: Vec<QueueRow> = rows.iter().map(row_from_meta).collect();
+        // S9 R1b：重建立即（字符串/结构），本地行封面 miss 不再 90 连发同步
+        // 解码——热行缓存探测命中即同步直出，冷行占位 + 异步逐行回填。
+        let mut pending_covers: Vec<(String, String)> = Vec::new();
+        let track_rows: Vec<QueueRow> = rows
+            .iter()
+            .map(|row| row_from_meta(row, &mut pending_covers))
+            .collect();
         let total_ms: u64 = rows.iter().map(|row| row.duration_ms.max(0) as u64).sum();
         player.set_queue_meta(
             format!(
@@ -729,6 +735,16 @@ fn apply_event(
             .into(),
         );
         player.set_queue(ModelRc::new(VecModel::from(track_rows)));
+        // 回填排程（换装语义：空批也换装——旧代在途条目随之作废）。
+        // pending 计数是 E3 口径：换曲一次重建的 miss 解码数可从日志读出。
+        if !pending_covers.is_empty() {
+            tracing::debug!(
+                rows = rows.len(),
+                pending = pending_covers.len(),
+                "queue rebuild: local row covers scheduled for backfill"
+            );
+        }
+        schedule_queue_cover_backfill(ui_weak.clone(), pending_covers.into());
         // QQ 远程封面行预取 + 回包原地换图（2026-10-04 封面审计①）：队列行
         // 封面在投影时固化，daemon rebind_cover_url 不触发队列重建——不回填
         // 则抽屉里非当前曲整场会话占位。去重/失败出账在 track_covers。
@@ -781,6 +797,77 @@ fn apply_offline(player: &Player, ui_weak: &Weak<AppWindow>) {
     player.set_shuffle(false);
     LAST_SHOWN_ERROR.with(|cell| *cell.borrow_mut() = None);
     clear_now_playing(player, ui_weak);
+}
+
+// ——— S9 R1b：队列封面异步逐行回填 ———
+//
+// 换曲/结构变化的重投影保留（模型立即重建），但本地 file:// 行的封面装载
+// 从「重建派发内 ≤90 次 get_or_load 同步解码」改为：热行缓存探测命中即同步
+// 直出（零解码零闪烁），冷行占位 + 登记 pending，单一 repeating Timer
+// （16ms × ≤6 行/tick）在 UI 线程分批真装载并原地换图。世代语义由「队列
+// 换装 + 单一 Timer」吸收（PLAN §2.1 D3）：每次重建整体替换 pending，在途
+// 批次自然作废（不为已淘汰行解码）；队列耗尽/空批换装即停表，不留常开 Timer
+// （与 R3 EqClock 门控同纪律）。
+
+/// 每 tick 回填行数上限：90 行冷启动 ≈ 15 tick ≈ 240ms 填满，批间让出渲染/输入。
+const COVER_BACKFILL_BATCH: usize = 6;
+/// tick 间隔（≈1 帧）。
+const COVER_BACKFILL_TICK: Duration = Duration::from_millis(16);
+
+thread_local! {
+    /// 待回填行（mid, 封面盘路径）；换装语义见上，全部 UI 线程触碰。
+    static PENDING_COVERS: RefCell<VecDeque<(String, String)>> =
+        const { RefCell::new(VecDeque::new()) };
+    /// 回填驱动 Timer（default = 未激活；耗尽/空换装即 stop）。
+    static COVER_BACKFILL_TIMER: RefCell<slint::Timer> = RefCell::new(slint::Timer::default());
+}
+
+/// 登记一批待回填封面并起动回填 Timer：pending 整体换装（旧代在途条目作废）；
+/// 空批 = 新模型无冷行 → 清队停表。
+fn schedule_queue_cover_backfill(ui_weak: Weak<AppWindow>, pending: VecDeque<(String, String)>) {
+    let idle = pending.is_empty();
+    PENDING_COVERS.with(|cell| *cell.borrow_mut() = pending);
+    if idle {
+        COVER_BACKFILL_TIMER.with(|cell| cell.borrow().stop());
+        return;
+    }
+    COVER_BACKFILL_TIMER.with(|cell| {
+        cell.borrow()
+            .start(slint::TimerMode::Repeated, COVER_BACKFILL_TICK, move || {
+                process_cover_backfill_tick(&ui_weak)
+            });
+    });
+}
+
+/// 单个回填 tick：drain ≤BATCH 条真装载（get_or_load：LRU 记账照旧）并按 mid
+/// 原地换图（mid 已不在当前模型 → no-op）；批耗尽/窗口已亡即停表。
+fn process_cover_backfill_tick(ui_weak: &Weak<AppWindow>) {
+    let batch: Vec<(String, String)> = PENDING_COVERS.with(|cell| {
+        let mut queue = cell.borrow_mut();
+        let take = COVER_BACKFILL_BATCH.min(queue.len());
+        queue.drain(..take).collect()
+    });
+    if batch.is_empty() {
+        stop_cover_backfill();
+        return;
+    }
+    let Some(ui) = ui_weak.upgrade() else {
+        stop_cover_backfill();
+        return;
+    };
+    let player = Player::get(&ui);
+    for (mid, path) in &batch {
+        if let Some(image) = crate::cover_cache::get_or_load(path, 256) {
+            update_queue_row_cover(&player, mid, image);
+        }
+    }
+    if PENDING_COVERS.with(|cell| cell.borrow().is_empty()) {
+        stop_cover_backfill();
+    }
+}
+
+fn stop_cover_backfill() {
+    COVER_BACKFILL_TIMER.with(|cell| cell.borrow().stop());
 }
 
 // daemon `last_error` 已展示消息（去重：状态推送 ~10Hz 携带同一错误，
@@ -1360,7 +1447,7 @@ fn quality_tier(quality: &AudioQuality) -> i32 {
 /// 队列抽屉是 TrackRow.cover 唯一消费方（36×36），故队列行单独走带 cover 的
 /// QueueRow，表格 TrackRow 不再背图（MEMFIX-CONTRACT 第 1/2 条）。
 /// 歌手/专辑 mid 在 IPC ID 投影里不存在（链接型列在队列抽屉未使用）。
-fn row_from_meta(meta: &QueueRowMeta) -> QueueRow {
+fn row_from_meta(meta: &QueueRowMeta, pending_covers: &mut Vec<(String, String)>) -> QueueRow {
     let mut row = QueueRow {
         mid: meta.mid.as_str().into(),
         source: if hmp_core::TrackProvider::from_id(&meta.mid) == hmp_core::TrackProvider::Local {
@@ -1375,7 +1462,7 @@ fn row_from_meta(meta: &QueueRowMeta) -> QueueRow {
         album_mid: "".into(),
         duration_ms: meta.duration_ms,
         quality: "".into(),
-        cover: queue_cover(meta),
+        cover: queue_cover(meta, pending_covers),
     };
     // 库外曲目（搜索结果等，daemon stub 只有 id）标题回退 mid 时，用
     // play-tracks 发出时的 UI 行元数据补真名（仅显示层，不写库）。
@@ -1394,17 +1481,21 @@ fn row_from_meta(meta: &QueueRowMeta) -> QueueRow {
     row
 }
 
-/// 队列行封面：本地库 file:// 封面直接读盘（扩列投影带出；daemon 已把取到
-/// 的本地产物回写 cover_uri，播过的 QQ 曲同样命中）→ cover_cache 256 桶
-/// （抽屉行 36×36，行桶与表格/侧栏同档）；远程 URL 先程序化占位，队列落地
-/// 的预取回包原地换图（apply_event → track_covers::prefetch_tracks_with）。
-fn queue_cover(meta: &QueueRowMeta) -> slint::Image {
+/// 队列行封面：本地库 file:// 封面 **探测** cover_cache 256 桶（抽屉行
+/// 36×36，行桶与表格/侧栏同档）——命中（会话内常态）同步直出，零解码零
+/// 闪烁；未命中占位 + 登记 `pending_covers` 交回填 Timer 异步分批真装载
+/// （S9 R1b：重建派发内不再 90 连发同步全尺寸解码）。远程 URL 先程序化
+/// 占位，队列落地的预取回包原地换图（apply_event →
+/// track_covers::prefetch_tracks_with）。
+fn queue_cover(meta: &QueueRowMeta, pending_covers: &mut Vec<(String, String)>) -> slint::Image {
     if let Some(uri) = &meta.cover_uri {
         if !uri.starts_with("http://") && !uri.starts_with("https://") {
             if let Some(path) = crate::covers::file_uri_to_path(uri) {
-                if let Some(image) = crate::cover_cache::get_or_load(&path, 256) {
+                if let Some(image) = crate::cover_cache::get_if_cached(&path, 256) {
                     return image;
                 }
+                pending_covers.push((meta.mid.clone(), path));
+                return crate::covers::cover_image(&cover_seed(meta));
             }
         }
     }
@@ -1443,7 +1534,9 @@ fn cover_for_track(mid: &str, cover: Option<&hmp_core::CoverRef>) -> slint::Imag
 }
 
 #[cfg(test)]
-mod tests {
+// pub(crate)：bridge.rs 的 AppWindow 测试共用本模块的测试平台 Once 初始化
+//（i-slint-backend-testing 的 platform 是进程级单例，二次 init 即 panic）。
+pub(crate) mod tests {
     use super::*;
 
     fn playback_with(duration_ms: u64, position_ms: u64) -> PlaybackState {
@@ -1578,7 +1671,8 @@ mod tests {
                 },
             )]);
         });
-        let row = row_from_meta(&meta);
+        let mut pending = Vec::new();
+        let row = row_from_meta(&meta, &mut pending);
         assert_eq!(row.title, "夜曲");
         assert_eq!(row.artists, "周杰伦");
         assert_eq!(row.album, "十一月的萧邦");
@@ -1607,7 +1701,8 @@ mod tests {
             duration_ms: 1_000,
             cover_uri: None,
         };
-        let row = row_from_meta(&local);
+        let mut pending = Vec::new();
+        let row = row_from_meta(&local, &mut pending);
         assert_eq!(row.source, 1);
         assert_eq!(row.mid, "local:/music/a.flac");
         assert_eq!(row.duration_ms, 1_000);
@@ -1620,7 +1715,8 @@ mod tests {
             duration_ms: 0,
             cover_uri: None,
         };
-        let row = row_from_meta(&qq);
+        let mut pending = Vec::new();
+        let row = row_from_meta(&qq, &mut pending);
         assert_eq!(row.source, 0);
         assert_eq!(row.title, "003Z3i2C");
         assert_eq!(row.quality, "", "音质未知 → 徽章留空");
@@ -1682,5 +1778,294 @@ mod tests {
             FavoriteOutcome::Unreachable
         );
         assert!(FAVORITE_UNREACHABLE_TEXT.contains("未连接"));
+    }
+
+    // —— S9 R1b：队列封面异步逐行回填（AppWindow 全链）——
+
+    /// AppWindow 测试专用平台线程：slint platform 是进程级单例且**线程亲和**
+    ///（set_platform 记住所在线程，他线程 AppWindow::new 即 Err「platform was
+    /// initialized in another thread」），而 libtest 给每个测试开新线程——
+    /// 因此所有 AppWindow 测试（本模块 + bridge.rs 先例）都经此投递到同一条
+    /// 常驻 worker 线程串行执行；panic 用 catch_unwind 捕获后回放（worker
+    /// 不死、后续测试可继续）。
+    pub(crate) fn run_on_platform_thread<T: Send + 'static>(
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        type Task = Box<dyn FnOnce() + Send + 'static>;
+        static TASK_TX: std::sync::OnceLock<std::sync::mpsc::Sender<Task>> =
+            std::sync::OnceLock::new();
+        let (result_tx, result_rx) =
+            std::sync::mpsc::sync_channel::<Result<T, Box<dyn std::any::Any + Send>>>(1);
+        let task: Task = Box::new(move || {
+            let _ = result_tx.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)));
+        });
+        let tx = TASK_TX.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Task>();
+            std::thread::Builder::new()
+                .name("slint-test-platform".into())
+                .spawn(move || {
+                    i_slint_backend_testing::init_no_event_loop();
+                    while let Ok(task) = rx.recv() {
+                        task();
+                    }
+                })
+                .expect("spawn slint test platform thread");
+            tx
+        });
+        tx.send(task).expect("platform worker alive");
+        match result_rx.recv().expect("platform worker replied") {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// 平台线程上的逐测试复位：thread_local（CACHE / 回填队列与 Timer）在
+    /// 常驻线程上跨测试存活，起点必须显式清零。
+    fn reset_backfill_for_test() {
+        crate::cover_cache::clear_for_test();
+        PENDING_COVERS.with(|cell| cell.borrow_mut().clear());
+        COVER_BACKFILL_TIMER.with(|cell| cell.borrow().stop());
+    }
+
+    /// 素材目录（cover_cache 测试同款：temp + 进程号，不引 tempfile dev-dep）。
+    fn backfill_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("hmp-pb-bf-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 落一张 w×h 渐变 PNG（400×200 → 256 桶缩为 256×128；占位是 256×256
+    /// 方形——尺寸比即「真图 vs 占位」判据）。
+    fn backfill_png(dir: &std::path::Path, name: &str, w: u32, h: u32) -> std::path::PathBuf {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 0x40, 0xFF])
+        });
+        let path = dir.join(name);
+        img.save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        path
+    }
+
+    fn cover_file_uri(path: &std::path::Path) -> String {
+        format!("file:///{}", path.to_string_lossy().replace('\\', "/"))
+    }
+
+    fn row_meta_with_cover(mid: &str, cover: &std::path::Path) -> QueueRowMeta {
+        QueueRowMeta {
+            mid: mid.into(),
+            title: mid.into(),
+            artists: "".into(),
+            album: "".into(),
+            duration_ms: 0,
+            cover_uri: Some(cover_file_uri(cover)),
+        }
+    }
+
+    /// 投 queue_rows 事件（state=None 走离线尾；队列分支在前，不受影响）。
+    fn apply_queue_rows(
+        ui: &AppWindow,
+        runtime: &Arc<BackendRuntime>,
+        queue_mids: &Mutex<Vec<String>>,
+        rows: Vec<QueueRowMeta>,
+    ) {
+        apply_event(
+            &ui.as_weak(),
+            runtime,
+            queue_mids,
+            &Mutex::new(EchoGuard::default()),
+            UiStateEvent {
+                state: None,
+                queue_rows: Some(rows),
+                library_changed: false,
+                offline_reason: None,
+            },
+        );
+    }
+
+    fn queue_rows_of(ui: &AppWindow) -> Vec<QueueRow> {
+        let model = Player::get(ui).get_queue();
+        let vec = model
+            .as_any()
+            .downcast_ref::<VecModel<QueueRow>>()
+            .expect("queue model is VecModel");
+        (0..vec.iter().count())
+            .filter_map(|i| vec.row_data(i))
+            .collect()
+    }
+
+    fn cover_misses() -> u64 {
+        crate::cover_cache::cache_stats().3
+    }
+
+    /// 相对基线的 miss 增量（测试线程上的绝对值不受其他测试影响）。
+    fn cache_delta(base: u64) -> u64 {
+        cover_misses() - base
+    }
+
+    /// 热行同步直出 + 冷行占位 + 分批回填全链（mock 时间逐 tick 驱动 Timer）。
+    #[test]
+    fn queue_rebuild_backfills_covers_in_batches() {
+        run_on_platform_thread(|| {
+            reset_backfill_for_test();
+            let ui = AppWindow::new().unwrap();
+            let runtime = Arc::new(BackendRuntime::new().unwrap());
+            let queue_mids = Mutex::new(Vec::<String>::new());
+            let dir = backfill_dir("batch");
+
+            // 热行：预装载进 cover_cache（重建探测命中 → 同步直出，零解码）
+            let hot = backfill_png(&dir, "hot.png", 400, 200);
+            assert!(crate::cover_cache::get_or_load(hot.to_str().unwrap(), 256).is_some());
+            let misses_after_warm = cover_misses();
+            assert_eq!(misses_after_warm, 1);
+
+            let mut metas = vec![row_meta_with_cover("hot-1", &hot)];
+            for i in 0..7 {
+                metas.push(row_meta_with_cover(
+                    &format!("cold-{i}"),
+                    &backfill_png(&dir, &format!("cold{i}.png"), 400, 200),
+                ));
+            }
+            apply_queue_rows(&ui, &runtime, &queue_mids, metas);
+
+            // 重建即刻：热行真图（256×128），冷行全部占位（256×256），且零解码
+            let rows = queue_rows_of(&ui);
+            assert_eq!(rows.len(), 8);
+            let hot_size = rows[0].cover.size();
+            assert_eq!(
+                (hot_size.width, hot_size.height),
+                (256, 128),
+                "热行探测命中应同步直出真图"
+            );
+            assert_eq!(
+                cache_delta(misses_after_warm),
+                0,
+                "重建派发内不应发生任何解码"
+            );
+            for row in &rows[1..] {
+                let s = row.cover.size();
+                assert_eq!((s.width, s.height), (256, 256), "冷行应先占位");
+            }
+
+            // 分批边界：7 冷行 / 批 6 → 首个 tick 恰 6 行换真图，第 2 个 tick 清尾
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            let rows = queue_rows_of(&ui);
+            let real = rows[1..]
+                .iter()
+                .filter(|r| r.cover.size().height == 128)
+                .count();
+            assert_eq!(real, COVER_BACKFILL_BATCH, "首个 tick 恰回填一批");
+            assert_eq!(cache_delta(misses_after_warm), 6);
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            let rows = queue_rows_of(&ui);
+            assert!(
+                rows.iter().all(|r| r.cover.size().height == 128),
+                "全部行应回填为真图：{:?}",
+                rows.iter().map(|r| r.cover.size()).collect::<Vec<_>>()
+            );
+            assert_eq!(cache_delta(misses_after_warm), 7);
+
+            // 耗尽即停表：再推时间无新解码
+            let misses = cover_misses();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(64));
+            assert_eq!(cover_misses(), misses, "队列耗尽后 Timer 应停表");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// 换装竞态（PLAN §2.1 D3）：回填中途再重建 → 旧代剩余条目随换装丢弃
+    /// （以 miss 计数差断言不再解码），新代只回填自己的未命中行。
+    #[test]
+    fn queue_rebuild_swap_drops_inflight_backfill() {
+        run_on_platform_thread(|| {
+            reset_backfill_for_test();
+            let ui = AppWindow::new().unwrap();
+            let runtime = Arc::new(BackendRuntime::new().unwrap());
+            let queue_mids = Mutex::new(Vec::<String>::new());
+            let dir = backfill_dir("swap");
+
+            // 第一代：8 冷行
+            let gen1: Vec<QueueRowMeta> = (0..8)
+                .map(|i| {
+                    row_meta_with_cover(
+                        &format!("g1-{i}"),
+                        &backfill_png(&dir, &format!("g1-{i}.png"), 400, 200),
+                    )
+                })
+                .collect();
+            apply_queue_rows(&ui, &runtime, &queue_mids, gen1);
+            // 一个 tick：回填 6 行，余 2 条在途
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            assert_eq!(cover_misses(), 6, "首个 tick 恰 6 次解码");
+
+            // 第二代重建（4 行全新路径）：pending 换装，2 条第一代在途条目作废
+            let gen2: Vec<QueueRowMeta> = (0..4)
+                .map(|i| {
+                    row_meta_with_cover(
+                        &format!("g2-{i}"),
+                        &backfill_png(&dir, &format!("g2-{i}.png"), 400, 200),
+                    )
+                })
+                .collect();
+            apply_queue_rows(&ui, &runtime, &queue_mids, gen2);
+            let rows = queue_rows_of(&ui);
+            assert_eq!(rows.len(), 4, "模型应为第二代");
+            for row in &rows {
+                assert_eq!(row.cover.size().height, 256, "二代冷行应占位");
+            }
+
+            // 第二代回填完：6（一代）+ 4（二代）= 10；被作废的 2 条不再解码
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            assert_eq!(cover_misses(), 10, "旧代在途条目应随换装丢弃");
+            let rows = queue_rows_of(&ui);
+            assert!(
+                rows.iter().all(|r| r.cover.size().height == 128),
+                "第二代全部回填为真图"
+            );
+            // 停表后再推时间无变化
+            let misses = cover_misses();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(64));
+            assert_eq!(cover_misses(), misses);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// mid 已不在模型 → set_row_data 不命中、无 panic；耗尽即停表。
+    #[test]
+    fn backfill_mid_missing_from_model_is_noop() {
+        run_on_platform_thread(|| {
+            reset_backfill_for_test();
+            let ui = AppWindow::new().unwrap();
+            let dir = backfill_dir("ghost");
+            let path = backfill_png(&dir, "ghost.png", 400, 200);
+            // 直接排程：模型为空（ghost mid 不在），tick 解码成功但换图 no-op
+            schedule_queue_cover_backfill(
+                ui.as_weak(),
+                vec![("ghost-mid".into(), path.to_str().unwrap().to_owned())].into(),
+            );
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            assert_eq!(cover_misses(), 1, "ghost 行仍解码（装载照旧），换图 no-op");
+            let misses = cover_misses();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(64));
+            assert_eq!(cover_misses(), misses, "耗尽后停表");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// 空队列重建 → 不启 Timer（t 推进无副作用）。
+    #[test]
+    fn empty_queue_rebuild_starts_no_timer() {
+        run_on_platform_thread(|| {
+            reset_backfill_for_test();
+            let ui = AppWindow::new().unwrap();
+            let runtime = Arc::new(BackendRuntime::new().unwrap());
+            let queue_mids = Mutex::new(Vec::<String>::new());
+            apply_queue_rows(&ui, &runtime, &queue_mids, vec![]);
+            assert!(queue_rows_of(&ui).is_empty());
+            let misses = cover_misses();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+            assert_eq!(cover_misses(), misses, "空队列不应起动回填 Timer");
+        });
     }
 }

@@ -143,11 +143,27 @@ fn decode_downsampled(path: &str, max_side: u32) -> Option<Image> {
 
 // ——— 测试观测（仅测试构建）：条目数/总字节/命中计数 ———
 #[cfg(test)]
-fn cache_stats() -> (usize, u64, u64, u64) {
+pub(crate) fn cache_stats() -> (usize, u64, u64, u64) {
     CACHE.with(|cell| {
         let cache = cell.borrow();
         (cache.map.len(), cache.total_bytes, cache.hits, cache.misses)
     })
+}
+
+/// 测试间复位（仅测试构建）：共享平台线程上多测试串行执行时，各测试
+/// 需要干净的缓存与计数起点（S9 R1b 回填测试用）。
+#[cfg(test)]
+pub(crate) fn clear_for_test() {
+    CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        cache.map.clear();
+        cache.total_bytes = 0;
+        #[cfg(test)]
+        {
+            cache.hits = 0;
+            cache.misses = 0;
+        }
+    });
 }
 
 #[cfg(test)]

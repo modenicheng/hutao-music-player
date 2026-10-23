@@ -1565,80 +1565,83 @@ mod tests {
 
     /// M2 验收：本地/远端交替导航后状态正确——远端失败 state=4 → 返回本地
     /// 命中 state=2 正常渲染；本地 miss → state=3（未找到/失败不串台）。
+    /// （S9：lib 二进制内 AppWindow 测试统一投递到共享平台线程串行执行
+    /// ——slint platform 是进程级单例且线程亲和，他线程建窗即 Err。）
     #[test]
     fn local_remote_alternating_navigation_states() {
-        i_slint_backend_testing::init_no_event_loop();
-        let ui = AppWindow::new().unwrap();
-        let runtime = Arc::new(crate::backend::BackendRuntime::new().unwrap());
-        let data = Data::get(&ui);
+        crate::player_bridge::tests::run_on_platform_thread(|| {
+            let ui = AppWindow::new().unwrap();
+            let runtime = Arc::new(crate::backend::BackendRuntime::new().unwrap());
+            let data = Data::get(&ui);
 
-        // 远端回包失败（离线）→ state=4
-        crate::remote_details::apply_playlist_response(
-            &ui.as_weak(),
-            &runtime,
-            crate::remote_details::current_playlist_generation(),
-            Err(crate::backend::BackendError::Protocol("offline".into())),
-        );
-        assert_eq!(data.get_playlist_state(), 4, "远端失败态");
+            // 远端回包失败（离线）→ state=4
+            crate::remote_details::apply_playlist_response(
+                &ui.as_weak(),
+                &runtime,
+                crate::remote_details::current_playlist_generation(),
+                Err(crate::backend::BackendError::Protocol("offline".into())),
+            );
+            assert_eq!(data.get_playlist_state(), 4, "远端失败态");
 
-        // 返回本地歌单（本地命中）→ state=2、found=true 正常渲染
-        let detail = DetailData::Playlist(
-            "3".into(),
-            Some(library_view::PlaylistDetail {
-                name: "深夜循环".into(),
+            // 返回本地歌单（本地命中）→ state=2、found=true 正常渲染
+            let detail = DetailData::Playlist(
+                "3".into(),
+                Some(library_view::PlaylistDetail {
+                    name: "深夜循环".into(),
+                    tracks: vec![],
+                    total_ms: 0,
+                    cover_uri: None,
+                }),
+            );
+            apply_detail(&ui, &runtime, &detail);
+            assert_eq!(data.get_playlist_state(), 2, "本地命中必须复位就绪态");
+            assert!(data.get_playlist_found());
+            assert_eq!(data.get_playlist_name().as_str(), "深夜循环");
+
+            // 本地 miss（已删除）→ state=3
+            apply_detail(&ui, &runtime, &DetailData::Playlist("999".into(), None));
+            assert_eq!(data.get_playlist_state(), 3, "本地 miss → 未找到");
+
+            // 专辑/歌手本地分支同步置位（M2 逐一落位）
+            apply_detail(&ui, &runtime, &DetailData::Album(None));
+            assert_eq!(data.get_album_state(), 3);
+            apply_detail(&ui, &runtime, &DetailData::Artist(None));
+            assert_eq!(data.get_artist_state(), 3);
+
+            // 远端专辑（T5）：失败 → 4；本地命中复位 2（交替导航，M2 同款）
+            crate::remote_details::apply_album_response(
+                &ui.as_weak(),
+                &runtime,
+                crate::remote_details::current_album_generation(),
+                Err(crate::backend::BackendError::Protocol("offline".into())),
+            );
+            assert_eq!(data.get_album_state(), 4, "远端专辑失败态");
+            let album = DetailData::Album(Some(library_view::AlbumDetail {
+                name: "十一月的萧邦".into(),
+                artist: Some("周杰伦".into()),
+                year: Some(2005),
+                cover_uri: None,
                 tracks: vec![],
                 total_ms: 0,
-                cover_uri: None,
-            }),
-        );
-        apply_detail(&ui, &runtime, &detail);
-        assert_eq!(data.get_playlist_state(), 2, "本地命中必须复位就绪态");
-        assert!(data.get_playlist_found());
-        assert_eq!(data.get_playlist_name().as_str(), "深夜循环");
+            }));
+            apply_detail(&ui, &runtime, &album);
+            assert_eq!(data.get_album_state(), 2, "本地专辑命中复位就绪态");
 
-        // 本地 miss（已删除）→ state=3
-        apply_detail(&ui, &runtime, &DetailData::Playlist("999".into(), None));
-        assert_eq!(data.get_playlist_state(), 3, "本地 miss → 未找到");
-
-        // 专辑/歌手本地分支同步置位（M2 逐一落位）
-        apply_detail(&ui, &runtime, &DetailData::Album(None));
-        assert_eq!(data.get_album_state(), 3);
-        apply_detail(&ui, &runtime, &DetailData::Artist(None));
-        assert_eq!(data.get_artist_state(), 3);
-
-        // 远端专辑（T5）：失败 → 4；本地命中复位 2（交替导航，M2 同款）
-        crate::remote_details::apply_album_response(
-            &ui.as_weak(),
-            &runtime,
-            crate::remote_details::current_album_generation(),
-            Err(crate::backend::BackendError::Protocol("offline".into())),
-        );
-        assert_eq!(data.get_album_state(), 4, "远端专辑失败态");
-        let album = DetailData::Album(Some(library_view::AlbumDetail {
-            name: "十一月的萧邦".into(),
-            artist: Some("周杰伦".into()),
-            year: Some(2005),
-            cover_uri: None,
-            tracks: vec![],
-            total_ms: 0,
-        }));
-        apply_detail(&ui, &runtime, &album);
-        assert_eq!(data.get_album_state(), 2, "本地专辑命中复位就绪态");
-
-        // 远端歌手（T6）：失败 → 4；本地命中复位 2（交替导航，M2 同款）
-        crate::remote_details::apply_artist_response(
-            &ui.as_weak(),
-            &runtime,
-            crate::remote_details::current_artist_generation(),
-            Err(crate::backend::BackendError::Protocol("offline".into())),
-        );
-        assert_eq!(data.get_artist_state(), 4, "远端歌手失败态");
-        let artist = DetailData::Artist(Some(library_view::ArtistDetail {
-            name: "周杰伦".into(),
-            tracks: vec![],
-            albums: vec![],
-        }));
-        apply_detail(&ui, &runtime, &artist);
-        assert_eq!(data.get_artist_state(), 2, "本地歌手命中复位就绪态");
+            // 远端歌手（T6）：失败 → 4；本地命中复位 2（交替导航，M2 同款）
+            crate::remote_details::apply_artist_response(
+                &ui.as_weak(),
+                &runtime,
+                crate::remote_details::current_artist_generation(),
+                Err(crate::backend::BackendError::Protocol("offline".into())),
+            );
+            assert_eq!(data.get_artist_state(), 4, "远端歌手失败态");
+            let artist = DetailData::Artist(Some(library_view::ArtistDetail {
+                name: "周杰伦".into(),
+                tracks: vec![],
+                albums: vec![],
+            }));
+            apply_detail(&ui, &runtime, &artist);
+            assert_eq!(data.get_artist_state(), 2, "本地歌手命中复位就绪态");
+        });
     }
 }
