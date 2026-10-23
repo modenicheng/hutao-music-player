@@ -145,21 +145,29 @@ export global Data {
     in-out property <int> purchased-single-count;
     in-out property <int> purchased-album-count;
     in-out property <string> purchased-total;
-    // —— 歌单详情页（导航时装载；found=false → 诚实"未找到"空态）———
+    // —— 歌单详情页（导航时装载；本地/远端两路径）———
+    /** 页面状态机（M3，对齐 top/search 码位）：0=初始 1=加载中 2=就绪
+        3=未找到 4=失败（离线/网络）。本地命中/miss 由 bridge 同步置位，
+        远端路径由 remote_details 异步置位；found 布尔保留由本地路径维护 */
+    in-out property <int> playlist-state: 0;
     in-out property <bool> playlist-found: false;
     in-out property <string> playlist-name: "";
     in-out property <[string]> playlist-meta-items;
     in-out property <image> playlist-cover;
     in-out property <[TrackRow]> playlist-tracks;
-    // —— 专辑详情页（参数 = 专辑名，本地投影）———
+    // —— 专辑详情页（参数 = 专辑名（本地）/ qq:albummid（远端））———
+    /** 码位同 playlist-state（M3） */
+    in-out property <int> album-state: 0;
     in-out property <bool> album-found: false;
     in-out property <string> album-name: "";
-    /** 歌手链接参数（本地投影 = 歌手名；空串禁用链接） */
+    /** 歌手链接参数（本地投影 = 歌手名；远端 = qq:singermid；空串禁用链接） */
     in-out property <string> album-artist: "";
     in-out property <[string]> album-meta-items;
     in-out property <image> album-cover;
     in-out property <[TrackRow]> album-tracks;
-    // —— 歌手详情页（参数 = 歌手名，本地投影）———
+    // —— 歌手详情页（参数 = 歌手名（本地）/ qq:singermid（远端））———
+    /** 码位同 playlist-state（M3） */
+    in-out property <int> artist-state: 0;
     in-out property <bool> artist-found: false;
     in-out property <string> artist-name: "";
     in-out property <[string]> artist-meta-items;

@@ -1,9 +1,11 @@
-//! 在线内容页封面装载（M4）：daemon CoverGet 换本地产物 + cover_cache 统一缓存。
+//! 在线内容页封面装载（M4 + D2/D7 泛化）：daemon CoverGet 换本地产物 +
+//! cover_cache 统一缓存。
 //!
 //! 借鉴 `player_bridge::spawn_cover_fetch` 的去重/竞态防护，但目标是
-//! `Data.discover-playlists` 模型内的卡片（按歌单 id 定位），非当前曲。
+//! `Data.discover-playlists` 等模型内的卡片（按 id 定位），非当前曲。
+//! D7 抽出通用取图核心 [`fetch_cover`]（远端详情 hero / 榜单卡 / 搜索卡
+//! 共用），去重账本进程级（失败出账允许重试）。
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -11,9 +13,23 @@ use slint::{Global, Model, Weak};
 
 use crate::{AppWindow, Data};
 
-thread_local! {
-    /// 在账的 (kind, id, url)（在途或已成功；失败出账允许重试，进程级）。
-    static REQUESTED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+/// 在账的 (kind, id, url)（在途或已成功；失败出账允许重试，进程级）。
+/// 此前 thread_local + 跨线程 remove 实际删的是另一线程的账（无效操作），
+/// 统一收敛为全局 Mutex，失败出账语义才真正成立。
+static REQUESTED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+fn requested_insert(key: &str) -> bool {
+    let mut guard = REQUESTED.lock().expect("cover requests");
+    guard
+        .get_or_insert_with(HashSet::new)
+        .insert(key.to_string())
+}
+
+fn requested_remove(key: &str) {
+    let mut guard = REQUESTED.lock().expect("cover requests");
+    if let Some(set) = guard.as_mut() {
+        set.remove(key);
+    }
 }
 
 /// 载入本地产物（cover_cache 256 桶：卡片封面消费方 ≤ 百px 级；不存在返回
@@ -21,6 +37,57 @@ thread_local! {
 /// 已并入统一字节加权 LRU。
 fn load_image(path: &str) -> Option<slint::Image> {
     crate::cover_cache::get_or_load(path, 256)
+}
+
+/// 通用取图核心（D-7）：CoverGet → 本地产物路径 → 回事件循环线程 256 桶
+/// 装载并应用。去重键 `key` 由调用方组（kind|id|url）；失败出账允许重试。
+/// `apply` 仅在取图与装载都成功时被调（UI 线程），竞态守卫（页参数/代数
+/// 复核）由调用方闭包自带。
+pub fn fetch_cover(
+    ui_weak: Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    key: String,
+    url: String,
+    apply: impl Fn(&AppWindow, slint::Image) + Send + 'static,
+) {
+    if !requested_insert(&key) {
+        return; // 已请求过（在途或已成功）
+    }
+    runtime.spawn(async move {
+        let Ok(hmp_core::Response::Cover(uri)) =
+            crate::backend::request(hmp_core::Request::CoverGet { url }).await
+        else {
+            // 失败出账（2026-10-04 封面审计⑤）：一次失败不锁死整个会话，
+            // 重进页面/重触发即可重试（触发源低频，无需退避）。
+            requested_remove(&key);
+            return;
+        };
+        let path = crate::covers::file_uri_to_path(&uri).unwrap_or(uri);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if let Some(image) = load_image(&path) {
+                apply(&ui, image);
+            } else {
+                requested_remove(&key);
+            }
+        });
+    });
+}
+
+/// 发现页歌单卡 mid ↔ 旁路表键的统一规范化（M1）：裸数字 id（历史登记
+/// 形态）归一为 `qq:<id>`；已带前缀或非数字原样返回。登记
+/// （`register_playlist_covers`）与匹配（`playlist_cover_url` 查表）两侧
+/// **必须同走本函数**——`qq:` 前缀引入后卡片 mid 改形，两侧若不同源即
+/// 封面静默失配（单测钉死）。
+pub fn playlist_card_key(card_mid: &str) -> String {
+    if card_mid.starts_with(crate::remote_details::REMOTE_PREFIX)
+        || !card_mid.chars().all(|c| c.is_ascii_digit())
+        || card_mid.is_empty()
+    {
+        card_mid.to_string()
+    } else {
+        format!("{}{}", crate::remote_details::REMOTE_PREFIX, card_mid)
+    }
 }
 
 /// 把 `Data.discover-playlists` 中封面对应的模型项替换为真实图片。
@@ -43,25 +110,23 @@ pub fn refresh_discover_covers(
     };
     for i in 0..vec_model.iter().count() {
         let card = vec_model.row_data(i).unwrap_or_default();
-        // 占位封面无真实图；mid 即歌单 id
-        let Some((id, url)) = playlist_cover_url(&ui, &card.mid) else {
+        // 占位封面无真实图；mid 与旁路表键同经 playlist_card_key 规范化（M1）
+        let Some((id, url)) = playlist_cover_url(&card.mid) else {
             continue;
         };
         let key = format!("discover|{id}|{url}");
-        if REQUESTED.with(|set| !set.borrow_mut().insert(key.clone())) {
+        if !requested_insert(&key) {
             continue; // 已请求过（在途或已成功）
         }
         let ui_weak = ui_weak.clone();
         let id = id.clone();
         runtime.spawn(async move {
-            // 失败出账（2026-10-04 封面审计⑤）：冷启动窗口一次失败不再让
-            // 卡片整个会话占位；重进 discover 页触发重试（触发源低频，无需退避）。
+            // 失败出账：冷启动窗口一次失败不再让卡片整个会话占位；
+            // 重进 discover 页触发重试（触发源低频，无需退避）。
             let Ok(hmp_core::Response::Cover(uri)) =
                 crate::backend::request(hmp_core::Request::CoverGet { url }).await
             else {
-                REQUESTED.with(|set| {
-                    set.borrow_mut().remove(&key);
-                });
+                requested_remove(&key);
                 return;
             };
             let path = crate::covers::file_uri_to_path(&uri).unwrap_or(uri);
@@ -105,30 +170,30 @@ fn apply_playlist_cover(ui_weak: Weak<AppWindow>, id: &str, path: &str) {
 ///
 /// `CoverCardData` 不携带 URL（Slint 结构保持窄），Rust 侧以并发安全
 /// 的 side-table 保存 id→url；`spawn_discover_load` 落模型时同步登记。
+/// 键与卡片 mid 同经 [`playlist_card_key`] 规范化（M1）。
 static PLAYLIST_COVERS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
-/// 登记一批歌单封面 URL（discover 响应落地时调用）。
+/// 登记一批歌单封面 URL（discover 响应落地时调用；键规范化归一）。
 pub fn register_playlist_covers(entries: Vec<(String, String)>) {
     let mut guard = PLAYLIST_COVERS.lock().expect("playlist covers");
     let map = guard.get_or_insert_with(HashMap::new);
     for (id, url) in entries {
-        map.insert(id, url);
+        map.insert(playlist_card_key(&id), url);
     }
 }
 
-fn playlist_cover_url(_ui: &AppWindow, id: &str) -> Option<(String, String)> {
+fn playlist_cover_url(card_mid: &str) -> Option<(String, String)> {
+    let key = playlist_card_key(card_mid);
     let guard = PLAYLIST_COVERS.lock().expect("playlist covers");
-    guard
-        .as_ref()?
-        .get(id)
-        .map(|url| (id.to_string(), url.clone()))
+    guard.as_ref()?.get(&key).map(|url| (key, url.clone()))
 }
 
-/// 读取 playlist 旁路表（单测用）。
+/// 读取 playlist 旁路表（单测用；键与登记侧同规范化）。
 #[cfg(test)]
-pub fn playlist_cover_of(id: &str) -> Option<String> {
+pub fn playlist_cover_of(card_mid: &str) -> Option<String> {
+    let key = playlist_card_key(card_mid);
     let guard = PLAYLIST_COVERS.lock().expect("playlist covers");
-    guard.as_ref()?.get(id).cloned()
+    guard.as_ref()?.get(&key).cloned()
 }
 
 #[cfg(test)]
@@ -137,11 +202,36 @@ mod tests {
 
     #[test]
     fn register_and_lookup_cover() {
+        // 裸数字登记（历史形态）与 qq: 前缀查表同键命中（M1）
         register_playlist_covers(vec![("123456".into(), "https://y.gtimg.cn/x.jpg".into())]);
         assert_eq!(
             playlist_cover_of("123456").as_deref(),
             Some("https://y.gtimg.cn/x.jpg")
         );
+        assert_eq!(
+            playlist_cover_of("qq:123456").as_deref(),
+            Some("https://y.gtimg.cn/x.jpg")
+        );
         assert_eq!(playlist_cover_of("nope"), None);
+    }
+
+    /// M1 验收：推荐卡 mid（前缀形态）↔ 旁路表键一致——登记与匹配两侧
+    /// 同走 playlist_card_key，任一侧改形都会在此失配。
+    #[test]
+    fn playlist_card_key_normalizes_both_directions() {
+        // 裸数字 → 前缀；已前缀/非数字 → 原样
+        assert_eq!(playlist_card_key("7468450811"), "qq:7468450811");
+        assert_eq!(playlist_card_key("qq:7468450811"), "qq:7468450811");
+        assert_eq!(playlist_card_key("sm-1"), "sm-1");
+        assert_eq!(playlist_card_key(""), "");
+
+        // 发现卡投影（bridge::discover_playlist_card 同式构造）与登记键一致
+        let card_mid = playlist_card_key(&7468450811i64.to_string());
+        register_playlist_covers(vec![(7468450811i64.to_string(), "u".into())]);
+        assert_eq!(
+            playlist_cover_url(&card_mid).map(|(k, _)| k),
+            Some(card_mid.clone()),
+            "卡片 mid 必须命中旁路表键"
+        );
     }
 }

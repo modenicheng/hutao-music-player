@@ -132,7 +132,10 @@ fn discover_track_row(s: &hmp_core::DiscoverNewSong) -> TrackRow {
 }
 
 /// 发现页歌单卡片（DiscoverPlaylist → CoverCardData；封面经 covers 程序化占位，
-/// 真实封面 URL 交给 CoverGet 异步补齐的成本后续评估，先保导航可用）。
+/// 真实封面 URL 经 CoverGet 异步补齐——online_covers 旁路表 + 换图）。
+/// mid 带 `qq:` 前缀（D-1）：点击即走远端歌单详情装载（本地 DB id 参数
+/// 空间不含前缀，互不污染）；与封面旁路表键同经 `playlist_card_key`
+/// 规范化（M1，两侧同帧同源）。
 fn discover_playlist_card(p: &hmp_core::DiscoverPlaylist) -> CoverCardData {
     let subtitle = if p.creator.is_empty() {
         format!("{} 首", p.songnum)
@@ -140,7 +143,7 @@ fn discover_playlist_card(p: &hmp_core::DiscoverPlaylist) -> CoverCardData {
         format!("{} 首 · {}", p.songnum, p.creator)
     };
     CoverCardData {
-        mid: p.id.to_string().into(),
+        mid: crate::online_covers::playlist_card_key(&p.id.to_string()).into(),
         title: p.title.as_str().into(),
         subtitle: subtitle.into(),
         cover: crate::covers::cover_image(&format!("playlist:{}", p.id)),
@@ -666,14 +669,38 @@ fn apply_snapshot(
 }
 
 /// 路由落地后的详情装载（导航路径：单次同步读，单页查询量小；库变更刷新
-/// 路径走后台预计算 + [`apply_detail`]）。found=false → 页面诚实空态。
+/// 路径走后台预计算 + [`apply_detail`]）。本地 miss 即诚实空态（state=3）。
+/// 远端参数（`qq:` 前缀）在本地 miss 后分流到异步远端装载（D-1）。
 fn apply_route(
     ui: &AppWindow,
     runtime: &Arc<crate::backend::BackendRuntime>,
     route: crate::Route,
     param: SharedString,
 ) {
-    apply_detail(ui, runtime, &load_detail(route, &param));
+    let detail = load_detail(route, &param);
+    // 远端分流：本地投影 miss 且带 qq: 前缀 → 异步远端装载（本地事实
+    // 优先，R3：同形展示名本地命中时不会走到这里）。load_detail 对远端
+    // 参数返回 None，miss 判定涵盖。
+    if matches!(
+        detail,
+        DetailData::None
+            | DetailData::Playlist(_, None)
+            | DetailData::Album(None)
+            | DetailData::Artist(None)
+    ) {
+        let remote_mid = crate::remote_details::remote_param(&param);
+        let handled = match (route, remote_mid) {
+            (crate::Route::Playlist, Some(_)) => {
+                crate::remote_details::spawn_remote_playlist_load(ui.as_weak(), runtime, &param);
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            return;
+        }
+    }
+    apply_detail(ui, runtime, &detail);
 }
 
 /// 详情页数据（纯数据、Send——供库变更刷新在后台线程预算）。
@@ -687,15 +714,43 @@ enum DetailData {
 
 fn load_detail(route: crate::Route, param: &str) -> DetailData {
     match route {
-        crate::Route::Playlist => DetailData::Playlist(
-            param.to_string(),
-            param
+        crate::Route::Playlist => {
+            if let Some(detail) = param
                 .parse::<i64>()
                 .ok()
-                .and_then(library_view::playlist_detail),
-        ),
-        crate::Route::Album => DetailData::Album(library_view::album_detail(param)),
-        crate::Route::Artist => DetailData::Artist(library_view::artist_detail(param)),
+                .and_then(library_view::playlist_detail)
+            {
+                return DetailData::Playlist(param.to_string(), Some(detail));
+            }
+            if crate::remote_details::remote_param(param).is_some() {
+                // 远端参数：本地投影 miss（数字 parse 被前缀挡住必 miss）。
+                // 返回 None → 库变更重放（schedule_refresh）apply_detail
+                // no-op，远端页面数据不被库变更误清（D-1）；导航路径由
+                // apply_route 在此之前分流到远端装载。
+                return DetailData::None;
+            }
+            DetailData::Playlist(param.to_string(), None)
+        }
+        // 专辑/歌手（展示名参数）：本地命中优先（R3——展示名理论上可叫
+        // "qq:…" 属极端构造，本地事实先行）；miss 且带前缀 → None（同上）。
+        crate::Route::Album => {
+            if let Some(detail) = library_view::album_detail(param) {
+                DetailData::Album(Some(detail))
+            } else if crate::remote_details::remote_param(param).is_some() {
+                DetailData::None
+            } else {
+                DetailData::Album(None)
+            }
+        }
+        crate::Route::Artist => {
+            if let Some(detail) = library_view::artist_detail(param) {
+                DetailData::Artist(Some(detail))
+            } else if crate::remote_details::remote_param(param).is_some() {
+                DetailData::None
+            } else {
+                DetailData::Artist(None)
+            }
+        }
         _ => DetailData::None,
     }
 }
@@ -708,6 +763,9 @@ fn apply_detail(
     let data = Data::get(ui);
     match detail {
         DetailData::Playlist(param, Some(detail)) => {
+            // 本地命中 → 就绪（M2：本地路径同步维护 state，防「远端失败
+            // state=4 → 返回本地歌单仍渲染失败文案」的交替导航残留）
+            data.set_playlist_state(2);
             data.set_playlist_found(true);
             data.set_playlist_name(detail.name.clone().into());
             data.set_playlist_meta_items(model(vec![
@@ -729,8 +787,13 @@ fn apply_detail(
                 crate::track_covers::targets_from_rows(&detail.tracks),
             );
         }
-        DetailData::Playlist(_, None) => data.set_playlist_found(false),
+        // 本地 miss → 未找到（M2：同步维护 state）
+        DetailData::Playlist(_, None) => {
+            data.set_playlist_state(3);
+            data.set_playlist_found(false);
+        }
         DetailData::Album(Some(detail)) => {
+            data.set_album_state(2);
             data.set_album_found(true);
             data.set_album_name(detail.name.clone().into());
             data.set_album_artist(detail.artist.clone().unwrap_or_default().into());
@@ -759,8 +822,12 @@ fn apply_detail(
                 crate::track_covers::targets_from_rows(&detail.tracks),
             );
         }
-        DetailData::Album(None) => data.set_album_found(false),
+        DetailData::Album(None) => {
+            data.set_album_state(3);
+            data.set_album_found(false);
+        }
         DetailData::Artist(Some(detail)) => {
+            data.set_artist_state(2);
             data.set_artist_found(true);
             data.set_artist_name(detail.name.clone().into());
             data.set_artist_meta_items(model(vec![
@@ -792,7 +859,10 @@ fn apply_detail(
                     .collect::<Vec<_>>(),
             ));
         }
-        DetailData::Artist(None) => data.set_artist_found(false),
+        DetailData::Artist(None) => {
+            data.set_artist_state(3);
+            data.set_artist_found(false);
+        }
         DetailData::None => {}
     }
 }
@@ -1300,5 +1370,107 @@ mod tests {
         assert_eq!(row.duration_ms, 0);
         // TrackRow 已剥 cover（表格行不背位图，MEMFIX 工作②）：无封面断言可做，
         // 字段层面的占位图职责移交 QueueRow（player_bridge 队列投影）
+    }
+
+    /// D-1 分流：远端参数（qq:）→ `DetailData::None`（导航分流信号 + 库变更
+    /// 重放 no-op）；本地参数形态（数字 id / 展示名）不误判（miss 走诚实空态）。
+    #[test]
+    fn load_detail_routes_remote_params_to_none() {
+        assert!(matches!(
+            load_detail(crate::Route::Playlist, "qq:8522132521"),
+            DetailData::None
+        ));
+        assert!(matches!(
+            load_detail(crate::Route::Album, "qq:002albUMZTyiKq"),
+            DetailData::None
+        ));
+        assert!(matches!(
+            load_detail(crate::Route::Artist, "qq:0025NhlN2yWrP4"),
+            DetailData::None
+        ));
+        // 本地参数：形态保持（命中与否取决于本机库，只锚定不误判远端）
+        match load_detail(crate::Route::Playlist, "123") {
+            DetailData::Playlist(p, _) => assert_eq!(p, "123"),
+            _ => panic!("本地数字 id 参数必须保持 Playlist 形态"),
+        }
+        assert!(matches!(
+            load_detail(crate::Route::Album, "十一月的萧邦"),
+            DetailData::Album(_)
+        ));
+        assert!(matches!(
+            load_detail(crate::Route::Artist, "周杰伦"),
+            DetailData::Artist(_)
+        ));
+    }
+
+    /// M1 验收：推荐卡 mid（qq: 前缀形态）↔ 封面旁路表键一致——卡片构造与
+    /// 登记两侧同走 `playlist_card_key`，任一侧改形即在此失配。
+    #[test]
+    fn discover_card_mid_prefix_matches_cover_side_table() {
+        let p = hmp_core::DiscoverPlaylist {
+            id: 7468450811,
+            title: "爆款预警".into(),
+            picurl: "https://y.gtimg.cn/cover.jpg".into(),
+            creator: "胡桃".into(),
+            songnum: 161,
+            listennum: 0,
+        };
+        let card = discover_playlist_card(&p);
+        // 卡片 mid 带前缀（点击即远端详情动线，D-1）
+        assert_eq!(card.mid.as_str(), "qq:7468450811");
+        // 登记侧（裸 id）与卡片 mid 命中同一键（M1）
+        crate::online_covers::register_playlist_covers(vec![(
+            p.id.to_string(),
+            "https://y.gtimg.cn/cover.jpg".into(),
+        )]);
+        assert_eq!(
+            crate::online_covers::playlist_cover_of(card.mid.as_str()).as_deref(),
+            Some("https://y.gtimg.cn/cover.jpg"),
+            "发现卡 mid 必须命中封面旁路表键"
+        );
+    }
+
+    /// M2 验收：本地/远端交替导航后状态正确——远端失败 state=4 → 返回本地
+    /// 命中 state=2 正常渲染；本地 miss → state=3（未找到/失败不串台）。
+    #[test]
+    fn local_remote_alternating_navigation_states() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+        let runtime = Arc::new(crate::backend::BackendRuntime::new().unwrap());
+        let data = Data::get(&ui);
+
+        // 远端回包失败（离线）→ state=4
+        crate::remote_details::apply_playlist_response(
+            &ui.as_weak(),
+            &runtime,
+            crate::remote_details::current_playlist_generation(),
+            Err(crate::backend::BackendError::Protocol("offline".into())),
+        );
+        assert_eq!(data.get_playlist_state(), 4, "远端失败态");
+
+        // 返回本地歌单（本地命中）→ state=2、found=true 正常渲染
+        let detail = DetailData::Playlist(
+            "3".into(),
+            Some(library_view::PlaylistDetail {
+                name: "深夜循环".into(),
+                tracks: vec![],
+                total_ms: 0,
+                cover_uri: None,
+            }),
+        );
+        apply_detail(&ui, &runtime, &detail);
+        assert_eq!(data.get_playlist_state(), 2, "本地命中必须复位就绪态");
+        assert!(data.get_playlist_found());
+        assert_eq!(data.get_playlist_name().as_str(), "深夜循环");
+
+        // 本地 miss（已删除）→ state=3
+        apply_detail(&ui, &runtime, &DetailData::Playlist("999".into(), None));
+        assert_eq!(data.get_playlist_state(), 3, "本地 miss → 未找到");
+
+        // 专辑/歌手本地分支同步置位（M2 逐一落位）
+        apply_detail(&ui, &runtime, &DetailData::Album(None));
+        assert_eq!(data.get_album_state(), 3);
+        apply_detail(&ui, &runtime, &DetailData::Artist(None));
+        assert_eq!(data.get_artist_state(), 3);
     }
 }
