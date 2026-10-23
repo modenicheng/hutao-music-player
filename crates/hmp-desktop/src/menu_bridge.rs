@@ -5,6 +5,7 @@
 //! - 加入播放列表 / 从歌单移除：`PlaylistWrite`（桌面端首个消费方）；受理
 //!   （Ok）后触发库刷新，歌单详情页/侧栏模型即时落账——与 daemon
 //!   `LibraryChanged` 推送互补，推送丢失或离线窗口期也不落空
+//!
 //! 错误反馈统一走 [`player_bridge`] 派发路径（未登录等人话文案复用）。
 
 use std::sync::{Arc, Mutex};
