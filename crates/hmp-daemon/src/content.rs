@@ -131,6 +131,9 @@ impl ContentService {
                     mid: a.mid,
                     name: a.name,
                     singer: a.singer,
+                    // smartbox 的专辑封面是完整 URL（fixture 实证 y.gtimg.cn
+                    // T002R180 模板）；空 → UI 程序化占位。
+                    pic: a.pic.unwrap_or_default(),
                 })
                 .collect(),
             singers: result
@@ -139,6 +142,8 @@ impl ContentService {
                 .map(|s| hmp_core::SearchSinger {
                     mid: s.mid,
                     name: s.name,
+                    // T001R150 头像，同上。
+                    pic: s.pic.unwrap_or_default(),
                 })
                 .collect(),
         })
@@ -441,6 +446,8 @@ impl ContentService {
                             update_time: t.update_time,
                             listen_num: t.listen_num,
                             picurl: t.front_pic_url,
+                            // 榜单总曲数（卡面「N 首」角标）。
+                            total_num: t.total_num,
                             preview: t
                                 .songs
                                 .iter()
@@ -508,6 +515,30 @@ impl ContentService {
         Ok(hmp_core::GuessPage {
             songs: resp.songs.iter().map(project_song).collect(),
         })
+    }
+
+    /// 远端歌单详情（D2 内容动线；免登录只读，委托自由函数）。
+    pub async fn remote_playlist_detail(
+        &self,
+        id: i64,
+    ) -> Result<hmp_core::RemotePlaylistDetail, String> {
+        remote_playlist_detail(&self.client, id).await
+    }
+
+    /// 远端专辑详情（D2 内容动线；免登录只读）。
+    pub async fn remote_album_detail(
+        &self,
+        mid: &str,
+    ) -> Result<hmp_core::RemoteAlbumDetail, String> {
+        remote_album_detail(&self.client, mid).await
+    }
+
+    /// 远端歌手详情（D2 内容动线；免登录只读，含歌手照片）。
+    pub async fn remote_artist_detail(
+        &self,
+        mid: &str,
+    ) -> Result<hmp_core::RemoteArtistDetail, String> {
+        remote_artist_detail(&self.client, mid).await
     }
 }
 
@@ -639,7 +670,204 @@ fn project_song(s: &hmp_qqmusic_api::models::Song) -> hmp_core::DiscoverNewSong 
         // 裸 pmid 不是 URL（2026-09-30 修复：此前直接透传，UI 经 CoverGet
         // 换图时被域守卫拒绝）；套 T002 模板成完整封面地址
         picurl: cover_url_from_pmid(&s.album.pmid),
+        // 行内链接（D-5）：远端详情行经 `qq:` 前缀跳远端专辑/歌手页；
+        // 空串 → 链接禁用。
+        album_mid: s.album.mid.clone(),
+        artist_mid: s.singer.first().map(|g| g.mid.clone()).unwrap_or_default(),
     }
+}
+
+// ————————————————————————————————————————————————
+// 远端详情数据域（D2 内容动线；免登录只读，PLAN §③ D-3）
+//
+// 自由函数形态（client 显式入参）对齐 reconcile.rs 的 fetch_playlist_songs
+// 先例——wiremock 集成测试可直接注入 mock client（tests/remote_details.rs）。
+// 曲目首窗语义对齐 TopDetailGet 固定页先例（PLAN D-4）：歌单/专辑前 100、
+// 歌手热歌 50 / 专辑 30，total/has_more 交 UI 诚实标注。
+// ————————————————————————————————————————————————
+
+/// 远端歌单详情首窗大小（`CgiGetDiss` 单页请求）。
+const REMOTE_PLAYLIST_WINDOW: u32 = 100;
+/// 远端专辑曲目首窗大小。
+const REMOTE_ALBUM_WINDOW: u32 = 100;
+/// 远端歌手热歌首窗大小（服务端可能忽略 number 按固定条数返回）。
+const REMOTE_ARTIST_SONGS_WINDOW: u32 = 50;
+/// 远端歌手专辑首窗大小。
+const REMOTE_ARTIST_ALBUMS_WINDOW: u32 = 30;
+
+/// 远端歌单详情（`CgiGetDiss`；reconcile `fetch_playlist_songs` 同源接口，
+/// 此处只读展示不落库）。
+pub async fn remote_playlist_detail(
+    client: &QqMusicClient,
+    id: i64,
+) -> Result<hmp_core::RemotePlaylistDetail, String> {
+    let resp = hmp_qqmusic_api::songlist::SonglistApi::new(client)
+        .get_detail(
+            id,
+            0,
+            hmp_qqmusic_api::pagination::Page::new(1, REMOTE_PLAYLIST_WINDOW),
+            true,
+            false,
+            false,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.code != 0 {
+        // 服务端把「歌单不存在」表达为内层 data.code=-100006（songlist.rs 实测记录）
+        return Err(format!("playlist not found (code {})", resp.code));
+    }
+    Ok(project_songlist_detail(id, &resp))
+}
+
+/// `CgiGetDiss` 响应 → `RemotePlaylistDetail`（纯投影，单测锚定）。
+fn project_songlist_detail(
+    id: i64,
+    resp: &hmp_qqmusic_api::songlist::GetSonglistDetailResponse,
+) -> hmp_core::RemotePlaylistDetail {
+    hmp_core::RemotePlaylistDetail {
+        id,
+        name: resp.info.list.title.clone(),
+        creator: resp.info.creator.nick.clone(),
+        picurl: resp.info.list.picurl.clone(),
+        listen_num: resp.info.list.listennum,
+        tracks: resp.songs.iter().map(project_song).collect(),
+        total: resp.total,
+        has_more: resp.hasmore != 0,
+    }
+}
+
+/// 远端专辑详情（`GetAlbumDetail` + `GetAlbumSongList`）。
+pub async fn remote_album_detail(
+    client: &QqMusicClient,
+    mid: &str,
+) -> Result<hmp_core::RemoteAlbumDetail, String> {
+    if mid.is_empty() {
+        return Err("album mid is empty".into());
+    }
+    let api = hmp_qqmusic_api::album::AlbumApi::new(client);
+    let detail = api.get_detail(mid).await.map_err(|e| e.to_string())?;
+    let songs = api
+        .get_song(
+            mid,
+            hmp_qqmusic_api::pagination::Page::new(1, REMOTE_ALBUM_WINDOW),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(project_album_detail(&detail, &songs))
+}
+
+/// 专辑详情两响应 → `RemoteAlbumDetail`（纯投影，单测锚定）。
+fn project_album_detail(
+    detail: &hmp_qqmusic_api::album::GetAlbumDetailResponse,
+    songs: &hmp_qqmusic_api::album::GetAlbumSongResponse,
+) -> hmp_core::RemoteAlbumDetail {
+    let singer = if detail.singers.is_empty() {
+        String::new()
+    } else {
+        detail
+            .singers
+            .iter()
+            .map(|g| g.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
+    // has_more 归一规则 ②（无显式字段，按 total 推算；服务端可能少给条数）
+    let has_more = songs.total_num > songs.song_list.len() as i64;
+    hmp_core::RemoteAlbumDetail {
+        mid: detail.album.album.mid.clone(),
+        name: detail.album.album.name.clone(),
+        singer,
+        singer_mid: detail
+            .singers
+            .first()
+            .map(|g| g.mid.clone())
+            .unwrap_or_default(),
+        company: detail.company.name.clone(),
+        genre: detail.album.genre.clone(),
+        language: detail.album.language.clone(),
+        desc: detail.album.desc.clone(),
+        time_public: detail.album.album.time_public.clone(),
+        picurl: cover_url_from_pmid(&detail.album.album.pmid),
+        tracks: songs.song_list.iter().map(project_song).collect(),
+        total: songs.total_num,
+        has_more,
+    }
+}
+
+/// 远端歌手详情（`GetHomepageHeader` + `GetSingerSongList` + `GetAlbumList`）。
+///
+/// 歌手照片取主页头部 `singer_pic`（§20/§23「歌手照片无数据源」边界就此
+/// 闭合）；歌曲/专辑列表服务端可能忽略 `number`，has_more 按 total 推算。
+pub async fn remote_artist_detail(
+    client: &QqMusicClient,
+    mid: &str,
+) -> Result<hmp_core::RemoteArtistDetail, String> {
+    use hmp_qqmusic_api::pagination::Page;
+    use hmp_qqmusic_api::singer::SingerApi;
+    if mid.is_empty() {
+        return Err("artist mid is empty".into());
+    }
+    let api = SingerApi::new(client);
+    let header = api.get_info(mid).await.map_err(|e| e.to_string())?;
+    let songs = api
+        .get_songs_list(mid, Page::new(1, REMOTE_ARTIST_SONGS_WINDOW))
+        .await
+        .map_err(|e| e.to_string())?;
+    let albums = api
+        .get_album_list(mid, Page::new(1, REMOTE_ARTIST_ALBUMS_WINDOW))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(project_artist_detail(mid, &header, &songs, &albums))
+}
+
+/// 歌手三响应 → `RemoteArtistDetail`（纯投影，单测锚定）。
+fn project_artist_detail(
+    mid: &str,
+    header: &hmp_qqmusic_api::singer::HomepageHeaderResponse,
+    songs: &hmp_qqmusic_api::singer::SingerSongListResponse,
+    albums: &hmp_qqmusic_api::singer::SingerAlbumListResponse,
+) -> hmp_core::RemoteArtistDetail {
+    hmp_core::RemoteArtistDetail {
+        mid: mid.to_string(),
+        name: header.singer.name.clone(),
+        photo_url: singer_photo_url(header),
+        song_total: songs.total_num,
+        album_total: albums.total,
+        tracks: songs.song_list.iter().map(project_song).collect(),
+        albums: albums
+            .album_list
+            .iter()
+            .map(|a| hmp_core::RemoteAlbumBrief {
+                mid: a.album.mid.clone(),
+                name: a.album.name.clone(),
+                picurl: cover_url_from_pmid(&a.album.pmid),
+                // 年份取发行日期前 4 位；无值 → "—"（不伪造）
+                year_text: if a.album.time_public.len() >= 4 {
+                    a.album.time_public[..4].to_string()
+                } else {
+                    "—".into()
+                },
+                track_count: a.total_num,
+            })
+            .collect(),
+        // B2（歌手简介）裁剪：字段预铺恒空（PLAN 修订记录）
+        desc: String::new(),
+    }
+}
+
+/// 歌手照片 URL：`singer_pic` 为空时（2026-10-23 真机实测：live 端点恒空、
+/// fixture 才有值）退 `T001R300x300M000` 模板（`singer_pmid`，y.gtimg.cn
+/// 域内，29KB 实测可取）；两者皆空 → 空串（UI 程序化占位，D-3 域外
+/// 回退口径）。`BaseInfo.avatar` 域为 y.qq.com 不在 `COVER_HOSTS`，不走。
+fn singer_photo_url(header: &hmp_qqmusic_api::singer::HomepageHeaderResponse) -> String {
+    if !header.singer.singer_pic.is_empty() {
+        return header.singer.singer_pic.clone();
+    }
+    let pmid = &header.singer.singer_pmid;
+    if pmid.is_empty() {
+        return String::new();
+    }
+    format!("https://y.gtimg.cn/music/photo_new/T001R300x300M000{pmid}.jpg")
 }
 
 #[cfg(test)]
@@ -664,6 +892,27 @@ mod tests {
         let v = serde_json::json!({ "data": { "userinfo": { "nick": "胡桃" } } });
         assert_eq!(find_str(&v, "nick"), Some("胡桃"));
         assert_eq!(find_str(&v, "missing"), None);
+    }
+
+    /// 歌手照片 URL 三级回退：singer_pic 直通 → pmid T001 模板 → 空串。
+    /// （live 端点 SingerPic 恒空、模板 URL 29KB 实测可取——2026-10-23）
+    #[test]
+    fn singer_photo_url_prefers_pic_then_pmid_template() {
+        let mut header = hmp_qqmusic_api::singer::HomepageHeaderResponse::default();
+        header.singer.singer_pic =
+            "https://y.gtimg.cn/music/photo_new/T001R150x150M000x_1.jpg".into();
+        assert_eq!(
+            singer_photo_url(&header),
+            "https://y.gtimg.cn/music/photo_new/T001R150x150M000x_1.jpg"
+        );
+        header.singer.singer_pic = String::new();
+        header.singer.singer_pmid = "0025NhlN2yWrP4_11".into();
+        assert_eq!(
+            singer_photo_url(&header),
+            "https://y.gtimg.cn/music/photo_new/T001R300x300M0000025NhlN2yWrP4_11.jpg"
+        );
+        header.singer.singer_pmid = String::new();
+        assert_eq!(singer_photo_url(&header), "");
     }
 
     #[test]
@@ -864,5 +1113,162 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page, LyricPage::default());
+    }
+
+    // ——— 远端详情纯投影（D2；free 函数的出网部分由 wiremock 集成锚定）———
+
+    /// 构造最小可播 `Song`（models 结构 Default 全空，关键字段逐个给）。
+    fn api_song(
+        mid: &str,
+        name: &str,
+        album_mid: &str,
+        pmid: &str,
+    ) -> hmp_qqmusic_api::models::Song {
+        hmp_qqmusic_api::models::Song {
+            mid: mid.into(),
+            name: name.into(),
+            singer: vec![hmp_qqmusic_api::models::Singer {
+                mid: "smid".into(),
+                name: "歌手甲".into(),
+                ..Default::default()
+            }],
+            album: hmp_qqmusic_api::models::Album {
+                mid: album_mid.into(),
+                name: "专辑甲".into(),
+                pmid: pmid.into(),
+                ..Default::default()
+            },
+            interval: 180,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn project_songlist_detail_maps_fields() {
+        let mut resp = hmp_qqmusic_api::songlist::GetSonglistDetailResponse::default();
+        resp.info.list.title = "华语经典".into();
+        resp.info.list.picurl = "https://qpic.y.qq.com/p.jpg".into();
+        resp.info.list.listennum = 12_345;
+        resp.info.creator.nick = "胡桃".into();
+        resp.songs = vec![api_song("m1", "夜曲", "am1", "pmid1")];
+        resp.total = 268;
+        resp.hasmore = 1;
+        let page = project_songlist_detail(8522132521, &resp);
+        assert_eq!(page.id, 8522132521);
+        assert_eq!(page.name, "华语经典");
+        assert_eq!(page.creator, "胡桃");
+        assert_eq!(page.picurl, "https://qpic.y.qq.com/p.jpg");
+        assert_eq!(page.listen_num, 12_345);
+        assert_eq!(page.total, 268);
+        assert!(page.has_more);
+        // 曲目走 project_song：封面套模板、行内链接带 mid
+        assert_eq!(page.tracks.len(), 1);
+        assert_eq!(
+            page.tracks[0].picurl,
+            "https://y.gtimg.cn/music/photo_new/T002R300x300M000pmid1.jpg"
+        );
+        assert_eq!(page.tracks[0].album_mid, "am1");
+        assert_eq!(page.tracks[0].artist_mid, "smid");
+    }
+
+    #[test]
+    fn project_album_detail_maps_fields_and_cover_template() {
+        let mut detail = hmp_qqmusic_api::album::GetAlbumDetailResponse::default();
+        detail.album.album.mid = "amid".into();
+        detail.album.album.name = "十一月的萧邦".into();
+        detail.album.album.pmid = "pmidX".into();
+        detail.album.album.time_public = "2005-11-01".into();
+        detail.album.desc = "简介".into();
+        detail.album.language = "国语".into();
+        detail.album.genre = "流行".into();
+        detail.company.name = "杰威尔音乐".into();
+        detail.singers = vec![
+            hmp_qqmusic_api::models::Singer {
+                mid: "s1".into(),
+                name: "周杰伦".into(),
+                ..Default::default()
+            },
+            hmp_qqmusic_api::models::Singer {
+                mid: "s2".into(),
+                name: "费玉清".into(),
+                ..Default::default()
+            },
+        ];
+        let songs = hmp_qqmusic_api::album::GetAlbumSongResponse {
+            album_mid: "amid".into(),
+            total_num: 12,
+            song_list: vec![api_song("m1", "夜曲", "amid", "p1")],
+        };
+        let page = project_album_detail(&detail, &songs);
+        assert_eq!(page.name, "十一月的萧邦");
+        assert_eq!(page.singer, "周杰伦 / 费玉清");
+        assert_eq!(page.singer_mid, "s1");
+        assert_eq!(page.company, "杰威尔音乐");
+        assert_eq!(page.time_public, "2005-11-01");
+        // pmid → T002 模板（空 pmid → 空串由 cover_url_from_pmid 单测另锚）
+        assert_eq!(
+            page.picurl,
+            "https://y.gtimg.cn/music/photo_new/T002R300x300M000pmidX.jpg"
+        );
+        assert_eq!(page.total, 12);
+        // total(12) > 返回条数(1) → has_more（归一规则②）
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn project_artist_detail_photo_and_album_briefs() {
+        let mut header = hmp_qqmusic_api::singer::HomepageHeaderResponse::default();
+        header.singer.mid = "smid".into();
+        header.singer.name = "周杰伦".into();
+        header.singer.singer_pic =
+            "https://y.gtimg.cn/music/photo_new/T001R150x150M000x_11.jpg".into();
+        let songs = hmp_qqmusic_api::singer::SingerSongListResponse {
+            total_num: 1012,
+            song_list: vec![api_song("m1", "青花瓷", "am1", "p1")],
+            ..Default::default()
+        };
+        let albums = hmp_qqmusic_api::singer::SingerAlbumListResponse {
+            total: 139,
+            album_list: vec![
+                hmp_qqmusic_api::singer::AlbumBrief {
+                    album: hmp_qqmusic_api::models::Album {
+                        mid: "a1".into(),
+                        name: "范特西".into(),
+                        pmid: "pA".into(),
+                        time_public: "2001-09-14".into(),
+                        ..Default::default()
+                    },
+                    total_num: 10,
+                    ..Default::default()
+                },
+                // 无发行日期 → 年份 "—"（不伪造）
+                hmp_qqmusic_api::singer::AlbumBrief {
+                    album: hmp_qqmusic_api::models::Album {
+                        mid: "a2".into(),
+                        name: "单曲集".into(),
+                        ..Default::default()
+                    },
+                    total_num: 2,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let page = project_artist_detail("smid", &header, &songs, &albums);
+        assert_eq!(page.mid, "smid");
+        assert_eq!(page.name, "周杰伦");
+        assert_eq!(page.photo_url, header.singer.singer_pic);
+        assert_eq!(page.song_total, 1012);
+        assert_eq!(page.album_total, 139);
+        assert_eq!(page.tracks.len(), 1);
+        assert_eq!(page.desc, ""); // B2 裁剪：恒空
+        assert_eq!(page.albums.len(), 2);
+        assert_eq!(page.albums[0].year_text, "2001");
+        assert_eq!(page.albums[0].track_count, 10);
+        assert_eq!(
+            page.albums[0].picurl,
+            "https://y.gtimg.cn/music/photo_new/T002R300x300M000pA.jpg"
+        );
+        assert_eq!(page.albums[1].year_text, "—");
     }
 }

@@ -13,6 +13,7 @@ pub mod menu_bridge;
 pub mod online_covers;
 pub mod player_bridge;
 pub mod prefs;
+pub mod remote_details;
 pub mod track_covers;
 pub mod track_theme;
 

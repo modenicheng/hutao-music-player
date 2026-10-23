@@ -25,8 +25,9 @@ pub use ipc::{
     AccountInfo, CommentItem, CommentPage, DaemonState, DiscoverNewSong, DiscoverPage,
     DiscoverPlaylist, EnginePhase, ErrorInfo, Event, GuessPage, IpcErrorCode, LoginQrSession,
     LoginQrState, LyricPage, PlayRequest, PlaylistWriteOp, QualityPrefDto, QueueEntry, QueuePage,
-    Request, Response, SearchAlbum, SearchPage, SearchSinger, SearchSong, TopCategoryPage,
-    TopDetailPage, TopGroupDto, TopSongDto, TopSummaryDto, TrackProvider, TrackRef,
+    RemoteAlbumBrief, RemoteAlbumDetail, RemoteArtistDetail, RemotePlaylistDetail, Request,
+    Response, SearchAlbum, SearchPage, SearchSinger, SearchSong, TopCategoryPage, TopDetailPage,
+    TopGroupDto, TopSongDto, TopSummaryDto, TrackProvider, TrackRef,
 };
 pub use media::{Album, AlbumRef, ArtistRef, AudioQuality, CoverRef, Playlist, Track, TrackStub};
 pub use player::{

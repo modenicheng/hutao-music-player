@@ -544,6 +544,12 @@ fn artist_detail_from(db: &mut LibraryDb, param: &str) -> Option<ArtistDetail> {
             tracks = db.local_tracks_by_artist(&name).ok()?;
         }
     }
+    // 本地投影 miss 判定（D2c）：曲目空 = 该歌手不在本地库（含 qq: 远端
+    // 参数——精确 artist 匹配必空）。空曲目页无信息量且会拦掉远端分流，
+    // 退回 None 走「未找到」/远端装载（专辑页同口径：分组无命中即 None）。
+    if tracks.is_empty() {
+        return None;
+    }
 
     let album_covers = album_cover_map(db)?;
     let groups: HashMap<String, AlbumGroup> = db
@@ -1236,9 +1242,9 @@ mod tests {
         assert_eq!(resolved.name, "群星");
         assert_eq!(resolved.tracks.len(), 2);
 
-        // 完全无关的名字 → 空详情（found 但无内容）；空参 → None。
-        let empty = artist_detail_from(&mut db, "不存在的歌手").expect("detail ok");
-        assert!(empty.tracks.is_empty() && empty.albums.is_empty());
+        // 完全无关的名字 → None（本地 miss：空曲目页无信息量且拦远端分流，
+        // 退「未找到」/远端装载——D2c）；空参 → None。
+        assert!(artist_detail_from(&mut db, "不存在的歌手").is_none());
         assert!(artist_detail_from(&mut db, "").is_none());
     }
 }

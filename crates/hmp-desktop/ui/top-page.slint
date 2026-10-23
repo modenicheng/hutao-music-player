@@ -8,7 +8,8 @@ import { Nav, Route } from "nav.slint";
 import { Data } from "stores.slint";
 import { TopCardData } from "data.slint";
 
-// 单个榜单卡：名称 + 期号 + 预览前 3 首（悬停浮起）。
+// 单个榜单卡（T5/D-8）：封面（4:3、radius-lg、阴影、hover 浮起）+
+// 右下「N 首」角标 + 名 + 更新时间 + 预览前 3 首（DESIGN §3.2 完整卡）。
 component TopCard inherits Rectangle {
     in property <TopCardData> card;
     // 列宽由网格容器按窗口宽算好传入（280px 为最大卡宽，窄窗按比例缩）
@@ -16,7 +17,8 @@ component TopCard inherits Rectangle {
     callback clicked();
 
     width: root.card-width;
-    height: 156px;
+    // 封面 4:3 + 间距 + 名/更新/预览文本区
+    height: root.card-width * 0.75 + 118px;
     border-radius: Theme.radius-lg;
     drop-shadow-blur: touch.has-hover ? 8px : 2px;
     drop-shadow-color: #241F1B.transparentize(touch.has-hover ? 0.86 : 0.92);
@@ -43,16 +45,53 @@ component TopCard inherits Rectangle {
     }
 
     VerticalLayout {
-        padding-left: Theme.space-5;
-        padding-right: Theme.space-5;
-        padding-top: Theme.space-4;
-        padding-bottom: Theme.space-4;
-        spacing: 4px;
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        padding-top: Theme.space-3;
+        padding-bottom: Theme.space-3;
+        spacing: 3px;
+
+        // —— 封面（4:3；占位 → CoverGet 换真图渐进）———
+        Rectangle {
+            height: root.card-width * 0.75;
+            border-radius: Theme.radius-lg;
+            clip: true;
+            background: Theme.muted;
+
+            Image {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                source: root.card.cover;
+                image-fit: ImageFit.cover;
+            }
+
+            // 「N 首」角标（B3；total-num=0 未知不展示）
+            if root.card.total-num > 0: Rectangle {
+                x: parent.width - self.width - 8px;
+                y: parent.height - self.height - 8px;
+                width: badge-text.preferred-width + 14px;
+                height: 20px;
+                border-radius: Theme.pill(self.height);
+                background: #241F1B.transparentize(0.35);
+
+                badge-text := Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.card.total-num + " 首";
+                    color: #FAF9F8;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
 
         Text {
             text: root.card.name;
             color: Theme.foreground;
-            font-size: 15px;
+            font-size: 14.5px;
             font-weight: 700;
             overflow: elide;
         }
@@ -64,24 +103,22 @@ component TopCard inherits Rectangle {
             overflow: elide;
         }
 
-        Rectangle { height: 4px; }
-
         Text {
             text: root.card.preview.length > 0 ? root.card.preview[0] : "";
             color: Theme.muted-foreground;
-            font-size: 12.5px;
+            font-size: 12px;
             overflow: elide;
         }
         Text {
             text: root.card.preview.length > 1 ? root.card.preview[1] : "";
             color: Theme.muted-foreground;
-            font-size: 12.5px;
+            font-size: 12px;
             overflow: elide;
         }
         Text {
             text: root.card.preview.length > 2 ? root.card.preview[2] : "";
             color: Theme.muted-foreground;
-            font-size: 12.5px;
+            font-size: 12px;
             overflow: elide;
         }
     }
@@ -159,12 +196,13 @@ export component TopPage inherits Rectangle {
 
                 Rectangle {
                     background: transparent;
-                    // 行数自撑容器高度（Scroll content VerticalLayout preferred-height 生效）
+                    // 行数自撑容器高度（Scroll content VerticalLayout preferred-height 生效）；
+                    // 卡高随列宽动态（封面 4:3 + 文本区，D-8）
                     height: rows > 0 ? rows * card-h + (rows - 1) * 16px : 0px;
 
                     property <int> cols: Math.max(1, Math.ceil((self.width + 16px) / 296px));
                     property <int> rows: Math.ceil(group.tops.length / cols);
-                    property <length> card-h: 156px;
+                    property <length> card-h: card-w * 0.75 + 118px;
                     // 280px 为最大卡宽，窄窗按比例缩
                     property <length> card-w: Math.min(280px, (self.width - (cols - 1) * 16px) / cols);
 

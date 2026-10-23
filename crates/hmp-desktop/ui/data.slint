@@ -51,6 +51,15 @@ export struct CoverCardData {
     cover: image,
 }
 
+/** 搜索歌手卡（SearchView.vue 圆形头像卡对应物，C6） */
+export struct ArtistCardData {
+    /** singermid（Rust 侧已拼 qq: 前缀，导航直达远端歌手详情） */
+    mid: string,
+    name: string,
+    /** 头像（程序化占位 → CoverGet 换真图） */
+    cover: image,
+}
+
 /** 本地监视文件夹行（WatchedFolder） */
 export struct FolderRow {
     path: string,
@@ -98,7 +107,11 @@ export struct TopCardData {
     title-sub: string,
     update-time: string,
     listen-num: int,
+    /** 榜单总曲数（「N 首」角标；0 = 未知不展示，B3） */
+    total-num: int,
     preview: [string],
+    /** 封面（程序化占位 → daemon picurl 经 CoverGet 换真图，T5） */
+    cover: image,
 }
 
 /** 排行榜分组（TopGroupDto 展示投影） */
