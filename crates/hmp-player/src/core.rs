@@ -15,30 +15,93 @@ use crate::source::{MediaLocation, parse_uri};
 /// rodio 的 `DecoderBuilder` 要求 reader `Send + Sync`，而 hmp-core 契约的
 /// [`MediaStream`] 只有 `Send`。Read/Seek 都是 `&mut self` 独占访问，decoder
 /// 是唯一消费者（无并发锁竞争），用 `Mutex` 桥接 `Sync`——无 unsafe。
-struct SyncStream(std::sync::Mutex<Box<dyn MediaStream>>);
+struct SyncStream {
+    inner: std::sync::Mutex<Box<dyn MediaStream>>,
+    /// 中途读错误闩（见 [`SourceErrorLatch`]）。
+    latch: SourceErrorLatch,
+}
+
+/// 源读错误闩（AUDIT §16 开放项：中途读错误被 rodio 视为 EOS → 静默跳歌）。
+///
+/// rodio/symphonia 把 reader 的 IO 错误当源终止（rodio-0.21.1
+/// `decoder/symphonia.rs::next` 的 `Err(_) => return None`），`sink.empty()`
+/// 无法区分自然播完与错误终止。reader 包装层在 `Read` 返回 `Err` 时置闩
+/// （首错粘滞），drive ticker 在判 EOS 前查询：闩有错 → 显式
+/// `PlayerEvent::Error` + `PlaybackStatus::Error`，而非 Ended——引擎侧
+/// 不再静默跳歌。**只在 Read 置闩**：seek 错误由 `try_seek` 结果自带
+/// 报告（保持播放态的既有语义），置闩反而会把「seek 失败后自然播完」
+/// 误判为中途错误。
+type SourceErrorLatch = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+
+fn new_error_latch() -> SourceErrorLatch {
+    std::sync::Arc::new(std::sync::Mutex::new(None))
+}
+
+/// 置闩（首错粘滞：只记第一个错误，避免高频读错误反复改写）。
+fn latch_set(latch: &SourceErrorLatch, context: &str, err: &std::io::Error) {
+    let mut g = latch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if g.is_none() {
+        *g = Some(format!("{context}: {err}"));
+    }
+}
+
+/// 取走闩中错误（消费语义：ticker 判定一次即清）。
+fn latch_take(latch: &SourceErrorLatch) -> Option<String> {
+    latch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
 
 impl SyncStream {
-    fn new(stream: Box<dyn MediaStream>) -> Self {
-        Self(std::sync::Mutex::new(stream))
+    fn new(stream: Box<dyn MediaStream>, latch: SourceErrorLatch) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(stream),
+            latch,
+        }
     }
 }
 
 impl std::io::Read for SyncStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         // 锁中毒（reader 读中途 panic）不致命：继续用内部 reader。
-        self.0
+        self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .read(buf)
+            .inspect_err(|e| latch_set(&self.latch, "media stream read", e))
     }
 }
 
 impl std::io::Seek for SyncStream {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        self.0
+        self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .seek(pos)
+    }
+}
+
+/// 本地文件的同款错误闩包装（`Decoder::try_from(file)` 的中途读错同走
+/// rodio 静默终止路径；本地盘错误罕见但同病，一并显式化）。
+struct LatchedFile {
+    file: File,
+    latch: SourceErrorLatch,
+}
+
+impl std::io::Read for LatchedFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.file
+            .read(buf)
+            .inspect_err(|e| latch_set(&self.latch, "audio file read", e))
+    }
+}
+
+impl std::io::Seek for LatchedFile {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
     }
 }
 
@@ -54,6 +117,9 @@ enum LoadCommand {
 struct LoadCompletion {
     request: Box<LoadRequest>,
     result: Result<Option<Duration>, HmpError>,
+    /// 本次装载 reader 的错误闩（§16：中途读错误显式化；result 为 Err 时
+    /// 未使用——装载失败本身已走 completion Err 分支）。
+    latch: SourceErrorLatch,
 }
 
 /// Open the platform-appropriate output stream (safe variant).
@@ -317,7 +383,10 @@ impl PlayerCore {
 async fn append_location(
     sink: &Sink,
     location: MediaLocation,
-) -> Result<Option<Duration>, HmpError> {
+) -> Result<(Option<Duration>, SourceErrorLatch), HmpError> {
+    // 错误闩随 reader 建立（§16：中途读错误显式化），经 LoadCompletion
+    // 回 drive 循环供 ticker 在判 EOS 前查询。
+    let latch = new_error_latch();
     // 格式探测（decoder 构建）是**阻塞读**（MediaStream 的 Read 在数据
     // 饥饿时阻塞等源的后台预取），必须在 `spawn_blocking` 上做：若内联在
     // runtime worker 上，worker 被读挂起，而源的后台预取生产任务
@@ -329,11 +398,21 @@ async fn append_location(
     // 丢弃，decoder 随之释放，不会追加过期音源。
     let decoder: Box<dyn Source<Item = f32> + Send> = match location {
         MediaLocation::File(path) => {
+            let latch = latch.clone();
             spawn_decode(move || {
                 let file = File::open(&path).map_err(|error| {
                     HmpError::Playback(format!("open audio file {}: {error}", path.display()))
                 })?;
-                Decoder::try_from(file)
+                // 对齐 `Decoder::try_from(File)` 的设置（byte_len + seekable
+                // 提升seek性能）；包一层错误闩 reader（§16）。
+                let byte_len = file
+                    .metadata()
+                    .map_err(|e| HmpError::Playback(format!("stat audio file: {e}")))?
+                    .len();
+                Decoder::builder()
+                    .with_data(LatchedFile { file, latch })
+                    .with_byte_len(byte_len)
+                    .build()
                     .map(|decoder| Box::new(decoder) as Box<dyn Source<Item = f32> + Send>)
                     .map_err(|error| {
                         HmpError::Playback(format!("decode audio file {}: {error}", path.display()))
@@ -347,7 +426,7 @@ async fn append_location(
             let reader = source
                 .open()
                 .map_err(|error| HmpError::Playback(format!("open media stream: {error}")))?;
-            let builder = Decoder::builder().with_data(SyncStream::new(reader));
+            let builder = Decoder::builder().with_data(SyncStream::new(reader, latch.clone()));
             spawn_decode(move || {
                 builder
                     .build()
@@ -359,7 +438,7 @@ async fn append_location(
     };
     let duration = decoder.total_duration();
     sink.append(decoder);
-    Ok(duration)
+    Ok((duration, latch))
 }
 
 /// 在阻塞线程池上构建 decoder（见 `append_location` 注释）。
@@ -386,13 +465,21 @@ async fn perform_load(sink: Arc<Sink>, request: Box<LoadRequest>) -> LoadComplet
                 return LoadCompletion {
                     request,
                     result: Err(error),
+                    latch: new_error_latch(),
                 };
             }
         },
     };
     sink.clear();
-    let result = append_location(&sink, location).await;
-    LoadCompletion { request, result }
+    let (result, latch) = match append_location(&sink, location).await {
+        Ok((duration, latch)) => (Ok(duration), latch),
+        Err(e) => (Err(e), new_error_latch()),
+    };
+    LoadCompletion {
+        request,
+        result,
+        latch,
+    }
 }
 
 async fn drive(
@@ -409,6 +496,9 @@ async fn drive(
     // 远端取流挂起就冻结全部命令处理，驱动永久僵尸，2026-09-29 事故）。
     let mut load_abort: Option<tokio::task::AbortHandle> = None;
     let mut load_done: Option<tokio::sync::oneshot::Receiver<LoadCompletion>> = None;
+    // 当前装载 reader 的错误闩（§16：判 EOS 前查询，中途读错误 → 显式
+    // Error 态；装载分派/Stop 清除、completion 换新）。
+    let mut current_latch: Option<SourceErrorLatch> = None;
 
     loop {
         tokio::select! {
@@ -417,6 +507,15 @@ async fn drive(
                 match command {
                     PlayerCommand::Play => {
                         if state.current.is_some() {
+                            if state.status == PlaybackStatus::Error {
+                                // Error 态点播放 = 用户显式恢复（O1）：清闩，
+                                // 已排空的源经 ticker 判 Ended → PlaybackEnded
+                                // 续播下一首（干净恢复，不再闪回 Error）。
+                                // 全新装载路径（Request::Play）本就重建闩。
+                                if let Some(latch) = current_latch.as_ref() {
+                                    latch_take(latch);
+                                }
+                            }
                             sink.play();
                             state.status = PlaybackStatus::Playing;
                         }
@@ -436,6 +535,12 @@ async fn drive(
                             sink.pause();
                             state.status = PlaybackStatus::Paused;
                         } else if state.current.is_some() {
+                            if state.status == PlaybackStatus::Error {
+                                // 同 Play：Error 态切换播放 = 显式恢复（O1）。
+                                if let Some(latch) = current_latch.as_ref() {
+                                    latch_take(latch);
+                                }
+                            }
                             sink.play();
                             state.status = PlaybackStatus::Playing;
                         }
@@ -448,6 +553,7 @@ async fn drive(
                         }
                         drop(load_done.take());
                         sink.stop();
+                        current_latch = None;
                         state.status = PlaybackStatus::Stopped;
                         state.position = Duration::ZERO;
                     }
@@ -498,6 +604,8 @@ async fn drive(
                             abort.abort();
                         }
                         drop(load_done.take());
+                        // 旧装载的错误闩随旧装载作废（§16）。
+                        current_latch = None;
                         state.status = PlaybackStatus::Loading;
                         state.buffering = Some(0.0);
                         let _ = state_tx.send(state.clone());
@@ -527,6 +635,7 @@ async fn drive(
                 let request = completion.request;
                 match completion.result {
                     Ok(duration) => {
+                        current_latch = Some(completion.latch);
                         state.current = Some(request.track);
                         state.actual_quality = Some(request.quality);
                         state.load_gen = request.load_gen;
@@ -563,13 +672,29 @@ async fn drive(
                 if state.current.is_some() && matches!(state.status, PlaybackStatus::Playing | PlaybackStatus::Paused) {
                     state.position = sink.get_pos();
                     if state.status == PlaybackStatus::Playing && sink.empty() {
-                        state.status = PlaybackStatus::Ended;
-                        if let Some(duration) = state.duration {
-                            state.position = duration;
+                        // 中途读错误判定（§16 开放项）：闩有错 → 显式 Error
+                        // 态 + Error 事件（不 Ended、不前移位置、不发
+                        // PlaybackEnded——引擎不再静默跳歌）。仅自然排空才
+                        // 判曲尾。
+                        let latched_error = current_latch.as_ref().and_then(latch_take);
+                        if let Some(err) = latched_error {
+                            state.status = PlaybackStatus::Error;
+                            let error = HmpError::Playback(format!("source read error: {err}"));
+                            tracing::warn!(%error, "source read failed mid-playback");
+                            let _ = state_tx.send(state.clone());
+                            let _ = events_tx.send(PlayerEvent::Error {
+                                load_gen: state.load_gen,
+                                error,
+                            });
+                        } else {
+                            state.status = PlaybackStatus::Ended;
+                            if let Some(duration) = state.duration {
+                                state.position = duration;
+                            }
+                            let _ = events_tx.send(PlayerEvent::PlaybackEnded {
+                                load_gen: state.load_gen,
+                            });
                         }
-                        let _ = events_tx.send(PlayerEvent::PlaybackEnded {
-                            load_gen: state.load_gen,
-                        });
                     }
                     let _ = state_tx.send(state.clone());
                 }
@@ -581,7 +706,6 @@ async fn drive(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::*;
 
     /// 输出设备安全策略：只允许经系统音频服务器路由的 PCM。回归守护：
@@ -630,5 +754,244 @@ mod tests {
         ];
         prefs.sort_by_key(|p| p.unwrap_or(usize::MAX));
         assert_eq!(prefs, vec![Some(0), Some(1), Some(2)]);
+    }
+
+    // ── §16 开放项 #2：中途读错误显式 Error 态（错误闩） ──────────────
+
+    /// 最小合法 WAV（PCM 8-bit 单声道 8kHz）：44 字节头 + `data_len` 字节中值。
+    fn wav_bytes(data_len: usize) -> Vec<u8> {
+        let sample_rate = 8000u32;
+        let mut b = Vec::with_capacity(44 + data_len);
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&((36 + data_len) as u32).to_le_bytes());
+        b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(b"fmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        b.extend_from_slice(&1u16.to_le_bytes()); // 单声道
+        b.extend_from_slice(&sample_rate.to_le_bytes());
+        b.extend_from_slice(&sample_rate.to_le_bytes()); // byte rate（8-bit mono）
+        b.extend_from_slice(&1u16.to_le_bytes()); // block align
+        b.extend_from_slice(&8u16.to_le_bytes()); // bits per sample
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(data_len as u32).to_le_bytes());
+        b.extend_from_slice(&vec![128u8; data_len]);
+        b
+    }
+
+    fn test_track(id: &str) -> hmp_core::Track {
+        hmp_core::Track {
+            id: hmp_core::TrackId::new(id),
+            title: format!("t-{id}"),
+            artists: vec![],
+            album: None,
+            duration: None,
+            cover: None,
+            url: None,
+            available_qualities: vec![],
+        }
+    }
+
+    /// 假进程内源：固定字节集；读越过 `err_at` 后返回 Err（模拟中途读
+    /// 错误；`err_at = usize::MAX` 即永不失败的干净源）。
+    #[derive(Debug)]
+    struct FailingStreamSource {
+        data: Vec<u8>,
+        err_at: usize,
+    }
+
+    impl hmp_core::MediaStreamSource for FailingStreamSource {
+        fn len(&self) -> u64 {
+            self.data.len() as u64
+        }
+        fn open(&self) -> std::io::Result<Box<dyn MediaStream>> {
+            Ok(Box::new(FailingStream {
+                data: self.data.clone(),
+                err_at: self.err_at,
+                pos: 0,
+            }))
+        }
+    }
+
+    struct FailingStream {
+        data: Vec<u8>,
+        err_at: usize,
+        pos: usize,
+    }
+
+    impl std::io::Read for FailingStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.err_at {
+                return Err(std::io::Error::other("synthetic mid-read failure"));
+            }
+            let end = self.data.len().min(self.err_at).min(self.pos + buf.len());
+            let n = end.saturating_sub(self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..end]);
+            self.pos = end;
+            Ok(n)
+        }
+    }
+
+    impl std::io::Seek for FailingStream {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            let base = match pos {
+                std::io::SeekFrom::Start(n) => n as i128,
+                std::io::SeekFrom::End(d) => self.data.len() as i128 + d as i128,
+                std::io::SeekFrom::Current(d) => self.pos as i128 + d as i128,
+            };
+            self.pos = (base.clamp(0, self.data.len() as i128)) as usize;
+            Ok(self.pos as u64)
+        }
+    }
+
+    /// 收集驱动事件直到谓词命中或超时。
+    async fn next_event(
+        events: &mut tokio::sync::broadcast::Receiver<PlayerEvent>,
+        deadline: tokio::time::Instant,
+    ) -> Option<PlayerEvent> {
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Ok(ev)) => return Some(ev),
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
+                Err(_) => return None, // deadline 到
+            }
+        }
+        None
+    }
+
+    /// §16：中途读错误不得被当成 EOS——显式 `PlayerEvent::Error` +
+    /// `status=Error`，**无** PlaybackEnded（引擎侧因此不静默跳歌）。
+    #[tokio::test]
+    async fn mid_read_error_yields_error_event_not_ended() {
+        let core = PlayerCore::new_silent_for_test();
+        let mut events = core.subscribe_events();
+        let state = core.subscribe_state();
+        // 3s 素材，1s 处读错误（探测已过、解码中途命中）。
+        let src = std::sync::Arc::new(FailingStreamSource {
+            data: wav_bytes(24_000),
+            err_at: 44 + 8_000,
+        });
+        core.load(LoadRequest {
+            track: test_track("wav1"),
+            uri: "fake://wav1".into(),
+            quality: hmp_core::AudioQuality::Mp3_128,
+            load_gen: 1,
+            stream: Some(src),
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        let mut saw_error = false;
+        let mut saw_ended = false;
+        while let Some(ev) = next_event(&mut events, deadline).await {
+            match ev {
+                PlayerEvent::Error { .. } => {
+                    saw_error = true;
+                    break;
+                }
+                PlayerEvent::PlaybackEnded { .. } => {
+                    saw_ended = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_error, "中途读错误应产生 Error 事件（而非静默终止）");
+        assert!(!saw_ended, "中途读错误不得被当成曲尾 PlaybackEnded");
+        // 状态翻到 Error（Error 事件先行，状态同拍随后；稍候收尾发布）。
+        let settle = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < settle && state.borrow().status != PlaybackStatus::Error
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(state.borrow().status, PlaybackStatus::Error);
+    }
+
+    /// §16 防误伤：自然播完（无读错误）仍判 Ended + PlaybackEnded。
+    #[tokio::test]
+    async fn clean_exhaust_still_ends() {
+        let core = PlayerCore::new_silent_for_test();
+        let mut events = core.subscribe_events();
+        let src = std::sync::Arc::new(FailingStreamSource {
+            data: wav_bytes(2_400), // 0.3s
+            err_at: usize::MAX,     // 永不失败
+        });
+        core.load(LoadRequest {
+            track: test_track("wav2"),
+            uri: "fake://wav2".into(),
+            quality: hmp_core::AudioQuality::Mp3_128,
+            load_gen: 1,
+            stream: Some(src),
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        let mut saw_error = false;
+        let mut saw_ended = false;
+        while let Some(ev) = next_event(&mut events, deadline).await {
+            match ev {
+                PlayerEvent::Error { .. } => {
+                    saw_error = true;
+                    break;
+                }
+                PlayerEvent::PlaybackEnded { .. } => {
+                    saw_ended = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_ended, "干净源自然播完应产生 PlaybackEnded");
+        assert!(!saw_error, "干净源不得误报 Error");
+    }
+
+    /// O1：Error 态点 Play = 显式恢复——清闩后经 EOS 路径续播
+    /// （PlaybackEnded 到达，不再闪回 Error）。
+    #[tokio::test]
+    async fn play_after_error_clears_latch_and_advances() {
+        let core = PlayerCore::new_silent_for_test();
+        let mut events = core.subscribe_events();
+        let state = core.subscribe_state();
+        let src = std::sync::Arc::new(FailingStreamSource {
+            data: wav_bytes(24_000),
+            err_at: 44 + 8_000,
+        });
+        core.load(LoadRequest {
+            track: test_track("wav3"),
+            uri: "fake://wav3".into(),
+            quality: hmp_core::AudioQuality::Mp3_128,
+            load_gen: 1,
+            stream: Some(src),
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        // 先等到 Error。
+        loop {
+            let Some(ev) = next_event(&mut events, deadline).await else {
+                panic!("8s 内未出现中途读错误 Error 事件");
+            };
+            if matches!(ev, PlayerEvent::Error { .. }) {
+                break;
+            }
+        }
+        assert_eq!(state.borrow().status, PlaybackStatus::Error);
+        // 点播放：清闩 → 排空源判 Ended → PlaybackEnded（续播信号）。
+        core.play();
+        let mut saw_ended = false;
+        let mut saw_second_error = false;
+        while let Some(ev) = next_event(&mut events, deadline).await {
+            match ev {
+                PlayerEvent::PlaybackEnded { .. } => {
+                    saw_ended = true;
+                    break;
+                }
+                PlayerEvent::Error { .. } => {
+                    saw_second_error = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_ended && !saw_second_error,
+            "Play 后应经 Ended 续播而非再次 Error（O1 清闩）"
+        );
     }
 }
