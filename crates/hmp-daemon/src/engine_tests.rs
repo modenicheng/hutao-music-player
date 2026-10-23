@@ -104,6 +104,16 @@ impl FakeDriver {
     pub fn emit(&self, ev: PlayerEvent) {
         let _ = self.events_tx.send(ev);
     }
+    /// 模拟驱动播放中错误（§16 #2 引擎收口测试）：status=Error + 同代
+    /// Error 事件——对齐 T2 真实驱动 ticker 的错误分支形态。
+    pub fn emit_playback_error(&self, load_gen: u64) {
+        self.state_tx
+            .send_modify(|s| s.status = PlaybackStatus::Error);
+        let _ = self.events_tx.send(PlayerEvent::Error {
+            load_gen,
+            error: hmp_core::HmpError::Playback("source read error: synthetic mid-read".into()),
+        });
+    }
     /// 仅 URI 列表（断言便捷；loads 同时记录装载代际）。
     pub fn load_uris(&self) -> Vec<String> {
         self.loads
@@ -1763,6 +1773,179 @@ async fn stale_gen_error_is_ignored() {
         s.playback.current.as_ref().unwrap().id,
         TrackId::new("b"),
         "旧代错误不得改变当前曲"
+    );
+}
+
+/// §16 开放项 #2：播放中（同代）读错误 → 显式收口——last_error 置位、
+/// 会话以 reason="error" 闭合、phase=Failed；**不 on_ended、不 advance**
+/// （队列不前移、无新装载），不再静默跳歌。
+#[tokio::test]
+async fn midplay_error_sets_last_error_closes_session_holds() {
+    use hmp_storage::LibraryDb;
+
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+    let library = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+    let (handle, _st) = start_engine_with_library(driver.clone(), resolver, library.clone()).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_idle().await;
+    let load_gen = driver.loads.lock().unwrap()[0].1;
+    let loads_before = driver.loads.lock().unwrap().len();
+
+    driver.emit_playback_error(load_gen);
+    wait_idle().await;
+
+    let s = handle.state_rx.borrow();
+    assert!(
+        s.last_error.is_some(),
+        "播放中错误必须浮出 last_error（否则 UI 无感知）"
+    );
+    assert_eq!(s.phase, hmp_core::EnginePhase::Failed);
+    assert_eq!(
+        s.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("a"),
+        "错误后停在原曲（队列不前移）"
+    );
+    assert_eq!(s.queue.current, Some(0), "队列游标不动");
+    drop(s);
+    assert_eq!(
+        driver.loads.lock().unwrap().len(),
+        loads_before,
+        "错误收口不得触发换曲装载"
+    );
+    // 会话以 reason="error" 闭合（listened_ms = 当前位置 0）。
+    {
+        let mut lib = library.lock().unwrap();
+        let recent = lib.recent_plays(10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].reason, "error");
+        assert!(recent[0].ended_at.is_some(), "错误即闭合会话");
+    }
+}
+
+/// seek 失败事件（驱动刻意保持播放态、status 不变 Error）不得按播放故障
+/// 收口：无 last_error、阶段保持 Playing、播放继续（core.rs 既有语义）。
+#[tokio::test]
+async fn seek_failure_error_not_treated() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+    let (handle, _st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_idle().await;
+    let load_gen = driver.loads.lock().unwrap()[0].1;
+    let loads_before = driver.loads.lock().unwrap().len();
+
+    // seek 失败形态：同代 Error 事件但 status 保持 Playing（不置 Error）。
+    driver.emit(PlayerEvent::Error {
+        load_gen,
+        error: hmp_core::HmpError::Playback("seek audio stream: not buffered".into()),
+    });
+    wait_idle().await;
+
+    let s = handle.state_rx.borrow();
+    assert!(s.last_error.is_none(), "seek 失败不宣告播放器故障");
+    assert_eq!(s.phase, hmp_core::EnginePhase::Playing);
+    assert_eq!(
+        s.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("a"),
+        "seek 失败后当前曲不变"
+    );
+    drop(s);
+    assert_eq!(driver.loads.lock().unwrap().len(), loads_before);
+}
+
+/// M1：`resolve_source_ids` 第一次成功（播种列表），此后报错——模拟
+/// QueueAppend 解析失败置 last_error 且旧曲在播的常态窗口。
+#[derive(Debug)]
+struct OneShotSourceResolver {
+    inner: Arc<FakeResolver>,
+    used: std::sync::atomic::AtomicBool,
+}
+
+impl SourceResolver for OneShotSourceResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        if !self.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.inner.resolve_source_ids(src)
+        } else {
+            Box::pin(async {
+                Err(EngineError::Internal(
+                    "source resolution unavailable".into(),
+                ))
+            })
+        }
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        self.inner.resolve_track(id)
+    }
+}
+
+/// M1：无关错误（QueueAppend 解析失败置 last_error，旧曲在播）不得锁死
+/// 播放错误收口——守卫 (c) 按代际判重而非全局 last_error。若误用
+/// `last_error.is_none()` 判重，本测试收口被跳过（phase 停留 Playing）。
+#[tokio::test]
+async fn unrelated_resolve_error_does_not_lock_error_treatment() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(OneShotSourceResolver {
+        inner: FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]),
+        used: std::sync::atomic::AtomicBool::new(false),
+    });
+    let (handle, _st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_idle().await;
+    // QueueAppend 解析失败：last_error 置位，a 继续在播（常态窗口）。
+    handle
+        .cmd(Request::QueueAppend(PlayRequest::Playlist(
+            hmp_core::PlaylistId::new("123"),
+        )))
+        .await
+        .unwrap();
+    wait_idle().await;
+    assert!(
+        handle.state_rx.borrow().last_error.is_some(),
+        "前置：解析失败已置 last_error"
+    );
+    assert_eq!(
+        handle
+            .state_rx
+            .borrow()
+            .playback
+            .current
+            .as_ref()
+            .map(|t| t.id.as_ref()),
+        Some("a"),
+        "前置：旧曲仍在播"
+    );
+
+    // 播放中错误（同代 + 驱动 Error 态）→ 收口必须仍然生效。
+    let load_gen = driver.loads.lock().unwrap()[0].1;
+    driver.emit_playback_error(load_gen);
+    wait_idle().await;
+    let s = handle.state_rx.borrow();
+    assert_eq!(
+        s.phase,
+        hmp_core::EnginePhase::Failed,
+        "无关 last_error 不得锁死错误收口（M1 按代际判重）"
+    );
+    assert_eq!(
+        s.last_error.as_ref().map(|e| e.message.as_str()),
+        Some("playback error: source read error: synthetic mid-read"),
+        "last_error 更新为播放错误本体"
     );
 }
 

@@ -173,6 +173,12 @@ pub struct PlaybackEngine {
     phase: hmp_core::EnginePhase,
     /// 装载代际（每次 load_and_play 递增；旧代事件过滤，spec §7 换代机制）。
     current_gen: u64,
+    /// 已收口错误的装载代际（M1，§16 开放项 #2）：装载期失败在
+    /// `wait_current_applied` 消化 Error 事件时、播放中错误在 run() 收口时
+    /// 写入该代——run() 随后处理广播缓冲里同一事件的副本时不二次收口。
+    /// 按**代际**而非全局 last_error 判重：后者会被无关错误（如 QueueAppend
+    /// 解析失败且旧曲在播的常态窗口）误锁死。
+    error_handled_gen: Option<u64>,
     /// 播放能力发布（MPRIS 订阅，Finding 9）。
     caps_tx: watch::Sender<PlaybackCapabilities>,
     /// 终止信号发布（sticky，Finding 7）。
@@ -246,6 +252,9 @@ impl PlaybackEngine {
     /// 带装载超时注入的启动（测试用短超时驱动失败路径）。
     /// `session_path`：会话持久化路径（None = 不持久化）；`persist_throttle`：
     /// 位置写盘节流；`preload_timeout`：G2 预解析总超时（测试注入短值）。
+    // 测试专用注入缝：参数逐项注入（load/preload/list 超时等），调用点全在
+    // engine_tests.rs，超出 7 参阈值为有意取舍（生产入口走 start_with_library）。
+    #[allow(clippy::too_many_arguments)]
     pub fn start_with_options(
         driver: Arc<dyn PlaybackDriver>,
         resolver: Arc<dyn SourceResolver>,
@@ -310,6 +319,7 @@ impl PlaybackEngine {
             last_error: None,
             phase: hmp_core::EnginePhase::Idle,
             current_gen: 0,
+            error_handled_gen: None,
             caps_tx,
             term_tx,
             library,
@@ -504,10 +514,31 @@ impl PlaybackEngine {
                                 self.on_ended().await;
                             }
                         }
-                        Ok(PlayerEvent::Error { load_gen, .. }) => {
+                        Ok(PlayerEvent::Error { load_gen, error }) => {
                             // 旧代错误事件属已换下的曲目 → 忽略（装载结果由 load_and_play 决定）。
                             if load_gen != self.current_gen {
                                 tracing::debug!(load_gen, current = self.current_gen, "忽略旧代错误事件");
+                            } else if self.state_rx.borrow().status == PlaybackStatus::Error
+                                && self.error_handled_gen != Some(self.current_gen)
+                            {
+                                // 播放中驱动错误收口（§16 开放项 #2，三守卫）：
+                                // ① 同代（上）；② 驱动 status==Error——播放器
+                                // ticker 把中途读错误置为 Error 态（T2），而
+                                // seek 失败事件刻意保持播放态（core.rs 注释），
+                                // 不得按播放故障收口；③ error_handled_gen 判重
+                                // （M1）——装载期失败已由 wait_current_applied
+                                // 消化（降档 bump / 终败回滚复原代际后，本事件
+                                // 多数已被 ① 过滤，此处兜广播缓冲竞态）。
+                                // → 显式错误：last_error + 闭合会话 + Failed；
+                                // 不 on_ended、不 advance——不静默跳歌。
+                                self.error_handled_gen = Some(self.current_gen);
+                                self.last_error = Some(ErrorInfo {
+                                    code: IpcErrorCode::Internal,
+                                    message: error.to_string(),
+                                });
+                                self.end_session("error");
+                                self.phase = hmp_core::EnginePhase::Failed;
+                                self.publish();
                             } else {
                                 self.publish();
                             }
@@ -1293,6 +1324,10 @@ impl PlaybackEngine {
                         Ok(PlayerEvent::Error { load_gen: ev_gen, error }) if ev_gen == load_gen => {
                             // 装载期驱动错误（打开/解码失败）：专用变体供
                             // load_and_play 触发音质降档重试（§16 开放项）。
+                            // M1：标记该代错误已处理——run() 循环稍后处理同一
+                            // 广播事件的缓冲副本时不二次收口（全局 last_error
+                            // 判重会被无关错误误锁死，按代际标记）。
+                            self.error_handled_gen = Some(load_gen);
                             return Err(EngineError::LoadFailed(error.to_string()));
                         }
                         Ok(_) => {}
