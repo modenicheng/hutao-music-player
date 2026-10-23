@@ -477,7 +477,7 @@ fn browse_loop_main(
     };
 
     let top_hit = sentinel_probe("top"); // 回顶：应命中（窗口 0..31 含首屏行）
-                                         // 关闭可能打开的菜单（点外）：中性左键
+    // 关闭可能打开的菜单（点外）：中性左键
     left_click(ui, 640.0, 30.0);
     settle();
 
@@ -499,11 +499,15 @@ fn browse_loop_main(
     let windowed = top_hit && !deep_hit && top_hit2;
     println!("GATE: windowed={windowed} (期望 true；false=全量退化)");
     if !windowed && !browse_force {
-        eprintln!("GATE FAIL: Viewport 直驱未切进窗口化路径，浏览代理数据无效（--browse-force 可在全量模式下继续，只覆盖根因 3+模型重建）");
+        eprintln!(
+            "GATE FAIL: Viewport 直驱未切进窗口化路径，浏览代理数据无效（--browse-force 可在全量模式下继续，只覆盖根因 3+模型重建）"
+        );
         std::process::exit(3);
     }
     if !windowed {
-        eprintln!("GATE FAIL 但 --browse-force：继续全量渲染模式（只覆盖根因 3 行不背图 + 模型重建，不覆盖窗口化）");
+        eprintln!(
+            "GATE FAIL 但 --browse-force：继续全量渲染模式（只覆盖根因 3 行不背图 + 模型重建，不覆盖窗口化）"
+        );
     }
     // 收起菜单，进入主循环
     left_click(ui, 640.0, 30.0);
