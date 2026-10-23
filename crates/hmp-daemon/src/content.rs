@@ -697,7 +697,7 @@ const REMOTE_ARTIST_ALBUMS_WINDOW: u32 = 30;
 
 /// 远端歌单详情（`CgiGetDiss`；reconcile `fetch_playlist_songs` 同源接口，
 /// 此处只读展示不落库）。
-pub(crate) async fn remote_playlist_detail(
+pub async fn remote_playlist_detail(
     client: &QqMusicClient,
     id: i64,
 ) -> Result<hmp_core::RemotePlaylistDetail, String> {
@@ -737,7 +737,7 @@ fn project_songlist_detail(
 }
 
 /// 远端专辑详情（`GetAlbumDetail` + `GetAlbumSongList`）。
-pub(crate) async fn remote_album_detail(
+pub async fn remote_album_detail(
     client: &QqMusicClient,
     mid: &str,
 ) -> Result<hmp_core::RemoteAlbumDetail, String> {
@@ -798,7 +798,7 @@ fn project_album_detail(
 ///
 /// 歌手照片取主页头部 `singer_pic`（§20/§23「歌手照片无数据源」边界就此
 /// 闭合）；歌曲/专辑列表服务端可能忽略 `number`，has_more 按 total 推算。
-pub(crate) async fn remote_artist_detail(
+pub async fn remote_artist_detail(
     client: &QqMusicClient,
     mid: &str,
 ) -> Result<hmp_core::RemoteArtistDetail, String> {
