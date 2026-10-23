@@ -698,6 +698,10 @@ fn apply_route(
                 crate::remote_details::spawn_remote_album_load(ui.as_weak(), runtime, &param);
                 true
             }
+            (crate::Route::Artist, Some(_)) => {
+                crate::remote_details::spawn_remote_artist_load(ui.as_weak(), runtime, &param);
+                true
+            }
             _ => false,
         };
         if handled {
@@ -1495,5 +1499,21 @@ mod tests {
         }));
         apply_detail(&ui, &runtime, &album);
         assert_eq!(data.get_album_state(), 2, "本地专辑命中复位就绪态");
+
+        // 远端歌手（T6）：失败 → 4；本地命中复位 2（交替导航，M2 同款）
+        crate::remote_details::apply_artist_response(
+            &ui.as_weak(),
+            &runtime,
+            crate::remote_details::current_artist_generation(),
+            Err(crate::backend::BackendError::Protocol("offline".into())),
+        );
+        assert_eq!(data.get_artist_state(), 4, "远端歌手失败态");
+        let artist = DetailData::Artist(Some(library_view::ArtistDetail {
+            name: "周杰伦".into(),
+            tracks: vec![],
+            albums: vec![],
+        }));
+        apply_detail(&ui, &runtime, &artist);
+        assert_eq!(data.get_artist_state(), 2, "本地歌手命中复位就绪态");
     }
 }

@@ -166,6 +166,40 @@ fn apply_playlist_cover(ui_weak: Weak<AppWindow>, id: &str, path: &str) {
     }
 }
 
+/// 歌手页专辑网格卡换图（D-7：≤30 张，discover 模式）：按 mid 定位
+/// `Data.artist-albums` 模型行原地换图，无匹配（页已切走/模型重建）即丢弃。
+/// 远端卡 mid 带 `qq:` 前缀，entries 传裸 albummid——匹配前同前缀拼接。
+pub fn refresh_artist_album_covers(
+    ui_weak: Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    entries: Vec<(String, String)>,
+) {
+    for (mid, url) in entries {
+        let key = format!("artist-album|{mid}|{url}");
+        let needle = format!("{}{mid}", crate::remote_details::REMOTE_PREFIX);
+        fetch_cover(ui_weak.clone(), runtime, key, url, move |ui, image| {
+            let data = Data::get(ui);
+            let model = data.get_artist_albums();
+            let Some(vec_model) = model
+                .as_any()
+                .downcast_ref::<slint::VecModel<crate::CoverCardData>>()
+            else {
+                return;
+            };
+            for i in 0..vec_model.iter().count() {
+                let Some(mut card) = vec_model.row_data(i) else {
+                    continue;
+                };
+                if card.mid.as_str() == needle {
+                    card.cover = image.clone();
+                    vec_model.set_row_data(i, card);
+                    return;
+                }
+            }
+        });
+    }
+}
+
 /// 歌单 id → 远程封面 URL（来自 discover 原始响应的旁路表）。
 ///
 /// `CoverCardData` 不携带 URL（Slint 结构保持窄），Rust 侧以并发安全

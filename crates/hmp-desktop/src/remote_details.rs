@@ -30,6 +30,8 @@ thread_local! {
     static PLAYLIST_GENERATION: Cell<u64> = const { Cell::new(0) };
     /// 远端专辑装载代数（同上）。
     static ALBUM_GENERATION: Cell<u64> = const { Cell::new(0) };
+    /// 远端歌手装载代数（同上）。
+    static ARTIST_GENERATION: Cell<u64> = const { Cell::new(0) };
 }
 
 /// 剥离 `qq:` 前缀（无前缀 → None；本地/远端分流判据，单测锚定）。
@@ -325,6 +327,161 @@ pub fn apply_album_response(
     }
 }
 
+// ————————————————————————————————————————————————
+// 远端歌手详情（D2c，含歌手照片）
+// ————————————————————————————————————————————————
+
+/// 远端歌手 meta：歌曲/专辑总数（超窗标注首窗，D-4）；空域不占位。
+fn remote_artist_meta(page: &hmp_core::RemoteArtistDetail) -> Vec<SharedString> {
+    let songs = if (page.tracks.len() as i64) < page.song_total {
+        format!(
+            "{} 首歌曲（展示前 {} 首）",
+            page.song_total,
+            page.tracks.len()
+        )
+    } else {
+        format!("{} 首歌曲", page.song_total)
+    };
+    let albums = if (page.albums.len() as i64) < page.album_total {
+        format!(
+            "{} 张专辑（展示前 {} 张）",
+            page.album_total,
+            page.albums.len()
+        )
+    } else {
+        format!("{} 张专辑", page.album_total)
+    };
+    vec![songs.into(), albums.into()]
+}
+
+/// 歌手页专辑网格卡（RemoteAlbumBrief 投影）：mid 带 `qq:` 前缀
+/// （点击进远端专辑详情，二级深入），副标题 "年份 · N 首"。
+fn remote_artist_album_card(a: &hmp_core::RemoteAlbumBrief) -> crate::CoverCardData {
+    crate::CoverCardData {
+        mid: format!("{REMOTE_PREFIX}{}", a.mid).into(),
+        title: a.name.as_str().into(),
+        subtitle: format!("{} · {} 首", a.year_text, a.track_count).into(),
+        cover: crate::covers::cover_image(&format!("album:{}", a.mid)),
+    }
+}
+
+/// 远端歌手装载入口（UI 线程被调，O1）。`param` 形如 `qq:<singermid>`。
+pub fn spawn_remote_artist_load(
+    ui_weak: Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    param: &str,
+) {
+    let Some((mid, generation)) = begin_artist_load(&ui_weak, param) else {
+        return;
+    };
+    let weak = ui_weak;
+    let rt_apply = Arc::clone(runtime);
+    runtime.spawn(async move {
+        let result = crate::backend::request(hmp_core::Request::ArtistDetailGet { mid }).await;
+        let _ = slint::invoke_from_event_loop(move || {
+            apply_artist_response(&weak, &rt_apply, generation, result);
+        });
+    });
+}
+
+/// 装载前半（纯 UI 线程部分）：置 state=1、校验参数、bump 代数。
+/// 前缀后为空 → state=4 并返回 None。
+pub fn begin_artist_load(ui_weak: &Weak<AppWindow>, param: &str) -> Option<(String, u64)> {
+    let ui = ui_weak.upgrade()?;
+    let data = Data::get(&ui);
+    data.set_artist_state(1);
+    let Some(mid) = remote_param(param).filter(|m| !m.is_empty()) else {
+        data.set_artist_state(4);
+        return None;
+    };
+    Some((mid.to_string(), bump_artist_generation()))
+}
+
+/// 当前远端歌手装载代数（迟到回包丢弃测试用）。
+pub fn current_artist_generation() -> u64 {
+    ARTIST_GENERATION.with(|g| g.get())
+}
+
+fn bump_artist_generation() -> u64 {
+    ARTIST_GENERATION.with(|g| {
+        let next = g.get().wrapping_add(1);
+        g.set(next);
+        next
+    })
+}
+
+/// 回包落地（invoke 闭包体，UI 线程）：代数过期即弃；not-found（3）与
+/// 失败（4）分态。歌手照片 = 主页头部 singer_pic（§20/§23 边界闭合的
+/// 数据源）；域外/空 → 程序化占位不换图。
+pub fn apply_artist_response(
+    ui_weak: &Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    generation: u64,
+    result: Result<hmp_core::Response, crate::backend::BackendError>,
+) {
+    let Some(ui) = ui_weak.upgrade() else {
+        return;
+    };
+    if current_artist_generation() != generation {
+        return; // 迟到回包：页已切走/已重新装载，丢弃防覆盖
+    }
+    let data = Data::get(&ui);
+    match result {
+        Ok(hmp_core::Response::ArtistDetail(page)) => {
+            data.set_artist_name(page.name.as_str().into());
+            data.set_artist_meta_items(model_rc(remote_artist_meta(&page)));
+            // 照片：程序化占位先行，photo_url 非空 → CoverGet 换真图
+            data.set_artist_photo(crate::covers::cover_image(&format!("artist:{}", page.mid)));
+            let rows: Vec<TrackRow> = page.tracks.iter().map(remote_track_row).collect();
+            data.set_artist_tracks(model_rc(rows));
+            let cards: Vec<crate::CoverCardData> =
+                page.albums.iter().map(remote_artist_album_card).collect();
+            data.set_artist_albums(model_rc(cards));
+            data.set_artist_state(2);
+            crate::track_covers::prefetch_tracks(
+                runtime,
+                page.tracks
+                    .iter()
+                    .filter(|s| !s.picurl.is_empty())
+                    .map(|s| (s.mid.clone(), s.picurl.clone()))
+                    .collect(),
+            );
+            if !page.photo_url.is_empty() {
+                let key = format!("artist-photo|{}|{}", page.mid, page.photo_url);
+                crate::online_covers::fetch_cover(
+                    ui_weak.clone(),
+                    runtime,
+                    key,
+                    page.photo_url.clone(),
+                    move |ui, image| {
+                        if current_artist_generation() != generation {
+                            return;
+                        }
+                        Data::get(ui).set_artist_photo(image);
+                    },
+                );
+            }
+            // 专辑网格卡换图（≤30 张，discover 模式：模型已落地，按 mid
+            // 原地换图；离页无匹配即丢弃）
+            crate::online_covers::refresh_artist_album_covers(
+                ui_weak.clone(),
+                runtime,
+                page.albums
+                    .iter()
+                    .filter(|a| !a.picurl.is_empty())
+                    .map(|a| (a.mid.clone(), a.picurl.clone()))
+                    .collect(),
+            );
+        }
+        Ok(hmp_core::Response::Err { ref message, .. }) if is_not_found(message) => {
+            data.set_artist_state(3);
+        }
+        _ => {
+            data.set_artist_state(4);
+        }
+    }
+}
+
 fn model_rc<T: 'static + Clone>(items: Vec<T>) -> slint::ModelRc<T> {
     slint::ModelRc::new(slint::VecModel::from(items))
 }
@@ -366,6 +523,45 @@ mod tests {
         assert_eq!(meta[0].as_str(), "—");
         assert_eq!(meta[1].as_str(), "国语");
         assert_eq!(meta.last().unwrap().as_str(), "共 130 首（展示前 12 首）");
+    }
+
+    #[test]
+    fn remote_artist_meta_and_album_card_projection() {
+        let page = hmp_core::RemoteArtistDetail {
+            mid: "sm-1".into(),
+            name: "周杰伦".into(),
+            photo_url: "https://y.gtimg.cn/p.jpg".into(),
+            song_total: 1012,
+            album_total: 139,
+            tracks: vec![hmp_core::DiscoverNewSong::default(); 50],
+            albums: vec![hmp_core::RemoteAlbumBrief {
+                mid: "a-1".into(),
+                name: "范特西".into(),
+                picurl: String::new(),
+                year_text: "2001".into(),
+                track_count: 10,
+            }],
+            desc: String::new(),
+        };
+        let meta = remote_artist_meta(&page);
+        assert_eq!(meta[0].as_str(), "1012 首歌曲（展示前 50 首）");
+        assert_eq!(meta[1].as_str(), "139 张专辑（展示前 1 张）");
+
+        // 专辑网格卡：qq: 前缀导航 + 年份·曲数副标题（T6 验收）
+        let card = remote_artist_album_card(&page.albums[0]);
+        assert_eq!(card.mid.as_str(), "qq:a-1");
+        assert_eq!(card.title.as_str(), "范特西");
+        assert_eq!(card.subtitle.as_str(), "2001 · 10 首");
+
+        // 首窗即全集 → 无标注
+        let exact = hmp_core::RemoteArtistDetail {
+            song_total: 50,
+            album_total: 1,
+            ..page
+        };
+        let meta = remote_artist_meta(&exact);
+        assert_eq!(meta[0].as_str(), "50 首歌曲");
+        assert_eq!(meta[1].as_str(), "1 张专辑");
     }
 
     #[test]
