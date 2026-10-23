@@ -131,6 +131,9 @@ impl ContentService {
                     mid: a.mid,
                     name: a.name,
                     singer: a.singer,
+                    // smartbox 的专辑封面是完整 URL（fixture 实证 y.gtimg.cn
+                    // T002R180 模板）；空 → UI 程序化占位。
+                    pic: a.pic.unwrap_or_default(),
                 })
                 .collect(),
             singers: result
@@ -139,6 +142,8 @@ impl ContentService {
                 .map(|s| hmp_core::SearchSinger {
                     mid: s.mid,
                     name: s.name,
+                    // T001R150 头像，同上。
+                    pic: s.pic.unwrap_or_default(),
                 })
                 .collect(),
         })
@@ -441,6 +446,8 @@ impl ContentService {
                             update_time: t.update_time,
                             listen_num: t.listen_num,
                             picurl: t.front_pic_url,
+                            // 榜单总曲数（卡面「N 首」角标）。
+                            total_num: t.total_num,
                             preview: t
                                 .songs
                                 .iter()
@@ -639,6 +646,10 @@ fn project_song(s: &hmp_qqmusic_api::models::Song) -> hmp_core::DiscoverNewSong 
         // 裸 pmid 不是 URL（2026-09-30 修复：此前直接透传，UI 经 CoverGet
         // 换图时被域守卫拒绝）；套 T002 模板成完整封面地址
         picurl: cover_url_from_pmid(&s.album.pmid),
+        // 行内链接（D-5）：远端详情行经 `qq:` 前缀跳远端专辑/歌手页；
+        // 空串 → 链接禁用。
+        album_mid: s.album.mid.clone(),
+        artist_mid: s.singer.first().map(|g| g.mid.clone()).unwrap_or_default(),
     }
 }
 

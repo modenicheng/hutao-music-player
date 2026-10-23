@@ -262,6 +262,10 @@ fn spawn_top_detail_load(
                                 album: s.album.clone(),
                                 interval: s.interval,
                                 picurl: s.picurl.clone(),
+                                // TopSongDto 不携带 mid（D-5 只覆盖远端详情行）
+                                // → 链接禁用，与既有行为一致。
+                                album_mid: String::new(),
+                                artist_mid: String::new(),
                             };
                             discover_track_row(&p)
                         })
