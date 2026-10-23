@@ -22,6 +22,13 @@ use crate::player::{EngineError, PlaybackDriver, ResolvedTrack, SourceResolver};
 /// 留余量防病理解析器不断给出新档导致无界重试）。
 const MAX_LOAD_DEGRADES: usize = 8;
 
+/// G2 预解析总超时默认值（AUDIT §16 开放项「预解析期无总超时」）。
+/// 流式解析典型 1-2s；预解析价值在曲间切换前完成，>15s 对 gapless 无
+/// 意义——超时静默放弃，Next 时按需解析路径语义完全一致地兜底。无 Range
+/// CDN 的全量下载回退被中止只留 `.part` 临时文件（`.part`+rename 原子写），
+/// 由既有「成功写缓存后清扫陈旧 tmp」（AUDIT §2）兜底。
+const PRELOAD_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// 会话持久化文件内容（`$XDG_DATA_HOME/hmp/playback_state.json`）。
 /// 恢复 queue/volume/position；恢复后不自动播放，首次 Play 时续播（里程碑 D）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,6 +194,10 @@ pub struct PlaybackEngine {
     current_rg_db: Option<f64>,
     /// 等待驱动应用装载的超时（测试注入短超时）。
     load_timeout: std::time::Duration,
+    /// G2 预解析总超时（AUDIT §16 开放项：预解析期无总超时——resolve 含
+    /// 网络/无 Range 全量下载回退可分钟级挂起；超时静默放弃，播放时按需
+    /// 解析兜底。测试注入短超时）。
+    preload_timeout: std::time::Duration,
     /// 完整队列快照（仅结构变化时发送；position tick 不触发——O(1) publish）。
     queue_tx: watch::Sender<QueueSnapshot>,
     /// 上次发布的队列版本（避免重复发送）。
@@ -228,11 +239,13 @@ impl PlaybackEngine {
             std::time::Duration::from_secs(5),
             session_path,
             std::time::Duration::from_secs(5),
+            PRELOAD_RESOLVE_TIMEOUT,
         )
     }
 
     /// 带装载超时注入的启动（测试用短超时驱动失败路径）。
-    /// `session_path`：会话持久化路径（None = 不持久化）；`persist_throttle`：位置写盘节流。
+    /// `session_path`：会话持久化路径（None = 不持久化）；`persist_throttle`：
+    /// 位置写盘节流；`preload_timeout`：G2 预解析总超时（测试注入短值）。
     pub fn start_with_options(
         driver: Arc<dyn PlaybackDriver>,
         resolver: Arc<dyn SourceResolver>,
@@ -241,6 +254,7 @@ impl PlaybackEngine {
         load_timeout: std::time::Duration,
         session_path: Option<std::path::PathBuf>,
         persist_throttle: std::time::Duration,
+        preload_timeout: std::time::Duration,
     ) -> EngineHandle {
         // 启动恢复：队列/音量/位置（不自动播放；Play 时续播，里程碑 D）。
         // 同步读取（run 开始前），避免与首帧发布竞态。
@@ -306,6 +320,7 @@ impl PlaybackEngine {
             rg_factor: 1.0,
             current_rg_db: None,
             load_timeout,
+            preload_timeout,
             queue_tx,
             last_queue_rev: 0,
             session_path,
@@ -1184,9 +1199,14 @@ impl PlaybackEngine {
         let key = (self.queue.revision(), self.current_gen);
         let resolver = self.resolver.clone();
         let slot = self.preload_slot.clone();
+        let timeout = self.preload_timeout;
         tokio::spawn(async move {
-            match resolver.resolve_track(&next).await {
-                Ok(res) => {
+            // 总超时（AUDIT §16 开放项）：resolve 含网络与无 Range 全量下载
+            // 回退，无界挂起会长期占用连接与任务；预解析本就是尽力而为，
+            // 超时即放弃（drop 取消在飞请求），播放时按需解析兜底。
+            let resolved = tokio::time::timeout(timeout, resolver.resolve_track(&next)).await;
+            match resolved {
+                Ok(Ok(res)) => {
                     let mut g = slot.lock().await;
                     // 乱序保护：仅当槽为空或槽的 key 不新于本次（<=）才写入。
                     let stale_or_same = match g.as_ref() {
@@ -1197,7 +1217,10 @@ impl PlaybackEngine {
                         *g = Some(PreloadSlot { key, id: next, res });
                     }
                 }
-                Err(e) => tracing::debug!(%e, "预解析失败（不影响播放）"),
+                Ok(Err(e)) => tracing::debug!(%e, "预解析失败（不影响播放）"),
+                Err(_) => {
+                    tracing::debug!(?timeout, "预解析超时（gapless 加速放弃，播放时按需解析）")
+                }
             }
         });
     }

@@ -676,6 +676,114 @@ async fn preload_consumed_on_eos() {
     );
 }
 
+/// 包装解析器：`resolve_track` 先睡眠 `delay`（测试注入慢解析；计数在
+/// 睡眠**前**递增——超时取消时 FakeResolver 内部计数不会推进，本计数器
+/// 才能区分「预解析被超时放弃」与「预解析成功写槽」）。
+#[derive(Debug)]
+struct DelayTrackResolver {
+    inner: Arc<FakeResolver>,
+    delay: std::time::Duration,
+    attempts: std::sync::atomic::AtomicU32,
+}
+
+impl SourceResolver for DelayTrackResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        self.inner.resolve_source_ids(src)
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let delay = self.delay;
+        let inner = self.inner.clone();
+        let id = id.clone();
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            inner.resolve_track(&id).await
+        })
+    }
+}
+
+/// §16 开放项（预解析无总超时）：注入短超时后，慢于超时的预解析被放弃
+/// （槽永不写入），Next 走按需解析（attempt 计数递增）；引擎不 hang、
+/// 不产生 last_error（预解析失败静默语义不变）。
+#[tokio::test]
+async fn preload_resolve_timeout_gives_up() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(DelayTrackResolver {
+        inner: FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]),
+        delay: std::time::Duration::from_millis(400),
+        attempts: std::sync::atomic::AtomicU32::new(0),
+    });
+    let handle = PlaybackEngine::start_with_options(
+        driver.clone(),
+        resolver.clone(),
+        Arc::new(|| true),
+        None,
+        std::time::Duration::from_secs(5),
+        None,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(50), // 预解析超时 ≪ delay
+    );
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref())
+                == Some("a")
+        },
+        "装载 a 完成",
+    )
+    .await;
+    // 预解析尝试发生但被 50ms 超时放弃（400ms 延迟远未到）→ 槽空。
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    assert_eq!(
+        resolver.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a 装载 + 预解析 b 各一次尝试"
+    );
+    assert!(handle.state_rx.borrow().last_error.is_none());
+    // Next：缓存未命中（超时放弃）→ 按需解析 b（第三次尝试）→ 成功装载。
+    handle
+        .cmd(Request::Command(PlayerCommand::Next))
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref())
+                == Some("b")
+        },
+        "Next 经按需解析装载 b",
+    )
+    .await;
+    assert_eq!(
+        resolver.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "超时放弃的预解析不被消费，Next 重新解析"
+    );
+    assert!(handle.state_rx.borrow().last_error.is_none());
+}
+
 /// G2：RG 增益在装载时叠加到用户音量；SetVolume 后仍叠加；换曲自动切换。
 #[tokio::test]
 // 锁仅用于串行化改 env 的测试；引擎任务从不获取该锁，无死锁风险。
@@ -1693,6 +1801,7 @@ async fn failed_load_rolls_back_to_previous_track() {
         std::time::Duration::from_millis(300),
         None,
         std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
     );
     // 先成功播放 a（gen=1）。
     handle
@@ -1746,6 +1855,7 @@ async fn first_load_failure_has_no_rollback() {
         std::time::Duration::from_millis(300),
         None,
         std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
     );
     driver.set_fail_load(true);
     handle
@@ -2473,6 +2583,7 @@ async fn rollback_failure_only_warns() {
         std::time::Duration::from_millis(300),
         None,
         std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
     );
     handle
         .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
@@ -2516,6 +2627,7 @@ async fn rollback_restores_gen_then_eos_advances() {
         std::time::Duration::from_millis(300),
         None,
         std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
     );
     handle
         .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
@@ -2832,6 +2944,7 @@ async fn load_passes_stream_source_and_rollback_reuses_it() {
         std::time::Duration::from_millis(300),
         None,
         std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
     );
     handle
         .cmd(Request::Play(PlayRequest::Track(TrackId::new("s1"))))
@@ -2981,6 +3094,7 @@ async fn session_restores_after_restart() {
         std::time::Duration::from_secs(5),
         Some(sp.clone()),
         std::time::Duration::from_millis(0), // 节流 0 → 每次 publish 都写
+        PRELOAD_RESOLVE_TIMEOUT,
     );
     h1.cmd(Request::Command(PlayerCommand::SetVolume(0.37)))
         .await
@@ -3005,6 +3119,7 @@ async fn session_restores_after_restart() {
         std::time::Duration::from_secs(5),
         Some(sp.clone()),
         std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
     );
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let st = h2.state_rx.borrow().clone();
@@ -3047,6 +3162,7 @@ async fn position_persist_is_throttled() {
         std::time::Duration::from_secs(5),
         Some(sp.clone()),
         std::time::Duration::from_secs(5), // 长节流
+        PRELOAD_RESOLVE_TIMEOUT,
     );
     h.cmd(Request::Play(PlayRequest::Track(TrackId::new("qq:t1"))))
         .await
@@ -3089,6 +3205,7 @@ async fn session_persist_failure_is_swallowed() {
         std::time::Duration::from_secs(5),
         Some(sp),
         std::time::Duration::from_millis(0),
+        PRELOAD_RESOLVE_TIMEOUT,
     );
     h.cmd(Request::Play(PlayRequest::Track(TrackId::new("qq:f1"))))
         .await
