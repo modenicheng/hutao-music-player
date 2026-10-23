@@ -2877,6 +2877,7 @@ version = "0.1.0"
 dependencies = [
  "hmp-core",
  "hmp-qqmusic-api",
+ "image",
  "keyring",
  "lofty",
  "rusqlite",
