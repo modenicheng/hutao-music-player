@@ -38,7 +38,7 @@
 ## 已定工程决策
 
 1. **mock-first**：与 Vue 版同纪律 —— 接口形状即契约（types.ts），mock 数据确定性（同一 FNV-1a 种子），诚实空态/禁用。真实数据接线是 M8。
-2. **app.rs（AppCore）暂不动**：真实后端编排原样保留（编译不引用，无 dead_code 警告），M8 重接；`demo.rs`/旧 `bridge.rs`/旧 `bridge_tests.rs` 随旧 UI 契约删除。
+2. **app.rs（AppCore）已随 M8 删除**（2026-09-29 与 mock.rs 同批，AUDIT §8 缺口记录）；真实后端编排由 `backend.rs`/`bridge.rs` 承担。
 3. **模拟播放桥在 Rust**：`slint::Timer` 250ms 快照推进 position，队列/seek/音量/自动下一曲全实现 —— 对应 Vue 的 BrowserPlayerBridge。**（M8 已由 daemon IPC 真桥替换，见下方接线记录；player_host.rs → player_bridge.rs。）**
 4. **封面用 resvg 运行时栅格化**（slint 同款依赖，256px 缓存 `HashMap<seed, Image>`），保证与 Vue 版同一套确定性封面。
 5. **TrackTable 歌手列简化**：歌手串整体一个链接（→ 主歌手页）；多人合唱逐人分链留到 M4 歌手页落地时评估（Slint struct 无嵌套数组，逐人分链需拆模型）。

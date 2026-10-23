@@ -3,7 +3,7 @@
 > 项目名：hutao-music-player
 > 缩写：HMP
 > 主程序命令：`hmp`
-> 当前阶段：CLI 原型（login/search/play 闭环）/ 主项目 crate 骨架
+> 当前阶段：CLI 与 Slint 桌面端双前端全量接常驻 daemon（播放/队列/歌词/封面/媒体库真数据）；Windows SMTC / Linux MPRIS 系统集成已落地
 > 目标平台：Windows 与 Linux 桌面；Windows 使用 SMTC，Linux 使用 MPRIS
 > 文档用途：作为仓库内的项目总纲、架构说明、开发路线和验收标准
 
@@ -46,7 +46,7 @@ Rust 2024
 HMP 首先服务以下用户：
 
 - 主要使用 QQ 音乐账号和会员曲库；
-- 使用 Linux 桌面，尤其是 Wayland 合成器；
+- 使用 Windows 或 Linux 桌面（Linux 尤其 Wayland 合成器）；
 - 希望系统媒体键、状态栏、通知中心、锁屏或桌面 Shell 能完整控制播放器；
 - 不需要直播、社区、短视频、K 歌、弹幕、游戏专区等附属功能；
 - 关注内存、后台 CPU、启动时间和长期运行稳定性；
@@ -301,6 +301,8 @@ pub struct PlaybackState {
 ---
 
 ## 5. Cargo 工作区设计
+
+> 注：本节为方案期结构快照，crate 命名与现状有出入（如 `hmp-qqmusic` 实名 `hmp-qqmusic-api`，`hmp` 二进制在 `hmp-cli`）；实际成员以根 `Cargo.toml` 为准。
 
 ### 5.1 推荐的初始结构
 
@@ -1397,15 +1399,15 @@ test(qqmusic): add vkey response fixture
 
 ### v0.0.1：工作区骨架
 
-- [ ] 创建 workspace；
-- [ ] 创建核心 crate；
-- [ ] CI；
-- [ ] fmt / clippy / test；
-- [ ] tracing；
-- [ ] 基础文档；
-- [ ] Slint 空窗口；
-- [ ] Rodio 初始化测试；
-- [ ] MPRIS 注册测试。
+- [x] 创建 workspace；
+- [x] 创建核心 crate；
+- [x] CI；
+- [x] fmt / clippy / test；
+- [x] tracing；
+- [x] 基础文档；
+- [x] Slint 空窗口；
+- [x] Rodio 初始化测试；
+- [x] MPRIS 注册测试。
 
 ### v0.1.0：最小可播放版本
 
@@ -1425,31 +1427,31 @@ test(qqmusic): add vkey response fixture
 
 ### v0.2.0：账号和歌单
 
-- [ ] 用户资料；
-- [ ] 用户歌单；
-- [ ] 歌单详情；
-- [ ] 播放队列；
-- [ ] 上一首 / 下一首；
-- [ ] 循环和随机；
-- [ ] 登录态刷新；
-- [ ] 重启恢复。
+- [x] 用户资料（`hmp account profile`；昵称受 QQ 服务端 code 10000 影响回退 uin，见 AUDIT §8）；
+- [x] 用户歌单；
+- [x] 歌单详情；
+- [x] 播放队列；
+- [x] 上一首 / 下一首；
+- [x] 循环和随机；
+- [x] 登录态刷新；
+- [x] 重启恢复。
 
 ### v0.3.0：歌词和缓存
 
-- [ ] 原文歌词；
-- [ ] 翻译歌词；
-- [ ] 歌词自动滚动；
-- [ ] 封面缓存；
-- [ ] 歌词缓存；
-- [ ] SQLite 迁移；
+- [x] 原文歌词；
+- [x] 翻译歌词；
+- [x] 歌词自动滚动；
+- [x] 封面缓存；
+- [x] 歌词缓存；
+- [x] SQLite 迁移；
 - [ ] 缓存清理设置。
 
 ### v0.4.0：桌面体验
 
-- [ ] 媒体键；
+- [x] 媒体键；
 - [ ] 通知；
-- [ ] 单实例；
-- [ ] 托盘可选；
+- [x] 单实例；
+- [x] 托盘可选（Linux SNI / Windows 通知区，无桌面会话自动跳过）；
 - [ ] 高 DPI；
 - [ ] 中文输入法验证；
 - [ ] Niri / KDE / GNOME 测试；
@@ -1574,13 +1576,13 @@ playerctl -p hmp position 60
 
 ## 23. 项目一句话说明
 
-建议 README 使用：
+与现行 README 首段保持一致：
 
-> HMP is a lightweight, Rust-native QQ Music player for Linux with complete MPRIS integration.
+> HMP is a lightweight, Rust-native QQ Music player for Windows and Linux (MPRIS on Linux, SMTC on Windows).
 
 中文：
 
-> HMP 是一个面向 Linux 的轻量 Rust QQ 音乐播放器，重点提供完整的 MPRIS 系统媒体控制体验。
+> HMP 是一个跨平台（Windows / Linux）的轻量 Rust QQ 音乐播放器：Linux 侧提供完整 MPRIS 系统媒体控制，Windows 侧接入 SMTC 与托盘。
 
 ---
 
