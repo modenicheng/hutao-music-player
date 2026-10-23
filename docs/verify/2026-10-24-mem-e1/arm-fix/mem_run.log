@@ -1,0 +1,28 @@
+[01:15:01] === S9 E1 mem_run start (arm=verify/arm-fix) ===
+[01:15:09] daemon pid=62032
+[01:15:09] volume gate PASS (user_volume=0)
+[01:15:09] backend_build=6a3c6f734a9a399b
+[01:15:09] exe same-batch check: hmp.exe mtime=00:54:10, hmp-desktop.exe mtime=00:56:11 (same cargo invocation => 同批)
+[01:15:10] scan done: D:\coding\hutao-music-player\.worktrees\s9-mem-fixes\verify\arm-fix\sandbox\media
+[01:15:10] churn playlist id=13 (Created playlist #13: e1闀胯窇)
+[01:15:13] seeded 80 tracks into playlist 13
+[01:15:13] desktop pid=23940
+[01:15:25] media tracks: 80
+[01:15:25] phase P0-warmup start (budget used 24s)
+[01:18:25] phase P0-warmup end
+[01:18:25] phase P1-play start (budget used 204s)
+[01:25:25] phase P1-play end
+[01:25:25] phase P2-queue start (budget used 624s)
+[01:29:25] phase P2-queue end
+[01:29:25] phase P3-library start (budget used 864s)
+[01:33:25] phase P3-library end
+[01:33:25] phase P4-settle start (budget used 1104s)
+[01:35:25] phase P4-settle end
+[01:35:25] phase P5-replay start (budget used 1224s)
+[01:38:25] phase P5-replay end
+[01:38:25] === phases complete, elapsed 1404s ===
+[01:38:25] cleanup: hmp quit (isolated endpoint)
+[01:38:30] cleanup: Stop-Process pid=23940 (still alive)
+[01:38:33] cleanup check pid=23940 alive=True
+[01:38:33] cleanup check pid=62032 alive=False
+[01:38:33] === mem_run done, total 1411s ===
