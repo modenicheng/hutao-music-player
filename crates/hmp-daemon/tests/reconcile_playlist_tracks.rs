@@ -311,9 +311,15 @@ async fn reconcile_tracks_carry_cover_url_and_rebind_survives_resync() {
     let local = "file://C:/covers/aa.jpg";
     {
         let mut db = lib.lock().unwrap();
-        let meta = db.track_meta_batch("qq", &["m-1".to_owned(), "m-2".to_owned()]).unwrap();
+        let meta = db
+            .track_meta_batch("qq", &["m-1".to_owned(), "m-2".to_owned()])
+            .unwrap();
         assert_eq!(
-            meta.iter().find(|m| m.source_key == "m-1").unwrap().cover_uri.as_deref(),
+            meta.iter()
+                .find(|m| m.source_key == "m-1")
+                .unwrap()
+                .cover_uri
+                .as_deref(),
             Some(url_m1),
             "pmid 应套 T002 模板入库"
         );

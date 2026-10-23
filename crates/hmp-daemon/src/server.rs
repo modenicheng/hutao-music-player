@@ -625,9 +625,10 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             let cache_key =
                 crate::content::normalize_cover_url(&url).unwrap_or_else(|| url.clone());
             let cached = match &handle.library {
-                Some(library) => library.lock().ok().and_then(|mut db| {
-                    db.cover_cache_get(&cache_key).ok().flatten()
-                }),
+                Some(library) => library
+                    .lock()
+                    .ok()
+                    .and_then(|mut db| db.cover_cache_get(&cache_key).ok().flatten()),
                 None => None,
             };
             let resp = if let Some(path) = cached {
@@ -1003,7 +1004,10 @@ mod tests {
             .await
             .expect("等待 Quit 应答超时")
             .unwrap();
-        assert!(matches!(decode_frame::<Response>(&buf[..m]).unwrap(), Response::Ok));
+        assert!(matches!(
+            decode_frame::<Response>(&buf[..m]).unwrap(),
+            Response::Ok
+        ));
 
         // 订阅连接：Shutdown 帧（容忍其前的中间状态推送）。
         loop {

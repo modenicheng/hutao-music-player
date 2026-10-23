@@ -56,9 +56,7 @@ fn hover_slider_chain_reports_and_clears() {
     ui.window().set_size(slint::PhysicalSize::new(1280, 800));
     hmp_desktop::bridge::load_data(
         &ui,
-        &std::sync::Arc::new(
-            hmp_desktop::backend::BackendRuntime::new().unwrap(),
-        ),
+        &std::sync::Arc::new(hmp_desktop::backend::BackendRuntime::new().unwrap()),
     );
 
     // 侧栏歌单区已接真数据（Data.sidebar-*）：测试环境无库为空 → 手动播种，

@@ -1148,13 +1148,18 @@ mod tests {
             "曲".into(),
             Some(&meta(Some("file://C:/covers/aa.jpg"))),
         );
-        assert_eq!(rebound.cover_uri.as_deref(), Some("file://C:/covers/aa.jpg"));
+        assert_eq!(
+            rebound.cover_uri.as_deref(),
+            Some("file://C:/covers/aa.jpg")
+        );
         assert_eq!(rebound.remote_cover, None, "本地产物不再预取");
 
         let remote = song_row_from_qq(
             "mid",
             "曲".into(),
-            Some(&meta(Some("https://y.gtimg.cn/music/photo_new/T002R300x300M000x.jpg"))),
+            Some(&meta(Some(
+                "https://y.gtimg.cn/music/photo_new/T002R300x300M000x.jpg",
+            ))),
         );
         assert_eq!(remote.cover_uri, None, "http 封面不落 UI 直读列（禁网）");
         assert_eq!(

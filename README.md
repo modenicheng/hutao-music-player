@@ -11,19 +11,20 @@ hutao-music-player/
 ├── Cargo.toml              # workspace 根（resolver 3, edition 2024）
 ├── crates/
 │   ├── hmp-core/           # 领域模型：Track/PlayerCommand/PlaybackState/QueueCore/IPC 协议
-│   ├── hmp-qqmusic-api/    # QQ 音乐 API 移植 crate（独立发布 crates.io）
+│   ├── hmp-qqmusic-api/    # QQ 音乐 API 移植 crate（独立发布 crates.io；tests/fixtures/ 存差分测试录制 ×24）
 │   ├── hmp-player/     # Rodio 播放核心（PlayerCore）
 │   ├── hmp-media/          # 下载/QMC2 解密/缓存/进程内随机访问解密源（流式）
 │   ├── hmp-storage/        # 凭证存储 + 媒体库（SQLite，扫描/歌单/封面缓存）
 │   ├── hmp-mpris/          # MPRIS D-Bus 服务
+│   ├── hmp-smtc/           # Windows SMTC 系统媒体控制适配
 │   ├── hmp-daemon/         # 后台播放后端（socket 服务器 + 播放引擎 + tray/MPRIS 适配）
 │   ├── hmp-desktop/        # Slint 桌面端（daemon 前端：库页/播放已接真实后端）
 │   └── hmp-cli/            # CLI（登录/搜索/遥控子命令，二进制名 `hmp`）
 ├── docs/
 │   ├── PROJECT.md          # 项目总纲
 │   ├── USAGE.md            # ★ 使用文档（命令参考/队列语义/故障排查/测试指南）
-│   └── QQMUSIC_PORTING.md  # 移植跟踪（上游模块 → Rust 模块映射）
-├── fixtures/               # 差分测试原始录制
+│   ├── QQMUSIC_PORTING.md  # 移植跟踪（上游模块 → Rust 模块映射）
+│   ├── DESIGN.md           # 胡桃木设计语言（桌面端移植基准，v0.13）
 └── scripts/
 ```
 
@@ -50,7 +51,7 @@ cargo run --release -p hmp-desktop --bin hmp-desktop
 
 ## Crate 说明
 
-`hmp-qqmusic-api` 是 `hmp-qqmusic-api` 项目的 QQ 音乐协议实现：
+`hmp-qqmusic-api` 是 HMP 项目的 QQ 音乐协议实现：
 
 - 独立版本号，独立发布到 crates.io（`hmp-qqmusic-api = "0.1"`）；
 - 以 Python 参考实现 [L-1124/QQMusicApi](https://github.com/L-1124/QQMusicApi)
@@ -67,27 +68,14 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
-## 用法
+## 命令参考
 
-```bash
-hmp login                    # QQ 扫码登录：终端 ASCII 二维码，扫码后凭证存入系统密钥环
-hmp auth                     # 显示登录状况
-hmp search "歌曲名"           # 搜索歌曲
-hmp play <track-id>          # 遥控后端播放（track-id | playlist:<id> | album:<id>）
-hmp playnext <id>            # 插队播放
-hmp queue show|add <id>|remove <idx>|clear
-hmp status                   # 查询后端状态
-hmp pause / resume / next / prev / stop / seek 60 / volume 0.5
-hmp queue loop list          # 循环模式（none/list/track）
-hmp queue shuffle on         # 随机播放
-hmp quit                     # 优雅退出后端
-hmp serve                    # 前台运行后端（--background 后台运行，由遥控命令自动拉起）
-```
+完整命令参考（播放源 / 播放控制 / 队列 / 歌单 / 媒体库 / 收藏 / 评论 / 后端管理）见
+**[docs/USAGE.md](docs/USAGE.md) §4**。
 
-后台播放：`hmp play/status/...` 等遥控命令自动拉起常驻 daemon（单例 IPC 端点：
-Unix socket `$XDG_RUNTIME_DIR/hmp.sock` / Windows 命名管道 `\\.\pipe\hmp`；
-`flock` / first_pipe_instance 保证单实例），CLI 退出后播放不中断；亦可用
-`playerctl -p hmp ...` 经 MPRIS 遥控（见 [docs/USAGE.md](docs/USAGE.md) §7）。
+所有遥控命令（`hmp play/status/pause/...`）自动拉起常驻 daemon（单例 IPC 端点：Unix
+socket / Windows 命名管道），CLI 退出播放不中断；Linux 亦可用 `playerctl -p hmp ...`
+经 MPRIS 遥控，Windows 走 SMTC 系统媒体键（USAGE §3 / §7）。
 
 ## 鸣谢 / Acknowledgements
 
