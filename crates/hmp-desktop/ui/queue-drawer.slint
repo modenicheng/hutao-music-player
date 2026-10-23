@@ -359,10 +359,13 @@ export component QueueDrawer inherits Rectangle {
                                 }
                             }
 
-                            // 行锚定菜单弹层（同 track-table：编译期摘除、点外/ESC
-                            // 默认关、行卸载自动关）；themed 态面板 hover 底经
-                            // TrackPalette.ctx-* 自动跟专辑色
+                            // 行锚定菜单弹层（同 track-table：编译期摘除、
+                            // 行卸载自动关；close-policy 显式 close-on-click-outside
+                            // ——默认 close-on-click 会连弹层内完整点击一起关掉，
+                            // 二级 picker 不可达，S6 缺陷 #1）；themed 态面板
+                            // hover 底经 TrackPalette.ctx-* 自动跟专辑色
                             row-menu := PopupWindow {
+                                close-policy: close-on-click-outside;
                                 x: TrackMenu.open-x;
                                 y: TrackMenu.open-y + 4px;
                                 width: 216px;
