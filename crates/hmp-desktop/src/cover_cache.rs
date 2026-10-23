@@ -130,7 +130,33 @@ fn evict_until_fits(cache: &mut Cache, incoming: u64, cap: u64) {
 }
 
 /// 解码 + 保比降采样（最长边钳到 max_side）→ Slint rgba8 位图。
+///
+/// S9 R2：`max_side ≤ 512` 时优先解码派生缩略件（写侧 `persist_cover` 落盘
+/// 的同目录 `<stem>.512.jpg`，拼名契约 [`hmp_core::media::derived_cover_name`]
+/// 互锚）——miss 解码触摸 ~6.5MB（1200×1200 全尺寸）→ ~1.2MB（≤512 派生）。
+/// 派生件缺失/损坏/拼名失败全部自动回退原路径（现状行为）。缓存 key 仍为
+/// `(原路径, max_side)`：命中路径零变化，派生件只优化 miss 的解码成本。
 fn decode_downsampled(path: &str, max_side: u32) -> Option<Image> {
+    if max_side <= hmp_core::media::COVER_DERIVED_SIDE {
+        if let Some(derived) = derived_cover_path(path) {
+            if let Some(image) = decode_thumbnail_from(&derived, max_side) {
+                return Some(image);
+            }
+        }
+    }
+    decode_thumbnail_from(path, max_side)
+}
+
+/// 同目录派生缩略件路径（拼名走 hmp-core 共享助手；无文件名/空 stem → None）。
+fn derived_cover_path(path: &str) -> Option<String> {
+    let p = std::path::Path::new(path);
+    let name = p.file_name()?.to_string_lossy();
+    let derived = hmp_core::media::derived_cover_name(&name)?;
+    Some(p.with_file_name(derived).to_string_lossy().into_owned())
+}
+
+/// 指定路径解码 + 保比降采样（最长边钳到 max_side）→ Slint rgba8 位图。
+fn decode_thumbnail_from(path: &str, max_side: u32) -> Option<Image> {
     let decoded = image::ImageReader::open(path).ok()?.decode().ok()?;
     // max_side 为 0 时 thumbnail 退化为原尺寸钳 1px，防御取 max(1)。
     let thumb = decoded.thumbnail(max_side.max(1), max_side.max(1));
@@ -312,6 +338,116 @@ mod tests {
             miss_before + 1,
             "a 应因探测不刷新 stamp 而被逐出"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // —— S9 R2 读侧：派生缩略件优先 + 回退链 ——
+
+    /// 落一张 w×h JPEG（covers 产物即 JPEG；解码器按扩展名认格式，
+    /// JPEG 编码需 RGB8）。
+    fn write_jpeg(dir: &Path, name: &str, w: u32, h: u32) -> PathBuf {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 0x40, 0xFF])
+        });
+        let path = dir.join(name);
+        image::DynamicImage::ImageRgba8(img)
+            .to_rgb8()
+            .save_with_format(&path, image::ImageFormat::Jpeg)
+            .unwrap();
+        path
+    }
+
+    /// 原图 w×h JPEG；可选同目录伪派生件 dw×dh（拼名走 hmp-core 共享助手，
+    /// 与写侧互锚）。返回原图路径。
+    fn write_cover_with_derived(
+        dir: &Path,
+        original: &str,
+        w: u32,
+        h: u32,
+        derived_dims: Option<(u32, u32)>,
+    ) -> PathBuf {
+        let path = write_jpeg(dir, original, w, h);
+        if let Some((dw, dh)) = derived_dims {
+            let derived_name = hmp_core::media::derived_cover_name(original).expect("非空文件名");
+            write_jpeg(dir, &derived_name, dw, dh);
+        }
+        path
+    }
+
+    /// a：原图 1200×900（4:3）+ 伪派生 400×100（4:1，故意异宽高比作来源
+    /// 标记）→ 256 桶得 256×64 ⇒ 证走派生。
+    #[test]
+    fn decode_prefers_derived_when_present() {
+        let dir = test_dir("derived-hit");
+        let path = write_cover_with_derived(&dir, "cover.jpg", 1200, 900, Some((400, 100)));
+        let image = get_or_load(path.to_str().unwrap(), 256).expect("decode ok");
+        let size = image.size();
+        assert_eq!(
+            (size.width, size.height),
+            (256, 64),
+            "4:1 派生件缩出 256×64（原图直缩应为 256×192）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// b：派生缺失 → 原图回退（4:3 → 256×192）。
+    #[test]
+    fn decode_falls_back_when_derived_missing() {
+        let dir = test_dir("derived-miss");
+        let path = write_cover_with_derived(&dir, "cover.jpg", 1200, 900, None);
+        let image = get_or_load(path.to_str().unwrap(), 256).expect("decode ok");
+        let size = image.size();
+        assert_eq!((size.width, size.height), (256, 192), "回退原图 4:3");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// c：派生件损坏字节 → 回退原图。
+    #[test]
+    fn decode_falls_back_when_derived_corrupt() {
+        let dir = test_dir("derived-corrupt");
+        let path = write_cover_with_derived(&dir, "cover.jpg", 1200, 900, None);
+        let derived_name = hmp_core::media::derived_cover_name("cover.jpg").unwrap();
+        std::fs::write(dir.join(&derived_name), b"garbage bytes not a jpeg").unwrap();
+        let image = get_or_load(path.to_str().unwrap(), 256).expect("decode ok");
+        let size = image.size();
+        assert_eq!((size.width, size.height), (256, 192), "损坏派生回退原图");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// d：512 桶从派生直出（400×100 派生 → thumbnail(512) 等比 512×128；
+    /// 与原图路径同款 thumbnail 语义——桶为最长边上限，来源是 4:1 派生件
+    /// 而非 4:3 原图即证）。
+    #[test]
+    fn decode_512_bucket_serves_derived_directly() {
+        let dir = test_dir("derived-512");
+        let path = write_cover_with_derived(&dir, "cover.jpg", 1200, 900, Some((400, 100)));
+        let image = get_or_load(path.to_str().unwrap(), 512).expect("decode ok");
+        let size = image.size();
+        assert_eq!(
+            (size.width, size.height),
+            (512, 128),
+            "512 桶走派生（4:1 保比；原图直缩应为 512×384）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// e：缓存命中路径与派生件无关——二次调用零解码（hits+1），且删除
+    /// 派生件后命中结果不变（key 是原路径）。
+    #[test]
+    fn cache_hit_path_ignores_derived() {
+        let dir = test_dir("derived-hitcache");
+        let path = write_cover_with_derived(&dir, "cover.jpg", 1200, 900, Some((400, 100)));
+        let p = path.to_str().unwrap();
+        assert!(get_or_load(p, 256).is_some());
+        let (_, _, hits, misses) = cache_stats();
+        assert_eq!((hits, misses), (0, 1));
+        // 删掉派生件再取：命中缓存（hits+1），不触盘
+        std::fs::remove_file(dir.join(hmp_core::media::derived_cover_name("cover.jpg").unwrap()))
+            .unwrap();
+        let image = get_or_load(p, 256).expect("hit");
+        assert_eq!(image.size().height, 64, "命中返回首次（派生来源）结果");
+        let (_, _, hits, misses) = cache_stats();
+        assert_eq!((hits, misses), (1, 1), "二次调用零解码");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
