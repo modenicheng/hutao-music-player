@@ -313,7 +313,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 播种（在 daemon 快照之后，防冲掉）
     {
-        let data = hmp_desktop::Data::get(ui);
+        let data = hmp_desktop::Data::get(&ui);
         let tracks = seed_track_rows(rows, nav_mids, rows_source);
         data.set_liked(slint::ModelRc::new(slint::VecModel::from(tracks)));
         data.set_liked_count(rows);
