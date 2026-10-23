@@ -267,6 +267,50 @@ fn swap_search_artist_cover(ui: &AppWindow, mid: &str, image: slint::Image) {
     }
 }
 
+/// 榜单卡换图（T5/D-7）：top-groups 嵌套模型（外层 VecModel<TopGroupData>
+/// → 内层 tops VecModel）按榜单 id 原地换 `TopCardData.cover`；无匹配
+/// （页面已切走/模型重建）即丢弃。
+pub fn refresh_top_covers(
+    ui_weak: Weak<AppWindow>,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    entries: Vec<(String, String)>,
+) {
+    for (top_id, url) in entries {
+        let key = format!("top|{top_id}|{url}");
+        fetch_cover(ui_weak.clone(), runtime, key, url, move |ui, image| {
+            let model = Data::get(ui).get_top_groups();
+            let Some(groups) = model
+                .as_any()
+                .downcast_ref::<slint::VecModel<crate::TopGroupData>>()
+            else {
+                return;
+            };
+            for g in 0..groups.iter().count() {
+                let Some(group) = groups.row_data(g) else {
+                    continue;
+                };
+                let Some(tops) = group
+                    .tops
+                    .as_any()
+                    .downcast_ref::<slint::VecModel<crate::TopCardData>>()
+                else {
+                    continue;
+                };
+                for i in 0..tops.iter().count() {
+                    let Some(mut card) = tops.row_data(i) else {
+                        continue;
+                    };
+                    if card.id.as_str() == top_id {
+                        card.cover = image;
+                        tops.set_row_data(i, card);
+                        return; // 同 id 榜单不跨组重复，换到即止
+                    }
+                }
+            }
+        });
+    }
+}
+
 /// 歌单 id → 远程封面 URL（来自 discover 原始响应的旁路表）。
 ///
 /// `CoverCardData` 不携带 URL（Slint 结构保持窄），Rust 侧以并发安全

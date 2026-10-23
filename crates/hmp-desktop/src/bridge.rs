@@ -341,7 +341,9 @@ fn spawn_top_category_load(
     runtime: &Arc<crate::backend::BackendRuntime>,
 ) {
     let weak = ui_weak;
-    runtime.spawn(async move {
+    let rt = Arc::clone(runtime);
+    let rt_spawn = Arc::clone(&rt);
+    rt_spawn.spawn(async move {
         // 置加载态在 tokio 线程（同 discover）
         let w0 = weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -350,6 +352,7 @@ fn spawn_top_category_load(
             }
         });
         let result = crate::backend::request(hmp_core::Request::TopCategoryGet).await;
+        let rt2 = Arc::clone(&rt);
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
             let data = Data::get(&ui);
@@ -361,28 +364,23 @@ fn spawn_top_category_load(
                         .map(|g| TopGroupData {
                             id: g.id.to_string().into(),
                             name: g.name.as_str().into(),
-                            tops: model(
-                                g.tops
-                                    .iter()
-                                    .map(|t| TopCardData {
-                                        id: t.id.to_string().into(),
-                                        name: t.name.as_str().into(),
-                                        title_sub: t.title_sub.as_str().into(),
-                                        update_time: t.update_time.as_str().into(),
-                                        listen_num: t.listen_num as i32,
-                                        preview: model(
-                                            t.preview
-                                                .iter()
-                                                .map(|s| s.as_str().into())
-                                                .collect::<Vec<slint::SharedString>>(),
-                                        ),
-                                    })
-                                    .collect::<Vec<TopCardData>>(),
-                            ),
+                            tops: model(g.tops.iter().map(top_card).collect::<Vec<TopCardData>>()),
                         })
                         .collect();
                     data.set_top_groups(model(groups));
                     data.set_top_state(2);
+                    // 榜单卡换图（T5/D-8：daemon picurl → CoverGet；响应
+                    // 同帧落地，URL 直传无 side-table，迟到图无匹配即丢弃）
+                    crate::online_covers::refresh_top_covers(
+                        ui.as_weak(),
+                        &rt2,
+                        page.groups
+                            .iter()
+                            .flat_map(|g| g.tops.iter())
+                            .filter(|t| !t.picurl.is_empty())
+                            .map(|t| (t.id.to_string(), t.picurl.clone()))
+                            .collect(),
+                    );
                 }
                 Ok(hmp_core::Response::TopCategory(_)) => {
                     data.set_top_state(3);
@@ -393,6 +391,26 @@ fn spawn_top_category_load(
             }
         });
     });
+}
+
+/// 榜单卡投影（TopSummaryDto → TopCardData；T5 单测锚定）。封面程序化
+/// 占位先行（seed top:{id}），daemon picurl 经 CoverGet 异步换真图。
+fn top_card(t: &hmp_core::TopSummaryDto) -> TopCardData {
+    TopCardData {
+        id: t.id.to_string().into(),
+        name: t.name.as_str().into(),
+        title_sub: t.title_sub.as_str().into(),
+        update_time: t.update_time.as_str().into(),
+        listen_num: t.listen_num as i32,
+        total_num: t.total_num as i32,
+        preview: model(
+            t.preview
+                .iter()
+                .map(|s| s.as_str().into())
+                .collect::<Vec<slint::SharedString>>(),
+        ),
+        cover: crate::covers::cover_image(&format!("top:{}", t.id)),
+    }
 }
 
 /// 账号状态查询（daemon AccountStatus IPC；设置页账号面板）。
@@ -1465,6 +1483,26 @@ mod tests {
         assert!(search_has_results(&[], &[album_card], &[]));
         assert!(search_has_results(&[], &[], &[singer_card]));
         assert!(!search_has_results(&[], &[], &[]));
+    }
+
+    /// T5 验收：TopCardData 投影含 picurl→占位与 total_num 透传。
+    #[test]
+    fn top_card_projects_cover_placeholder_and_total_num() {
+        let t = hmp_core::TopSummaryDto {
+            id: 26,
+            name: "热歌榜".into(),
+            title_sub: "".into(),
+            update_time: "2026-10-23".into(),
+            listen_num: 32_500_000,
+            picurl: "https://y.gtimg.cn/top.jpg".into(),
+            total_num: 300,
+            preview: vec!["1. 歌一 - 歌手甲".into()],
+        };
+        let card = top_card(&t);
+        assert_eq!(card.id.as_str(), "26");
+        assert_eq!(card.name.as_str(), "热歌榜");
+        assert_eq!(card.total_num, 300, "B3「N 首」角标数据");
+        assert!(card.cover.size().width > 0, "picurl → 程序化占位先行");
     }
 
     /// D-1 分流：远端参数（qq:）→ `DetailData::None`（导航分流信号 + 库变更

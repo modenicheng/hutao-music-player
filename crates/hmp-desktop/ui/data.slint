@@ -107,7 +107,11 @@ export struct TopCardData {
     title-sub: string,
     update-time: string,
     listen-num: int,
+    /** 榜单总曲数（「N 首」角标；0 = 未知不展示，B3） */
+    total-num: int,
     preview: [string],
+    /** 封面（程序化占位 → daemon picurl 经 CoverGet 换真图，T5） */
+    cover: image,
 }
 
 /** 排行榜分组（TopGroupDto 展示投影） */
