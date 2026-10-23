@@ -36,8 +36,3 @@ third_party/
 
 # 本地视觉 QA 截图（PORTING.md 只引用路径）
 /.shots/
-
-# tauri 生成物与 sidecar（prepare-sidecar.mjs 拷贝产物）
-apps/hmp-tauri/.vite/
-apps/hmp-tauri/src-tauri/binaries/
-apps/hmp-tauri/src-tauri/gen/

@@ -23,7 +23,8 @@ hutao-music-player/
 ├── docs/
 │   ├── PROJECT.md          # 项目总纲
 │   ├── USAGE.md            # ★ 使用文档（命令参考/队列语义/故障排查/测试指南）
-│   └── QQMUSIC_PORTING.md  # 移植跟踪（上游模块 → Rust 模块映射）
+│   ├── QQMUSIC_PORTING.md  # 移植跟踪（上游模块 → Rust 模块映射）
+│   ├── DESIGN.md           # 胡桃木设计语言（桌面端移植基准，v0.13）
 └── scripts/
 ```
 

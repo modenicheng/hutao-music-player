@@ -1,6 +1,6 @@
 # hmp-tauri (Vue) → hmp-desktop (Slint) 分模块移植
 
-基准：`apps/hmp-tauri`（DESIGN.md v0.13，胡桃木设计语言）。
+基准：`apps/hmp-tauri`（已退役，git 历史可回溯；设计基准现 `docs/DESIGN.md` v0.13，胡桃木设计语言）。
 目标：`crates/hmp-desktop` —— 把 Vue 前端按模块移植成 Slint UI。
 旧 Slint 原型（2026-08 初，`#ff2d55` accent 的另一套 Apple Music 风格）整体废弃，文件随模块移植逐个重写/删除。
 
