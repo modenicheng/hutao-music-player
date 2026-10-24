@@ -119,7 +119,7 @@ pub struct RadarRecommendResponse {
 
 /// 推荐歌单条目（上游 `RecommendSonglistItem`）。
 ///
-/// 由 [`extract_songlists`] 从 `$.List[*].Playlist.basic` 解析；`cover`/
+/// 由 `extract_songlists` 从 `$.List[*].Playlist.basic` 解析；`cover`/
 /// `creator` 也位于 `basic` 下（2026-09-29 实测）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RecommendSonglistItem {

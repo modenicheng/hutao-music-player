@@ -25,10 +25,10 @@ use crate::transport::{IpcListener, IpcStream};
 /// Windows 下任意路径会被 `transport::pipe_name` 确定性映射为
 /// `\\.\pipe\hmp-<sanitized>`；Unix 下须是 socket 文件路径。
 pub fn socket_path() -> PathBuf {
-    if let Ok(ep) = std::env::var("HMP_IPC_ENDPOINT") {
-        if !ep.is_empty() {
-            return PathBuf::from(ep);
-        }
+    if let Ok(ep) = std::env::var("HMP_IPC_ENDPOINT")
+        && !ep.is_empty()
+    {
+        return PathBuf::from(ep);
     }
     // 平台块作尾表达式：Windows 只剩管道名分支，Unix 只剩 socket 路径分支。
     #[cfg(windows)]
@@ -316,10 +316,8 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 Some(Ok(())) => {
                     // 收藏写落库 → 媒体库内容变更（客户端刷新"我喜欢"等页）。
                     handle.library_tx.send_modify(|g| *g += 1);
-                    if !is_local {
-                        if let Some(h) = &handle.sync_handle {
-                            h.trigger();
-                        }
+                    if !is_local && let Some(h) = &handle.sync_handle {
+                        h.trigger();
                     }
                     Response::Ok
                 }
@@ -440,20 +438,18 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 Some(Ok(Some(id))) => {
                     // 歌单结构落库 → 媒体库内容变更。
                     handle.library_tx.send_modify(|g| *g += 1);
-                    if trigger_sync {
-                        if let Some(h) = &handle.sync_handle {
+                    if trigger_sync
+                        && let Some(h) = &handle.sync_handle {
                             h.trigger();
                         }
-                    }
                     Response::Created(id)
                 }
                 Some(Ok(None)) => {
                     handle.library_tx.send_modify(|g| *g += 1);
-                    if trigger_sync {
-                        if let Some(h) = &handle.sync_handle {
+                    if trigger_sync
+                        && let Some(h) = &handle.sync_handle {
                             h.trigger();
                         }
-                    }
                     Response::Ok
                 }
                 Some(Err(rusqlite::Error::InvalidQuery)) => Response::Err {
@@ -691,10 +687,10 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 None => None,
             };
             let resp = if let Some(path) = cached {
-                if let Some(library) = &handle.library {
-                    if let Ok(mut db) = library.lock() {
-                        let _ = db.rebind_cover_url(&cache_key, &path);
-                    }
+                if let Some(library) = &handle.library
+                    && let Ok(mut db) = library.lock()
+                {
+                    let _ = db.rebind_cover_url(&cache_key, &path);
                 }
                 Response::Cover(path)
             } else {
@@ -705,12 +701,12 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                             // UI 禁直连 HTTP——回写后队列/列表投影直接读盘渲染
                             // （按 URL 匹配幂等；失败仅丢回写不影响本次返回）。
                             // 同步登记盘级索引，下次同 URL 直接命中。
-                            if let Some(library) = &handle.library {
-                                if let Ok(mut db) = library.lock() {
-                                    let _ = db.cover_cache_put(&cache_key, &path);
-                                    if let Err(e) = db.rebind_cover_url(&cache_key, &path) {
-                                        tracing::warn!(%e, "cover rebind failed");
-                                    }
+                            if let Some(library) = &handle.library
+                                && let Ok(mut db) = library.lock()
+                            {
+                                let _ = db.cover_cache_put(&cache_key, &path);
+                                if let Err(e) = db.rebind_cover_url(&cache_key, &path) {
+                                    tracing::warn!(%e, "cover rebind failed");
                                 }
                             }
                             Response::Cover(path)

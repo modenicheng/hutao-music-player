@@ -27,12 +27,12 @@ notify = { workspace = true }
 hmp-smtc = { path = "../hmp-smtc" }
 # 托盘（feature `tray`）：Win32 原生实现；windows-sys 提供创建线程的
 # 消息泵（tray-icon 的图标/菜单事件都经 Win32 消息送达）。
-tray-icon = { version = "0.24", optional = true }
-windows-sys = { version = "0.60", features = ["Win32_UI_WindowsAndMessaging"] }
+tray-icon = { version = "0.26", optional = true }
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 # 托盘（feature `tray`）：D-Bus StatusNotifierItem 实现。
-ksni = { version = "0.2", optional = true }
+ksni = { version = "0.3", optional = true }
 
 [features]
 default = []

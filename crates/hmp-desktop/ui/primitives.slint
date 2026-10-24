@@ -637,8 +637,8 @@ export component Scroll inherits Rectangle {
         width: parent.width;
         height: parent.height;
         // 纵向滚动：视口宽固定为自身宽（默认绑定取内容最小宽会成环）
-        viewport-width: self.width;
-        viewport-height: content.preferred-height;
+        content-width: self.width;
+        content-height: content.preferred-height;
 
         content := VerticalLayout {
             @children
@@ -647,15 +647,15 @@ export component Scroll inherits Rectangle {
 
     /** 观察滚动位置（changed 只能挂自身属性，走别名）；播放页歌词弹簧
      * 需要程序化回写视口，对外可写（in-out） */
-    in-out property <length> scroll-offset <=> flick.viewport-y;
+    in-out property <length> scroll-offset <=> flick.content-y;
     /** 内容全高（弹簧 clamp 的滚动上限 = self - view-height） */
-    out property <length> content-height: flick.viewport-height;
+    out property <length> content-height: flick.content-height;
     property <bool> thumb-active: false;
-    property <length> scrollable: max(flick.viewport-height - flick.height, 0px);
+    property <length> scrollable: max(flick.content-height - flick.height, 0px);
     property <length> thumb-h: scrollable <= 0px ? flick.height
-        : min(flick.height, max(flick.height * flick.height / flick.viewport-height, 24px));
+        : min(flick.height, max(flick.height * flick.height / flick.content-height, 24px));
     property <length> thumb-y: scrollable <= 0px ? 0px
-        : (-flick.viewport-y) * (flick.height - thumb-h) / scrollable;
+        : (-flick.content-y) * (flick.height - thumb-h) / scrollable;
 
     function wake() {
         thumb-active = true;
@@ -697,7 +697,7 @@ export component Scroll inherits Rectangle {
                     // 点击轨道即定位：thumb 中心吸附到指针处（overlay 滚动条惯例），
                     // 随后按抓取点 1:1 拖拽——不吸附的话抓取点被钳进 thumb，
                     // 第一次移动会出现跳变
-                    flick.viewport-y = -clamp(
+                    flick.content-y = -clamp(
                             self.mouse-y - root.thumb-h / 2,
                             0px,
                             flick.height - root.thumb-h,
@@ -709,7 +709,7 @@ export component Scroll inherits Rectangle {
             }
             moved => {
                 if (root.scrollable > 0px && flick.height > root.thumb-h) {
-                    flick.viewport-y = -clamp(
+                    flick.content-y = -clamp(
                             self.mouse-y - grab-offset,
                             0px,
                             flick.height - root.thumb-h,

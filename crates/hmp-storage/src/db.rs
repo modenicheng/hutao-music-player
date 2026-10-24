@@ -310,14 +310,14 @@ impl LibraryDb {
         self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))
     }
 
-    /// v5 迁移步骤（幂等）：合并本地意图幽灵行（见 [`merge_ghost_local_tracks`]）。
+    /// v5 迁移步骤（幂等）：合并本地意图幽灵行（见 `merge_ghost_local_tracks`）。
     /// 独立暴露供迁移测试直接驱动。
     pub fn merge_ghost_local_tracks(&mut self) -> rusqlite::Result<()> {
         merge_ghost_local_tracks(&self.conn)
     }
 
     /// v7 迁移步骤（幂等）：合并非规范键本地扫描行
-    /// （见 [`merge_noncanonical_local_tracks`]）。独立暴露供迁移测试直接驱动。
+    /// （见 `merge_noncanonical_local_tracks`）。独立暴露供迁移测试直接驱动。
     pub fn merge_noncanonical_local_tracks(&mut self) -> rusqlite::Result<()> {
         merge_noncanonical_local_tracks(&self.conn)
     }
@@ -449,7 +449,7 @@ impl LibraryDb {
 
     /// 最近播放（LRU 视图）：一曲一行，按最近一次播放倒序——播放即移到最前，
     /// 同曲重复播放不产生重复行（行字段取该曲最近一次会话）。
-    /// GUI 历史页用这份；会话流水（含同曲多条）走 [`recent_plays`]（CLI history）。
+    /// GUI 历史页用这份；会话流水（含同曲多条）走 `recent_plays`（CLI history）。
     pub fn recent_tracks(&mut self, limit: u32) -> rusqlite::Result<Vec<RecentPlay>> {
         let mut stmt = self.conn.prepare(
             r#"SELECT p.track_id, t.title, t.artist, t.source, t.source_key,

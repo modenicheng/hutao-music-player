@@ -951,27 +951,25 @@ fn apply_daemon_state(
         }
         changed
     });
-    if mid_changed {
-        if let Some(ui) = ui_weak.upgrade() {
-            let np = NowPlaying::get(&ui);
-            // 中性过渡先熄灭，真实收藏态由后台回填（库事实，陈包守卫）。
-            np.set_liked(false);
-            spawn_liked_backfill(ui_weak, runtime, mid.clone());
-            np.set_active_line(-1);
-            LYRIC_STAMPS.with(|cell| cell.borrow_mut().clear());
-            // 本地/QQ 同一歌词管线：本地曲 daemon 先读同目录 .lrc/内嵌标签，
-            // 缺失再按标题+歌手检索 QQ 兜底（本地优先）；QQ 曲按 mid 直取。
-            np.set_lyrics_loading(true);
-            spawn_lyric_fetch(
-                ui_weak,
-                runtime,
-                mid.clone(),
-                track.title.clone(),
-                track.artist_names(),
-            );
-            COMMENT_KEY.with(|cell| *cell.borrow_mut() = None);
-            maybe_load_comments(runtime, ui_weak);
-        }
+    if mid_changed && let Some(ui) = ui_weak.upgrade() {
+        let np = NowPlaying::get(&ui);
+        // 中性过渡先熄灭，真实收藏态由后台回填（库事实，陈包守卫）。
+        np.set_liked(false);
+        spawn_liked_backfill(ui_weak, runtime, mid.clone());
+        np.set_active_line(-1);
+        LYRIC_STAMPS.with(|cell| cell.borrow_mut().clear());
+        // 本地/QQ 同一歌词管线：本地曲 daemon 先读同目录 .lrc/内嵌标签，
+        // 缺失再按标题+歌手检索 QQ 兜底（本地优先）；QQ 曲按 mid 直取。
+        np.set_lyrics_loading(true);
+        spawn_lyric_fetch(
+            ui_weak,
+            runtime,
+            mid.clone(),
+            track.title.clone(),
+            track.artist_names(),
+        );
+        COMMENT_KEY.with(|cell| *cell.borrow_mut() = None);
+        maybe_load_comments(runtime, ui_weak);
     }
 
     // 进度展示：拖拽中（seeking）或落点未确认（松手 seek 后旧位置推送在途）
@@ -1026,10 +1024,10 @@ fn apply_daemon_state(
     // QQ 远程封面：UI 禁直连 HTTP → 经 daemon CoverGet 换本地产物
     // （先程序化占位，回包后按 mid 复核防串台；每 mid 每进程只请求一次，
     // daemon 侧 covers/ 目录按内容哈希持久去重）。
-    if let Some(cover) = track.cover.as_ref() {
-        if cover.url.starts_with("https://") {
-            spawn_cover_fetch(ui_weak, runtime, track.id.0.clone(), cover.url.clone());
-        }
+    if let Some(cover) = track.cover.as_ref()
+        && cover.url.starts_with("https://")
+    {
+        spawn_cover_fetch(ui_weak, runtime, track.id.0.clone(), cover.url.clone());
     }
     let quality = playback.actual_quality.as_ref();
     player.set_track_quality(quality.map(quality_label).unwrap_or_default().into());
@@ -1488,16 +1486,16 @@ fn row_from_meta(meta: &QueueRowMeta, pending_covers: &mut Vec<(String, String)>
 /// 占位，队列落地的预取回包原地换图（apply_event →
 /// track_covers::prefetch_tracks_with）。
 fn queue_cover(meta: &QueueRowMeta, pending_covers: &mut Vec<(String, String)>) -> slint::Image {
-    if let Some(uri) = &meta.cover_uri {
-        if !uri.starts_with("http://") && !uri.starts_with("https://") {
-            if let Some(path) = crate::covers::file_uri_to_path(uri) {
-                if let Some(image) = crate::cover_cache::get_if_cached(&path, 256) {
-                    return image;
-                }
-                pending_covers.push((meta.mid.clone(), path));
-                return crate::covers::cover_image(&cover_seed(meta));
-            }
+    if let Some(uri) = &meta.cover_uri
+        && !uri.starts_with("http://")
+        && !uri.starts_with("https://")
+        && let Some(path) = crate::covers::file_uri_to_path(uri)
+    {
+        if let Some(image) = crate::cover_cache::get_if_cached(&path, 256) {
+            return image;
         }
+        pending_covers.push((meta.mid.clone(), path));
+        return crate::covers::cover_image(&cover_seed(meta));
     }
     crate::covers::cover_image(&cover_seed(meta))
 }
@@ -1517,17 +1515,18 @@ fn cover_seed(meta: &QueueRowMeta) -> String {
 /// http(s)（UI 禁 HTTP 为项目原则，封面代理缺失）→ 按 mid 程序化占位；
 /// 无封面 → 程序化占位。
 fn cover_for_track(mid: &str, cover: Option<&hmp_core::CoverRef>) -> slint::Image {
-    if let Some(url) = cover.map(|c| c.url.as_str()) {
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            // file:// 双形态（persist_cover 宽容形态 `file://C:\...` 与历史
-            // 规范形态 `file:///C:/...`）都收：裸剥前缀把规范形态解析成
-            // `/C:/...`（Windows 读不到）→ 盘上有图恒占位（§18 库行实锤）。
-            if let Some(path) = crate::covers::file_uri_to_path(url) {
-                if let Some(image) = crate::cover_cache::get_or_load(&path, 512) {
-                    return image;
-                }
-                tracing::debug!(path, "cover file unreadable; fallback to placeholder");
+    if let Some(url) = cover.map(|c| c.url.as_str())
+        && !url.starts_with("http://")
+        && !url.starts_with("https://")
+    {
+        // file:// 双形态（persist_cover 宽容形态 `file://C:\...` 与历史
+        // 规范形态 `file:///C:/...`）都收：裸剥前缀把规范形态解析成
+        // `/C:/...`（Windows 读不到）→ 盘上有图恒占位（§18 库行实锤）。
+        if let Some(path) = crate::covers::file_uri_to_path(url) {
+            if let Some(image) = crate::cover_cache::get_or_load(&path, 512) {
+                return image;
             }
+            tracing::debug!(path, "cover file unreadable; fallback to placeholder");
         }
     }
     crate::covers::cover_image(&format!("album:{mid}"))

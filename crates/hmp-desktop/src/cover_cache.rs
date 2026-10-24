@@ -137,12 +137,11 @@ fn evict_until_fits(cache: &mut Cache, incoming: u64, cap: u64) {
 /// 派生件缺失/损坏/拼名失败全部自动回退原路径（现状行为）。缓存 key 仍为
 /// `(原路径, max_side)`：命中路径零变化，派生件只优化 miss 的解码成本。
 fn decode_downsampled(path: &str, max_side: u32) -> Option<Image> {
-    if max_side <= hmp_core::media::COVER_DERIVED_SIDE {
-        if let Some(derived) = derived_cover_path(path) {
-            if let Some(image) = decode_thumbnail_from(&derived, max_side) {
-                return Some(image);
-            }
-        }
+    if max_side <= hmp_core::media::COVER_DERIVED_SIDE
+        && let Some(derived) = derived_cover_path(path)
+        && let Some(image) = decode_thumbnail_from(&derived, max_side)
+    {
+        return Some(image);
     }
     decode_thumbnail_from(path, max_side)
 }

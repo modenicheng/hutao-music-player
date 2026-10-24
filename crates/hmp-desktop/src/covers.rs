@@ -130,7 +130,12 @@ fn svg_to_image(svg: &str) -> Image {
     let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(RENDER_SIZE, RENDER_SIZE);
     let src = pixmap.data();
     let dst = buffer.make_mut_bytes();
-    for (px, out) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+    for (px, out) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+    {
         // tiny-skia 预乘 alpha → Slint 直 alpha
         let a = u32::from(px[3]);
         // tiny-skia 预乘 → 直 alpha；a==255 快路径（封面全不透明）

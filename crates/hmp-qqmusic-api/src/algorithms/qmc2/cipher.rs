@@ -170,11 +170,11 @@ impl QmcRc4Cipher {
         // 命中缓存：直接用该段密钥流 XOR。
         {
             let cache = self.lock_segment_cache();
-            if let Some((cached_id, keystream)) = cache.as_ref() {
-                if *cached_id == seg_id {
-                    QmcRc4Cipher::xor_with_keystream(buf, keystream, in_seg);
-                    return;
-                }
+            if let Some((cached_id, keystream)) = cache.as_ref()
+                && *cached_id == seg_id
+            {
+                QmcRc4Cipher::xor_with_keystream(buf, keystream, in_seg);
+                return;
             }
         }
 

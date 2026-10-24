@@ -1109,20 +1109,20 @@ mod tests {
                         .insert_header("Accept-Ranges", "bytes");
                 }
 
-                if let Some(range_val) = req.headers.get("Range").and_then(|v| v.to_str().ok()) {
-                    if let Some((start, end)) = parse_range_value(range_val) {
-                        let end_capped = end.min(total_len.saturating_sub(1));
-                        if start >= total_len {
-                            return ResponseTemplate::new(416);
-                        }
-                        let body = &encrypted[start as usize..=end_capped as usize];
-                        return ResponseTemplate::new(206)
-                            .insert_header(
-                                "Content-Range",
-                                format!("bytes {start}-{end_capped}/{total_len}"),
-                            )
-                            .set_body_bytes(body.to_vec());
+                if let Some(range_val) = req.headers.get("Range").and_then(|v| v.to_str().ok())
+                    && let Some((start, end)) = parse_range_value(range_val)
+                {
+                    let end_capped = end.min(total_len.saturating_sub(1));
+                    if start >= total_len {
+                        return ResponseTemplate::new(416);
                     }
+                    let body = &encrypted[start as usize..=end_capped as usize];
+                    return ResponseTemplate::new(206)
+                        .insert_header(
+                            "Content-Range",
+                            format!("bytes {start}-{end_capped}/{total_len}"),
+                        )
+                        .set_body_bytes(body.to_vec());
                 }
 
                 ResponseTemplate::new(200).set_body_bytes(encrypted.clone())
@@ -1353,17 +1353,17 @@ mod tests {
                         .set_body_bytes(encrypted[0..=0].to_vec());
                 }
 
-                if let Some((start, end)) = parse_range_value(range_val) {
-                    if start >= total_len.saturating_sub(0x40) {
-                        let end_capped = end.min(total_len.saturating_sub(1));
-                        let body = &encrypted[start as usize..=end_capped as usize];
-                        return ResponseTemplate::new(206)
-                            .insert_header(
-                                "Content-Range",
-                                format!("bytes {start}-{end_capped}/{total_len}"),
-                            )
-                            .set_body_bytes(body.to_vec());
-                    }
+                if let Some((start, end)) = parse_range_value(range_val)
+                    && start >= total_len.saturating_sub(0x40)
+                {
+                    let end_capped = end.min(total_len.saturating_sub(1));
+                    let body = &encrypted[start as usize..=end_capped as usize];
+                    return ResponseTemplate::new(206)
+                        .insert_header(
+                            "Content-Range",
+                            format!("bytes {start}-{end_capped}/{total_len}"),
+                        )
+                        .set_body_bytes(body.to_vec());
                 }
 
                 // 200 但 body 极短

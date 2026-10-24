@@ -56,10 +56,10 @@ pub enum TrackProvider {
 impl TrackProvider {
     /// 依据 id 前缀识别来源（`local:` 前缀 → 本地）。
     pub fn from_id(id: &str) -> Self {
-        if let Some(rest) = id.strip_prefix("local:") {
-            if !rest.is_empty() {
-                return Self::Local;
-            }
+        if let Some(rest) = id.strip_prefix("local:")
+            && !rest.is_empty()
+        {
+            return Self::Local;
         }
         Self::QqMusic
     }
@@ -763,7 +763,7 @@ pub struct LoginQrSession {
 /// 扫码登录进度态（`LoginQrPoll` 的响应）。
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LoginQrState {
-    /// 进度常量（[`LoginQrState::STATUS_*`]）之一。
+    /// 进度常量（LoginQrState 的 STATUS_* 系列常量）之一。
     pub status: i32,
     /// 二维码 PNG 当前路径（会话超时自动刷新后变化；终态为空串）。
     pub qr_path: String,

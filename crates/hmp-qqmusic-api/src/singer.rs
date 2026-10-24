@@ -781,15 +781,15 @@ impl Paged for HomepageTabDetailResponse {
 /// 提取 `$.Info.Singer` / `$.Info.BaseInfo` 并填充主页头部响应。
 pub(crate) fn extract_homepage_info(data: &Value, resp: &mut HomepageHeaderResponse) {
     if let Some(info) = data.get("Info") {
-        if let Some(s) = info.get("Singer").cloned() {
-            if let Ok(s) = serde_json::from_value::<HomepageSinger>(s) {
-                resp.singer = s;
-            }
+        if let Some(s) = info.get("Singer").cloned()
+            && let Ok(s) = serde_json::from_value::<HomepageSinger>(s)
+        {
+            resp.singer = s;
         }
-        if let Some(b) = info.get("BaseInfo").cloned() {
-            if let Ok(b) = serde_json::from_value::<HomepageBaseInfo>(b) {
-                resp.base_info = b;
-            }
+        if let Some(b) = info.get("BaseInfo").cloned()
+            && let Ok(b) = serde_json::from_value::<HomepageBaseInfo>(b)
+        {
+            resp.base_info = b;
         }
     }
 }

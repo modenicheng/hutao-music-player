@@ -61,7 +61,7 @@ fn key_to_u32(key: &[u8; 16]) -> [u32; 4] {
 /// 密文格式：PadLen(1) + Padding(var) + Salt(2) + Body(var) + Zero(7)。
 /// 返回 `None` 当长度不是 8 的倍数或不足 16 字节时。
 pub(crate) fn tea_cbc_decrypt(data: &[u8], key: &[u8; 16]) -> Option<Vec<u8>> {
-    if data.len() % 8 != 0 || data.len() < 16 {
+    if !data.len().is_multiple_of(8) || data.len() < 16 {
         return None;
     }
 
