@@ -1847,7 +1847,16 @@ pub(crate) mod tests {
     }
 
     fn cover_file_uri(path: &std::path::Path) -> String {
-        format!("file:///{}", path.to_string_lossy().replace('\\', "/"))
+        // 规范 file URI：Windows `C:\a\b` → `file:///C:/a/b`；Unix `/a/b` →
+        // `file:///a/b`（勿对已是绝对路径的 Unix 形态再拼前导斜杠——否则得
+        // `file:////tmp/...`，file_uri_to_path 解析回双前导斜杠，与预装载
+        // 路径键失配——S11 CI Linux 实证）。
+        let p = path.to_string_lossy().replace('\\', "/");
+        if p.starts_with('/') {
+            format!("file://{p}")
+        } else {
+            format!("file:///{p}")
+        }
     }
 
     fn row_meta_with_cover(mid: &str, cover: &std::path::Path) -> QueueRowMeta {
