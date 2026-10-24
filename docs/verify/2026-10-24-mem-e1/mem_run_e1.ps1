@@ -115,7 +115,11 @@ try {
     L "seeded $added tracks into playlist $script:PlId"
 
     # 4) 起桌面（真机 GUI；~21min 已获批）
-    $desktop = Start-Process -FilePath $Global:S6Desktop -PassThru
+    # E3 口径（AUDIT §25③）：desktop stdout/stderr 重定向落盘——回填计数等
+    # tracing::debug 日志此前静默丢弃，复验无法取回填批数证据。
+    $desktopLog = Join-Path $script:Sandbox "desktop_stdout.log"
+    $desktop = Start-Process -FilePath $Global:S6Desktop -PassThru `
+        -RedirectStandardOutput $desktopLog -RedirectStandardError $desktopLog
     $desktop_pid = $desktop.Id
     L "desktop pid=$desktop_pid"
     Start-Sleep -Seconds 12

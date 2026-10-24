@@ -50,6 +50,15 @@ pub fn format_status(st: &DaemonState) -> String {
         st.playback.loop_mode, st.playback.shuffle
     ));
     s.push_str(&format!("Queue: {} track(s)\n", st.queue.len));
+    // S3 审计 P3（AUDIT §25）：last_error 只经 play 回包透出，status 恒空白——
+    // 坏路径播放失败后用户 `hmp status` 看不到任何错误痕迹。此处补渲染。
+    if let Some(info) = &st.last_error {
+        s.push_str(&format!(
+            "LastError: {:?} {}
+",
+            info.code, info.message
+        ));
+    }
     s
 }
 
