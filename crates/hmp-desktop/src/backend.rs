@@ -87,18 +87,31 @@ impl From<std::io::Error> for BackendError {
 
 /// 桌面进程内 tokio 多线程 runtime：UI 线程只跑 Slint 事件循环，
 /// 全部 IPC（短连接请求 + 订阅长连接）在本 runtime 上执行。
+///
+/// **runtime 与进程同寿（S10 T7）**：内部持 `&'static`（构造时 `Box::leak`），
+/// 任何路径都不执行 `tokio::runtime::Runtime::drop`。真根因（2026-10-24 cdb
+/// 僵尸栈实锤，verify-s10/）：`bridge::schedule_refresh` 的 thread_local
+/// `slint::Timer` 回调闭包捕获 `Arc<BackendRuntime>`，是退出时最后一个引用；
+/// main 返回 → exit() → ExitProcess 先终止其余线程（含 tokio blocking 池）→
+/// `LdrShutdownProcess` 跑 TLS 析构 → Timer drop → 闭包 drop → Arc 归零 →
+/// Runtime::drop → `BlockingPool::shutdown` 在 oneshot 上等一个**已被杀死的**
+/// blocking 线程 → `WaitOnAddress` 永久死锁（不可杀：主线程困在 loader 关停
+/// 期）。runtime 永不 drop 后，TLS 析构只递减引用计数，退出路径确定可完成；
+/// worker/blocking 线程由 ExitProcess 常规回收。
 pub struct BackendRuntime {
-    rt: tokio::runtime::Runtime,
+    rt: &'static tokio::runtime::Runtime,
 }
 
 impl BackendRuntime {
     /// 构建多线程 runtime（enable_all：IO + 时间驱动）。
     pub fn new() -> Result<Self, std::io::Error> {
-        Ok(Self {
-            rt: tokio::runtime::Builder::new_multi_thread()
+        let rt: &'static tokio::runtime::Runtime = Box::leak(
+            tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .build()?,
-        })
+                .build()?
+                .into(),
+        );
+        Ok(Self { rt })
     }
 
     /// 派生后台任务（订阅循环 / 单发命令）。失败即丢弃（命令-查询分离：
@@ -674,6 +687,28 @@ async fn read_frame(stream: &mut IpcStream) -> std::io::Result<Option<Vec<u8>>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S10 T7 契约钉：BackendRuntime 句柄消亡后**在途任务继续完成**（runtime
+    /// 与进程同寿，任何路径不触发 Runtime::drop 的 shutdown 握手）。旧实现
+    /// （持有 Runtime 值，句柄离开作用域即 shutdown）在本测试下任务被取消、
+    /// recv 超时——真根因修复的行为面就在这里：ExitProcess 期 TLS 析构若
+    /// 触发 drop，shutdown 会死等已被杀死的 blocking 线程（verify-s10 僵尸栈）。
+    #[test]
+    fn runtime_outlives_backend_runtime_drop() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let rt = BackendRuntime::new().expect("runtime");
+            rt.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                tx.send(()).expect("receiver alive");
+            });
+            // 句柄随作用域消亡（新实现无 Drop 行为；旧实现此刻 shutdown）。
+        }
+        assert!(
+            rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "BackendRuntime 句柄消亡后在途任务应继续完成（runtime 进程级存活契约被破坏？）"
+        );
+    }
 
     #[test]
     fn stale_backend_error_names_problem_and_remedy() {
