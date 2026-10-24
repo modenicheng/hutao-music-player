@@ -128,7 +128,7 @@ impl ksni::Tray for HmpTray {
 /// `serve.rs` 持有到进程收尾；守卫 drop 先于进程退出即优雅关闭
 /// （释放 D-Bus 名称、移除图标）。
 pub struct Tray {
-    handle: ksni::blocking::Handle<HmpTray>,
+    handle: Arc<ksni::blocking::Handle<HmpTray>>,
     forward_task: tokio::task::JoinHandle<()>,
 }
 
