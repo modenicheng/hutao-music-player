@@ -763,7 +763,7 @@ pub struct LoginQrSession {
 /// 扫码登录进度态（`LoginQrPoll` 的响应）。
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LoginQrState {
-    /// 进度常量（[`LoginQrState::STATUS_*`]）之一。
+    /// 进度常量（LoginQrState 的 STATUS_* 系列常量）之一。
     pub status: i32,
     /// 二维码 PNG 当前路径（会话超时自动刷新后变化；终态为空串）。
     pub qr_path: String,

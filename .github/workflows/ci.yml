@@ -77,18 +77,14 @@ jobs:
       - run: cargo check --workspace --all-targets
 
   msrv:
-    name: msrv (1.85)
+    name: msrv (1.92)
     runs-on: ubuntu-latest
-    # 暂缓 blocking（continue-on-error）：本机实测 cargo +1.85.0 check
-    # --workspace --all-targets 退出 101——Cargo.lock 的 slint 1.17.1 链
-    # （const-field-offset 0.2.x 全系 MSRV 1.88）与 zbus 家族（1.87）使
-    # rust-version = "1.85" 声明与当前依赖集矛盾，待项目决策：升 MSRV
-    # 1.88 需重估 deny.toml 的 MSRV 相关 RUSTSEC ignore（time / zbus_xml
-    # 等锁旧版本的前提将失效）。决策落地前此 job 仅作探针不挡合并。
-    continue-on-error: true
+    # MSRV 定实 1.92 = 全图依赖 rust_version 顶点（slint 1.18 链），
+    # cargo metadata 聚合核实（S11）；serial_test 4 需 1.93.1 故按 Q1=A
+    # 留 3.x 不抬顶。转正 blocking：声明与依赖集一致后挡回归。
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.92
       - uses: Swatinem/rust-cache@v2
       - name: Install system deps
         run: |

@@ -7,7 +7,7 @@ use std::time::Duration;
 use hmp_core::{
     HmpError, LoadRequest, MediaStream, PlaybackState, PlaybackStatus, PlayerCommand, PlayerEvent,
 };
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source, DeviceSinkError};
+use rodio::{Decoder, DeviceSinkBuilder, DeviceSinkError, MixerDeviceSink, Player, Source};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::source::{MediaLocation, parse_uri};
@@ -140,12 +140,11 @@ struct LoadCompletion {
 
 /// Open the platform-appropriate output stream (safe variant).
 ///
-/// Candidate devices come from [`collect_output_candidates`] (platform
+/// Candidate devices come from `collect_output_candidates` (platform
 /// policy); each is tried in preference order and the first stream that
 /// opens wins. Never fatal: an empty candidate list or all-failed opens
 /// surfaces as `Err` and the caller falls back to the silent sink.
 pub fn open_default_output() -> Result<MixerDeviceSink, DeviceSinkError> {
-
     let mut candidates = collect_output_candidates();
     candidates.sort_by_key(|&(preference, _)| preference);
 
@@ -301,9 +300,10 @@ impl PlayerCore {
                 let (sink, mut output) = Player::new();
                 std::thread::spawn(move || {
                     loop {
-                        let samples_per_tick =
-                            (output.sample_rate().get() as usize * output.channels().get() as usize / 100)
-                                .max(1);
+                        let samples_per_tick = (output.sample_rate().get() as usize
+                            * output.channels().get() as usize
+                            / 100)
+                            .max(1);
                         for _ in 0..samples_per_tick {
                             if output.next().is_none() {
                                 return;
@@ -340,7 +340,8 @@ impl PlayerCore {
         std::thread::spawn(move || {
             loop {
                 let samples_per_tick =
-                    (output.sample_rate().get() as usize * output.channels().get() as usize / 100).max(1);
+                    (output.sample_rate().get() as usize * output.channels().get() as usize / 100)
+                        .max(1);
                 for _ in 0..samples_per_tick {
                     if output.next().is_none() {
                         return;

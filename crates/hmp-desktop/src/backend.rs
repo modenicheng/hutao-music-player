@@ -41,7 +41,7 @@ pub enum BackendError {
     StaleBackend,
     /// 协议错误（畸形帧/连接中断）。
     Protocol(String),
-    /// daemon 连上但 [`REQUEST_TIMEOUT`] 预算内未应答（挂死）。瞬时/可自愈态
+    /// daemon 连上但 `REQUEST_TIMEOUT` 预算内未应答（挂死）。瞬时/可自愈态
     /// （用户 `hmp quit` 或 daemon 恢复后订阅循环 2s 重连自愈），恢复指引
     /// 在 Display 文案里，不进离线原因三元组（见 `offline_reason_text`）。
     Timeout(Duration),
@@ -292,7 +292,7 @@ fn find_hmp_in_dirs<I: Iterator<Item = PathBuf>>(dirs: I) -> Option<PathBuf> {
 
 /// 单发请求-响应（每命令一条短连接，CLI `request()` 同模式）。
 /// 命令-查询分离：`Response::Ok` 仅代表受理，真实结果经订阅事件呈现。
-/// 全程（连接重试+写+读+解码）受 [`REQUEST_TIMEOUT`] 上界约束：daemon
+/// 全程（连接重试+写+读+解码）受 `REQUEST_TIMEOUT` 上界约束：daemon
 /// 连上但挂死（应答前卡住）时报错而非永久挂起（AUDIT §16 #3）。
 /// 订阅长连接不经此路径（推送流无应答语义，勿套请求超时）。
 ///

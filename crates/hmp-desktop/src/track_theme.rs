@@ -15,7 +15,7 @@
 //! - oklch 色相归一到 [0, 2π)；fitIntoSrgbGamut 固定 24 次二分，epsilon 1e-4。
 //! - kmeans.ts 不移植（Vue 默认 refine:"none"，adapter 不传该选项）。
 //!
-//! 另含环境层底图预烘焙（[`ambient_image`]）：Slint 无 CSS blur/saturate 滤镜，
+//! 另含环境层底图预烘焙（`ambient_image`）：Slint 无 CSS blur/saturate 滤镜，
 //! 用「最长边 ≤128 面积平均降采样 + 3 趟盒滤波(半径 5) + 饱和度 ×1.2」近似
 //! Vue 播放页 `blur(80px) saturate(1.2)` 环境层。
 //!

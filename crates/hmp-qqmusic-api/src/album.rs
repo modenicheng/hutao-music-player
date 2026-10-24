@@ -56,7 +56,7 @@ pub struct AlbumCompany {
 /// 专辑详情响应（上游 `GetAlbumDetailResponse`）。
 ///
 /// 实测（2026-09-29）：服务端数据键 `basicInfo`/`company`，署名歌手位于
-/// `singer.singerList`（由 [`extract_singers`] 填充）。
+/// `singer.singerList`（由 `extract_singers` 填充）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct GetAlbumDetailResponse {
     /// 专辑基础信息与补充描述。
@@ -73,7 +73,7 @@ pub struct GetAlbumDetailResponse {
 /// 专辑歌曲列表响应（上游 `GetAlbumSongResponse`）。
 ///
 /// 实测（2026-09-29）：服务端数据键 `albumMid`/`totalNum`，歌曲位于
-/// `songList[*].songInfo`（由 [`extract_song_list`] 填充）。
+/// `songList[*].songInfo`（由 `extract_song_list` 填充）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct GetAlbumSongResponse {
     /// 专辑 MID。

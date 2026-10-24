@@ -267,7 +267,7 @@ fn swap_search_artist_cover(ui: &AppWindow, mid: &str, image: slint::Image) {
     }
 }
 
-/// 榜单卡换图（T5/D-7）：top-groups 嵌套模型（外层 VecModel<TopGroupData>
+/// 榜单卡换图（T5/D-7）：top-groups 嵌套模型（外层 `VecModel<TopGroupData>`
 /// → 内层 tops VecModel）按榜单 id 原地换 `TopCardData.cover`；无匹配
 /// （页面已切走/模型重建）即丢弃。
 pub fn refresh_top_covers(

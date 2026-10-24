@@ -341,22 +341,45 @@ mod tests {
     #[test]
     fn lyrics_tag_item_reads_back() {
         let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
-        tag.insert_text(ItemKey::UnsyncLyrics, "[00:01.00]embedded
-".into());
-        assert_eq!(tag.get_string(ItemKey::UnsyncLyrics), Some("[00:01.00]embedded
-"));
+        tag.insert_text(
+            ItemKey::UnsyncLyrics,
+            "[00:01.00]embedded
+"
+            .into(),
+        );
+        assert_eq!(
+            tag.get_string(ItemKey::UnsyncLyrics),
+            Some(
+                "[00:01.00]embedded
+"
+            )
+        );
 
         let mut vorbis = lofty::tag::Tag::new(lofty::tag::TagType::VorbisComments);
-        vorbis.insert_text(ItemKey::Lyrics, "[00:02.00]flac
-".into());
-        assert_eq!(vorbis.get_string(ItemKey::Lyrics), Some("[00:02.00]flac
-"));
+        vorbis.insert_text(
+            ItemKey::Lyrics,
+            "[00:02.00]flac
+"
+            .into(),
+        );
+        assert_eq!(
+            vorbis.get_string(ItemKey::Lyrics),
+            Some(
+                "[00:02.00]flac
+"
+            )
+        );
         // 回退链形态：ID3v2 标签上 Lyrics 键缺位时读 UnsyncLyrics
         let text = tag
             .get_string(ItemKey::UnsyncLyrics)
             .or_else(|| tag.get_string(ItemKey::Lyrics));
-        assert_eq!(text, Some("[00:01.00]embedded
-"));
+        assert_eq!(
+            text,
+            Some(
+                "[00:01.00]embedded
+"
+            )
+        );
     }
 
     #[test]

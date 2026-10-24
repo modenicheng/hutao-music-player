@@ -54,7 +54,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     // —— 高频 alias（保留）——
-    /// Play (track / playlist:<id> / album:<id>; controls the daemon).
+    /// Play (track / `playlist:<id>` / `album:<id>`; controls the daemon).
     Play { source: String },
     /// Play next (insert after current and play).
     PlayNext { source: String },
@@ -86,7 +86,7 @@ enum Command {
     Search { keyword: String },
     /// Lyrics for a track (local sidecar/embedded first, QQ search fallback).
     Lyric {
-        /// Track id (QQ mid or local:<path>).
+        /// Track id (QQ mid or `local:<path>`).
         id: String,
         /// Title (local-track QQ search fallback).
         #[arg(long, default_value = "")]
@@ -238,7 +238,7 @@ enum PlaylistCmd {
     Create { name: String },
     /// Rename a playlist.
     Rename { id: i64, name: String },
-    /// Add a track (QQ mid or local:<path>).
+    /// Add a track (QQ mid or `local:<path>`).
     Add { id: i64, track: String },
     /// Remove a track by position.
     Remove { id: i64, position: i64 },
@@ -343,7 +343,7 @@ enum CommentCmd {
 /// `hmp favorite` 子命令。
 #[derive(Subcommand)]
 enum FavoriteCmd {
-    /// Like a track (QQ mid or local:<path>).
+    /// Like a track (QQ mid or `local:<path>`).
     Add { id: String },
     /// Unlike a track.
     Remove { id: String },

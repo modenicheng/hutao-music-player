@@ -7,31 +7,19 @@
 
 [advisories]
 yanked = "warn"
-# 以下通报均为传递依赖、无兼容修复版本，且不影响本项目运行时安全边界：
-# - RUSTSEC-2021-0139 ansi_term / RUSTSEC-2024-0375 atty：
-#   clap v2 → dbus-codegen → ksni 0.2.2 的构建期工具链（仅 build-dependencies）。
-# - RUSTSEC-2024-0436 paste：lofty / image(exr→pulp) / rav1e 传递依赖。
-# - RUSTSEC-2026-0206 rustybuzz / RUSTSEC-2026-0192 ttf-parser：
-#   resvg（slint SVG 渲染）传递依赖，替代品需上游换用 skrifa/harfrust。
-# - RUSTSEC-2026-0194 / RUSTSEC-2026-0195 quick-xml：
-#   zbus_xml 5.1 锁定 quick-xml 0.38；修复需 zbus_xml ≥5.2（MSRV 1.87）。
-#   本项目仅经 zbus 解析本地会话总线 introspection XML，非攻击者输入。
-# - RUSTSEC-2026-0009 time：修复版 0.3.47+ 要求 rust ≥1.88（本工作区 MSRV 1.85）；
-#   cookie 解析仅用于出站 HTTP 响应，本地播放器场景风险低。
+# 以下通报均为传递依赖、无兼容修复版本，且不影响本项目运行时安全边界
+# （S11 终态 lock 复核后收敛：ksni 0.3 链使 ansi_term/atty/dbus-codegen 出图、
+#  rustybuzz 出图、time 0.3.55 与 quick-xml 0.41 已是修复版，故删对应 ignore）：
+# - RUSTSEC-2024-0436 paste：lofty 0.25.4 仍携带，无修复版。
+# - RUSTSEC-2026-0192 ttf-parser 0.25.1：slint 链（owned_ttf_parser）传入，
+#   替代品需上游换用 skrifa/harfrust。
 # - RUSTSEC-2024-0370 proc-macro-error（unmaintained）：gtk-rs 0.18 线
 #   glib-macros / gtk3-macros 传递依赖，经 tray-icon→libappindicator→gtk 传入；
 #   无兼容修复（gtk3-macros 0.18 仍绑定 syn 1 生态），需上游 gtk-rs 升级才能根除。
-# 若后续提升 MSRV（≥1.88），应优先 `cargo update -p time -p zbus_xml` 再移除对应 ignore。
 ignore = [
-    "RUSTSEC-2021-0139",
-    "RUSTSEC-2024-0375",
     "RUSTSEC-2024-0436",
     "RUSTSEC-2024-0370",
     "RUSTSEC-2026-0192",
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
-    "RUSTSEC-2026-0206",
-    "RUSTSEC-2026-0009",
 ]
 
 [licenses]
