@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use slint::{ComponentHandle, Global};
 
-use hmp_desktop::{backend, bridge, menu_bridge, player_bridge, prefs};
+use hmp_desktop::{backend, bridge, exit_guard, menu_bridge, player_bridge, prefs};
 
 fn main() -> Result<(), slint::PlatformError> {
     let prefs = Arc::new(Mutex::new(prefs::load()));
@@ -51,5 +51,22 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    ui.run()
+    ui.run()?;
+
+    // S10 退出段编排（真根因修复在 backend::BackendRuntime T7：runtime 与
+    // 进程同寿，ExitProcess 期 TLS 析构不再触发 Runtime::drop 的
+    // BlockingPool::shutdown 死锁——见 backend.rs 模块 doc 与 worktree
+    // FINDINGS.md）。这里只留看门狗做**纯纵深**：武装期间完成重量级清理，
+    // 用户态挂起（假想的锁/阻塞 IO 卡 drop）由 exit(0) 兜底；内核态/
+    // loader 关停期卡死任何 exit 都无效（历史上正是后者，已由 T7 消灭）。
+    let guard = exit_guard::arm(exit_guard::EXIT_WATCHDOG, || std::process::exit(0));
+    // 含 femtovg GL context 销毁——基线臂 3/3 实证该段正常完成（真卡点在
+    // 更晚的 ExitProcess 期 TLS/tokio 段，与渲染器无关：GL 与 software
+    // 僵尸同栈，verify-s10 僵尸栈存档）。
+    drop(ui);
+    // T7 下只递减引用计数（schedule_refresh 的 TLS Timer 持有最后引用，
+    // 其析构 drop 为 no-op——这正是死锁被消灭的机制）。
+    drop(runtime);
+    guard.disarm();
+    Ok(())
 }
