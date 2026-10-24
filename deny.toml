@@ -16,10 +16,17 @@ yanked = "warn"
 # - RUSTSEC-2024-0370 proc-macro-error（unmaintained）：gtk-rs 0.18 线
 #   glib-macros / gtk3-macros 传递依赖，经 tray-icon→libappindicator→gtk 传入；
 #   无兼容修复（gtk3-macros 0.18 仍绑定 syn 1 生态），需上游 gtk-rs 升级才能根除。
+# - RUSTSEC-2026-0370/0371/0372 zbus 5 家族（zvariant_derive/zvariant/zbus_names）
+#   标 unmaintained：zbus 6 已并入主 crate，但 slint Linux 无障碍栈
+#   （accesskit_unix ← i-slint-backend-winit）仍拉 zbus 5——升级权在
+#   accesskit 上游，非本仓可修。
 ignore = [
     "RUSTSEC-2024-0436",
     "RUSTSEC-2024-0370",
     "RUSTSEC-2026-0192",
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]

@@ -32,7 +32,9 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 # 托盘（feature `tray`）：D-Bus StatusNotifierItem 实现。
-ksni = { version = "0.3", optional = true }
+# ksni 0.3 把 async 运行时拆成互斥 feature（tokio/async-io）——钉死 tokio 面，
+# 否则 --all-features 同时点亮两者编译爆炸（S11 CI Linux 面实证）。
+ksni = { version = "0.3", optional = true, default-features = false, features = ["tokio"] }
 
 [features]
 default = []
