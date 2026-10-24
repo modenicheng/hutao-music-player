@@ -77,7 +77,7 @@ pub fn read_meta(path: &Path) -> Option<LocalMeta> {
     let props = tagged.properties();
     let artists: Vec<String> = tag
         .map(|t| {
-            t.get_strings(&ItemKey::TrackArtist)
+            t.get_strings(ItemKey::TrackArtist)
                 .map(|s| s.to_string())
                 .collect()
         })
@@ -116,15 +116,17 @@ pub fn read_meta(path: &Path) -> Option<LocalMeta> {
         sample_rate: props.sample_rate().map(|r| r as i64),
         artists,
         album_artist: tag
-            .and_then(|t| t.get_string(&ItemKey::AlbumArtist))
+            .and_then(|t| t.get_string(ItemKey::AlbumArtist))
             .map(|s| s.to_string()),
         track_number: tag.and_then(|t| t.track()).map(|n| n as u16),
         disc_number: tag.and_then(|t| t.disk()).map(|n| n as u16),
-        year: tag.and_then(|t| t.year()).map(|y| y as i64),
+        year: tag
+            .and_then(|t| t.get_string(ItemKey::Year))
+            .and_then(|y| y.trim().parse::<i64>().ok()),
         genre: tag.and_then(|t| t.genre()).map(|s| s.to_string()),
         cover,
         replaygain_track_db: tag
-            .and_then(|t| t.get_string(&ItemKey::ReplayGainTrackGain))
+            .and_then(|t| t.get_string(ItemKey::ReplayGainTrackGain))
             .and_then(parse_rg_db),
     })
 }
@@ -170,12 +172,15 @@ pub fn read_sidecar_lrc(audio: &Path) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-/// 读取内嵌歌词标签（ID3v2 USLT / MP4 ©lyr / APE LYRICS 等，经 lofty
-/// `ItemKey::Lyrics` 归一）；无标签或标签为空 → None。
+/// 读取内嵌歌词标签（ID3v2 USLT / MP4 ©lyr / APE LYRICS 等）。lofty 0.25 起
+/// ID3v2 把 USLT 映射到 `ItemKey::UnsyncLyrics`（`Lyrics` 键在 ID3v2 不受支持），
+/// FLAC/Vorbis/MP4 仍走 `Lyrics`——两条键做回退链，两种容器都能读出。
 pub fn read_embedded_lyrics(path: &Path) -> Option<String> {
     let tagged = Probe::open(path).ok()?.read().ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
-    let text = tag.get_string(&ItemKey::Lyrics)?;
+    let text = tag
+        .get_string(ItemKey::UnsyncLyrics)
+        .or_else(|| tag.get_string(ItemKey::Lyrics))?;
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
 }
@@ -244,7 +249,7 @@ mod tests {
     fn replaygain_tag_item_reads_back() {
         let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
         tag.insert_text(lofty::tag::ItemKey::ReplayGainTrackGain, "-6.50 dB".into());
-        let got = tag.get_string(&lofty::tag::ItemKey::ReplayGainTrackGain);
+        let got = tag.get_string(lofty::tag::ItemKey::ReplayGainTrackGain);
         assert_eq!(got, Some("-6.50 dB"));
         assert_eq!(got.and_then(parse_rg_db), Some(-6.5));
     }
@@ -331,12 +336,27 @@ mod tests {
     }
 
     /// 内嵌歌词：ItemKey::Lyrics 标签项映射可读取（USLT/©lyr 归一入口）。
+    /// 内嵌歌词：lofty 0.25 ID3v2 把 USLT 映射到 UnsyncLyrics（主路径），
+    /// Lyrics 键回退链覆盖 FLAC/Vorbis/MP4——与 read_embedded_lyrics 同构。
     #[test]
     fn lyrics_tag_item_reads_back() {
         let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
-        tag.insert_text(ItemKey::Lyrics, "[00:01.00]embedded\n".into());
-        let got = tag.get_string(&ItemKey::Lyrics);
-        assert_eq!(got, Some("[00:01.00]embedded\n"));
+        tag.insert_text(ItemKey::UnsyncLyrics, "[00:01.00]embedded
+".into());
+        assert_eq!(tag.get_string(ItemKey::UnsyncLyrics), Some("[00:01.00]embedded
+"));
+
+        let mut vorbis = lofty::tag::Tag::new(lofty::tag::TagType::VorbisComments);
+        vorbis.insert_text(ItemKey::Lyrics, "[00:02.00]flac
+".into());
+        assert_eq!(vorbis.get_string(ItemKey::Lyrics), Some("[00:02.00]flac
+"));
+        // 回退链形态：ID3v2 标签上 Lyrics 键缺位时读 UnsyncLyrics
+        let text = tag
+            .get_string(ItemKey::UnsyncLyrics)
+            .or_else(|| tag.get_string(ItemKey::Lyrics));
+        assert_eq!(text, Some("[00:01.00]embedded
+"));
     }
 
     #[test]

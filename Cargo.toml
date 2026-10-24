@@ -20,30 +20,36 @@ repository = "https://github.com/modenicheng/hutao-music-player"
 rust-version = "1.92"
 
 [workspace.dependencies]
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4", features = ["derive"] }
 keyring = "4.1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 slint = "1.18"
-zbus = "5"
+zbus = "6"
 bytes = "1"
 flate2 = "1"
 futures-util = "0.3"
-lofty = "0.21"
-rusqlite = { version = "0.32", features = ["bundled"] }
-toml = "0.8"
-reqwest = { version = "0.12", default-features = false, features = [
+lofty = "0.25"
+rusqlite = { version = "0.40", features = ["bundled"] }
+toml = "1"
+# reqwest 0.13: `query`/`form` 移入 feature；`rustls-tls` 拆为 `rustls`+`webpki-roots`；
+# `system-proxy` 开 OS 级代理读取（no_proxy() 调用点不受影响——0.13 语义=清 proxies+禁自动系统代理，S11 审核实证）
+reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "cookies",
     "gzip",
     "brotli",
     "deflate",
-    "rustls-tls",
+    "rustls",
+    "webpki-roots",
+    "system-proxy",
     "stream",
+    "query",
+    "form",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-sha1 = "0.10"
+sha1 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -56,7 +62,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-notify = "6"
+notify = "8"
 hmp-core = { path = "crates/hmp-core" }
 hmp-storage = { path = "crates/hmp-storage" }
 

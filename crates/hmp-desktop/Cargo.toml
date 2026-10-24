@@ -22,7 +22,7 @@ serde_json = { workspace = true }
 # resvg 供 covers.rs 运行时栅格化程序化封面；
 # unstable-winit-030 = winit 句柄访问器（title-bar 拖动走系统级移动循环）
 slint = { version = "1.18", features = ["unstable-winit-030"] }
-resvg = "0.47"
+resvg = "0.48"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

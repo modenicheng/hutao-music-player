@@ -9,7 +9,7 @@ use zbus::Connection;
 use zbus::fdo::Properties;
 use zbus::names::InterfaceName;
 use zbus::object_server::{InterfaceRef, SignalEmitter};
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::{OwnedVariant, Variant};
 
 use crate::metadata;
 
@@ -108,7 +108,7 @@ pub struct MprisPlayer {
     shuffle: bool,
     volume: f64,
     position_us: i64,
-    metadata: HashMap<String, OwnedValue>,
+    metadata: HashMap<String, OwnedVariant>,
     rate: f64,
     minimum_rate: f64,
     maximum_rate: f64,
@@ -184,7 +184,7 @@ impl MprisPlayer {
     /// CanSeek=false 时返回 NotSupported。
     async fn set_position(
         &mut self,
-        track_id: zbus::zvariant::ObjectPath<'_>,
+        track_id: zbus::ObjectPath<'_>,
         position_us: i64,
     ) -> zbus::fdo::Result<()> {
         // stale TrackId：与当前曲目对象路径不一致 → 忽略。
@@ -323,7 +323,7 @@ impl MprisPlayer {
     }
 
     #[zbus(property)]
-    fn metadata(&self) -> HashMap<String, OwnedValue> {
+    fn metadata(&self) -> HashMap<String, OwnedVariant> {
         self.metadata.clone()
     }
 
@@ -415,15 +415,15 @@ impl MprisService {
         open_uri_tx: Option<mpsc::UnboundedSender<String>>,
         quit_tx: Option<mpsc::UnboundedSender<()>>,
     ) -> Result<Self, MprisError> {
-        let connection = zbus::connection::Builder::session()?
-            .name(BUS_NAME.to_owned())?
+        let connection = zbus::connection::Builder::session()
+            .name(BUS_NAME.to_owned())
             .serve_at(
                 OBJECT_PATH,
                 MprisRoot {
                     identity: "Hutao Music Player".into(),
                     quit_tx: quit_tx.clone(),
                 },
-            )?
+            )
             .serve_at(
                 OBJECT_PATH,
                 MprisPlayer {
@@ -447,7 +447,7 @@ impl MprisService {
                     open_uri_tx,
                     current_track_id: None,
                 },
-            )?
+            )
             .build()
             .await?;
 
@@ -514,16 +514,16 @@ async fn publish_capabilities(connection: &Connection, caps: &PlaybackCapabiliti
     let Ok(player_ref) = server.interface::<_, MprisPlayer>(OBJECT_PATH).await else {
         return;
     };
-    let mut changed: HashMap<&str, Value> = HashMap::new();
+    let mut changed: HashMap<&str, Variant> = HashMap::new();
     {
         let mut iface = player_ref.get_mut().await;
         if iface.can_go_next != caps.can_go_next {
             iface.can_go_next = caps.can_go_next;
-            changed.insert("CanGoNext", Value::Bool(caps.can_go_next));
+            changed.insert("CanGoNext", Variant::Bool(caps.can_go_next));
         }
         if iface.can_go_previous != caps.can_go_previous {
             iface.can_go_previous = caps.can_go_previous;
-            changed.insert("CanGoPrevious", Value::Bool(caps.can_go_previous));
+            changed.insert("CanGoPrevious", Variant::Bool(caps.can_go_previous));
         }
     }
     emit_properties_changed(player_ref, changed).await;
@@ -548,7 +548,7 @@ async fn publish_state(connection: &Connection, state: &PlaybackState) {
     }
 
     // 2) 可写属性 → PropertiesChanged
-    let mut changed: HashMap<&str, Value> = HashMap::new();
+    let mut changed: HashMap<&str, Variant> = HashMap::new();
     {
         let mut iface = player_ref.get_mut().await;
         iface.update_props(state, &mut changed);
@@ -583,34 +583,34 @@ impl MprisPlayer {
         emit
     }
 
-    fn update_props(&mut self, state: &PlaybackState, changed: &mut HashMap<&str, Value>) {
+    fn update_props(&mut self, state: &PlaybackState, changed: &mut HashMap<&str, Variant>) {
         let status = metadata::playback_status(state.status);
         if self.playback_status != status {
             self.playback_status = status.to_owned();
-            changed.insert("PlaybackStatus", Value::from(status));
+            changed.insert("PlaybackStatus", Variant::from(status));
         }
         let loop_status = metadata::loop_status(state.loop_mode);
         if self.loop_status != loop_status {
             self.loop_status = loop_status.to_owned();
-            changed.insert("LoopStatus", Value::from(loop_status));
+            changed.insert("LoopStatus", Variant::from(loop_status));
         }
         if self.shuffle != state.shuffle {
             self.shuffle = state.shuffle;
-            changed.insert("Shuffle", Value::Bool(state.shuffle));
+            changed.insert("Shuffle", Variant::Bool(state.shuffle));
         }
         if (self.volume - state.volume).abs() > 1e-9 {
             self.volume = state.volume;
-            changed.insert("Volume", Value::F64(state.volume));
+            changed.insert("Volume", Variant::F64(state.volume));
         }
         let can_seek = state.can_seek;
         if self.can_seek != can_seek {
             self.can_seek = can_seek;
-            changed.insert("CanSeek", Value::Bool(can_seek));
+            changed.insert("CanSeek", Variant::Bool(can_seek));
         }
         let can_play = !matches!(state.status, PlaybackStatus::Empty);
         if self.can_play != can_play {
             self.can_play = can_play;
-            changed.insert("CanPlay", Value::Bool(can_play));
+            changed.insert("CanPlay", Variant::Bool(can_play));
         }
         let can_pause = matches!(
             state.status,
@@ -618,7 +618,7 @@ impl MprisPlayer {
         );
         if self.can_pause != can_pause {
             self.can_pause = can_pause;
-            changed.insert("CanPause", Value::Bool(can_pause));
+            changed.insert("CanPause", Variant::Bool(can_pause));
         }
         // Metadata 变更
         if let Some(track) = &state.current {
@@ -626,20 +626,20 @@ impl MprisPlayer {
             if self.current_track_id.as_deref() != Some(track.id.as_ref()) {
                 self.current_track_id = Some(track.id.0.clone());
             }
-            let new_meta: HashMap<String, OwnedValue> = metadata::metadata_from_track(track)
+            let new_meta: HashMap<String, OwnedVariant> = metadata::metadata_from_track(track)
                 .into_iter()
                 .map(|(k, v)| (k.to_owned(), v))
                 .collect();
             if self.metadata != new_meta {
                 self.metadata = new_meta;
-                changed.insert("Metadata", Value::from(self.metadata.clone()));
+                changed.insert("Metadata", Variant::from(self.metadata.clone()));
             }
         } else if !self.metadata.is_empty() {
             self.metadata = HashMap::new();
             self.current_track_id = None;
             changed.insert(
                 "Metadata",
-                Value::from(HashMap::<String, OwnedValue>::new()),
+                Variant::from(HashMap::<String, OwnedVariant>::new()),
             );
         }
     }
@@ -647,7 +647,7 @@ impl MprisPlayer {
 
 async fn emit_properties_changed(
     player_ref: InterfaceRef<MprisPlayer>,
-    changed: HashMap<&str, Value<'_>>,
+    changed: HashMap<&str, Variant<'_>>,
 ) {
     if changed.is_empty() {
         return;
@@ -712,27 +712,27 @@ mod tests {
     #[test]
     fn update_props_syncs_shuffle_on() {
         let mut iface = iface();
-        let mut changed: HashMap<&str, Value> = HashMap::new();
+        let mut changed: HashMap<&str, Variant> = HashMap::new();
         iface.update_props(&state(true), &mut changed);
         assert!(iface.shuffle);
-        assert_eq!(changed.get("Shuffle"), Some(&Value::Bool(true)));
+        assert_eq!(changed.get("Shuffle"), Some(&Variant::Bool(true)));
     }
 
     #[test]
     fn update_props_syncs_shuffle_off() {
         let mut iface = iface();
         iface.shuffle = true;
-        let mut changed: HashMap<&str, Value> = HashMap::new();
+        let mut changed: HashMap<&str, Variant> = HashMap::new();
         iface.update_props(&state(false), &mut changed);
         assert!(!iface.shuffle);
-        assert_eq!(changed.get("Shuffle"), Some(&Value::Bool(false)));
+        assert_eq!(changed.get("Shuffle"), Some(&Variant::Bool(false)));
     }
 
     /// 无变化时不产生属性变更。
     #[test]
     fn update_props_noop_when_shuffle_unchanged() {
         let mut iface = iface();
-        let mut changed: HashMap<&str, Value> = HashMap::new();
+        let mut changed: HashMap<&str, Variant> = HashMap::new();
         iface.update_props(&state(false), &mut changed);
         assert!(!changed.contains_key("Shuffle"));
     }
@@ -792,7 +792,7 @@ mod tests {
         iface.current_track_id = Some("qq:mid-a".into());
         iface.metadata.insert(
             "mpris:length".into(),
-            OwnedValue::try_from(Value::from(100_000_000i64)).unwrap(),
+            OwnedVariant::try_from(Variant::from(100_000_000i64)).unwrap(),
         );
         let stale = metadata::track_id_object_path("qq:mid-other");
         iface.set_position(stale, 50_000_000).await.unwrap();
@@ -810,7 +810,7 @@ mod tests {
         iface.current_track_id = Some("qq:mid-a".into());
         iface.metadata.insert(
             "mpris:length".into(),
-            OwnedValue::try_from(Value::from(100_000_000i64)).unwrap(),
+            OwnedVariant::try_from(Variant::from(100_000_000i64)).unwrap(),
         );
         let path = metadata::track_id_object_path("qq:mid-a");
         iface.set_position(path.clone(), -1).await.unwrap();
@@ -830,7 +830,7 @@ mod tests {
         iface.current_track_id = Some("qq:mid-a".into());
         iface.metadata.insert(
             "mpris:length".into(),
-            OwnedValue::try_from(Value::from(100_000_000i64)).unwrap(),
+            OwnedVariant::try_from(Variant::from(100_000_000i64)).unwrap(),
         );
         let path = metadata::track_id_object_path("qq:mid-a");
         iface.set_position(path, 30_000_000).await.unwrap();
@@ -860,7 +860,7 @@ mod tests {
         iface.position_us = 90_000_000;
         iface.metadata.insert(
             "mpris:length".into(),
-            OwnedValue::try_from(Value::from(100_000_000i64)).unwrap(),
+            OwnedVariant::try_from(Variant::from(100_000_000i64)).unwrap(),
         );
         iface.seek(20_000_000).await.unwrap(); // 90s + 20s > 100s
         assert!(matches!(rx.try_recv().unwrap(), PlayerCommand::Next));
@@ -882,7 +882,7 @@ mod tests {
     #[test]
     fn can_play_true_when_stopped_with_track() {
         let mut iface = iface();
-        let mut changed: HashMap<&str, Value> = HashMap::new();
+        let mut changed: HashMap<&str, Variant> = HashMap::new();
         let st = PlaybackState {
             status: PlaybackStatus::Stopped,
             current: Some(hmp_core::Track::new(
@@ -894,7 +894,7 @@ mod tests {
         iface.update_props(&st, &mut changed);
         assert!(iface.can_play, "Stopped 有曲时应可 Play");
         // Empty（无曲）→ false。
-        let mut changed: HashMap<&str, Value> = HashMap::new();
+        let mut changed: HashMap<&str, Variant> = HashMap::new();
         let st2 = PlaybackState {
             status: PlaybackStatus::Empty,
             current: None,

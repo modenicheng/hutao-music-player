@@ -7,7 +7,7 @@ use std::time::Duration;
 use hmp_core::{
     HmpError, LoadRequest, MediaStream, PlaybackState, PlaybackStatus, PlayerCommand, PlayerEvent,
 };
-use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source, StreamError};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source, DeviceSinkError};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::source::{MediaLocation, parse_uri};
@@ -117,7 +117,7 @@ const SEEK_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 后台 seek 结果（§16 开放项 #3）。双代际守卫：`seek_gen` 判「是否被
 /// 更新的 seek / Stop / Shutdown 取代」，`load_gen` 判「装载是否已换代」；
-/// 任一过期即丢弃，不污染新状态。错误预格式化为 `String`（`Sink::try_seek`
+/// 任一过期即丢弃，不污染新状态。错误预格式化为 `String`（`Player::try_seek`
 /// 的错误类型不跨线程语义暴露，仅用于事件消息）。
 struct SeekOutcome {
     seek_gen: u64,
@@ -144,16 +144,15 @@ struct LoadCompletion {
 /// policy); each is tried in preference order and the first stream that
 /// opens wins. Never fatal: an empty candidate list or all-failed opens
 /// surfaces as `Err` and the caller falls back to the silent sink.
-pub fn open_default_output() -> Result<OutputStream, StreamError> {
-    use rodio::cpal::traits::DeviceTrait;
+pub fn open_default_output() -> Result<MixerDeviceSink, DeviceSinkError> {
 
     let mut candidates = collect_output_candidates();
     candidates.sort_by_key(|&(preference, _)| preference);
 
-    let mut last_error = StreamError::NoDevice;
+    let mut last_error = DeviceSinkError::NoDevice;
     for (_, device) in candidates {
-        let name = device.name().unwrap_or_else(|_| "<unnamed>".into());
-        let builder = match OutputStreamBuilder::from_device(device) {
+        let name = device.to_string();
+        let builder = match DeviceSinkBuilder::from_device(device) {
             Ok(builder) => builder,
             Err(error) => {
                 tracing::warn!(%name, %error, "audio device rejected builder config, trying next");
@@ -208,15 +207,13 @@ fn collect_output_candidates() -> OutputCandidates {
     let consider = |device: Option<rodio::cpal::Device>,
                     candidates: &mut Vec<(usize, rodio::cpal::Device)>| {
         let Some(device) = device else { return };
-        let Ok(name) = device.name() else {
-            return;
-        };
+        let name = device.to_string();
         let Some(preference) = server_routed_preference(&name) else {
             return;
         };
         if candidates
             .iter()
-            .any(|(_, device)| device.name().ok().as_deref() == Some(name.as_str()))
+            .any(|(_, device)| device.to_string() == name)
         {
             return;
         }
@@ -280,7 +277,7 @@ pub struct PlayerCore {
     state_rx: watch::Receiver<PlaybackState>,
     events_rx: broadcast::Receiver<PlayerEvent>,
     // Rodio stops the device stream when this guard is dropped.
-    _output: Option<OutputStream>,
+    _output: Option<MixerDeviceSink>,
 }
 
 impl PlayerCore {
@@ -293,7 +290,7 @@ impl PlayerCore {
     pub fn new() -> Result<Self, HmpError> {
         match open_default_output() {
             Ok(output) => {
-                let sink = Sink::connect_new(output.mixer());
+                let sink = Player::connect_new(output.mixer());
                 Ok(Self::from_sink(sink, Some(output)))
             }
             Err(error) => {
@@ -301,11 +298,11 @@ impl PlayerCore {
                     %error,
                     "no audio output available; using silent output (clock keeps running)"
                 );
-                let (sink, mut output) = Sink::new();
+                let (sink, mut output) = Player::new();
                 std::thread::spawn(move || {
                     loop {
                         let samples_per_tick =
-                            (output.sample_rate() as usize * output.channels() as usize / 100)
+                            (output.sample_rate().get() as usize * output.channels().get() as usize / 100)
                                 .max(1);
                         for _ in 0..samples_per_tick {
                             if output.next().is_none() {
@@ -320,7 +317,7 @@ impl PlayerCore {
         }
     }
 
-    fn from_sink(sink: Sink, output: Option<OutputStream>) -> Self {
+    fn from_sink(sink: Player, output: Option<MixerDeviceSink>) -> Self {
         let sink = Arc::new(sink);
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (load_tx, load_rx) = mpsc::unbounded_channel();
@@ -339,11 +336,11 @@ impl PlayerCore {
     /// Construct a deterministic sink for unit tests without an audio device.
     #[cfg(test)]
     pub(crate) fn new_silent_for_test() -> Self {
-        let (sink, mut output) = Sink::new();
+        let (sink, mut output) = Player::new();
         std::thread::spawn(move || {
             loop {
                 let samples_per_tick =
-                    (output.sample_rate() as usize * output.channels() as usize / 100).max(1);
+                    (output.sample_rate().get() as usize * output.channels().get() as usize / 100).max(1);
                 for _ in 0..samples_per_tick {
                     if output.next().is_none() {
                         return;
@@ -397,7 +394,7 @@ impl PlayerCore {
 }
 
 async fn append_location(
-    sink: &Sink,
+    sink: &Player,
     location: MediaLocation,
 ) -> Result<(Option<Duration>, SourceErrorLatch), HmpError> {
     // 错误闩随 reader 建立（§16：中途读错误显式化），经 LoadCompletion
@@ -470,7 +467,7 @@ where
 /// 装载任务体：打开源并解码、追加进 sink。**只做阻塞在自身 future 里的
 /// 取流/解码工作**，状态转换一律由 drive 循环在收到 [`LoadCompletion`] 后
 /// 执行（任务可能被更新的装载/Stop/Shutdown abort，不得自行发布状态）。
-async fn perform_load(sink: Arc<Sink>, request: Box<LoadRequest>) -> LoadCompletion {
+async fn perform_load(sink: Arc<Player>, request: Box<LoadRequest>) -> LoadCompletion {
     // stream 优先于 uri：远端曲目（明文/加密）一律经进程内源直连；
     // uri 仅元数据/日志。无 stream 才按 file:// 解析本地文件。
     let location = match request.stream.as_ref() {
@@ -499,7 +496,7 @@ async fn perform_load(sink: Arc<Sink>, request: Box<LoadRequest>) -> LoadComplet
 }
 
 async fn drive(
-    sink: Arc<Sink>,
+    sink: Arc<Player>,
     mut cmd_rx: mpsc::UnboundedReceiver<PlayerCommand>,
     mut load_rx: mpsc::UnboundedReceiver<LoadCommand>,
     state_tx: watch::Sender<PlaybackState>,
@@ -515,7 +512,7 @@ async fn drive(
     // 当前装载 reader 的错误闩（§16：判 EOS 前查询，中途读错误 → 显式
     // Error 态；装载分派/Stop 清除、completion 换新）。
     let mut current_latch: Option<SourceErrorLatch> = None;
-    // §16 开放项 #3：seek 后台化。`Sink::try_seek` 同步等音频线程执行
+    // §16 开放项 #3：seek 后台化。`Player::try_seek` 同步等音频线程执行
     // seek（feedback.recv()），远端未缓冲区间的探测读受 CDN 超时钳制
     // （最长 ~30-40s），内联会冻结本循环（全部播放命令排队）。改为
     // spawn_blocking 投递 + 结果回投本通道，循环只登记代际与软期限。
