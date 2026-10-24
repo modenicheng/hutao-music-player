@@ -798,3 +798,10 @@ daemon 侧实测见上（探针法：起 HEAD daemon + 直发 CoverGet，观察�
 2. **修复（S9）**：R1b 队列封面异步逐行回填（16ms×6/tick、换装作废、热行 get_if_cached 同步零闪烁、探测不更新 LRU stamp）；R2 派生封面 `<hash>.512.jpg`（persist_cover 五调用点含 CLI scan 写侧、读侧三级回退、互锚 hmp-core::media::derived_cover_name、双向兼容独立回滚）；R3 EqClock 播放门控 + Equalizer paused||!visible 自门控（暂停冻结经绝对相位机制数学等价）。
 3. **E1 复验（docs/verify/2026-10-24-mem-e1/，同日同机双臂各 23.5min）**：fix 臂四判据全 PASS（max WS 246MB、斜率 -0.02MB/min、P5 36/36 存活、daemon 50MB 含迁移期、派生件 90 个 ≈23KB/张）；**基线臂当日亦有界（250MB/+0.166）——S6 失效签名跨日非平稳，主分量系系统态（当日内存压力）**，与 S8 排除论证闭环；修复全指标 ≤ 基线，机制级消灭由测试钉死（重建派发内解码 0 次/批恰 6/换装作废/门控往返）。真库护栏 94 文件前后零变化。
 4. **新登记**：①`hmp quit` 后桌面挂死成不可杀僵尸（两臂均有、基线同——退出路径死锁，**开放项 S10 候选**）；②backend_build 指纹只哈希 hmp-daemon/src/**（R2 落 hmp-storage 不入指纹，E1 两臂同指纹实锤）——依赖级陈旧检测失明，纪律防线不变；③E3 回填计数日志未落盘（stdout 未重定向，口径缺口）；④R1a（daemon revision 不 bump）留作远期候选；⑤播放期不可见行 EQ 求值残留（打磨项）。
+
+## §26 quit 后桌面僵尸挂死——根因与修复（2026-10-24，S10 流；调查四阶段+审计六发续接双代理验证）
+
+1. **根因（cdb 符号化栈实锤，置信度实锤级）**：非 GL。`ExitProcess → LdrShutdownProcess → TLS/FLS 析构 → thread_local RefCell<slint::Timer> drop（bridge.rs schedule_refresh 回调闭包捕获 Arc<BackendRuntime>，退出时为最后引用）→ BackendRuntime::drop → tokio Runtime::drop → BlockingPool::shutdown 在 oneshot 上死等已被 ExitProcess 杀死的 blocking 线程 → loader 关停期 WaitOnAddress 永久挂起（TerminateProcess 亦无法清出）`。GL 理论（初审通过）被 software 对照臂证伪——无 igd* 驱动模块仍复现僵尸且两臂逐帧同栈；「不可杀」的本质是 loader 关停期的线程困死。
+2. **修复（T7）**：`BackendRuntime` 持 `&'static Runtime`（Box::leak，进程同寿，任何退出路径不再触发 shutdown 握手）+ 契约单测（句柄消亡后在途任务继续，旧实现必红）。forget(ui)/KeepWindowShown 方案随前提证伪 revert；2s 用户态看门狗保留为纯纵深（对 loader 期挂死无效，如实注释）。
+3. **验收（9 臂真机，隔离端点）**：基线（a5a0236）quit×2+software×1 = **3/3 ZOMBIE**（3 分钟短周期即复现）；fix2 quit 2/2 + X 关窗 1/1 = **全部 1.1s CLEAN_EXIT**（自然 drop 与 GL 销毁照常——基线臂自证该段无罪）。GL 后端实测 WGL（M1 预测成立）。
+4. **方法论遗产**：①对照臂设计直接推翻了双代理一致认可的假设——「为佐证而设的对照臂」可能是最有价值的实验；②cdb 在 Windows Kits 默认路径（前任「缺席」误判贻误一轮）；③配额驱逐链下「增量落盘+续接代理」模式六发接力完成审计。
