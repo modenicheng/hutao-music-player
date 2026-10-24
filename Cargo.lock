@@ -3708,7 +3708,6 @@ dependencies = [
  "pastey",
  "serde",
  "task-local",
- "tokio",
  "zbus 5.19.0",
 ]
 
@@ -8567,7 +8566,6 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_repr",
- "tokio",
  "tracing",
  "uds_windows",
  "uuid",
