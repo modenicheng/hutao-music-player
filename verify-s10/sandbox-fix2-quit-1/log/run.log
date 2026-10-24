@@ -1,0 +1,20 @@
+[14:32:11] === S10 repro start (arm=fix2-quit-1 bin=fix2 exit=quit software=False) ===
+[14:32:11] pre-existing: PID 2712 hmp-desktop.exe PPID 65936
+[14:32:11] pre-existing: PID 46516 hmp-desktop.exe PPID 28500
+[14:32:11] pre-existing: PID 65904 hmp-desktop.exe PPID 40396
+[14:32:11] pre-existing: PID 73588 hmp-desktop.exe PPID 48784
+[14:32:18] daemon pid=2064 endpoint=\\.\pipe\hmp-s10-fix2-quit-1
+[14:32:19] volume gate PASS (user_volume=0) backend_build=6a3c6f734a9a399b
+[14:32:19] exe same-batch: hmp mtime=14:31:52, desktop mtime=14:31:52
+[14:32:19] scan done: D:\coding\hutao-music-player\.worktrees\s10-exit-deadlock\verify-s10\sandbox-fix2-quit-1\media
+[14:32:20] seeded 10 tracks into playlist 1
+[14:32:32] desktop pid=27688
+[14:35:36] play phase done (180s)
+[14:35:36] GL modules: 
+[14:35:36] exit trigger: hmp quit (isolated endpoint)
+[14:35:36] desktop exited after 0s
+[14:35:37] daemon exited after 1.6s of quit (assert <=15s: True)
+[14:35:37] === verdict: CLEAN_EXIT (elapsed 206s) ===
+[14:35:39] cleanup check pid=27688 alive=False
+[14:35:39] cleanup check pid=2064 alive=False
+[14:35:39] === repro finally done, verdict=CLEAN_EXIT ===

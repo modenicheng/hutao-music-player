@@ -1,0 +1,49 @@
+S10 僵尸主线程符号化栈存档（cdb 非侵入附加，2026-10-24 14:0x）
+================================================================================
+
+== 采集方法 ==
+cdb -pv -p <PID> -y <worktree>\target\release -c ".reload hmp_desktop.exe=f; ~*kb 16; qd"
+（PDB = bin-base exe 的同链产物；两渲染器僵尸同栈，卡点与渲染器无关）
+
+== 僵尸 A：GL/femtovg 臂（base-quit-1，PID 46516，bin-base，2026-10-24 13:37 起）==
+== 僵尸 B：software 臂（base-sw-1，PID 73588，bin-base + SLINT_BACKEND=winit-software，13:59 起）==
+两栈逐帧一致（仅地址不同），合并记录：
+
+ntdll!ZwWaitForAlertByThreadId+0x14
+ntdll!RtlWaitOnAddress+0x213
+KERNELBASE!WaitOnAddress+0x38
+hmp_desktop!std::sys::sync::futex::windows::wait_on_address+0x19      (inline)
+hmp_desktop!std::sys::sync::futex::windows::futex_wait+0x19           (inline)
+hmp_desktop!std::sys::sync::condvar::futex::Condvar::wait_optional_timeout+0x23 (inline)
+hmp_desktop!std::sys::sync::condvar::futex::Condvar::wait+0x33
+hmp_desktop!tokio::runtime::park::Inner::park+0x88
+hmp_desktop!tokio::runtime::park::CachedParkThread::block_on<oneshot::Receiver<()>>+0x115
+hmp_desktop!tokio::runtime::blocking::shutdown::Receiver::wait+0x64
+hmp_desktop!tokio::runtime::blocking::pool::BlockingPool::shutdown+0x200
+hmp_desktop!core::ptr::drop_glue<i_slint_core::graphics::image::Image>+0x5ad   (闭包 drop 内联)
+hmp_desktop!alloc::sync::Arc<hmp_desktop::backend::BackendRuntime>::drop_slow+0x79
+hmp_desktop!core::ptr::drop_glue<i_slint_core::timers::CallbackVariant>+0x3d
+hmp_desktop!i_slint_core::timers::Timer::ops::drop::Drop::drop+0x14e
+hmp_desktop!std::sys::thread_local::native::lazy::destroy<RefCell<i_slint_core::timers::Timer>>+0x27
+hmp_desktop!std::sys::thread_local::destructors::list::run+0x5e       (inline)
+hmp_desktop!std::sys::thread_local::guard::windows::cleanup+0x81
+ntdll!RtlFreeActivationContextStack+0xef        (FLS 回调)
+ntdll!LdrShutdownProcess+0x22a
+ntdll!RtlExitUserProcess+0x9e
+KERNEL32!ExitProcess+0xb
+ucrtbase!(exit)
+hmp_desktop!__scrt_common_main_seh+0x176
+
+== 解读（FINDINGS §1.3 真根因） ==
+main 已正常返回 → exit()/ExitProcess：先终止其余线程（含 tokio blocking 池），
+再 LdrShutdownProcess 跑主线程 FLS/TLS 析构 → bridge.rs schedule_refresh 的
+thread_local slint::Timer drop → 其回调闭包（捕获 Arc<BackendRuntime>，此时为
+最后引用）drop → BackendRuntime::drop → tokio Runtime::drop →
+BlockingPool::shutdown 在 oneshot 上死等一个已被 ExitProcess 杀死的 blocking
+线程 → WaitOnAddress 永久挂起。主线程困在 loader 关停期 → TerminateProcess
+亦无法清出（不可杀僵尸）。
+
+== 附：E1 时代僵尸 ==
+PID 2712 = E1 base 臂残留（01:40:04 起，s9-mem-base 二进制，PPID 65936），
+同签名（1 线程 Wait/Unknown）；机器未重启，楔了 12+ 小时——本轮 4 个僵尸
+（2712/46516/65904/73588）均需重启清理。
