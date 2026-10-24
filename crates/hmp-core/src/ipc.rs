@@ -56,10 +56,10 @@ pub enum TrackProvider {
 impl TrackProvider {
     /// 依据 id 前缀识别来源（`local:` 前缀 → 本地）。
     pub fn from_id(id: &str) -> Self {
-        if let Some(rest) = id.strip_prefix("local:") {
-            if !rest.is_empty() {
-                return Self::Local;
-            }
+        if let Some(rest) = id.strip_prefix("local:")
+            && !rest.is_empty()
+        {
+            return Self::Local;
         }
         Self::QqMusic
     }

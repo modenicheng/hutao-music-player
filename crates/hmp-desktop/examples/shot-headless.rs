@@ -274,10 +274,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }))
             {
                 let path = uri.strip_prefix("file://").unwrap_or(&uri);
-                if let Ok(image) = slint::Image::load_from_path(std::path::Path::new(path)) {
-                    if let Some(card) = cards.get_mut(i) {
-                        card.cover = image;
-                    }
+                if let Ok(image) = slint::Image::load_from_path(std::path::Path::new(path))
+                    && let Some(card) = cards.get_mut(i)
+                {
+                    card.cover = image;
                 }
             }
         }

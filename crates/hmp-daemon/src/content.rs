@@ -154,10 +154,10 @@ impl ContentService {
     /// 三级读取：内存 TTL（L1）→ 磁盘缓存（L2，`cache_dir()/lyrics/`，
     /// 跨重启免重复出网）→ QQ 网络；网络成功后双写回填。
     pub async fn lyric(&self, mid: &str) -> Result<LyricPage, String> {
-        if let Some((at, page)) = self.lyric_cache.lock().unwrap().get(mid) {
-            if fresh(*at, Instant::now(), LYRIC_TTL) {
-                return Ok(page.clone());
-            }
+        if let Some((at, page)) = self.lyric_cache.lock().unwrap().get(mid)
+            && fresh(*at, Instant::now(), LYRIC_TTL)
+        {
+            return Ok(page.clone());
         }
         if let Some((lyric, translation)) = hmp_storage::lyric_cache::read_cached_lyric(mid) {
             let page = LyricPage {
@@ -181,12 +181,11 @@ impl ContentService {
         // L2 落盘（空正文静默跳过；失败仅丢缓存不阻断）。落盘前校验内容
         // 像 LRC（含 `[` 标签）：上游偶发返回未解密的 QRC hex，落盘会把
         // 解密失败的脏数据永久化，存疑内容不缓存、下次请求重试网络。
-        if resp.lyric.contains('[') {
-            if let Err(e) =
+        if resp.lyric.contains('[')
+            && let Err(e) =
                 hmp_storage::lyric_cache::write_cached_lyric(mid, &resp.lyric, &resp.trans)
-            {
-                tracing::warn!(mid, %e, "lyric disk cache write failed");
-            }
+        {
+            tracing::warn!(mid, %e, "lyric disk cache write failed");
         }
         let page = LyricPage {
             lyric: resp.lyric,
@@ -216,10 +215,10 @@ impl ContentService {
         title: &str,
         artist: &str,
     ) -> Result<LyricPage, String> {
-        if let Some((at, page)) = self.lyric_cache.lock().unwrap().get(id) {
-            if fresh(*at, Instant::now(), LYRIC_TTL) {
-                return Ok(page.clone());
-            }
+        if let Some((at, page)) = self.lyric_cache.lock().unwrap().get(id)
+            && fresh(*at, Instant::now(), LYRIC_TTL)
+        {
+            return Ok(page.clone());
         }
         let page = match id.strip_prefix("local:") {
             Some(path) => {
@@ -294,10 +293,10 @@ impl ContentService {
         let Some(credential) = self.credential()? else {
             return Ok(AccountInfo::default());
         };
-        if let Some((at, info)) = self.account_cache.lock().unwrap().as_ref() {
-            if fresh(*at, Instant::now(), ACCOUNT_TTL) {
-                return Ok(info.clone());
-            }
+        if let Some((at, info)) = self.account_cache.lock().unwrap().as_ref()
+            && fresh(*at, Instant::now(), ACCOUNT_TTL)
+        {
+            return Ok(info.clone());
         }
         let mut info = AccountInfo {
             logged_in: true,
@@ -326,18 +325,20 @@ impl ContentService {
                     .unwrap_or_default();
             }
         }
-        if nick.is_none() && !euin.is_empty() {
-            if let Ok(gene) = api.get_music_gene(&euin, Some(&credential)).await {
-                let card = gene.userinfo_card.nick_name;
-                if !card.is_empty() {
-                    nick = Some(card);
-                }
+        if nick.is_none()
+            && !euin.is_empty()
+            && let Ok(gene) = api.get_music_gene(&euin, Some(&credential)).await
+        {
+            let card = gene.userinfo_card.nick_name;
+            if !card.is_empty() {
+                nick = Some(card);
             }
         }
-        if nick.is_none() && !euin.is_empty() {
-            if let Ok(data) = api.get_homepage(&euin, Some(&credential)).await {
-                nick = find_any_str(&data, &["nick", "nickname", "name"]);
-            }
+        if nick.is_none()
+            && !euin.is_empty()
+            && let Ok(data) = api.get_homepage(&euin, Some(&credential)).await
+        {
+            nick = find_any_str(&data, &["nick", "nickname", "name"]);
         }
         // VIP 摘要：vip_login_base 的 isVip 标志。失败 → 空串（不猜测）。
         if let Ok(data) = api.get_vip_info(&credential).await {
@@ -360,10 +361,10 @@ impl ContentService {
             // 一次性补救，失败不影响本次展示（下次 AccountStatus 再试）
             let _ = self.store.save(&patched);
         }
-        if let Some(nick) = nick {
-            if !nick.is_empty() {
-                info.nickname = nick;
-            }
+        if let Some(nick) = nick
+            && !nick.is_empty()
+        {
+            info.nickname = nick;
         }
         *self.account_cache.lock().unwrap() = Some((Instant::now(), info.clone()));
         Ok(info)

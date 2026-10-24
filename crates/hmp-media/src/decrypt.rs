@@ -255,10 +255,10 @@ pub(crate) fn embedded_ekey_from_bytes(tail: &[u8], audio_len: usize) -> Result<
             .unwrap_or_default(),
         Footer::V1 { .. } => &tail[..tail.len() - 4],
     };
-    if let Ok(text) = std::str::from_utf8(key_bytes) {
-        if parse_ekey(text).is_ok() {
-            return Ok(text.to_owned());
-        }
+    if let Ok(text) = std::str::from_utf8(key_bytes)
+        && parse_ekey(text).is_ok()
+    {
+        return Ok(text.to_owned());
     }
     let key = parse_ekey_decoded(key_bytes)
         .map_err(|_| MediaError::Unsupported("embedded ekey unparseable".to_string()))?;

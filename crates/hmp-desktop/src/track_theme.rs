@@ -518,7 +518,7 @@ fn select_accent_rgb(pixels: &[u8], mode: Mode) -> Option<[u8; 3]> {
 
 fn to_oklab_points(pixels: &[u8]) -> Vec<Oklab> {
     let mut points = Vec::with_capacity(pixels.len() / 4);
-    for px in pixels.chunks_exact(4) {
+    for px in pixels.as_chunks::<4>().0 {
         if px[3] < MIN_PIXEL_ALPHA {
             continue;
         }
@@ -722,7 +722,7 @@ fn box_blur_pass(data: &mut [f64], w: usize, h: usize, radius: usize, vertical: 
 
 /// gamma 域饱和度提升：luma = 0.2126r+0.7152g+0.0722b，c' = clamp(c + (c-luma)*amount)
 fn saturate_gamma(data: &mut [f64], amount: f64) {
-    for px in data.chunks_exact_mut(4) {
+    for px in data.as_chunks_mut::<4>().0 {
         let luma = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
         for c in &mut px[..3] {
             *c = (*c + (*c - luma) * amount).clamp(0.0, 255.0);
@@ -865,7 +865,7 @@ mod tests {
 
     fn solid_pixels(r: u8, g: u8, b: u8) -> Vec<u8> {
         let mut pixels = vec![0u8; SIZE * SIZE * 4];
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             px[0] = r;
             px[1] = g;
             px[2] = b;
@@ -877,7 +877,7 @@ mod tests {
     fn half_red_half_blue() -> Vec<u8> {
         let mut pixels = vec![0u8; SIZE * SIZE * 4];
         let half = pixels.len() / 2;
-        for (i, px) in pixels.chunks_exact_mut(4).enumerate() {
+        for (i, px) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let is_red = i * 4 < half;
             px[0] = if is_red { 255 } else { 0 };
             px[2] = if is_red { 0 } else { 255 };
@@ -888,7 +888,7 @@ mod tests {
 
     fn solid_image(w: u32, h: u32, r: u8, g: u8, b: u8) -> Image {
         let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
-        for px in buffer.make_mut_bytes().chunks_exact_mut(4) {
+        for px in buffer.make_mut_bytes().as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[r, g, b, 255]);
         }
         Image::from_rgba8(buffer)
@@ -957,7 +957,7 @@ mod tests {
     fn near_transparent_pixels_are_skipped() {
         // alpha < 16（MIN_PIXEL_ALPHA）不参与取色 → 整族回退
         let mut pixels = solid_pixels(255, 0, 0);
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             px[3] = MIN_PIXEL_ALPHA - 1;
         }
         let palette = extract(&pixels, false);
@@ -1021,7 +1021,7 @@ mod tests {
         let pixels = sample_pixels(&source, 4);
 
         assert_eq!(pixels.len(), 4 * 4 * 4);
-        for px in pixels.chunks_exact(4) {
+        for px in pixels.as_chunks::<4>().0 {
             assert_eq!(px, [200u8, 60, 40, 255].as_slice());
         }
     }
@@ -1052,7 +1052,7 @@ mod tests {
         assert!(size.height > 0 && size.height <= 128);
         let buffer = ambient.to_rgba8().expect("ambient is rgba8");
         assert_eq!(buffer.as_bytes().len() % 4, 0);
-        for px in buffer.as_bytes().chunks_exact(4) {
+        for px in buffer.as_bytes().as_chunks::<4>().0 {
             assert_eq!(px, [255u8, 0, 0, 255].as_slice());
         }
     }

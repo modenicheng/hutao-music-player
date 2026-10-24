@@ -27,15 +27,15 @@ fn from_env_or_home(env: &str, fallback_dir: &str) -> PathBuf {
 /// 极端服务环境）。
 #[cfg(windows)]
 fn windows_dir(xdg_var: &str, folder_var: &str, profile_part: &str) -> PathBuf {
-    if let Some(v) = std::env::var_os(xdg_var) {
-        if !v.is_empty() {
-            return PathBuf::from(v);
-        }
+    if let Some(v) = std::env::var_os(xdg_var)
+        && !v.is_empty()
+    {
+        return PathBuf::from(v);
     }
-    if let Some(v) = std::env::var_os(folder_var) {
-        if !v.is_empty() {
-            return PathBuf::from(v);
-        }
+    if let Some(v) = std::env::var_os(folder_var)
+        && !v.is_empty()
+    {
+        return PathBuf::from(v);
     }
     std::env::var_os("USERPROFILE")
         .filter(|v| !v.is_empty())

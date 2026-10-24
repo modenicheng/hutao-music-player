@@ -140,12 +140,11 @@ impl LocalSourceResolver {
             let mut lib = self.library.lock().unwrap();
             lib.add_local_file(&path, meta.as_ref())
                 .map_err(|e| EngineError::Internal(format!("library write failed: {e}")))?;
-            if let Some(cover) = &cover {
-                if let Err(error) =
+            if let Some(cover) = &cover
+                && let Err(error) =
                     lib.set_track_cover(&format!("local:{}", path.display()), &cover.url)
-                {
-                    tracing::warn!(%error, path = %path.display(), "failed to index local cover");
-                }
+            {
+                tracing::warn!(%error, path = %path.display(), "failed to index local cover");
             }
         }
         // 本地音质如实上报（按格式/码率；旧实现一律 Mp3_128，无损曲目被误报，P1）。

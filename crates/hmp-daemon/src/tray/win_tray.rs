@@ -191,10 +191,10 @@ fn run_owner(
                 }
             }
             while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-                if let tray_icon::TrayIconEvent::Click { button, .. } = &event {
-                    if *button == tray_icon::MouseButton::Left {
-                        let _ = command_tx.send(Request::Command(PlayerCommand::TogglePlay));
-                    }
+                if let tray_icon::TrayIconEvent::Click { button, .. } = &event
+                    && *button == tray_icon::MouseButton::Left
+                {
+                    let _ = command_tx.send(Request::Command(PlayerCommand::TogglePlay));
                 }
             }
             // 3) 等消息或 250ms（兜底唤醒，保证 Stop/Update 至多半拍延迟）。

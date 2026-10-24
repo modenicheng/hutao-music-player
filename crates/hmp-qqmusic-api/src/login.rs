@@ -737,13 +737,13 @@ impl<'a> LoginApi<'a> {
         let min_safe_interval = Duration::from_millis(1000);
 
         loop {
-            if let Some(cancel) = cancel {
-                if cancel.is_cancelled() {
-                    return Err(QqMusicError::Login {
-                        code: -1,
-                        message: "login canceled".into(),
-                    });
-                }
+            if let Some(cancel) = cancel
+                && cancel.is_cancelled()
+            {
+                return Err(QqMusicError::Login {
+                    code: -1,
+                    message: "login canceled".into(),
+                });
             }
             if Instant::now() >= deadline {
                 return Err(QqMusicError::Login {
@@ -947,10 +947,10 @@ fn extract_query_param(url: &str, key: &str) -> Option<String> {
 /// 从 oauth 授权 Location 提取 `code`（上游 `(?<=code=)(.+?)(?=&)`）。
 fn extract_code_from_location(location: &str) -> Result<String, QqMusicError> {
     for part in location.split(['?', '&']) {
-        if let Some(v) = part.strip_prefix("code=") {
-            if !v.is_empty() {
-                return Ok(v.to_owned());
-            }
+        if let Some(v) = part.strip_prefix("code=")
+            && !v.is_empty()
+        {
+            return Ok(v.to_owned());
         }
     }
     Err(QqMusicError::InvalidResponse(

@@ -162,12 +162,12 @@ impl MprisPlayer {
     /// 越过曲尾 → 等价于下一首（spec）；否则 clamp 到 [0, 曲长] 后 Seek。
     async fn seek(&mut self, offset_us: i64) -> zbus::fdo::Result<()> {
         let new_pos = self.position_us + offset_us;
-        if let Some(len) = self.length_us() {
-            if new_pos > len {
-                self.pending_seek = false;
-                let _ = self.cmd_tx.send(PlayerCommand::Next);
-                return Ok(());
-            }
+        if let Some(len) = self.length_us()
+            && new_pos > len
+        {
+            self.pending_seek = false;
+            let _ = self.cmd_tx.send(PlayerCommand::Next);
+            return Ok(());
         }
         let new_pos = new_pos.max(0);
         self.position_us = new_pos;
@@ -202,10 +202,10 @@ impl MprisPlayer {
         if position_us < 0 {
             return Ok(());
         }
-        if let Some(len) = self.length_us() {
-            if position_us > len {
-                return Ok(());
-            }
+        if let Some(len) = self.length_us()
+            && position_us > len
+        {
+            return Ok(());
         }
         self.position_us = position_us;
         self.pending_seek = true;

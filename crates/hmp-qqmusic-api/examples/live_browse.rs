@@ -390,10 +390,10 @@ async fn main() {
     let mut first_song_id: i64 = FALLBACK_SONG_ID;
     match album.get_song("1458791", Page::new(1, 5)).await {
         Ok(r) => {
-            if let Some(s) = r.song_list.first() {
-                if s.id > 0 {
-                    first_song_id = s.id;
-                }
+            if let Some(s) = r.song_list.first()
+                && s.id > 0
+            {
+                first_song_id = s.id;
             }
             println!(
                 "PASS album.get_song: album_mid={:?} total={} parsed={} first_id={first_song_id}",

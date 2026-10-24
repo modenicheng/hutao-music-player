@@ -103,10 +103,10 @@ impl CommentService {
     ) -> Result<hmp_core::CommentPage, String> {
         let window = Page::new(page.max(1), num.max(1));
         let key = (mid.to_string(), sort.to_string(), window.page, window.num);
-        if let Some((at, page)) = self.cache.lock().unwrap().get(&key) {
-            if cache_fresh(*at, Instant::now()) {
-                return Ok(page.clone());
-            }
+        if let Some((at, page)) = self.cache.lock().unwrap().get(&key)
+            && cache_fresh(*at, Instant::now())
+        {
+            return Ok(page.clone());
         }
         let biz_id = self.resolve_song_id(mid).await?;
         let api = CommentApi::new(&self.client);

@@ -61,7 +61,7 @@ fn hex_val(b: u8) -> Option<u8> {
 
 /// 3DES-EDE ECB 逐块解密（上游 `qrc_decrypt` 循环）。
 fn decrypt_3des_ecb(data: &[u8]) -> Result<Vec<u8>, QqMusicError> {
-    if data.is_empty() || data.len() % 8 != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(8) {
         return Err(QqMusicError::InvalidResponse(
             "QRC decrypt failed: data length is not a multiple of 8".into(),
         ));

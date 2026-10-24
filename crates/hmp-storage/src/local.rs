@@ -209,11 +209,11 @@ pub fn decode_lrc_text(bytes: &[u8]) -> String {
 }
 
 fn bytes_as_u16(bytes: &[u8], little_endian: bool) -> impl Iterator<Item = u16> + '_ {
-    bytes.chunks_exact(2).map(move |pair| {
+    bytes.as_chunks::<2>().0.iter().map(move |pair| {
         if little_endian {
-            u16::from_le_bytes([pair[0], pair[1]])
+            u16::from_le_bytes(*pair)
         } else {
-            u16::from_be_bytes([pair[0], pair[1]])
+            u16::from_be_bytes(*pair)
         }
     })
 }

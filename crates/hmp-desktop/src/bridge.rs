@@ -493,10 +493,11 @@ fn spawn_login_poll_loop(
                 ),
                 _ => true,
             };
-            if let Ok(hmp_core::Response::LoginQrState(state)) = &result {
-                if !state.qr_path.is_empty() && state.qr_path != qr_path {
-                    qr_path = state.qr_path.clone();
-                }
+            if let Ok(hmp_core::Response::LoginQrState(state)) = &result
+                && !state.qr_path.is_empty()
+                && state.qr_path != qr_path
+            {
+                qr_path = state.qr_path.clone();
             }
             let weak = ui_weak.clone();
             let rt = Arc::clone(&runtime);
@@ -509,10 +510,11 @@ fn spawn_login_poll_loop(
                 let data = Data::get(&ui);
                 match result {
                     Ok(hmp_core::Response::LoginQrState(state)) => {
-                        if !state.qr_path.is_empty() && state.qr_path != current_path {
-                            if let Some(img) = load_login_qr_image(&state.qr_path) {
-                                data.set_login_qr(img);
-                            }
+                        if !state.qr_path.is_empty()
+                            && state.qr_path != current_path
+                            && let Some(img) = load_login_qr_image(&state.qr_path)
+                        {
+                            data.set_login_qr(img);
                         }
                         data.set_login_message(state.message.clone().into());
                         data.set_login_state(login_ui_state(state.status));
@@ -1085,10 +1087,10 @@ pub fn bind(
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
                 };
-                if let Ok(hmp_core::Response::Quality(pref)) = result {
-                    if let Some(tier) = quality_alias_tier(&pref.mode) {
-                        Quality::get(&ui).set_selected(tier);
-                    }
+                if let Ok(hmp_core::Response::Quality(pref)) = result
+                    && let Some(tier) = quality_alias_tier(&pref.mode)
+                {
+                    Quality::get(&ui).set_selected(tier);
                 }
             });
         });
@@ -1347,10 +1349,10 @@ pub fn bind(
         *guess_trigger.lock().expect("guess trigger") = Box::new(move |weak: Weak<AppWindow>| {
             let weak_state = weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = weak_state.upgrade() {
-                    if !Data::get(&ui).get_account_logged_in() {
-                        Data::get(&ui).set_guess_state(3);
-                    }
+                if let Some(ui) = weak_state.upgrade()
+                    && !Data::get(&ui).get_account_logged_in()
+                {
+                    Data::get(&ui).set_guess_state(3);
                 }
             });
             let rt = Arc::clone(&rt_guess);
