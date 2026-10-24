@@ -1539,12 +1539,20 @@ impl PlaybackEngine {
 
     /// 装载/解析失败后的阶段恢复：旧曲仍在播 → Playing，否则 Idle。
     /// 回滚调用方（navigate/QueueRemove/on_ended）在 restore 后调用。
+    /// 判据（S12，修订 S3 审计 P4 修复）：`Playing` → Playing；`Error`
+    /// 仅在确有旧曲（current 在——回滚重载窗口的瞬时态，重载完成后回
+    /// Playing）时保持 Playing；`Stopped` 上不得抬 Playing——装载成功后
+    /// 被用户 Stop 的驱动 current 仍在，按 current 判的旧实现把失败的
+    /// Play 恢复成 Playing（「Engine: Playing / State: Stopped」错位）。
+    /// 其余（Empty/Loading/Buffering/Paused）不抬 Playing。
     fn restore_phase_after_failure(&mut self) {
-        let playing = self.state_rx.borrow().current.is_some();
-        self.phase = if playing {
-            hmp_core::EnginePhase::Playing
-        } else {
-            hmp_core::EnginePhase::Idle
+        let st = self.state_rx.borrow().clone();
+        self.phase = match st.status {
+            hmp_core::PlaybackStatus::Playing => hmp_core::EnginePhase::Playing,
+            hmp_core::PlaybackStatus::Error if st.current.is_some() => {
+                hmp_core::EnginePhase::Playing
+            }
+            _ => hmp_core::EnginePhase::Idle,
         };
     }
 

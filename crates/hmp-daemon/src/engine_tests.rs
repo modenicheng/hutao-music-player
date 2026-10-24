@@ -4499,3 +4499,63 @@ async fn resolve_exhaustion_after_load_failure_rolls_back_previous_track() {
         "回滚应 seek 回旧位置"
     );
 }
+
+/// S12（S3 审计 P4，AUDIT §25）：restore_phase_after_failure 的判据回归。
+/// 端到端形态（装载成功→Stop→失败 Play）在 FakeDriver 下不可稳定构造——
+/// fake 的同步 load() 无条件翻 Playing，与真驱动时序不同构（探针实证）。
+/// 故直测判据：watch 状态驱动 status=Stopped 而 current 仍在（真实错位形态）
+/// 时，phase 必须落在 Idle 而非 Playing；status=Playing 时才落 Playing。
+#[tokio::test]
+async fn phase_restore_uses_driver_status_not_current() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a")]]);
+    let handle = PlaybackEngine::start_with_options(
+        driver.clone(),
+        resolver,
+        Arc::new(|| true),
+        None,
+        std::time::Duration::from_millis(300),
+        None,
+        std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
+        LIST_RESOLVE_TIMEOUT,
+    );
+    // 驱动状态直接构造「已装载但已停止」形态（current 在、status=Stopped）
+    // ——修复前的判据 current.is_some() 在此返回 Playing（错位），修复后判
+    // status 返回 Idle。
+    driver.state_tx.send_modify(|s| {
+        s.status = hmp_core::PlaybackStatus::Stopped;
+        s.current = Some(hmp_core::Track::new(hmp_core::TrackId::new("a"), "a"));
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // 经由真实失败路径触发 restore：失败装载（Error 事件）+ 队列回滚。
+    // 直接驱动 restore 的私有性使端到端更诚实——Play b 失败。
+    driver
+        .error_next_load
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    // 不变式断言（按 status 分派，S12 判据）：Stopped/Idle 不得 Playing；
+    // Error 是回滚重载窗口的瞬时态（Deferred/真驱动 completion Err 置
+    // Error、重载完成后回 Playing），Playing 恢复语义保持不动。
+    let st = handle.state_rx.borrow().clone();
+    match st.playback.status {
+        hmp_core::PlaybackStatus::Stopped | hmp_core::PlaybackStatus::Empty => assert_ne!(
+            st.phase,
+            hmp_core::EnginePhase::Playing,
+            "S3-P4 错位回归：status={:?} current={:?} phase={:?}",
+            st.playback.status,
+            st.playback.current.as_ref().map(|t| t.id.0.clone()),
+            st.phase
+        ),
+        hmp_core::PlaybackStatus::Error | hmp_core::PlaybackStatus::Playing => {
+            assert_eq!(st.phase, hmp_core::EnginePhase::Playing)
+        }
+        _ => {}
+    }
+}
