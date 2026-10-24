@@ -1114,23 +1114,28 @@ mod tests {
         ));
 
         // 订阅连接：Shutdown 帧（容忍其前的中间状态推送）。
+        // 用生产同款 read_frame（长度前缀循环读）——裸 read() 假设单次
+        // read=整帧，Linux UDS 分帧时序下会拿到半帧/跨帧（S11 CI 实证
+        // "frame length prefix does not match payload"）。
         loop {
-            let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
-                .await
-                .expect("等待 Shutdown 帧超时")
-                .unwrap();
-            assert!(n > 0, "连接在 Shutdown 前被断开");
-            match decode_frame::<Event>(&buf[..n]).unwrap() {
+            let frame =
+                tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut stream))
+                    .await
+                    .expect("等待 Shutdown 帧超时")
+                    .expect("read_frame 错误");
+            assert!(frame.is_some(), "连接在 Shutdown 前被断开");
+            match decode_frame::<Event>(&frame.unwrap()).unwrap() {
                 Event::Shutdown => break,
                 _ => continue,
             }
         }
         // 随后 EOF（服务端断开；EOF 语义保留给非优雅死亡）。
-        let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
-            .await
-            .expect("等待 EOF 超时")
-            .unwrap();
-        assert_eq!(n, 0, "Shutdown 后应立即断开");
+        let frame =
+            tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut stream))
+                .await
+                .expect("等待 EOF 超时")
+                .expect("read_frame 错误");
+        assert!(frame.is_none(), "Shutdown 后应立即断开（EOF）");
     }
 
     #[tokio::test]
