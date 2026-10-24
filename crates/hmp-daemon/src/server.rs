@@ -37,10 +37,8 @@ pub fn socket_path() -> PathBuf {
     }
     #[cfg(unix)]
     {
-        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-            if !dir.is_empty() {
-                return PathBuf::from(dir).join("hmp.sock");
-            }
+        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+            return PathBuf::from(dir).join("hmp.sock");
         }
         let uid = unsafe { libc::getuid() };
         PathBuf::from(format!("/tmp/hmp-{uid}/hmp.sock"))
