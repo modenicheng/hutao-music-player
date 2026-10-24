@@ -6,6 +6,7 @@ pub mod backend;
 pub mod bridge;
 pub mod cover_cache;
 pub mod covers;
+pub mod exit_guard;
 pub mod format;
 pub mod library_view;
 pub mod lyrics;
