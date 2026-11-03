@@ -1,0 +1,9 @@
+# 双 checkout（Windows/NTFS + Linux）仓库：统一 LF，杜绝编辑器/脚本 CRLF 重写造成的
+# 全文件换行 churn（索引本就全 LF，无需 renormalize）。
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

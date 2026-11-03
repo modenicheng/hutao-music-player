@@ -109,10 +109,10 @@
 
 | 模块 | 能力 | 建议入口 |
 |---|---|---|
-| `lyric.rs` | 歌词（仅桌面端接入，CLI 无 `hmp lyrics`） | CLI `hmp lyrics <mid>` / status 内嵌 |
-| `top.rs` | 排行榜分类/详情 | `hmp top` / `hmp play top:<idx>` |
+| `lyric.rs` | ~~歌词~~ **已落地**（ed1dad3：CLI `hmp lyric` + daemon 三级缓存 + 播放页接入） | — |
+| `top.rs` | ~~排行榜分类/详情~~ **已落地**（ff8050e：`hmp top` + 排行榜页） | — |
 | `singer.rs` | 歌手主页/歌曲/专辑/MV/相似 | `hmp artist <mid>` 浏览 |
-| `recommend.rs` | 首页 Feed/雷达/推荐歌单/新歌/猜你喜欢 | `hmp recommend` / `hmp play radar` |
+| `recommend.rs` | ~~首页 Feed/雷达/推荐歌单/新歌/猜你喜欢~~ **已落地**（ff8050e：`hmp discover`/`hmp guess` + 发现页） | — |
 | `album.rs` | 专辑详情/新碟（播放路径已用） | `hmp album <mid>` 查看曲目列表 |
 
 其他方向（按价值排序）：
@@ -180,7 +180,7 @@
    "读库放后台线程、变更后重查"的纪律——刷新时机依赖第 9 条的变更事件。
    建议：维持直读契约并写进 PORTING 文档，不为读路径新增 IPC。
 
-2. **IPC 无搜索与内容详情接口——成立，M4 内容页无数据源**。
+2. **IPC 无搜索与内容详情接口——已关闭（内容域里程碑落地）**。Search/Discover/Top/歌手/推荐等内容读面已全部经 daemon content.rs 统一出网（ff8050e 接 IPC+CLI+桌面 UI、9b90e81 内容页升级），`hmp search`/`hmp account` 直连旁路同步收编。以下为当时的分析存档：
    桌面导航已含 home/discover/top/top-detail/search/playlist/album/artist 页
    （crates/hmp-desktop/ui/nav.slint:4-22），全部只有 mock 数据。daemon 只消费
    SongApi/SonglistApi/AlbumApi/CommentApi 与 reconcile 用的 UserApi
@@ -193,7 +193,8 @@
    内存缓存（评论已有同类先例，ipc.rs:156-158）；这是 M8 最大的一块新协议面，需
    产品决策排期。
 
-3. **IPC 无歌词读取——成立**。`Request` 无歌词变体；QQ 歌词 API（lyric.rs）目前唯一
+3. **IPC 无歌词读取——已关闭（ed1dad3）**。`Request::LyricGet` + daemon 本地三级缓存 + CLI `hmp lyric` 已全部落地，播放页歌词走同一链路。以下为当时的分析存档：
+   `Request` 无歌词变体；QQ 歌词 API（lyric.rs）目前唯一
    消费者是桌面老 AppCore 的进程内直连（crates/hmp-desktop/src/app.rs:20-23、
    796-821 `LyricApi::get_lyric`），而 AppCore 已随旧 UI 契约废弃
    （crates/hmp-desktop/src/bridge.rs:2；PORTING.md:41"app.rs 暂不动，M8 重接"）；
@@ -463,16 +464,20 @@ aeb2437（明文无 Range 回退）提交于其后 22:36、**从未进入任何�
 5. **`hmp quit` 在 daemon 未运行时先 spawn 再杀**（慢盘下留孤儿 daemon）：
    `connect_existing` 纯连接，端点无监听 = 幂等成功（hmp-cli/main.rs）。
 
-**开放项（按优先级，未修）**：
+**开放项（2026-11-04 复核：五项已修，仅余三条）**：
 
-- IPC：accept 循环一错即停摆无自愈（server.rs break）；单实例管道 + 1s BUSY 重试
-  预算在连接风暴下可能耗尽（实测裸连 97% BUSY）；客户端读响应无超时。
-- 播放：中途读错误被 rodio 视为 EOS → 静默跳歌无 Error 态；`try_seek` 阻塞命令循环
-  最长 30s；~~音质回退链不覆盖解码期失败~~（**2026-10-02 关闭**，见 §17：engine 降档
-  循环覆盖装载与解码期失败，Timeout 不降档为有意边界）；预解析期无总超时。
-- 引擎命令循环内联 await 解析（歌单/专辑秒级）→ 播放控制命令排队，UI 感知「点了
-  没反应几秒」。
-- 其余见 §4（footer 误报流式路径残余、INNER JOIN 收藏残余、local_files 二等行）
+- ~~IPC：accept 循环一错即停摆无自愈（server.rs break）~~ **已修**（server.rs accept
+  退避自愈，代码注明「自愈（AUDIT §16 #1）」，25ms×2ⁿ 封顶 1s）；单实例管道 + 1s BUSY
+  重试预算在连接风暴下可能耗尽（实测裸连 97% BUSY）——**仍开放**（Windows 面）；
+  ~~客户端读响应无超时~~ **已修**（cli/client.rs 读响应 30s 硬超时）。
+- 播放：~~中途读错误被 rodio 视为 EOS → 静默跳歌无 Error 态~~ **已修**（core.rs 读错误
+  Error 态上抛）；~~`try_seek` 阻塞命令循环最长 30s~~ **已修**（后台化 + 10s ACK
+  deadline）；~~音质回退链不覆盖解码期失败~~（**2026-10-02 关闭**，见 §17：engine 降档
+  循环覆盖装载与解码期失败，Timeout 不降档为有意边界）；预解析期无总超时——**仍开放**。
+- ~~引擎命令循环内联 await 解析（歌单/专辑秒级）→ 播放控制命令排队，UI 感知「点了
+  没反应几秒」~~ **已修**（resolve 走通道投递，播放控制不再被解析排队）。
+- 其余见 §4（V1 footer 误报待立项、local_files 二等行、桌面端 UI 文案；INNER JOIN
+  收藏观感已由 §17 大幅缓解、彻底关闭待 LEFT JOIN 决策）
   与 PORTING.md（设备热插拔不迁移、逐字歌词、P9 喜欢键）。
 
 ## §17 远程播放报错归因 + 歌单曲目缓存落地（2026-10-02，双代理并行修复）

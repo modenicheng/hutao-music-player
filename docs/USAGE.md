@@ -73,7 +73,7 @@ playerctl -p hmp ...  │   (Unix socket / Windows 命名管道，127.0.0.1 本�
 
 | 命令 | 说明 |
 |---|---|
-| `hmp play <id>` | 清空队列并立即播放。`<id>` 支持三种源：`<songmid>`（单曲）、`playlist:<id>`（歌单）、`album:<id>`（专辑） |
+| `hmp play <id>` | 清空队列并立即播放。`<id>` 支持：`<songmid>`（单曲）、`album:<id>`（专辑）、`playlist:<disstid>`（QQ 歌单，远端详情拉取；owned 歌单本地主键≠disstid，直接播 `playlist:<主键>` 会报 empty——已知缺口见 AUDIT §27 另案）、`playlist:local:<主键>`（本地歌单，直读媒体库缓存，`hmp playlist list` 的 `#N` 即主键） |
 | `hmp login` | QQ 扫码登录（终端 ASCII 二维码） |
 | `hmp auth` | 显示登录状况（用户/过期/凭证后端，本地检查） |
 | `hmp search <关键词>` | 搜索歌曲，输出 track-id |
@@ -115,6 +115,7 @@ playerctl -p hmp ...  │   (Unix socket / Windows 命名管道，127.0.0.1 本�
 | `hmp favorite` | add/remove/list（本地先提交，QQ 由 daemon 异步同步） |
 | `hmp account` | profile（昵称等主页头部）/vip |
 | `hmp comment` | list（--sort hot\|new\|recommend）/post/reply/delete |
+| `hmp lyric <id>` | QQ 曲 `<songmid>` 或本地曲 `local:<path>`（--title/--artist 检索兜底）：本地三级缓存优先，miss 时经 daemon LyricGet 出网并落盘缓存 |
 
 ### 4.3 后端进程管理
 
@@ -187,7 +188,7 @@ cargo run --release -p hmp-desktop --bin hmp-desktop
 ```
 
 - 启动时自动连接常驻 daemon（`$XDG_RUNTIME_DIR/hmp.sock`）；未运行则自动拉起 `hmp serve --background`——与 `hmp play`/CLI 遥控共用同一后端、同一播放状态源（MPRIS/托盘同源生效）。连接就绪后核对 daemon 构建指纹：发现运行中的 daemon 是旧构建（重建桌面端而 daemon 未重建时旧进程会驻留）会自动退出旧进程并重新拉起；磁盘二进制本身过旧则明确报「陈旧构建」错误（见 §8）。
-- 库页（我喜欢/最近播放/音乐库/歌单）在启动时直读媒体库（`$XDG_DATA_HOME/hmp/library.sqlite3`）：先 `hmp scan ~/Music` 入库本地曲目；QQ 侧登录后 `hmp library sync` 同步歌单/收藏**并缓存歌单曲目**（歌单卡计数、歌单详情与 `playlist:<id>` 播放全部读这份本地缓存；远端增删在下次 sync 时差集合入，每轮每歌单上限 2000 首）。
+- 库页（我喜欢/最近播放/音乐库/歌单）在启动时直读媒体库（`$XDG_DATA_HOME/hmp/library.sqlite3`）：先 `hmp scan ~/Music` 入库本地曲目；QQ 侧登录后 `hmp library sync` 同步歌单/收藏**并缓存歌单曲目**（歌单卡计数与歌单详情读这份本地缓存；本地歌单经 `playlist:local:<主键>` 播放同样直读缓存；远端增删在下次 sync 时差集合入，每轮每歌单上限 2000 首）。`playlist:<disstid>` 走远端详情拉取，owned 歌单的 dirid/tid 缺口见 AUDIT §27 另案。
 - 播放条/队列与 CLI 同源：CLI 换歌桌面即时可见，反之亦然；daemon 优雅退出（托盘「退出」/`hmp quit`/SIGINT）会广播 `Event::Shutdown`，桌面端收到即随之关窗退出；daemon 非优雅死亡（崩溃）时界面保持打开呈离线空态，不会自动拉活后端（关闭窗口后重开桌面端即恢复）。
 - 空数据是诚实状态：未扫描/未同步时对应页面为空，音乐库页"扫描本地音乐"按钮在桌面端禁用（走 `hmp scan`）。
 - 已知边界（docs/AUDIT.md §8）：下载/已购两页后端无对应域（诚实空态）；远端内容卡跳详情仍按展示名查本地库。内容页（发现/排行榜/猜你喜欢/搜索）、歌词页与封面（daemon CoverGet：远程三域白名单 + 盘级索引缓存（同 URL 只下载一次）+ 本地产物回写 + 歌单封面，无源时中性占位；打开列表即批量预取曲目封面并缓存）均已接入。

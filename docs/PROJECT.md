@@ -302,7 +302,7 @@ pub struct PlaybackState {
 
 ## 5. Cargo 工作区设计
 
-> 注：本节为方案期结构快照，crate 命名与现状有出入（如 `hmp-qqmusic` 实名 `hmp-qqmusic-api`，`hmp` 二进制在 `hmp-cli`）；实际成员以根 `Cargo.toml` 为准。
+> 注：本节为方案期结构快照，crate 命名与现状有出入（如 `hmp-qqmusic` 实名 `hmp-qqmusic-api`，`hmp` 二进制在 `hmp-cli`）；实际成员以根 `Cargo.toml` 为准。§5.1 所列 docs/ARCHITECTURE.md 等拟定文件并未创建，实际文档清单见 docs/ 目录。
 
 ### 5.1 推荐的初始结构
 
