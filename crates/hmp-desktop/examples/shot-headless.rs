@@ -453,6 +453,8 @@ fn qr_placeholder_image() -> slint::Image {
     const N: usize = 33;
     let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(N as u32, N as u32);
     let pixels = buf.make_mut_slice();
+    // 三个 7×7 定位角（左上/右上/左下）；新 clippy nonminimal_bool 的等价改写更难读，保留原样。
+    #[allow(clippy::nonminimal_bool)]
     let finder =
         |r: usize, c: usize| (r < 7 && c < 7) || (r < 7 && c >= N - 7) || (r >= N - 7 && c < 7);
     for r in 0..N {
