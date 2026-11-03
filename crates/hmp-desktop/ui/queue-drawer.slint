@@ -9,8 +9,10 @@
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, Button, Equalizer, HoverGroup, HoverItem, Scroll } from "primitives.slint";
+import { QueueRow } from "data.slint";
 import { Player, TrackPalette } from "stores.slint";
 import { TrackMenu, MenuContext, TrackMenuPanel } from "context-menu.slint";
+import { QueueWindow } from "viewport.slint";
 
 export component QueueDrawer inherits Rectangle {
     background: transparent;
@@ -20,6 +22,10 @@ export component QueueDrawer inherits Rectangle {
     property <bool> themed: Player.overlay-visible;
     /** themed 暗色下的面板前景（Vue .queue-drawer.themed 的 color 覆写） */
     property <color> panel-fg: themed && Theme.dark ? TrackPalette.deep-fg : Theme.foreground;
+
+    // 行窗双向别名（QueueWindow 全局，Rust 按窗回填队列封面——见行窗口容器）
+    property <int> qw-start <=> QueueWindow.start;
+    property <int> qw-count <=> QueueWindow.count;
 
     // 面板软卸载：隐藏后保持挂载一个动画周期（淡出播完），随后 visible=false。
     // opacity 0 不参与命中剔除——面板若常驻挂载，其内部 TouchArea/滚动条会
@@ -196,7 +202,7 @@ export component QueueDrawer inherits Rectangle {
             }
 
             // —— 行列表 ——
-            Scroll {
+            qscroll := Scroll {
                 vertical-stretch: 1;
 
                 // Vue --queue-hover: var(--muted) @ opacity 1；行 radius-md 复制到滑块
@@ -208,172 +214,243 @@ export component QueueDrawer inherits Rectangle {
                     VerticalLayout {
                         padding-bottom: Theme.space-6;
 
-                        for row[index] in Player.queue: drawer-item := HoverItem {
-                            group-id: hg.group-id;
-                            height: 49px;
-                            suppress-indicator: Player.queue-current-mid == row.mid;
-                            clicked => {
-                                Player.play-at(index);
+                        // —— 行窗口容器（窗口化虚拟化，模式同 track-table MEMFIX ④a）———
+                        // 高度只依赖队列长度（N×行距），滚动条几何与全量渲染一致；
+                        // 窗口量只依赖 qscroll 滚动状态与 N——依赖链绝不反向（高度
+                        // 掺入窗口变量会与滚动偏移绑定成环）。本组件深埋抽屉面板，
+                        // 滚动源是本文件自有 Scroll（命名引用即可，无需 Viewport
+                        // 全局——那只服务顶层页面滚动）。
+                        Rectangle {
+                            x: 0;
+                            // 布局子元素：宽度交给布局分配（勿写 width: parent.width，
+                            // 布局子元素引用父宽首选宽会成环，PORTING.md 坑位）；显式
+                            // height 进 preferred 链（表头 Rectangle 同布局先例）
+                            height: Player.queue.length * pitch;
+
+                            // 行距：现有行高（行间无 spacing）
+                            property <length> pitch: 49px;
+                            property <int> overscan: 8;
+                            // 视口顶在内容系的 y（scroll-offset 恒 ≤ 0）
+                            property <length> visible-top: -qscroll.scroll-offset;
+                            // 容器顶在内容系的 y：absolute-position 是窗口系且含滚动
+                            // 偏移（活依赖），减 scroll-offset 恰好抵消滚动位移——结果
+                            // 为恒定内容坐标，滚动逐帧自动重算
+                            property <length> list-top: self.absolute-position.y
+                                - qscroll.absolute-position.y - qscroll.scroll-offset;
+                            // 可见窗首行绝对索引与行数。view-h <= 0（TestingBackend/
+                            // 无头环境）时全量渲染，退化为旧的常驻实例化行为
+                            // （drag.rs 深滚点行测试走此路径）
+                            property <int> window-start: qscroll.view-height <= 0px ? 0
+                                : clamp(
+                                    Math.floor((visible-top - list-top) / pitch) - overscan,
+                                    0,
+                                    Math.max(Player.queue.length - 1, 0),
+                                );
+                            property <int> window-count: qscroll.view-height <= 0px ? Player.queue.length
+                                : Math.min(
+                                    Player.queue.length - window-start,
+                                    Math.ceil(qscroll.view-height / pitch) + 2 * overscan,
+                                );
+
+                            // —— 行窗对外发布（QueueWindow 全局，Rust 按窗回填封面）———
+                            // 桥法与 app.slint 的 Viewport 同款：property 声明处双向
+                            // 别名（语句级写全局是 parse error）+ changed/init 命令式
+                            // 回写；changed 不保证初值触发，init 显式落账一次。面板
+                            // visible=false 时几何仍参与布局（窗口量恒活），关着抽屉
+                            // 窗口量也随滚动更新——flush 时 Rust 读到的就是当前窗。
+                            // start/count 两个 changed 都要挂：队列装载时 start 不变
+                            // 而 count 0→N（只挂 start 会漏发——测试实锤）。
+                            changed window-start => {
+                                root.qw-start = self.window-start;
+                                root.qw-count = self.window-count;
+                                Player.queue-window(self.window-start, self.window-count);
+                            }
+                            changed window-count => {
+                                root.qw-start = self.window-start;
+                                root.qw-count = self.window-count;
+                                Player.queue-window(self.window-start, self.window-count);
+                            }
+                            init => {
+                                root.qw-start = self.window-start;
+                                root.qw-count = self.window-count;
                             }
 
-                            // —— 统一右键菜单（queue 上下文：含"从队列移除"）———
-                            // 快照为 TrackRow 字面量（QueueRow 剥 cover——表格行
-                            // 不背位图契约，data.slint）；打开坐标走 TrackMenu
-                            // global（popup 自有属性禁止外层访问）
-                            context-enabled: TrackMenu.enabled;
-                            context-requested(mx, my) => {
-                                TrackMenu.context = MenuContext.queue;
-                                TrackMenu.index = index;
-                                TrackMenu.track = {
-                                    mid: row.mid,
-                                    source: row.source,
-                                    title: row.title,
-                                    artists: row.artists,
-                                    artist-mid: row.artist-mid,
-                                    album: row.album,
-                                    album-mid: row.album-mid,
-                                    duration-ms: row.duration-ms,
-                                    quality: row.quality,
-                                };
-                                TrackMenu.open-x = mx;
-                                TrackMenu.open-y = my;
-                                row-menu.show();
-                            }
+                            // 整数即模型（Slint 无 `0..N` 区间 for）：offset ∈ 0..window-count
+                            for offset in window-count: drawer-item := HoverItem {
+                                // 绝对索引与行数据经命名属性取（loop 变量 offset 只是
+                                // 窗口内序号，绝不可作播放跳转/右键菜单/序号下标用；
+                                // `row` 名在 for 体内不可作属性名，改 rowd）
+                                property <int> abs-index: parent.window-start + offset;
+                                property <QueueRow> rowd: Player.queue[abs-index];
+                                x: 0;
+                                y: abs-index * pitch;
+                                width: parent.width;
+                                height: pitch;
+                                group-id: hg.group-id;
+                                suppress-indicator: Player.queue-current-mid == rowd.mid;
+                                clicked => {
+                                    Player.play-at(abs-index);
+                                }
 
-                            HorizontalLayout {
-                                padding-left: Theme.space-4;
-                                padding-right: 17px;
-                                spacing: Theme.space-3;
+                                // —— 统一右键菜单（queue 上下文：含"从队列移除"）———
+                                // 快照为 TrackRow 字面量（QueueRow 剥 cover——表格行
+                                // 不背位图契约，data.slint）；打开坐标走 TrackMenu
+                                // global（popup 自有属性禁止外层访问）
+                                context-enabled: TrackMenu.enabled;
+                                context-requested(mx, my) => {
+                                    TrackMenu.context = MenuContext.queue;
+                                    TrackMenu.index = abs-index;
+                                    TrackMenu.track = {
+                                        mid: rowd.mid,
+                                        source: rowd.source,
+                                        title: rowd.title,
+                                        artists: rowd.artists,
+                                        artist-mid: rowd.artist-mid,
+                                        album: rowd.album,
+                                        album-mid: rowd.album-mid,
+                                        duration-ms: rowd.duration-ms,
+                                        quality: rowd.quality,
+                                    };
+                                    TrackMenu.open-x = mx;
+                                    TrackMenu.open-y = my;
+                                    row-menu.show();
+                                }
 
-                                // 序号 / 跳动条（1.6rem）
-                                Rectangle {
-                                    width: 25.6px;
+                                HorizontalLayout {
+                                    padding-left: Theme.space-4;
+                                    padding-right: 17px;
+                                    spacing: Theme.space-3;
 
-                                    Equalizer {
-                                        paused: !Player.playing;
-                                        bar-color: TrackPalette.ctx-accent;
-                                        x: 0;
-                                        y: (parent.height - self.height) / 2;
-                                        visible: Player.queue-current-mid == row.mid;
+                                    // 序号 / 跳动条（1.6rem）
+                                    Rectangle {
+                                        width: 25.6px;
+
+                                        Equalizer {
+                                            paused: !Player.playing;
+                                            bar-color: TrackPalette.ctx-accent;
+                                            x: 0;
+                                            y: (parent.height - self.height) / 2;
+                                            visible: Player.queue-current-mid == rowd.mid;
+                                        }
+                                        Text {
+                                            text: "\{abs-index + 1}";
+                                            color: Theme.muted-foreground;
+                                            font-size: 13px;
+                                            vertical-alignment: center;
+                                            visible: Player.queue-current-mid != rowd.mid;
+                                        }
                                     }
+
+                                    // 封面缩略（2.25rem，radius-sm）
+                                    Rectangle {
+                                        width: 36px;
+                                        height: 36px;
+                                        border-radius: Theme.radius-sm;
+                                        clip: true;
+                                        background: Theme.muted;
+
+                                        Image {
+                                            x: 0;
+                                            y: 0;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            source: rowd.cover;
+                                            image-fit: ImageFit.cover;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: LayoutAlignment.center;
+                                        spacing: 1px;
+
+                                        Text {
+                                            text: rowd.title;
+                                            color: Player.queue-current-mid == rowd.mid ? TrackPalette.ctx-accent : root.panel-fg;
+                                            font-size: 14.4px;
+                                            font-weight: Player.queue-current-mid == rowd.mid ? 650 : 400;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: rowd.artists;
+                                            color: Theme.muted-foreground;
+                                            font-size: 12px;
+                                            overflow: elide;
+                                        }
+                                    }
+
                                     Text {
-                                        text: "\{index + 1}";
+                                        width: 44px;
+                                        text: format-duration(rowd.duration-ms);
                                         color: Theme.muted-foreground;
                                         font-size: 13px;
+                                        horizontal-alignment: right;
                                         vertical-alignment: center;
-                                        visible: Player.queue-current-mid != row.mid;
-                                    }
-                                }
-
-                                // 封面缩略（2.25rem，radius-sm）
-                                Rectangle {
-                                    width: 36px;
-                                    height: 36px;
-                                    border-radius: Theme.radius-sm;
-                                    clip: true;
-                                    background: Theme.muted;
-
-                                    Image {
-                                        x: 0;
-                                        y: 0;
-                                        width: parent.width;
-                                        height: parent.height;
-                                        source: row.cover;
-                                        image-fit: ImageFit.cover;
-                                    }
-                                }
-
-                                VerticalLayout {
-                                    horizontal-stretch: 1;
-                                    alignment: LayoutAlignment.center;
-                                    spacing: 1px;
-
-                                    Text {
-                                        text: row.title;
-                                        color: Player.queue-current-mid == row.mid ? TrackPalette.ctx-accent : root.panel-fg;
-                                        font-size: 14.4px;
-                                        font-weight: Player.queue-current-mid == row.mid ? 650 : 400;
-                                        overflow: elide;
-                                    }
-                                    Text {
-                                        text: row.artists;
-                                        color: Theme.muted-foreground;
-                                        font-size: 12px;
-                                        overflow: elide;
-                                    }
-                                }
-
-                                Text {
-                                    width: 44px;
-                                    text: format-duration(row.duration-ms);
-                                    color: Theme.muted-foreground;
-                                    font-size: 13px;
-                                    horizontal-alignment: right;
-                                    vertical-alignment: center;
-                                    // hover 交叉淡出（opacity 渐隐，非 visible 瞬切）
-                                    opacity: drawer-item.hovered ? 0 : 1;
-                                    animate opacity {
-                                        duration: Theme.duration-fast;
-                                        easing: cubic-bezier(0.2, 0, 0, 1);
-                                    }
-                                }
-
-                                // 移除：hover 行时时长淡出、原位浮现（网易云式行尾交互）
-                                Rectangle {
-                                    width: 28px;
-                                    height: 28px;
-                                    y: (parent.height - self.height) / 2;
-                                    border-radius: Theme.pill(self.height);
-                                    background: remove-touch.has-hover ? Theme.neutral-200 : transparent;
-                                    opacity: drawer-item.hovered ? 1 : 0;
-                                    animate opacity {
-                                        duration: Theme.duration-fast;
-                                        easing: cubic-bezier(0.2, 0, 0, 1);
-                                    }
-
-                                    remove-touch := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            Player.remove-at(index);
+                                        // hover 交叉淡出（opacity 渐隐，非 visible 瞬切）
+                                        opacity: drawer-item.hovered ? 0 : 1;
+                                        animate opacity {
+                                            duration: Theme.duration-fast;
+                                            easing: cubic-bezier(0.2, 0, 0, 1);
                                         }
-                                        // 行内按钮对所有按键 grab（会吞右键）：
-                                        // 右键释放转发给行宿主打开菜单
-                                        pointer-event(event) => {
-                                            if (event.kind == PointerEventKind.up
-                                                && event.button == PointerEventButton.right) {
-                                                drawer-item.context-requested(
-                                                    self.absolute-position.x - drawer-item.absolute-position.x + self.mouse-x,
-                                                    self.absolute-position.y - drawer-item.absolute-position.y + self.mouse-y,
-                                                );
+                                    }
+
+                                    // 移除：hover 行时时长淡出、原位浮现（网易云式行尾交互）
+                                    Rectangle {
+                                        width: 28px;
+                                        height: 28px;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: Theme.pill(self.height);
+                                        background: remove-touch.has-hover ? Theme.neutral-200 : transparent;
+                                        opacity: drawer-item.hovered ? 1 : 0;
+                                        animate opacity {
+                                            duration: Theme.duration-fast;
+                                            easing: cubic-bezier(0.2, 0, 0, 1);
+                                        }
+
+                                        remove-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                Player.remove-at(abs-index);
+                                            }
+                                            // 行内按钮对所有按键 grab（会吞右键）：
+                                            // 右键释放转发给行宿主打开菜单
+                                            pointer-event(event) => {
+                                                if (event.kind == PointerEventKind.up
+                                                    && event.button == PointerEventButton.right) {
+                                                    drawer-item.context-requested(
+                                                        self.absolute-position.x - drawer-item.absolute-position.x + self.mouse-x,
+                                                        self.absolute-position.y - drawer-item.absolute-position.y + self.mouse-y,
+                                                    );
+                                                }
                                             }
                                         }
-                                    }
-                                    AppIcon {
-                                        source: Icons.close;
-                                        icon-color: Theme.muted-foreground;
-                                        width: 15px;
-                                        height: 15px;
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
+                                        AppIcon {
+                                            source: Icons.close;
+                                            icon-color: Theme.muted-foreground;
+                                            width: 15px;
+                                            height: 15px;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
                                     }
                                 }
-                            }
 
-                            // 行锚定菜单弹层（同 track-table：编译期摘除、
-                            // 行卸载自动关；close-policy 显式 close-on-click-outside
-                            // ——默认 close-on-click 会连弹层内完整点击一起关掉，
-                            // 二级 picker 不可达，S6 缺陷 #1）；themed 态面板
-                            // hover 底经 TrackPalette.ctx-* 自动跟专辑色
-                            row-menu := PopupWindow {
-                                close-policy: close-on-click-outside;
-                                x: TrackMenu.open-x;
-                                y: TrackMenu.open-y + 4px;
-                                width: 216px;
-                                height: menu-panel.height;
+                                // 行锚定菜单弹层（同 track-table：编译期摘除、
+                                // 行卸载自动关；close-policy 显式 close-on-click-outside
+                                // ——默认 close-on-click 会连弹层内完整点击一起关掉，
+                                // 二级 picker 不可达，S6 缺陷 #1）；themed 态面板
+                                // hover 底经 TrackPalette.ctx-* 自动跟专辑色
+                                row-menu := PopupWindow {
+                                    close-policy: close-on-click-outside;
+                                    x: TrackMenu.open-x;
+                                    y: TrackMenu.open-y + 4px;
+                                    width: 216px;
+                                    height: menu-panel.height;
 
-                                menu-panel := TrackMenuPanel {
-                                    dismissed => {
-                                        row-menu.close();
+                                    menu-panel := TrackMenuPanel {
+                                        dismissed => {
+                                            row-menu.close();
+                                        }
                                     }
                                 }
                             }

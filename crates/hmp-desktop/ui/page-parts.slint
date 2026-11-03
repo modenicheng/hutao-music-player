@@ -4,6 +4,7 @@ import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, TextLink } from "primitives.slint";
 import { CoverCardData } from "data.slint";
+import { Viewport } from "viewport.slint";
 
 // —— 内容页页头：返回 + 大标题 + 元信息行 + 右侧动作区 ——
 export component PageHeader inherits Rectangle {
@@ -325,16 +326,42 @@ export component CoverCardGrid inherits Rectangle {
     // 封面(宽+4 hover 余量) + spacing 8×2 + 标题/副标题行高
     property <length> card-h: card-w + 4px + 16px + 22px + 19px;
 
-    for card[index] in cards: CoverCard {
-        x: Math.mod(index, cols) * (card-w + 16px);
-        y: Math.floor(index / cols) * (card-h + 16px);
+    // —— 窗口化虚拟化（MEMFIX ④a，Viewport 全局），按「行」开窗 ———
+    // 宿主页面全部挂在 app.slint 顶层 Scroll 下，本组件无法引用父级几何
+    // （成环），同 track-table 经 Viewport 全局做窗口换算，只读。
+    property <length> row-pitch: card-h + 16px;
+    // 网格顶在内容系的 y：absolute-position 是窗口系且含滚动偏移（活依赖），
+    // 减 origin-y 与 Viewport.y 恰好抵消滚动位移——结果为恒定内容坐标，
+    // 逐帧自动重算
+    property <length> grid-top: self.absolute-position.y - Viewport.origin-y - Viewport.y;
+    // 可见窗首行行号（钳在 0..rows-1，未滚到/深滚越过网格时退到边界）与
+    // 行数（overscan 上下各 2 行）。view-h <= 0（TestingBackend/无头环境未
+    // 绑定 Viewport）时全量渲染，退化为旧的常驻实例化行为，集成测试走此
+    // 路径。依赖链单向：窗口量只依赖 Viewport 与 row-count 整数，绝不读
+    // cards 模型（同上方 height 注释的拖 repeater 重算坑）；下方高度公式
+    // 只依赖 row-count——绝不反向掺入窗口变量，否则与 Viewport.y 绑定成环。
+    property <int> row-start: Viewport.view-h <= 0px ? 0
+        : clamp(Math.floor((-Viewport.y - grid-top) / row-pitch) - 2, 0, Math.max(rows - 1, 0));
+    property <int> visible-rows: Viewport.view-h <= 0px ? rows
+        : Math.min(rows - row-start, Math.ceil(Viewport.view-h / row-pitch) + 4);
+    // 窗内卡量：从首行绝对卡索引起，且不越过网格末尾（末行可能不满列）
+    property <int> first-index: row-start * cols;
+    property <int> card-count: Math.min(Math.max(row-count - first-index, 0), visible-rows * cols);
+
+    // 整数即模型（Slint 无 `0..N` 区间 for）：offset ∈ 0..card-count，卡按
+    // 绝对索引定位，offset 只是窗口内序号；数据只在行委托取值时按索引读
+    // 模型（`row` 名在 for 体内不可作属性名，改 rowd，同 track-table）
+    for offset in card-count: CoverCard {
+        property <CoverCardData> rowd: root.cards[first-index + offset];
+        x: Math.mod(first-index + offset, cols) * (card-w + 16px);
+        y: Math.floor((first-index + offset) / cols) * (card-h + 16px);
         width: card-w;
         height: card-h;
-        cover: card.cover;
-        title: card.title;
-        subtitle: card.subtitle;
+        cover: rowd.cover;
+        title: rowd.title;
+        subtitle: rowd.subtitle;
         clicked => {
-            root.card-clicked(card.mid);
+            root.card-clicked(rowd.mid);
         }
     }
 }

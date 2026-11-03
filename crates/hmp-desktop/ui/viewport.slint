@@ -10,3 +10,14 @@ export global Viewport {
     in-out property <length> origin-y;
     in-out property <length> view-h;
 }
+
+// 队列抽屉行窗（队列封面按窗回填，200MB 内存预算轮）：queue-drawer 的行
+// 窗口容器把 window-start/count 经 property 声明处双向别名写进这里（元素
+// 作用域语句级写全局是 parse error，只能走别名 + changed 命令式回写——
+// Viewport 同款桥法），Rust 侧打开抽屉/滚动换窗时只对当前窗行做封面解码
+// 与远端预取。此前全队列全量解码：1591 行关着抽屉也逐张装载，行持位图 +
+// 解码潮实测把 Private 推上 3.7GB；按窗后常驻 = 一窗行数（~30）× 256KB。
+export global QueueWindow {
+    in-out property <int> start;
+    in-out property <int> count;
+}

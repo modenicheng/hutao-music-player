@@ -743,9 +743,11 @@ enum Applied {
     None,
     /// 品牌回退族（无曲 / 无彩色封面）
     Fallback,
-    /// 胜出封面（key = `mid|url` 或 `mid|prog`）。只留 64×64 取色采样
-    /// （≤16KB，主题翻转免解码重算整族）——不再常驻全尺寸封面位图；
-    /// 环境层底图与亮暗无关，由 Player.ambient-cover 属性持有即可。
+    /// 胜出封面（key = player_bridge `now_playing_cover` 封面键：
+    /// `file:{path}` / `real:{mid}|{url}` / `pending:{mid}|{url}` / `prog:{mid}`）。
+    /// 只留 64×64 取色采样（≤16KB，主题翻转免解码重算整族）——不再常驻
+    /// 全尺寸封面位图；环境层底图与亮暗无关，由 Player.ambient-cover 属性
+    /// 持有即可。
     Cover { key: String, sample: Vec<u8> },
 }
 
@@ -755,9 +757,10 @@ thread_local! {
     static APPLIED: RefCell<(Applied, bool)> = const { RefCell::new((Applied::None, false)) };
 }
 
-/// 封面 → 曲目层调色板 + 环境层模糊底图（player_bridge 每帧推送调用）。
-/// 按键去重：10Hz 状态推送同曲同主题零重算；QQ 远程封面先吃程序化占位取色，
-/// 真图回包后按 `mid|url` 键重算（见 player_bridge::spawn_cover_fetch）。
+/// 封面 → 曲目层调色板 + 环境层模糊底图（player_bridge 换曲落地 /
+/// 远程封面取回回调调用；调用方键控幂等，此处键去重为最后防线）。
+/// 键含形态前缀：占位态（`pending:`/`prog:`）与真图态（`real:`/`file:`）
+/// 必然异键——真图回包取色/环境层随之重算。
 pub fn apply_cover(ui_weak: &Weak<AppWindow>, cover_key: &str, cover: &Image) {
     let Some(ui) = ui_weak.upgrade() else {
         return;

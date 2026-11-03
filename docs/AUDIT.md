@@ -805,3 +805,27 @@ daemon 侧实测见上（探针法：起 HEAD daemon + 直发 CoverGet，观察�
 2. **修复（T7）**：`BackendRuntime` 持 `&'static Runtime`（Box::leak，进程同寿，任何退出路径不再触发 shutdown 握手）+ 契约单测（句柄消亡后在途任务继续，旧实现必红）。forget(ui)/KeepWindowShown 方案随前提证伪 revert；2s 用户态看门狗保留为纯纵深（对 loader 期挂死无效，如实注释）。
 3. **验收（9 臂真机，隔离端点）**：基线（a5a0236）quit×2+software×1 = **3/3 ZOMBIE**（3 分钟短周期即复现）；fix2 quit 2/2 + X 关窗 1/1 = **全部 1.1s CLEAN_EXIT**（自然 drop 与 GL 销毁照常——基线臂自证该段无罪）。GL 后端实测 WGL（M1 预测成立）。
 4. **方法论遗产**：①对照臂设计直接推翻了双代理一致认可的假设——「为佐证而设的对照臂」可能是最有价值的实验；②cdb 在 Windows Kits 默认路径（前任「缺席」误判贻误一轮）；③配额驱逐链下「增量落盘+续接代理」模式六发接力完成审计。
+
+## §27 全列表窗口化虚拟化 + 队列封面按窗回填（2026-10-25，用户报「列表全卡（含 release）+ 桌面 4.3G 内存」；S12 流）
+
+**双症状同源定案**：
+1. **列表卡顿**：§21 只虚拟化了 TrackTable，其余列表仍 `for` 全量实例化——播放列表抽屉（队列可上千行 × ~25 元素/行，且面板 `visible=false` 仍参与布局全量驻留）、封面卡网格（发现页/库页/歌手/专辑/已购共用 CoverCardGrid）、榜单卡网格（30+ 组）、侧栏歌单区（QQ 收藏歌单数百行 × 带图）。
+2. **内存爆炸复现（§24 B 项 4.3G 的机制实锤）**：1591 首 × 逐 add 全量队列重建压力下，未门控构建（S9 全量在）实测 Private 331MB → **3.7GB**（队列封面全量装载潮 + 行持位图 1591×~256KB + 逐 add 模型换装 churn，重建期平台 331MB、装载潮完成后冲顶）；仅加「抽屉关闭门控」的中间构建同压力 218MB 平坦。E1 修复臂有界与此爆炸并存不矛盾——爆炸需「大队列 + 封面装载」共同触发，E1 双臂脚本未覆盖该路径。
+
+**虚拟化推广（第一批四文件，配方入册 PORTING「窗口化虚拟化推广模式」）**：queue-drawer 队列行窗（同文件命名 Scroll 变体）、page-parts CoverCardGrid 按行窗（Viewport 变体，发现页/库页/歌手/专辑/已购六页自动受益）、top-page 榜单卡组内行窗、sidebar 歌单区宽窄两形态行窗。统一铁律：容器高度只依赖模型长度（防滚动偏移绑定成环）、行按绝对索引绝对定位（offset 不可作下标）、view-h≤0 退化全量渲染（drag.rs 深滚守护仍有效）。**有意不虚拟化**：评论区（20 条/页有界 + 行高变）、歌词（行高变 + 弹簧跟随依赖逐行几何上报）、右键 picker/搜索歌手卡/扫描根/音质档（有界小列表）；sidebar 组收起动画期间不做 group-open 门控（防收起动画闪空）。
+
+**队列封面按窗回填（R1c，R1b 的按窗化）**：新 `QueueWindow` 全局（queue-drawer 行窗口容器经双向别名 + changed/init 发布 start/count；**start/count 两个 changed 都要挂**——队列装载时 start 恒 0 而 count 0→N，单挂 start 漏发，测试实锤）；Rust `schedule_queue_window_covers` 只对窗内行做 `get_if_cached` 探测（miss → 回填 Timer 分批装载）+ 远端预取（track_covers 在账去重）；排程统一走 changed → `Player.queue-window` 回调（**Slint changed 延迟到事件循环泵执行，重建当拍读全局必旧值**——回调下一拍必到）；抽屉关闭期零解码零预取。行持位图 1591 → ~30（×256KB），解码潮与远端预取同量级收窄。
+
+**验证**：`cargo clippy --workspace --all-targets -D warnings` 零警告；hmp-desktop 112 测试全绿（含 drag.rs 深滚守护；新增 `queue_rebuild_defers_covers_until_drawer_opens` 按窗门控测试）；无头截图 library/discover 退化路径布局不变；真机压力实测（1591 逐 add + 12min 采样，本机非隔离）：启动瞬态 WS 250MB → 回落 **194MB WS / 218MB Private 死平（斜率 ≈0）**，队列 1592 首全程驻留、抽屉关闭态。
+
+**已知边界**：①逐 add 全量重建的模型换装 churn 仍 O(N²)（压力路径专属；按窗后实测无碍，合并式重建留作候选）；②打开抽屉首拍窗内 ~30 行解码（毫秒级补齐，测试钉死）；③重建换装与 changed 发布间 ≤1 tick 的陈旧在途解码（mid 守卫 no-op，E3 口径 +≤6/次）；④歌词/评论区不虚拟化的理由如上，若日后评论改多页加载需重估。
+
+**另案登记**：真机验证中发现 `hmp play playlist:<本地id>` 对 qq-owned 歌单远端详情拉取恒报 "playlist is empty"（#16/#17 两条均复现，本地库 1591 首完整、登录态正常）——内容域 fetch 链路疑似 QQ 侧接口/风控变化，未列入本流处理。
+
+## §28 当前曲封面 10Hz 覆盖互踩 + 取色同键吞重算（2026-10-25，用户报「本地有缓存但底部播放栏恒占位」）
+
+**根因（双层，同源于 M8 全量投影未随封面异步化演进）**：`apply_daemon_state` 在每次状态推送（~10Hz）全量重设 now-playing 元数据。① `cover_for_track` 对 https 远程封面每帧回写程序化占位，把 `spawn_cover_fetch` 回包落地的真图**下一帧覆盖回占位**——QQ 曲目 `playback.current.cover.url` 恒为 daemon resolve 时的 https 模板 URL（player.rs 从 pmid 现拼，不经 rebind），故 QQ 曲播放条/播放页大图恒占位（本地 file:// 曲每帧重算命中 LRU 结果幂等，未暴露）；② 取色键占位态与真图态同为 `mid|url`，真图回包的 `apply_cover` 被键去重**静默吞掉**——真图取色/环境层从未生效，恒为占位中性色。
+
+**修复（键控幂等同步，废弃每帧重设）**：元数据层（标题/歌手/专辑/封面）按 `PREV_MID` 换曲门控，10Hz 推送只逐帧更新真正逐帧变化的传输/进度态；音质徽章按 `(mid, tier)` 门控（同曲重装载降档可翻新）。封面经 `now_playing_cover`（纯函数）产出 `(封面键, 真图?)` 四形态键：`file:{path}` 本地直读 / `real:{mid}|{url}` 会话已取回（新 `RESOLVED_COVERS` 备忘 url→盘路径——换曲重进/重装载时 REQUESTED 在账不会重发，靠此直读盘出真图）/ `pending:{mid}|{url}` 待取回 / `prog:{mid}` 占位；`sync_now_playing_cover` 键不变不动 `Player.cover`（异步真图不再被覆盖）。取色键随封面键走：`pending:` → `real:` 必然异键，回包重算自然触发（顺修②）。`spawn_cover_fetch` 调用点保持逐推送（即退避重试引擎，退避窗口内纯记账查询）。
+
+**验证**：clippy -D warnings 零警告；hmp-desktop 103 lib 测试全绿（新增 `now_playing_cover_key_semantics` 钉四形态键 + 桶填充尺寸契约）；daemon 侧实探（命名管道直发 CoverGet）确认盘缓存毫秒回，问题全在桌面端覆盖互踩。附带发现：image 0.25 `thumbnail` 为**桶填充语义（可放大）**，`decode_512_bucket_serves_derived_directly` 既有测试已钉死（400×100 → 512×128），非回归，测试按此口径断言。

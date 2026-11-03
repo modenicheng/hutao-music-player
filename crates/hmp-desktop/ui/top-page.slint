@@ -7,6 +7,7 @@ import { PageHeader, SectionHeader } from "page-parts.slint";
 import { Nav, Route } from "nav.slint";
 import { Data } from "stores.slint";
 import { TopCardData } from "data.slint";
+import { Viewport } from "viewport.slint";
 
 // 单个榜单卡（T5/D-8）：封面（4:3、radius-lg、阴影、hover 浮起）+
 // 右下「N 首」角标 + 名 + 更新时间 + 预览前 3 首（DESIGN §3.2 完整卡）。
@@ -206,13 +207,41 @@ export component TopPage inherits Rectangle {
                     // 280px 为最大卡宽，窄窗按比例缩
                     property <length> card-w: Math.min(280px, (self.width - (cols - 1) * 16px) / cols);
 
-                    for top-i[index] in group.tops: TopCard {
-                        card: top-i;
+                    // —— 行窗（窗口化虚拟化，模式同 track-table MEMFIX ④a）———
+                    // 本页挂在顶层 page-scroll 之下，滚动状态直接复用 Viewport
+                    // 全局。依赖链单向：高度只依赖 group.tops.length（滚动条
+                    // 几何与全量渲染一致）；窗口量只依赖 Viewport 与组卡数，
+                    // 绝不反向掺入（否则与滚动偏移绑定成环）。外层 group 循环
+                    // 每轮各有独立作用域，窗口属性挂在网格容器上天然隔离。
+                    property <length> row-pitch: card-h + 16px;
+                    // 网格顶在内容系 y：absolute-position 是窗口系且含滚动偏移
+                    // （活依赖），减 origin-y 与 Viewport.y 恰好抵消滚动位移——
+                    // 结果为恒定内容坐标，滚动逐帧自动重算
+                    property <length> grid-top: self.absolute-position.y - Viewport.origin-y - Viewport.y;
+                    property <int> row-start: Viewport.view-h <= 0px ? 0
+                        : clamp(
+                            Math.floor((-Viewport.y - grid-top) / row-pitch) - 2,
+                            0,
+                            Math.max(rows - 1, 0),
+                        );
+                    property <int> visible-rows: Viewport.view-h <= 0px ? rows
+                        : Math.min(rows - row-start, Math.ceil(Viewport.view-h / row-pitch) + 4);
+                    property <int> first-index: row-start * cols;
+                    property <int> card-count: Math.min(
+                        Math.max(group.tops.length - first-index, 0),
+                        visible-rows * cols,
+                    );
+
+                    // 卡按绝对索引绝对定位；offset 只是窗口内序号，数据与跳转
+                    // 一律经 first-index 换算回整表下标（rowd）
+                    for offset in card-count: TopCard {
+                        property <TopCardData> rowd: group.tops[first-index + offset];
+                        card: rowd;
                         card-width: card-w;
-                        x: Math.mod(index, cols) * (card-w + 16px);
-                        y: Math.floor(index / cols) * (card-h + 16px);
+                        x: Math.mod(first-index + offset, cols) * (card-w + 16px);
+                        y: Math.floor((first-index + offset) / cols) * (card-h + 16px);
                         clicked => {
-                            Nav.navigate(Route.top-detail, top-i.id);
+                            Nav.navigate(Route.top-detail, rowd.id);
                         }
                     }
                 }

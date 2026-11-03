@@ -50,6 +50,10 @@ export global Player {
     in-out property <string> queue-current-mid: "";
     /** 抽屉元信息（Rust 侧格式化）："13 首 · 58 分钟" */
     in-out property <string> queue-meta: "";
+    /** 行窗变化上报（queue-drawer 行窗口容器 changed/init 发出；参数 =
+        绝对首行索引与窗内行数，含 overscan）：Rust 据此只对当前窗行做
+        封面解码/远端预取（按窗回填，200MB 内存预算轮）。 */
+    callback queue-window(int, int);
 
     // —— 播放模式（daemon 权威写入；切换命令经 daemon 推送回显，不做本地乐观态）———
     /** 循环模式：0=顺序播放 1=单曲循环 2=列表循环。
