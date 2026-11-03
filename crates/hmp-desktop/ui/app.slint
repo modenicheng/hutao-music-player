@@ -26,10 +26,11 @@ import { DiscoverPage } from "discover-page.slint";
 import { TopPage } from "top-page.slint";
 import { TopDetailPage } from "top-detail-page.slint";
 import { Nav, Route } from "nav.slint";
-import { Viewport } from "viewport.slint";
+import { Viewport, QueueWindow } from "viewport.slint";
 import { TrackMenu, MenuContext } from "context-menu.slint";
-// 再导出：窗口化虚拟化的滚动状态单点出口，Rust 侧测试/探针需读回
-export { Viewport }
+// 再导出：窗口化虚拟化的滚动状态单点出口 + 队列抽屉行窗（Rust 侧按窗回填
+// 队列封面），Rust 侧测试/探针需读回
+export { Viewport, QueueWindow }
 import { Player, Data, Quality, NowPlaying, TrackPalette } from "stores.slint";
 import { Theme } from "theme.slint";
 import { TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData } from "data.slint";

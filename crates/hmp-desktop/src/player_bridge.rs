@@ -18,7 +18,7 @@ use hmp_core::{
 };
 
 use crate::backend::{BackendRuntime, QueueRowMeta, UiStateEvent};
-use crate::{AppWindow, CommentRow, LyricRow, NowPlaying, Player, QueueRow};
+use crate::{AppWindow, CommentRow, LyricRow, NowPlaying, Player, QueueRow, QueueWindow};
 
 /// seek 落点确认容忍：daemon 推送位置与目标差 ≤ 此值视为已生效
 /// （播放中位置持续前进，容忍取推送周期量级）。
@@ -658,10 +658,17 @@ fn send_volume_ipc(runtime: &Arc<BackendRuntime>, volume: f64) {
 fn bind_ui_toggles(ui: &AppWindow, runtime: &Arc<BackendRuntime>) {
     let player = Player::get(ui);
     let ui_weak: Weak<AppWindow> = ui.as_weak();
+    let runtime_for_queue = Arc::clone(runtime);
     player.on_toggle_queue(move || {
         if let Some(ui) = ui_weak.upgrade() {
             let player = Player::get(&ui);
+            let opening = !player.get_queue_visible();
             player.set_queue_visible(!player.get_queue_visible());
+            if opening {
+                // 打开抽屉：按当前行窗回填封面（QueueWindow 全局恒持当前窗，
+                // 隐藏期窗口量也随滚动更新——读到即所见）
+                schedule_queue_window_covers(ui_weak.clone(), &runtime_for_queue);
+            }
         }
     });
     let ui_weak: Weak<AppWindow> = ui.as_weak();
@@ -669,6 +676,14 @@ fn bind_ui_toggles(ui: &AppWindow, runtime: &Arc<BackendRuntime>) {
         if let Some(ui) = ui_weak.upgrade() {
             Player::get(&ui).set_queue_visible(false);
         }
+    });
+    // 滚动换窗：行窗口容器 changed → Player.queue-window。抽屉开着才排程
+    // （关闭期窗口量变化无消费面）；批内行数 ≈ 一屏 + overscan，重复排程
+    // 由缓存探测（命中零解码）与 track_covers 在账去重吸收。
+    let ui_weak: Weak<AppWindow> = ui.as_weak();
+    let runtime_for_window = Arc::clone(runtime);
+    player.on_queue_window(move |_start, _count| {
+        schedule_queue_window_covers(ui_weak.clone(), &runtime_for_window);
     });
     let ui_weak: Weak<AppWindow> = ui.as_weak();
     let runtime_for_overlay = Arc::clone(runtime);
@@ -744,30 +759,14 @@ fn apply_event(
                 "queue rebuild: local row covers scheduled for backfill"
             );
         }
-        schedule_queue_cover_backfill(ui_weak.clone(), pending_covers.into());
-        // QQ 远程封面行预取 + 回包原地换图（2026-10-04 封面审计①）：队列行
-        // 封面在投影时固化，daemon rebind_cover_url 不触发队列重建——不回填
-        // 则抽屉里非当前曲整场会话占位。去重/失败出账在 track_covers。
-        let remote_covers: Vec<(String, String)> = rows
-            .iter()
-            .filter_map(|row| {
-                let uri = row.cover_uri.as_deref()?;
-                (uri.starts_with("http://") || uri.starts_with("https://"))
-                    .then(|| (row.mid.clone(), uri.to_string()))
-            })
-            .collect();
-        if !remote_covers.is_empty() {
-            let ui_weak = ui_weak.clone();
-            crate::track_covers::prefetch_tracks_with(
-                runtime,
-                remote_covers,
-                Some(Arc::new(move |mid, image| {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        update_queue_row_cover(&Player::get(&ui), &mid, image);
-                    }
-                })),
-            );
-        }
+        // 按窗回填（200MB 内存预算轮，配合行窗虚拟化）：封面解码进
+        // cover_cache 与远端预取的唯一消费面是「抽屉里可见的行」。行窗由
+        // queue-drawer 经 QueueWindow 全局发布，**排程统一走 changed →
+        // queue-window 回调**——Slint 的 changed 延迟到事件循环泵执行，
+        // 重建当拍读全局还是旧值（队列装载时 window-count 0→N 恰是典型）；
+        // 回调这里下一拍必到，抽屉开着就按新窗补齐，关着则 no-op。此前
+        // 全队列全量装载：1591 行实测 Private +107MB、解码潮冲上 3.7GB。
+        QUEUE_ROW_METAS.with(|cell| *cell.borrow_mut() = rows.clone());
     }
 
     let Some(state) = event.state else {
@@ -820,6 +819,67 @@ thread_local! {
         const { RefCell::new(VecDeque::new()) };
     /// 回填驱动 Timer（default = 未激活；耗尽/空换装即 stop）。
     static COVER_BACKFILL_TIMER: RefCell<slint::Timer> = RefCell::new(slint::Timer::default());
+    /// 最近一次队列重建的全表行元数据：按窗回填的取数源——行窗只标范围，
+    /// 窗口行的本地路径/远端 URL 从这里分类取出。重建即整体换装，全部
+    /// UI 线程触碰。
+    static QUEUE_ROW_METAS: RefCell<Vec<QueueRowMeta>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 队列行远程封面的回包回填回调（可见路径与 flush 暂存共用同一闭包体）。
+fn queue_cover_remote_callback(ui_weak: Weak<AppWindow>) -> crate::track_covers::OnCover {
+    Arc::new(move |mid, image| {
+        if let Some(ui) = ui_weak.upgrade() {
+            update_queue_row_cover(&Player::get(&ui), &mid, image);
+        }
+    })
+}
+
+/// 按窗回填队列封面（200MB 内存预算轮，配合行窗虚拟化）：读 QueueWindow
+/// 全局（queue-drawer 行窗口容器 changed/init 发布），只对窗内行做本地缓存
+/// 探测（miss → 回填 Timer 分批装载）与远端预取（track_covers 在账去重）。
+/// 抽屉不可见时 no-op——打开抽屉由 toggle 排程、滚动换窗由 queue-window
+/// 回调排程。窗上行数 ≈ 一屏 + overscan（~30），行持位图与解码量级由此
+/// 封顶：此前全队列全量装载，1591 行实测 Private +107MB、解码潮 3.7GB。
+fn schedule_queue_window_covers(ui_weak: Weak<AppWindow>, runtime: &Arc<BackendRuntime>) {
+    let Some(ui) = ui_weak.upgrade() else {
+        return;
+    };
+    if !Player::get(&ui).get_queue_visible() {
+        return;
+    }
+    let queue_window = QueueWindow::get(&ui);
+    let (start, count) = (queue_window.get_start(), queue_window.get_count());
+    drop(queue_window);
+    let rows = QUEUE_ROW_METAS.with(|cell| {
+        let metas = cell.borrow();
+        let len = metas.len();
+        // i32 → usize 钳位（负值理论不出现，防御性按 0 处理）
+        let start = start.max(0) as usize;
+        let count = count.max(0) as usize;
+        let end = start.saturating_add(count).min(len);
+        metas.get(start.min(len)..end).unwrap_or(&[]).to_vec()
+    });
+    let mut pending: Vec<(String, String)> = Vec::new();
+    let mut remote: Vec<(String, String)> = Vec::new();
+    for meta in &rows {
+        if let Some(uri) = &meta.cover_uri {
+            if uri.starts_with("http://") || uri.starts_with("https://") {
+                remote.push((meta.mid.clone(), uri.clone()));
+            } else if let Some(path) = crate::covers::file_uri_to_path(uri)
+                && crate::cover_cache::get_if_cached(&path, 256).is_none()
+            {
+                pending.push((meta.mid.clone(), path));
+            }
+        }
+    }
+    schedule_queue_cover_backfill(ui_weak.clone(), pending.into());
+    if !remote.is_empty() {
+        crate::track_covers::prefetch_tracks_with(
+            runtime,
+            remote,
+            Some(queue_cover_remote_callback(ui_weak)),
+        );
+    }
 }
 
 /// 登记一批待回填封面并起动回填 Timer：pending 整体换装（旧代在途条目作废）；
@@ -877,10 +937,22 @@ thread_local! {
     static LAST_SHOWN_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     /// 歌词时间戳（毫秒升序，与 NowPlaying.lyrics 同源）；active-line 折算用
     static LYRIC_STAMPS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-    /// 上一次状态推送的当前曲 mid（换曲检测：重置喜欢态/重拉歌词与评论）
+    /// 上一次状态推送的当前曲 mid（换曲检测：曲目元数据层落地 + 重置喜欢
+    /// 态/重拉歌词与评论——10Hz 位置推送零触碰，见 apply_daemon_state）
     static PREV_MID: RefCell<String> = const { RefCell::new(String::new()) };
     /// 已装载评论的 (mid, sort)：未变不重拉（overlay 打开期间按推送驱动）
     static COMMENT_KEY: RefCell<Option<(String, i32)>> = const { RefCell::new(None) };
+    /// Player.cover 当前承载的封面键（now_playing_cover 产出）。封面同步
+    /// 键控幂等：键不变不动 Player.cover——10Hz 推送不再每帧回写占位，
+    /// 异步取回的真图不被下一帧覆盖（QQ 曲目播放条恒占位的根因）。
+    static LAST_COVER_KEY: RefCell<String> = const { RefCell::new(String::new()) };
+    /// 会话内已取回的远程封面（`mid|url` → 本地盘路径）：换曲重进/重装载
+    /// 时 now_playing_cover 直读盘出真图（REQUESTED 在账不会重发请求）。
+    /// HashMap::new 非 const（RandomState），不入 const 块。
+    static RESOLVED_COVERS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// 已落地的音质徽章 (mid, tier)：同曲重装载可能降档（actual_quality 变
+    /// 化而 mid 不变），按此门控；空 mid + -1 = 未落地（clear 复位值）。
+    static LAST_QUALITY: RefCell<(String, i32)> = const { RefCell::new((String::new(), -1)) };
 }
 
 /// DaemonState → Player global 单向映射（daemon 是唯一状态出口）。
@@ -1001,37 +1073,49 @@ fn apply_daemon_state(
         player.set_progress(progress_of(playback));
         update_active_line(ui_weak, position);
     }
-    player.set_title(track.title.as_str().into());
-    player.set_artists(track.artist_names().into());
-    player.set_album(
-        track
-            .album
-            .as_ref()
-            .map(|a| a.name.as_str())
-            .unwrap_or_default()
-            .into(),
+    // 曲目元数据层（标题/歌手/专辑/封面）：换曲才落地——10Hz 位置推送零
+    // 触碰。此前每帧全量重设，cover 对 https 远程封面每帧回写程序化占位，
+    // 把异步取回的真图覆盖回占位（QQ 曲目播放条恒占位的根因）；现封面
+    // 同步键控幂等（sync_now_playing_cover：键不变不动 Player.cover）。
+    if mid_changed {
+        player.set_title(track.title.as_str().into());
+        player.set_artists(track.artist_names().into());
+        player.set_album(
+            track
+                .album
+                .as_ref()
+                .map(|a| a.name.as_str())
+                .unwrap_or_default()
+                .into(),
+        );
+        sync_now_playing_cover(player, &mid, track.cover.as_ref(), ui_weak);
+    }
+    // 音质徽章随装载落地：同曲重装载可能降档（actual_quality 变、mid 不变）
+    let quality = playback.actual_quality.as_ref();
+    let (label, tier) = (
+        quality.map(quality_label).unwrap_or_default(),
+        quality.map(quality_tier).unwrap_or(0),
     );
-    let cover = cover_for_track(&track.id.0, track.cover.as_ref());
-    player.set_cover(cover.clone());
-    // 曲目层取色 + 环境层模糊底图随封面更新（apply_cover 内部按键去重，
-    // 10Hz 推送同曲零重算）；QQ 远程封面先吃程序化占位的取色，真图回包
-    // 后在 spawn_cover_fetch 落点按 mid|url 键重算
-    let cover_key = match track.cover.as_ref() {
-        Some(cover) => format!("{}|{}", track.id.0, cover.url),
-        None => format!("{}|prog", track.id.0),
-    };
-    crate::track_theme::apply_cover(ui_weak, &cover_key, &cover);
-    // QQ 远程封面：UI 禁直连 HTTP → 经 daemon CoverGet 换本地产物
-    // （先程序化占位，回包后按 mid 复核防串台；每 mid 每进程只请求一次，
-    // daemon 侧 covers/ 目录按内容哈希持久去重）。
+    if LAST_QUALITY.with(|cell| {
+        let mut prev = cell.borrow_mut();
+        let changed = prev.0 != mid || prev.1 != tier;
+        if changed {
+            *prev = (mid.clone(), tier);
+        }
+        changed
+    }) {
+        player.set_track_quality(label.into());
+        player.set_track_max_tier(tier);
+    }
+    // QQ 远程封面：UI 禁直连 HTTP → 经 daemon CoverGet 换本地产物（daemon
+    // 侧 covers/ 目录按内容哈希持久去重）。此调用点即重试引擎：每 mid 每
+    // 进程一次（REQUESTED 在账），失败退避后由 10Hz 推送自然重试；daemon
+    // 命中盘缓存毫秒回。真图落地见 spawn_cover_fetch 回包。
     if let Some(cover) = track.cover.as_ref()
         && cover.url.starts_with("https://")
     {
-        spawn_cover_fetch(ui_weak, runtime, track.id.0.clone(), cover.url.clone());
+        spawn_cover_fetch(ui_weak, runtime, mid.clone(), cover.url.clone());
     }
-    let quality = playback.actual_quality.as_ref();
-    player.set_track_quality(quality.map(quality_label).unwrap_or_default().into());
-    player.set_track_max_tier(quality.map(quality_tier).unwrap_or(0));
 }
 
 /// 播放页歌词装载：LyricGet（daemon 本地优先 + QQ 检索兜底）→ LRC 解析 →
@@ -1241,6 +1325,64 @@ fn cover_fetch_schedule_retry(mid: &str) {
     });
 }
 
+/// 当前曲封面解析（纯函数，UI 无副作用）：返回 (封面键, 真图)。真图
+/// None → 调用方出程序化占位（seed `album:{mid}`）。键同时是取色
+/// （track_theme::apply_cover）的去重键，四个形态：
+/// - `file:{path}`：本地/已回写 file:// 封面，cover_cache 512 桶直读；
+/// - `real:{mid}|{url}`：远程封面且本会话已取回（RESOLVED_COVERS 备忘出
+///   盘路径——REQUESTED 在账不会重发，换曲重进/重装载靠此出真图）；
+/// - `pending:{mid}|{url}`：远程封面未取回，占位等待 spawn_cover_fetch
+///   回包（回包翻 `real:` 键，取色随真图重算——旧实现占位与真图同键，
+///   重算被 apply_cover 去重静默吞掉，真图取色/环境层从未生效）；
+/// - `prog:{mid}`：无封面 / file:// 解析或装载失败，程序化占位。
+fn now_playing_cover(
+    mid: &str,
+    cover: Option<&hmp_core::CoverRef>,
+) -> (String, Option<slint::Image>) {
+    match cover.map(|c| c.url.as_str()) {
+        Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
+            let key = format!("{mid}|{url}");
+            let path = RESOLVED_COVERS.with(|cell| cell.borrow().get(&key).cloned());
+            match path.and_then(|p| crate::cover_cache::get_or_load(&p, 512)) {
+                Some(image) => (format!("real:{key}"), Some(image)),
+                None => (format!("pending:{key}"), None),
+            }
+        }
+        Some(url) => match crate::covers::file_uri_to_path(url) {
+            Some(path) => match crate::cover_cache::get_or_load(&path, 512) {
+                Some(image) => (format!("file:{path}"), Some(image)),
+                None => {
+                    tracing::debug!(path, "cover file unreadable; fallback to placeholder");
+                    (format!("prog:{mid}"), None)
+                }
+            },
+            None => (format!("prog:{mid}"), None),
+        },
+        None => (format!("prog:{mid}"), None),
+    }
+}
+
+/// 当前曲封面同步（键控幂等）：键与 LAST_COVER_KEY 相同 → 不动
+/// Player.cover——10Hz 推送安全复入，异步取回的真图不被覆盖；换曲（或
+/// 离线清空后的重连）键必然变化 → 重新落地。取色随落地图应用
+/// （apply_cover 键去重）：待取回期占位先出 `pending:` 键取色，真图回包
+/// 翻 `real:` 键自然重算（见 spawn_cover_fetch）。
+fn sync_now_playing_cover(
+    player: &Player,
+    mid: &str,
+    cover: Option<&hmp_core::CoverRef>,
+    ui_weak: &Weak<AppWindow>,
+) {
+    let (key, image) = now_playing_cover(mid, cover);
+    if LAST_COVER_KEY.with(|cell| cell.borrow().as_str() == key) {
+        return;
+    }
+    LAST_COVER_KEY.with(|cell| *cell.borrow_mut() = key.clone());
+    let shown = image.unwrap_or_else(|| crate::covers::cover_image(&format!("album:{mid}")));
+    player.set_cover(shown.clone());
+    crate::track_theme::apply_cover(ui_weak, &key, &shown);
+}
+
 /// 异步取 QQ 封面本地产物（CoverGet）；完成时当前曲仍是发起曲才应用。
 fn spawn_cover_fetch(
     ui_weak: &Weak<AppWindow>,
@@ -1286,15 +1428,24 @@ fn spawn_cover_fetch(
                     let Some(image) = crate::cover_cache::get_or_load(&path, 512) else {
                         return;
                     };
+                    // 会话备忘先行（与当前曲无关也入账）：换曲重进/重装载时
+                    // now_playing_cover 由此直读盘出真图，不再占位且无法重发。
+                    RESOLVED_COVERS.with(|cell| {
+                        cell.borrow_mut().insert(cover_key.clone(), path);
+                    });
                     // 队列抽屉行内原地换图：与当前曲无关——迟到的封面同样更新抽屉行
                     // （daemon 已回写 cover_uri，此后队列重建直接读盘，此处补本次会话）
                     update_queue_row_cover(&player, &mid, image.clone());
                     if player.get_current_mid() != mid.as_str() {
                         return; // 换曲竞态：播放条/取色只认当前曲
                     }
+                    // 封面键 pending: → real: 翻转（后续 sync 同键零触碰），
+                    // 真图取色覆写占位取色（键变必然重算）
+                    LAST_COVER_KEY.with(|cell| {
+                        *cell.borrow_mut() = format!("real:{cover_key}");
+                    });
                     player.set_cover(image.clone());
-                    // 真图取色覆写程序化占位的取色
-                    crate::track_theme::apply_cover(&ui_weak, &cover_key, &image);
+                    crate::track_theme::apply_cover(&ui_weak, &format!("real:{cover_key}"), &image);
                 });
             }
             _ => {
@@ -1359,10 +1510,13 @@ fn clear_now_playing(player: &Player, ui_weak: &Weak<AppWindow>) {
     player.set_track_quality("".into());
     player.set_track_max_tier(0);
     player.set_loading(false);
-    // 播放页数据随曲清空（无曲时 overlay 呈空态，不留上一曲残页）
+    // 播放页数据随曲清空（无曲时 overlay 呈空态，不留上一曲残页）；
+    // 同步键复位：重连同曲也必然重新落地（元数据/封面/徽章）
     PREV_MID.with(|cell| cell.borrow_mut().clear());
     LYRIC_STAMPS.with(|cell| cell.borrow_mut().clear());
     COMMENT_KEY.with(|cell| *cell.borrow_mut() = None);
+    LAST_COVER_KEY.with(|cell| cell.borrow_mut().clear());
+    LAST_QUALITY.with(|cell| *cell.borrow_mut() = (String::new(), -1));
     if let Some(ui) = ui_weak.upgrade() {
         // 无曲 → 曲目层调色整族回落品牌胡桃木、环境层清空
         crate::track_theme::apply_fallback(&ui);
@@ -1514,24 +1668,6 @@ fn cover_seed(meta: &QueueRowMeta) -> String {
 /// 大图消费方最大 336px 逻辑像素，512 余量充足）；
 /// http(s)（UI 禁 HTTP 为项目原则，封面代理缺失）→ 按 mid 程序化占位；
 /// 无封面 → 程序化占位。
-fn cover_for_track(mid: &str, cover: Option<&hmp_core::CoverRef>) -> slint::Image {
-    if let Some(url) = cover.map(|c| c.url.as_str())
-        && !url.starts_with("http://")
-        && !url.starts_with("https://")
-    {
-        // file:// 双形态（persist_cover 宽容形态 `file://C:\...` 与历史
-        // 规范形态 `file:///C:/...`）都收：裸剥前缀把规范形态解析成
-        // `/C:/...`（Windows 读不到）→ 盘上有图恒占位（§18 库行实锤）。
-        if let Some(path) = crate::covers::file_uri_to_path(url) {
-            if let Some(image) = crate::cover_cache::get_or_load(&path, 512) {
-                return image;
-            }
-            tracing::debug!(path, "cover file unreadable; fallback to placeholder");
-        }
-    }
-    crate::covers::cover_image(&format!("album:{mid}"))
-}
-
 #[cfg(test)]
 // pub(crate)：bridge.rs 的 AppWindow 测试共用本模块的测试平台 Once 初始化
 //（i-slint-backend-testing 的 platform 是进程级单例，二次 init 即 panic）。
@@ -1679,15 +1815,45 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cover_falls_back_to_programmatic_when_no_file() {
-        // 无封面 → 程序化占位（确定性渲染，非空图）。
-        let image = cover_for_track("mid-1", None);
-        assert!(image.size().width > 0);
-        // http 封面被禁（UI 禁 HTTP 原则）→ 同样程序化占位。
+    fn now_playing_cover_key_semantics() {
+        // 无封面 → 占位键 + 无真图（调用方出程序化占位）。
+        let (key, image) = now_playing_cover("mid-1", None);
+        assert_eq!(key, "prog:mid-1");
+        assert!(image.is_none());
+        // 远程封面未取回（会话备忘空）→ pending 占位（UI 禁直连 HTTP 原则）。
         let remote = hmp_core::CoverRef {
             url: "https://example.com/a.jpg".into(),
         };
-        assert!(cover_for_track("mid-1", Some(&remote)).size().width > 0);
+        let (key, image) = now_playing_cover("mid-1", Some(&remote));
+        assert_eq!(key, "pending:mid-1|https://example.com/a.jpg");
+        assert!(image.is_none());
+        // file:// 封面在盘 → file: 键 + 真图。512 桶按桶填充（image 0.25
+        // thumbnail 语义，cover_cache::decode_512_bucket_serves_derived_
+        // directly 同款钉死）：400×200 → 512×256，与 256×256 方形占位可辨。
+        let dir = backfill_dir("np-cover");
+        let png = backfill_png(&dir, "a.png", 400, 200);
+        let cover = hmp_core::CoverRef {
+            url: format!("file://{}", png.display()),
+        };
+        let (key, image) = now_playing_cover("mid-1", Some(&cover));
+        assert_eq!(key, format!("file:{}", png.display()));
+        let image = image.expect("file cover loads");
+        assert_eq!((image.size().width, image.size().height), (512, 256));
+        // 远程已取回（会话备忘入账）→ real 键直读盘出真图（换曲重进/
+        // 重装载的出图依据；REQUESTED 在账不会重发请求）。
+        let png2 = backfill_png(&dir, "b.png", 400, 200);
+        RESOLVED_COVERS.with(|cell| {
+            cell.borrow_mut().insert(
+                "mid-1|https://example.com/a.jpg".into(),
+                png2.display().to_string(),
+            );
+        });
+        let (key, image) = now_playing_cover("mid-1", Some(&remote));
+        assert_eq!(key, "real:mid-1|https://example.com/a.jpg");
+        let image = image.expect("resolved cover loads");
+        assert_eq!((image.size().width, image.size().height), (512, 256));
+        RESOLVED_COVERS.with(|cell| cell.borrow_mut().clear());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1818,12 +1984,18 @@ pub(crate) mod tests {
         }
     }
 
-    /// 平台线程上的逐测试复位：thread_local（CACHE / 回填队列与 Timer）在
-    /// 常驻线程上跨测试存活，起点必须显式清零。
+    /// 平台线程上的逐测试复位：thread_local（CACHE / 回填队列与 Timer / 行
+    /// 元数据表）在常驻线程上跨测试存活，起点必须显式清零。
     fn reset_backfill_for_test() {
         crate::cover_cache::clear_for_test();
         PENDING_COVERS.with(|cell| cell.borrow_mut().clear());
         COVER_BACKFILL_TIMER.with(|cell| cell.borrow().stop());
+        QUEUE_ROW_METAS.with(|cell| *cell.borrow_mut() = Vec::new());
+    }
+
+    /// 打开队列抽屉（回填可见性门控的「即时路径」前置；默认关闭态重建走暂存）。
+    fn open_queue_drawer(ui: &AppWindow) {
+        Player::get(ui).set_queue_visible(true);
     }
 
     /// 素材目录（cover_cache 测试同款：temp + 进程号，不引 tempfile dev-dep）。
@@ -1917,6 +2089,7 @@ pub(crate) mod tests {
         run_on_platform_thread(|| {
             reset_backfill_for_test();
             let ui = AppWindow::new().unwrap();
+            open_queue_drawer(&ui);
             let runtime = Arc::new(BackendRuntime::new().unwrap());
             let queue_mids = Mutex::new(Vec::<String>::new());
             let dir = backfill_dir("batch");
@@ -1955,6 +2128,10 @@ pub(crate) mod tests {
                 assert_eq!((s.width, s.height), (256, 256), "冷行应先占位");
             }
 
+            // 行窗发布走事件循环泵（changed 延迟执行）：先泵一拍让 QueueWindow
+            // 落账，再手动排程（真实应用由 queue-window 回调承担这一步）
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            schedule_queue_window_covers(ui.as_weak(), &runtime);
             // 分批边界：7 冷行 / 批 6 → 首个 tick 恰 6 行换真图，第 2 个 tick 清尾
             i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
             let rows = queue_rows_of(&ui);
@@ -1988,6 +2165,7 @@ pub(crate) mod tests {
         run_on_platform_thread(|| {
             reset_backfill_for_test();
             let ui = AppWindow::new().unwrap();
+            open_queue_drawer(&ui);
             let runtime = Arc::new(BackendRuntime::new().unwrap());
             let queue_mids = Mutex::new(Vec::<String>::new());
             let dir = backfill_dir("swap");
@@ -2002,7 +2180,10 @@ pub(crate) mod tests {
                 })
                 .collect();
             apply_queue_rows(&ui, &runtime, &queue_mids, gen1);
-            // 一个 tick：回填 6 行，余 2 条在途
+            // 泵一拍让行窗发布落账（changed 延迟执行）+ 手动排程（真实应用由
+            // queue-window 回调承担），随后一个 tick：回填 6 行，余 2 条在途
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            schedule_queue_window_covers(ui.as_weak(), &runtime);
             i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
             assert_eq!(cover_misses(), 6, "首个 tick 恰 6 次解码");
 
@@ -2016,6 +2197,10 @@ pub(crate) mod tests {
                 })
                 .collect();
             apply_queue_rows(&ui, &runtime, &queue_mids, gen2);
+            // 先换装再泵：QueueWindow 仍是旧 count=8，但 start=0 且 clamp 到
+            // 表长 → 窗恰为全部 4 条 gen2 行；若先泵，gen1 残留在途 Timer 会
+            // 先跑一 tick 把被丢弃的 2 条也解码（E3 计数 +2）
+            schedule_queue_window_covers(ui.as_weak(), &runtime);
             let rows = queue_rows_of(&ui);
             assert_eq!(rows.len(), 4, "模型应为第二代");
             for row in &rows {
@@ -2032,6 +2217,57 @@ pub(crate) mod tests {
                 "第二代全部回填为真图"
             );
             // 停表后再推时间无变化
+            let misses = cover_misses();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(64));
+            assert_eq!(cover_misses(), misses);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// 按窗回填（200MB 内存预算轮）：关闭态（默认）重建零解码（仅留存行
+    /// 元数据）；打开抽屉按窗排程 → 窗内行（= 全部 3 行）分批补齐。
+    #[test]
+    fn queue_rebuild_defers_covers_until_drawer_opens() {
+        run_on_platform_thread(|| {
+            reset_backfill_for_test();
+            let ui = AppWindow::new().unwrap();
+            let runtime = Arc::new(BackendRuntime::new().unwrap());
+            let queue_mids = Mutex::new(Vec::<String>::new());
+            let dir = backfill_dir("defer");
+
+            let metas: Vec<QueueRowMeta> = (0..3)
+                .map(|i| {
+                    row_meta_with_cover(
+                        &format!("d-{i}"),
+                        &backfill_png(&dir, &format!("d{i}.png"), 400, 200),
+                    )
+                })
+                .collect();
+            // 抽屉保持默认关闭：重建照常换装模型，但封面零解码零预取
+            apply_queue_rows(&ui, &runtime, &queue_mids, metas);
+            let misses = cover_misses();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+            assert_eq!(cover_misses(), misses, "抽屉关闭期重建不应解码任何封面");
+            assert!(
+                queue_rows_of(&ui)
+                    .iter()
+                    .all(|r| r.cover.size().height == 256),
+                "关闭期冷行保持占位"
+            );
+
+            // 打开抽屉：按窗排程（QueueWindow 全局由行窗容器 init 发布；
+            // 3 行 ≤ 一窗，首个 tick 全部补齐）
+            open_queue_drawer(&ui);
+            schedule_queue_window_covers(ui.as_weak(), &runtime);
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            assert!(
+                queue_rows_of(&ui)
+                    .iter()
+                    .all(|r| r.cover.size().height == 128),
+                "打开抽屉后首拍应回填为真图"
+            );
+            assert_eq!(cache_delta(misses), 3, "按窗排程恰好解码窗内行");
+            // 耗尽即停表
             let misses = cover_misses();
             i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(64));
             assert_eq!(cover_misses(), misses);
