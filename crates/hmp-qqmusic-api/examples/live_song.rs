@@ -15,9 +15,7 @@ use hmp_qqmusic_api::credential::Credential;
 use hmp_qqmusic_api::lyric::LyricApi;
 use hmp_qqmusic_api::pagination::Page;
 use hmp_qqmusic_api::protocol::cgi::CgiRequest;
-use hmp_qqmusic_api::singer::{
-    AreaType, GenreType, IndexType, SexType, SingerApi, TabType,
-};
+use hmp_qqmusic_api::singer::{AreaType, GenreType, IndexType, SexType, SingerApi, TabType};
 use hmp_qqmusic_api::song::{SongApi, SongFileInfo, SongFileType, SongQueryInfo};
 use serde_json::json;
 
@@ -162,7 +160,10 @@ async fn main() {
     run_stream(&client, cred.as_ref()).await;
 
     // ---------- lyric ----------
-    match lyric.get_lyric(&SONG_ID.to_string(), 0, true, false, false, false).await {
+    match lyric
+        .get_lyric(&SONG_ID.to_string(), 0, true, false, false, false)
+        .await
+    {
         Ok(r) => println!(
             "PASS lyric.get_lyric(186016 qrc): songid={} lrc_t={} qrc_t={} lyric_prefix={:?} trans_len={} roma_len={}",
             r.songid,
@@ -176,7 +177,10 @@ async fn main() {
     }
     gap().await;
 
-    match lyric.get_lyric(&QRC_SONG_ID.to_string(), 0, true, false, false, false).await {
+    match lyric
+        .get_lyric(&QRC_SONG_ID.to_string(), 0, true, false, false, false)
+        .await
+    {
         Ok(r) => println!(
             "PASS lyric.get_lyric(97773 晴天 qrc): songid={} lyric_prefix={:?} contains_xml={}",
             r.songid,
@@ -203,7 +207,13 @@ async fn main() {
     gap().await;
 
     match singer
-        .get_singer_list_index(AreaType::All, SexType::All, GenreType::All, IndexType::All, Page::new(1, 80))
+        .get_singer_list_index(
+            AreaType::All,
+            SexType::All,
+            GenreType::All,
+            IndexType::All,
+            Page::new(1, 80),
+        )
         .await
     {
         Ok(r) => println!(
@@ -240,21 +250,17 @@ async fn main() {
     gap().await;
 
     match singer
-        .get_desc(
-            &[SINGER_MID.to_string()],
-            false,
-            false,
-            false,
-            true,
-            false,
-        )
+        .get_desc(&[SINGER_MID.to_string()], false, false, false, true, false)
         .await
     {
         Ok(r) => println!(
             "PASS singer.get_desc(min param): list={} name={:?} pic={}",
             r.singer_list.len(),
             r.singer_list.first().map(|d| d.basic_info.name.clone()),
-            r.singer_list.first().map(|d| d.pic.pic.is_empty()).unwrap_or(true)
+            r.singer_list
+                .first()
+                .map(|d| d.pic.pic.is_empty())
+                .unwrap_or(true)
         ),
         Err(e) => println!("FAIL singer.get_desc(min param): {e}"),
     }
@@ -272,7 +278,9 @@ async fn main() {
                 .map(|d| d.ex_info.desc.len())
                 .unwrap_or(0)
         ),
-        Err(e) => println!("FAIL singer.get_desc(all true)（历史记录 ex/group 扩展参数可能 10006）: {e}"),
+        Err(e) => {
+            println!("FAIL singer.get_desc(all true)（历史记录 ex/group 扩展参数可能 10006）: {e}")
+        }
     }
     gap().await;
 
@@ -453,7 +461,10 @@ async fn run_detail_dump(client: &QqMusicClient) {
                 "DUMP song.detail info.company.content[0]: {}",
                 data["info"]["company"]["content"][0]
             );
-            println!("DUMP song.detail extras keys: {:?}", keys_of(&data["extras"]));
+            println!(
+                "DUMP song.detail extras keys: {:?}",
+                keys_of(&data["extras"])
+            );
         }
         Err(e) => println!("DUMP song.detail raw FAIL: {e}"),
     }

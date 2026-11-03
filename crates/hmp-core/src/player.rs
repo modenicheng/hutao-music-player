@@ -9,6 +9,35 @@ use crate::HmpError;
 use crate::id::TrackId;
 use crate::media::{AudioQuality, Track};
 
+/// 播放器可消费的同步媒体字节流（`Read + Seek`）。
+///
+/// 由 [`MediaStreamSource::open`] 产出，直接喂给解码器（rodio `Decoder`
+/// 约束 `R: Read + Seek`）；实现自带后台预取，`Read` 仅在数据饥饿时阻塞。
+pub trait MediaStream: std::io::Read + std::io::Seek + Send {}
+
+impl<T: std::io::Read + std::io::Seek + Send> MediaStream for T {}
+
+/// 进程内随机访问媒体源（播放驱动的本地字节流接缝）。
+///
+/// QQ 远端音频（加密/明文）经 daemon 内的 hmp-media 解密源实现本 trait
+/// 直连播放器，取代历史上的回环 HTTP 代理（2026-08 为 GStreamer 引入，
+/// gst 弃用后纯属自我强加的 TCP/HTTP/临时文件开销与系统代理劫持事故面）。
+///
+/// `open` 可重复调用（回滚重装载）；需在 tokio 上下文中调用
+/// （后台预取任务挂在当前 runtime 上）。
+pub trait MediaStreamSource: Send + Sync + std::fmt::Debug {
+    /// 明文总字节数。
+    fn len(&self) -> u64;
+
+    /// 是否为空源（默认按 `len() == 0` 判定）。
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// 打开一个新的同步 reader。
+    fn open(&self) -> std::io::Result<Box<dyn MediaStream>>;
+}
+
 /// 播放状态机（docs/PROJECT.md §8.1）。
 ///
 /// 状态转换只能发生在播放器核心（`hmp-player`）中。
@@ -113,17 +142,33 @@ pub struct PlaybackCapabilities {
 /// 后端无关的音频装载请求。
 ///
 /// URI 的解析与解码属于具体播放驱动；应用引擎只负责提供已解析的媒体地址、
-/// 领域元数据和用于过滤陈旧事件的装载代际。
-#[derive(Clone, Debug)]
+/// 领域元数据和用于过滤陈旧事件的装载代际。`stream` 存在时优先于 `uri`
+/// （进程内直连）；`uri` 始终保留作元数据/日志/回滚记录。
+#[derive(Clone)]
 pub struct LoadRequest {
     /// 当前曲目元数据。
     pub track: Track,
-    /// `file://`、`http://` 或 `https://` 媒体地址。
+    /// `file://` 本地地址，或远端曲目的 CDN url（仅元数据/日志用；
+    /// 播放路径由 `stream` 决定）。
     pub uri: String,
     /// 本次实际选定的音质。
     pub quality: AudioQuality,
     /// 引擎分配的装载代际。
     pub load_gen: u64,
+    /// 进程内随机访问源（远端曲目直连播放器）；本地文件为 `None`（按 uri 打开）。
+    pub stream: Option<std::sync::Arc<dyn MediaStreamSource>>,
+}
+
+impl std::fmt::Debug for LoadRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadRequest")
+            .field("track", &self.track)
+            .field("uri", &self.uri)
+            .field("quality", &self.quality)
+            .field("load_gen", &self.load_gen)
+            .field("stream", &self.stream.is_some())
+            .finish()
+    }
 }
 
 /// 播放驱动向应用引擎发布的离散事件。

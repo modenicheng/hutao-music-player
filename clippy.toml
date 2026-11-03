@@ -6,4 +6,4 @@ cognitive-complexity-threshold = 15
 # 允许的最大嵌套层级
 type-complexity-threshold = 250
 # 强制 MSRV 感知的 lint（与 workspace rust-version 一致）
-msrv = "1.85"
+msrv = "1.92"

@@ -32,6 +32,33 @@ pub struct CoverRef {
     pub url: String,
 }
 
+// ——— 派生缩略封面契约（S9 R2：换曲/浏览路径的 miss 解码降本）———
+//
+// 写侧（hmp-storage `persist_cover`）在原图 `covers/<hash>.jpg` 之外增写
+// `covers/<hash>.512.jpg`（最长边 ≤512、保比、JPEG q80）；读侧
+//（hmp-desktop `cover_cache`）≤512 桶 miss 优先解码派生件，缺失/损坏自动
+// 回退原图。双侧拼名共用本助手（互锚测试据此断言），杜绝命名漂移。
+
+/// 派生封面最长边（px）。
+pub const COVER_DERIVED_SIDE: u32 = 512;
+
+/// 原封面文件名 → 派生缩略件文件名：`<stem>.512.jpg`。
+///
+/// 后缀钉死 `.jpg`（派生件恒为 JPEG 编码，与原图格式无关）。空 stem
+///（空串 / 仅扩展名）→ None。
+pub fn derived_cover_name(original: &str) -> Option<String> {
+    // 剥最后一个扩展名；无扩展名用完整名兜底。剥完为空（空串 / 纯扩展名
+    //「.jpg」）→ None。
+    let stem = original
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(original);
+    if stem.is_empty() {
+        return None;
+    }
+    Some(format!("{stem}.{COVER_DERIVED_SIDE}.jpg"))
+}
+
 /// 音频质量（docs/PROJECT.md §7.3）。
 ///
 /// 序列化为字符串；反序列化时已知名映射到对应变体，未知字符串归入
@@ -363,5 +390,33 @@ mod tests {
         // Unknown 携带原文
         let u: AudioQuality = serde_json::from_value(json!("HiRes96")).unwrap();
         assert!(matches!(u, AudioQuality::Unknown(_)));
+    }
+
+    // —— 派生缩略封面契约（S9 R2）——
+
+    #[test]
+    fn derived_cover_side_is_512() {
+        assert_eq!(COVER_DERIVED_SIDE, 512);
+    }
+
+    #[test]
+    fn derived_cover_name_pins_suffix() {
+        // 常规内容哈希名（写侧产物形态）
+        assert_eq!(
+            derived_cover_name("9f2c1a8e.jpg"),
+            Some("9f2c1a8e.512.jpg".to_string())
+        );
+        // 无扩展名 / 多点 stem：取完整 stem，后缀钉死 .512.jpg
+        assert_eq!(
+            derived_cover_name("9f2c1a8e"),
+            Some("9f2c1a8e.512.jpg".to_string())
+        );
+        assert_eq!(
+            derived_cover_name("a.b.c.png"),
+            Some("a.b.c.512.jpg".to_string())
+        );
+        // 空 stem（空串 / 仅扩展名）→ None
+        assert_eq!(derived_cover_name(""), None);
+        assert_eq!(derived_cover_name(".jpg"), None);
     }
 }

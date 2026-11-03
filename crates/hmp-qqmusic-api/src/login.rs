@@ -211,6 +211,38 @@ impl<'a> LoginApi<'a> {
     ///
     /// 实测（2026-09-29）：真实凭证（uin=939861972）返回 `false`，HTTP 200 + code 0。
     pub async fn check_expired(&self, credential: &Credential) -> Result<bool, QqMusicError> {
+        let body = self.fetch_profile_homepage(credential).await?;
+        Ok(body.get("code").and_then(|v| v.as_i64()).unwrap_or(-1) != 0)
+    }
+
+    /// 当前账号资料主页（`fcg_get_profile_homepage.fcg`，与 [`Self::check_expired`]
+    /// 同端点；读操作，无会话副作用）。
+    ///
+    /// 与 check_expired 的差别：返回完整 JSON 供调用方提取昵称/加密 uin 等
+    /// 资料字段。按数字 uin（`music_id`）查询、不依赖 `encryptUin`——QQ 三方
+    /// 接入（QQConnectLogin）的登录响应没有该字段，此端点是登录后拿到昵称的
+    /// 主通道（2026-09-30）。
+    ///
+    /// # 错误
+    /// 业务 `code != 0` 返回 [`QqMusicError::InvalidResponse`]（此时响应不含
+    /// 有意义的资料字段）。
+    pub async fn get_profile_homepage(
+        &self,
+        credential: &Credential,
+    ) -> Result<Value, QqMusicError> {
+        let body = self.fetch_profile_homepage(credential).await?;
+        let code = body.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+        if code != 0 {
+            return Err(QqMusicError::InvalidResponse(format!(
+                "profile homepage business error code {code}"
+            )));
+        }
+        Ok(body)
+    }
+
+    /// `fcg_get_profile_homepage.fcg` 请求与 JSON 解析（check_expired /
+    /// get_profile_homepage 共用）。
+    async fn fetch_profile_homepage(&self, credential: &Credential) -> Result<Value, QqMusicError> {
         let cfg = &self.client_config();
         let resp = self
             .client
@@ -248,11 +280,9 @@ impl<'a> LoginApi<'a> {
             });
         }
 
-        let body: Value = resp
-            .json()
+        resp.json()
             .await
-            .map_err(|e| QqMusicError::InvalidResponse(e.to_string()))?;
-        Ok(body.get("code").and_then(|v| v.as_i64()).unwrap_or(-1) != 0)
+            .map_err(|e| QqMusicError::InvalidResponse(e.to_string()))
     }
 
     /// 刷新登录凭证（上游 `LoginApi.refresh_credential`）。
@@ -276,7 +306,9 @@ impl<'a> LoginApi<'a> {
         let login_type = credential.login_type.as_login_type_int();
         // 上游 Credential.musicid 为 int；musicid 必须按数值下发（字符串形状服务端拒绝）
         let music_id_value = |id: &str| -> Value {
-            id.parse::<i64>().map(|n| json!(n)).unwrap_or_else(|_| json!(id))
+            id.parse::<i64>()
+                .map(|n| json!(n))
+                .unwrap_or_else(|_| json!(id))
         };
         let param = match credential.login_type {
             crate::credential::LoginType::Wechat => json!({
@@ -705,13 +737,13 @@ impl<'a> LoginApi<'a> {
         let min_safe_interval = Duration::from_millis(1000);
 
         loop {
-            if let Some(cancel) = cancel {
-                if cancel.is_cancelled() {
-                    return Err(QqMusicError::Login {
-                        code: -1,
-                        message: "login canceled".into(),
-                    });
-                }
+            if let Some(cancel) = cancel
+                && cancel.is_cancelled()
+            {
+                return Err(QqMusicError::Login {
+                    code: -1,
+                    message: "login canceled".into(),
+                });
             }
             if Instant::now() >= deadline {
                 return Err(QqMusicError::Login {
@@ -915,10 +947,10 @@ fn extract_query_param(url: &str, key: &str) -> Option<String> {
 /// 从 oauth 授权 Location 提取 `code`（上游 `(?<=code=)(.+?)(?=&)`）。
 fn extract_code_from_location(location: &str) -> Result<String, QqMusicError> {
     for part in location.split(['?', '&']) {
-        if let Some(v) = part.strip_prefix("code=") {
-            if !v.is_empty() {
-                return Ok(v.to_owned());
-            }
+        if let Some(v) = part.strip_prefix("code=")
+            && !v.is_empty()
+        {
+            return Ok(v.to_owned());
         }
     }
     Err(QqMusicError::InvalidResponse(

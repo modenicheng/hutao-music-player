@@ -1,7 +1,9 @@
 // UI 数据结构（契约对齐 apps/hmp-tauri/src/lib/api/types.ts，DESIGN.md §4）。
 // Slint struct 无嵌套数组：多人合唱的歌手串为展示文本，链接统一指向主歌手（PORTING.md 决策 5）。
 
-/** 曲目表/队列行（SongRef 摊平）。播放态经 Player.queue-current-mid 比对 mid */
+/** 曲目表行（SongRef 摊平）。播放态经 Player.queue-current-mid 比对 mid。
+    无 cover 字段：表格行不背位图（12+ 个表格模型每行全尺寸封面是内存
+    根因之一），封面由行外消费点（侧栏/详情头图/卡片）各自取图 */
 export struct TrackRow {
     /** 源键：QQ 曲目 = songmid；本地曲目 = `local:<路径>`（PlayRequest 映射用） */
     mid: string,
@@ -17,6 +19,26 @@ export struct TrackRow {
     duration-ms: int,
     /** 音质徽章文案，如 "FLAC · 44.1kHz"；无损以下为空 */
     quality: string,
+}
+
+/** 队列行（Player.queue 专用）：TrackRow 全字段 + cover（唯一消费方
+    queue-drawer 36×36 行封面；字段名与 TrackRow 逐一同名，仅多 cover） */
+export struct QueueRow {
+    /** 源键：QQ 曲目 = songmid；本地曲目 = `local:<路径>`（PlayRequest 映射用） */
+    mid: string,
+    /** 源：0=QQ，1=本地（`hmp_core::PlayRequest` 分流） */
+    source: int,
+    title: string,
+    /** 展示串："白栖遥 / 陈屿帆"（点击整体跳主歌手页，PORTING.md 决策 5） */
+    artists: string,
+    /** 主歌手 mid */
+    artist-mid: string,
+    album: string,
+    album-mid: string,
+    duration-ms: int,
+    /** 音质徽章文案，如 "FLAC · 44.1kHz"；无损以下为空 */
+    quality: string,
+    /** 行封面（cover_cache 装载/降采样；真图缺失为程序化占位） */
     cover: image,
 }
 
@@ -29,6 +51,15 @@ export struct CoverCardData {
     cover: image,
 }
 
+/** 搜索歌手卡（SearchView.vue 圆形头像卡对应物，C6） */
+export struct ArtistCardData {
+    /** singermid（Rust 侧已拼 qq: 前缀，导航直达远端歌手详情） */
+    mid: string,
+    name: string,
+    /** 头像（程序化占位 → CoverGet 换真图） */
+    cover: image,
+}
+
 /** 本地监视文件夹行（WatchedFolder） */
 export struct FolderRow {
     path: string,
@@ -37,13 +68,16 @@ export struct FolderRow {
     last-scan: string,
 }
 
-/** 侧栏歌单条目（名称 + 确定性渐变取色，Rust 侧派生） */
+/** 侧栏歌单条目（名称 + 占位封面图，Rust 侧派生） */
 export struct PlaylistCover {
     /** 歌单 id：行点击跳歌单详情的导航参数（与库页歌单卡 mid 同一字符串形式） */
     id: string,
     name: string,
-    c1: color,
-    c2: color,
+    /** 歌单归属：`local`=纯本地，`owned`=QQ 自建（右键"加入播放列表"
+        按曲源兼容性预禁用：daemon 拒 owned 歌单收本地曲） */
+    relation: string,
+    /** 占位封面图（中性底 + 歌单图标，covers 程序化生成；与库页歌单卡同源） */
+    image: image,
 }
 
 /** 歌词行（LRC 行级时间轴；桌面 lyrics.rs 解析） */
@@ -73,7 +107,11 @@ export struct TopCardData {
     title-sub: string,
     update-time: string,
     listen-num: int,
+    /** 榜单总曲数（「N 首」角标；0 = 未知不展示，B3） */
+    total-num: int,
     preview: [string],
+    /** 封面（程序化占位 → daemon picurl 经 CoverGet 换真图，T5） */
+    cover: image,
 }
 
 /** 排行榜分组（TopGroupDto 展示投影） */

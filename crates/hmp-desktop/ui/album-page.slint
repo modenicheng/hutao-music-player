@@ -1,5 +1,8 @@
 // 专辑详情（AlbumView.vue）：封面 + 页头（返回/标题/歌手链接/元信息/播放全部）
-// + 通栏曲目表（专辑列冗余关闭）。本地投影：厂牌/简介/收藏计数无数据源。
+// + 通栏曲目表（专辑列冗余关闭）。
+// 状态机渲染（M3）：0=初始 1=加载中 2=就绪 3=未找到 4=失败（离线/网络）。
+// 本地投影：厂牌/简介/收藏计数无数据源；远端（qq: 参数）：年份/公司/
+// 语种/流派/共 N 首 + 超窗标注由 remote_details 投影，歌手链接 qq:singermid。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { Button, ButtonVariant } from "primitives.slint";
@@ -18,14 +21,34 @@ export component AlbumPage inherits Rectangle {
         padding-bottom: Theme.space-10;
         spacing: Theme.space-4;
 
-        if !Data.album-found: Text {
-            text: "本地媒体库中没有这张专辑";
+        if Data.album-state == 1: Text {
+            height: 64px;
+            text: "正在加载…";
             color: Theme.muted-foreground;
-            font-size: 14px;
+            font-size: 13.5px;
             horizontal-alignment: center;
+            vertical-alignment: center;
         }
 
-        if Data.album-found: Rectangle {
+        if Data.album-state == 3: Text {
+            height: 64px;
+            text: "本地媒体库中没有这张专辑";
+            color: Theme.muted-foreground;
+            font-size: 13.5px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        if Data.album-state == 4: Text {
+            height: 64px;
+            text: "加载失败：无法连接守护进程或网络不可用";
+            color: Theme.muted-foreground;
+            font-size: 13.5px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        if Data.album-state == 2: Rectangle {
             // 两段式头部（Vue .album-head）。子元素勿引用 parent.width
             //（布局首选宽计算成环，会解出负宽）。
             width: parent.width;
@@ -69,12 +92,25 @@ export component AlbumPage inherits Rectangle {
                     meta-link-clicked => {
                         Nav.navigate(Route.artist, Data.album-artist);
                     }
+
+                    // 播放全部（远端首窗整表入队，D-4；本地专辑同享）
+                    if Data.album-tracks.length > 0: Button {
+                        variant: ButtonVariant.default;
+                        small: true;
+                        icon: Icons.play_arrow;
+                        icon-size: 17.6px;
+                        text: "播放全部";
+                        height: 32px;
+                        clicked => {
+                            Player.play-tracks(Data.album-tracks, 0);
+                        }
+                    }
                 }
             }
         }
 
         // 专辑内曲目同属一张专辑，专辑列冗余关闭（同 Vue show-album=false）
-        if Data.album-found: TrackTable {
+        if Data.album-state == 2: TrackTable {
             tracks: Data.album-tracks;
             show-header: true;
             show-album: false;

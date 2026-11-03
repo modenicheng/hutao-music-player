@@ -88,12 +88,12 @@ impl<'de> serde::Deserialize<'de> for LoginType {
                 self,
                 mut map: A,
             ) -> Result<Self::Value, A::Error> {
-                let key: String = map
-                    .next_key()?
-                    .ok_or_else(|| serde::de::Error::invalid_value(
+                let key: String = map.next_key()?.ok_or_else(|| {
+                    serde::de::Error::invalid_value(
                         serde::de::Unexpected::Map,
                         &"a login type variant key",
-                    ))?;
+                    )
+                })?;
                 if key == "Other" {
                     let inner: String = map.next_value()?;
                     Ok(LoginType::Other(inner))
@@ -154,7 +154,11 @@ pub struct Credential {
     #[serde(default, deserialize_with = "de_string_from_any")]
     pub str_musicid: String,
     /// musickey 创建时间戳（上游 `musickeyCreateTime`，秒）。
-    #[serde(default, alias = "musickeyCreateTime", deserialize_with = "de_i64_lenient")]
+    #[serde(
+        default,
+        alias = "musickeyCreateTime",
+        deserialize_with = "de_i64_lenient"
+    )]
     pub musickey_create_time: i64,
     /// key 有效时长（上游 `keyExpiresIn`，秒）。
     #[serde(default, alias = "keyExpiresIn", deserialize_with = "de_i64_lenient")]
@@ -163,10 +167,18 @@ pub struct Credential {
     #[serde(default, alias = "firstLogin", deserialize_with = "de_i64_lenient")]
     pub first_login: i64,
     /// 绑定账号类型（上游 `bind_account_type`，别名 `bindAccountType`）。
-    #[serde(default, alias = "bindAccountType", deserialize_with = "de_i64_lenient")]
+    #[serde(
+        default,
+        alias = "bindAccountType",
+        deserialize_with = "de_i64_lenient"
+    )]
     pub bind_account_type: i64,
     /// 距下次需要 refresh key 的秒数（上游 `need_refresh_key_in`，别名 `needRefreshKeyIn`）。
-    #[serde(default, alias = "needRefreshKeyIn", deserialize_with = "de_i64_lenient")]
+    #[serde(
+        default,
+        alias = "needRefreshKeyIn",
+        deserialize_with = "de_i64_lenient"
+    )]
     pub need_refresh_key_in: i64,
     /// 加密 uin（上游 `encryptUin`）。
     #[serde(default, alias = "encryptUin", deserialize_with = "de_string_from_any")]
@@ -387,17 +399,18 @@ where
         }
 
         fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
-            i64::try_from(v).map_err(|_| serde::de::Error::invalid_value(
-                serde::de::Unexpected::Unsigned(v),
-                &"an integer that fits in i64",
-            ))
+            i64::try_from(v).map_err(|_| {
+                serde::de::Error::invalid_value(
+                    serde::de::Unexpected::Unsigned(v),
+                    &"an integer that fits in i64",
+                )
+            })
         }
 
         fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            v.parse().map_err(|_| serde::de::Error::invalid_value(
-                serde::de::Unexpected::Str(v),
-                &"a numeric string",
-            ))
+            v.parse().map_err(|_| {
+                serde::de::Error::invalid_value(serde::de::Unexpected::Str(v), &"a numeric string")
+            })
         }
 
         fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {

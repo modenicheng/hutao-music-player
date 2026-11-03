@@ -170,7 +170,10 @@ async fn album_song_list_pagination_and_song_info_parse() {
 
     let client = client_for(&server.uri());
     let api = AlbumApi::new(&client);
-    let resp = api.get_song("003RMaRI1iFoYd", Page::new(2, 5)).await.unwrap();
+    let resp = api
+        .get_song("003RMaRI1iFoYd", Page::new(2, 5))
+        .await
+        .unwrap();
     assert_eq!(resp.total_num, 10);
     assert_eq!(resp.song_list.len(), 2);
     assert_eq!(resp.song_list[0].id, 107192080);
@@ -187,9 +190,7 @@ async fn album_new_album_params_and_parse() {
             "newalbum.NewAlbumServer",
             "get_new_album_info",
             |param| {
-                param["area"] == json!(6)
-                    && param["num"] == json!(5)
-                    && param["start"] == json!(0)
+                param["area"] == json!(6) && param["num"] == json!(5) && param["start"] == json!(0)
             },
         ))
         .respond_with(ok_sub(json!({
@@ -394,10 +395,7 @@ async fn top_detail_without_tag_omits_with_tags() {
         .and(req_matches(
             "music.musicToplist.Toplist",
             "GetDetail",
-            |param| {
-                param["topId"] == json!(62)
-                    && param.get("withTags").is_none()
-            },
+            |param| param["topId"] == json!(62) && param.get("withTags").is_none(),
         ))
         .respond_with(ok_sub(json!({
             "data": {"topId": 62, "title": "飙升榜", "totalNum": 100},
@@ -752,9 +750,15 @@ async fn comment_lists_send_wire_params_and_parse_comments() {
     let client = client_for(&server.uri());
     let api = CommentApi::new(&client);
     for list in [
-        api.get_hot_comments(107192080, Page::new(2, 20)).await.unwrap(),
-        api.get_new_comments(107192080, Page::new(2, 20)).await.unwrap(),
-        api.get_recommend_comments(107192080, Page::new(2, 20)).await.unwrap(),
+        api.get_hot_comments(107192080, Page::new(2, 20))
+            .await
+            .unwrap(),
+        api.get_new_comments(107192080, Page::new(2, 20))
+            .await
+            .unwrap(),
+        api.get_recommend_comments(107192080, Page::new(2, 20))
+            .await
+            .unwrap(),
     ] {
         let list = list.comment_list.map(|l| l.comments).unwrap_or_default();
         assert_eq!(list.len(), 1);

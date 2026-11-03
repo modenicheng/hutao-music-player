@@ -365,17 +365,17 @@ impl QueueCore {
         let cur = self.current_idx();
         self.shuffle = shuffle;
         self.rebuild_order();
-        if let Some(cur) = cur {
-            if let Some(p) = self.order.iter().position(|&x| x == cur) {
-                if shuffle {
-                    // 开：当前曲保持在原 cursor 槽（播放位置不跳变）。
-                    let slot = self.cursor.min(self.order.len() - 1);
-                    self.order.swap(p, slot);
-                    self.cursor = slot;
-                } else {
-                    // 关：当前曲 = 原 canonical 曲在新恒等顺序中的位置。
-                    self.cursor = p;
-                }
+        if let Some(cur) = cur
+            && let Some(p) = self.order.iter().position(|&x| x == cur)
+        {
+            if shuffle {
+                // 开：当前曲保持在原 cursor 槽（播放位置不跳变）。
+                let slot = self.cursor.min(self.order.len() - 1);
+                self.order.swap(p, slot);
+                self.cursor = slot;
+            } else {
+                // 关：当前曲 = 原 canonical 曲在新恒等顺序中的位置。
+                self.cursor = p;
             }
         }
         self.revision += 1;

@@ -41,15 +41,15 @@
 | `qqmusic_api/modules/recommend.py` | `recommend.rs` | ✅ 已移植 | 首页 Feed/雷达/推荐歌单/新歌（免登录）；猜你喜欢（需登录） |
 | `qqmusic_api/algorithms/__init__.py` | `algorithms/qrc.rs` | ✅ 已移植 | qrc_decrypt（3DES + zlib） |
 | `qqmusic_api/algorithms/tripledes.py` | `algorithms/tripledes.rs` | ✅ 已移植 | 自定义 3DES 变体（PC-2 偏移） |
-| `qqmusic_api/modules/song.py` | （待移植） | ⬜ 未移植 | 阶段 C |
-| `qqmusic_api/modules/lyric.py` | （待移植） | ⬜ 未移植 | 阶段 C |
-| `qqmusic_api/modules/songlist.py` | （待移植） | ⬜ 未移植 | 阶段 D |
+| `qqmusic_api/modules/song.py` | `song.rs` | ✅ 已移植 | 取流/详情/红心等歌曲域 |
+| `qqmusic_api/modules/lyric.py` | `lyric.rs` | ✅ 已移植 | 行级歌词/翻译（QRC 解密走 `algorithms/qrc.rs`） |
+| `qqmusic_api/modules/songlist.py` | `songlist.rs` | ✅ 已移植 | 歌单域 |
 | `qqmusic_api/utils/device.py` | （待移植） | ⬜ 未移植 | 仅 Android 平台需要 |
 | `qqmusic_api/utils/qimei.py` | （待移植） | ⬜ 未移植 | 仅 Android 平台需要 |
 | `qqmusic_api/utils/mqtt.py` | — | ⬜ 不移植 | HMP 非目标功能 |
 | `qqmusic_api/core/pagination.py` | `pagination.rs` | 🔶 部分 | 策略层（PagerStrategy/AsyncPager）未移植；折叠为 `Page`/`PagedView`/`Paged` 统一分页原语 + 三条 has_more 归一规则（2026-09-29 重设计，见[统一分页重设计]） |
 | （无上游对应；独立实现） | `algorithms/qmc2` | ✅ 已移植 | QMC2 解密：TEA-CBC、ekey 派生（EncV1/EncV2）、map/RC4 流密码、STag/QTag 尾部检测 |
-| （无上游对应；独立实现） | `crates/hmp-media` | ✅ 已移植 | 加密流下载→解密→XDG 缓存→file URI（CLI/桌面共用；含 proxy：回环 Range 解密代理） |
+| （无上游对应；独立实现） | `crates/hmp-media` | ✅ 已移植 | 加密流下载→解密→XDG 缓存；进程内随机访问解密源（流式解密+边播边缓存，2026-09-30 起取代回环 Range 解密代理） |
 
 ## 已移植接口
 
@@ -97,7 +97,14 @@
 ### 取流实测记录（2026-08-06）
 
 - 免登录：`RS02`（试听）返回 `purl`+`vkey`；`M500`/`C400` 等完整音质返回 `104003`（无权限，需登录态）；
-- 完整音质需调用方传入 `credential`（`str_musicid` 注入 `uin` 参数）。
+- 完整音质需调用方传入 `credential`（`str_musicid` 注入 `uin` 参数）；
+- **实测记录（2026-10-02，逐档探针）**：存量凭证**全档**（AIM0/Q0M0/F0M0/C600/M800/M500）
+  一律 `104003` 而免登录 `RS02` 正常 → 「连仅需登录的档都被拒 + 免登录档可用」即登录态
+  整体失效（`Expiry: expired`）的服务端签名，与音质档位/权限无关；daemon 据此把全链
+  鉴权类错误码归因 `NotLoggedIn`（混合失败才逐档报 `QualityUnavailable`，归因规则见
+  hmp-daemon `player.rs::is_auth_result_code`）。同批实机 dump 核对 `models::File`
+  字段逐键对齐，补建模 `size_hires`（Hi-Res 档；线上另有 b_30s/hires_bitdepth/
+  size_360ra 等未建模键，serde 忽略无害）。
 
 ### 加密取流（阶段 D 补充，2026-08-06）
 
@@ -111,8 +118,7 @@
 - 明文高音质变体（`F000`/`AI00` 等）服务端已停发，故不提供（上游保留但不可用）；
 - 上游普通组高音质常量（`MASTER`/`FLAC`/`OGG_*` 等）与加密组同名，Rust 合并为单一
   `SongFileType`（高音质统一为加密版本）；
-- **待播放器阶段**：`.mflac`/`.mgg` 解密播放（上游仓库无解密算法，需社区方案如 unlock-music）。
-- **实测记录（2026-08-08）**：`CgiGetEVkey` 返回 `ekey` 后解密播放链路已接线（Task 3/4），QMC2 解密播放完整闭环已验证。加密流播放链路：CLI/桌面 → 本地回环解密代理（http://127.0.0.1:随机端口）→ Range 按需解密 → Rodio 流式播放。
+- **实测记录（2026-08-08）**：`CgiGetEVkey` 返回 `ekey` 后解密播放链路已接线（Task 3/4），QMC2 解密播放完整闭环已验证。加密流播放链路（当时）：CLI/桌面 → 本地回环解密代理（http://127.0.0.1:随机端口）→ Range 按需解密 → Rodio 流式播放——该回环代理已于 2026-09-30 由进程内随机访问解密源取代（见「设计决策记录·进程内随机访问解密源」）。
 
 ### 歌单/专辑/歌手/排行榜/推荐（阶段 D，docs/PROJECT.md §6.6）
 
@@ -312,6 +318,55 @@
 - 消费链路：daemon IPC `CommentList` 携带 `page`/`num`（serde default 兼容
   旧帧），`CommentPage` 增加 `has_more`/`page`；CLI 全局 `--json` 直接序列化
   分页 DTO 供 agent 程序化翻页。
+
+### 进程内随机访问解密源（2026-09-30，替换回环 HTTP 代理）
+
+- **动机**：2026-08-08 为 GStreamer（souphttpsrc 只认 HTTP Range）引入的
+  `127.0.0.1` 回环解密代理，在 gst 弃用（08-24 换 rodio）后纯属同进程内的
+  TCP/reqwest/stream-download 临时文件自我开销，且是系统代理劫持事故面
+  （2026-09-29/30 两次：`cdn_client` 与 `LOOPBACK_CLIENT` 被迫 `no_proxy`）。
+  QMC2 密钥流按绝对偏移寻址，天然随机访问——直接实现
+  `hmp_core::MediaStreamSource`（`len()` + `open() -> Read+Seek reader`），
+  `LoadRequest.stream` 优先于 uri，加密/明文统一（明文 = IdentityCipher）。
+- **reader 协议坑**（`hmp-media/src/stream/reader.rs`）：生产者（async 任务）
+  被区间请求头阶段的 epoch 变化"取消"时必须回到主循环重判（`continue 'main`），
+  绝不能当作退出——否则消费者在新偏移 condvar 死锁，且只在 seek 恰落窗口间
+  才偶发；完全消费的 chunk 不能立即出队（回看保留窗口），统一
+  `end + retain <= pos` 修剪；生产者绝不跨 `.await` 持 std MutexGuard；
+  Rust 2024 `gen` 是保留字（用 epoch）；`future::select` 双方需 Unpin
+  （`Box::pin`），输家原样归还是"假唤醒不产生重复请求"的关键。
+- **rodio 0.21 DecoderBuilder 要求 `R: Read + Seek + Send + Sync`**，而
+  `Box<dyn MediaStream>` 只有 Send → hmp-player 侧 `SyncStream(Mutex<...>)`
+  适配器桥接 Sync（无 unsafe）；decoder 构建仍必须在 `spawn_blocking`
+  （2026-09-29 LIFO 死锁纪律不变，仅措辞更新）。
+- **窗口内 seek 必须唤醒生产者**（2026-10-01 修复）：Seek 的 in-window 分支
+  单调推进 `consumed_until` 并 `notify_one`，read 饥饿（pos 达 `fetched_until`
+  且非 eof）先兜底 `notify_one` 再 condvar wait——否则 seek 恰落生产者 park
+  的取流头（`fetched_until`）时双向永久挂起（read 无覆盖分块在等数据、生产者
+  park 判定 `fetched_until - consumed_until >= prefetch` 基于推进前的
+  consumed_until 恒成立），经 rodio `try_seek` 的阻塞反馈会瘫痪整个音频驱动；
+  回归 `reader_in_window_seek_to_park_head_no_hang` 等 3 例。
+- **tee 边播边缓存**（取代解析即后台全量回填）：武装时机在 `open()` 而非
+  `prepare_media`（同源多次 open 防双写同一 tmp）；chunk offset < high-water
+  （探测期回读）跳过不 detach，> high-water（前向 seek 跳洞）永久 detach；
+  drop 后后台补齐 `[high-water, len)` 单区间再转正（收尾含驱逐扫描，也在
+  后台做，不卡解码线程）；键空间不变（path|ekey），二次播放
+  `cached_playable_uri` 命中语义不变。**语义变化**：G2 预解析但未播放的
+  曲目不再回填缓存。
+- **明文 + 无 Range CDN 的回退**：内嵌 ekey 提取失败后转 `fill_plain_at`
+  明文全量落缓存（先内嵌后明文双探测；明文侧多一次全量下载，仅此罕见
+  回退路径发生）。
+- **RC4 段密钥流缓存**（`qmc2/cipher.rs`）：`QmcRc4Cipher` 内
+  `Mutex<Option<(seg_id, [u8;0x1400])>>` 容量 1 段；等价性依据"丢弃
+  seg_key+in_seg 步后取 N 字节 ≡ 丢弃 seg_key 步生成整段后取 [in_seg..]"；
+  `encode_other_segment` 的单段不变量（`in_seg + len <= 0x1400`）由 decrypt
+  四段式结构保证（有 debug_assert 钉住），勿引入绕过分段的调用路径。
+- **测试基建坑**：`#[tokio::test]`（current_thread）下消费者阻塞读会饿死同
+  runtime 的生产者 → 阻塞读一律 `spawn_blocking`；tokio runtime drop 会等
+  永久阻塞的 spawn_blocking 线程 → 测试用源必须在 drop 时解除阻塞；XDG
+  隔离锁 panic 毒化用 `unwrap_or_else(PoisonError::into_inner)`；本 crate
+  （hmp-qqmusic-api）生产代码 deny unwrap/expect，锁中毒走恢复不 panic；
+  wiremock 判别尾部探测时小于 0x40 的文件须用 `end == total-1` 判据。
 
 ## Live 测试
 

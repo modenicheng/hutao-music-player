@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use hmp_core::{AccountInfo, LyricPage, SearchPage};
 use hmp_qqmusic_api::credential::Credential;
 use hmp_qqmusic_api::protocol::search::QuickSong;
-use hmp_qqmusic_api::{LyricApi, QqMusicClient, UserApi, song::SongApi};
+use hmp_qqmusic_api::{LoginApi, LyricApi, QqMusicClient, UserApi, song::SongApi};
 use hmp_storage::credential::CredentialStore;
 
 /// 歌词缓存 TTL（同评论服务量级）。
@@ -22,8 +22,37 @@ const ACCOUNT_TTL: Duration = Duration::from_secs(600);
 /// 缓存条目上限（防 (mid) 键无限增长；超限清空，同评论服务策略）。
 const CACHE_CAP: usize = 128;
 
-/// QQ 封面 CDN 前缀（CoverGet 只接受该来源，收敛 SSRF 面）。
-const COVER_HOST_PREFIX: &str = "https://y.gtimg.cn/";
+/// QQ 封面 CDN 允许域（CoverGet 只接受这些来源，收敛 SSRF 面）。
+/// 推荐歌单广场/新歌实测（2026-09-30 探针）返回 `qpic.y.qq.com` 与
+/// `music-file.y.qq.com`，专辑 pmid 模板（player.rs 同款）在 `y.gtimg.cn`。
+const COVER_HOSTS: [&str; 3] = ["y.gtimg.cn", "qpic.y.qq.com", "music-file.y.qq.com"];
+
+/// 校验并归一封面 URL：host 必须在允许域内；scheme 一律升级 https
+/// （三个域均实测支持；上游常给 http 形式的 qpic 链接）。
+pub(crate) fn normalize_cover_url(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    if !COVER_HOSTS.contains(&host) {
+        return None;
+    }
+    Some(format!(
+        "https://{host}/{}",
+        rest[host.len()..].trim_start_matches('/')
+    ))
+}
+
+/// 专辑 pmid → 封面 URL（T002R300x300M000 模板，与 daemon player.rs /
+/// 桌面 app.rs 同款；空 pmid → 空串，UI 保持程序化占位）。
+/// reconcile 入库（`qq_track_row`）同用：库内行从落地起就携带可回查的
+/// 封面 URL，CoverGet 盘缓存/桌面预取以此为键。
+pub(crate) fn cover_url_from_pmid(pmid: &str) -> String {
+    if pmid.is_empty() {
+        return String::new();
+    }
+    format!("https://y.gtimg.cn/music/photo_new/T002R300x300M000{pmid}.jpg")
+}
 
 /// 缓存条目是否新鲜（纯函数便于测试）。
 fn fresh(at: Instant, now: Instant, ttl: Duration) -> bool {
@@ -102,6 +131,9 @@ impl ContentService {
                     mid: a.mid,
                     name: a.name,
                     singer: a.singer,
+                    // smartbox 的专辑封面是完整 URL（fixture 实证 y.gtimg.cn
+                    // T002R180 模板）；空 → UI 程序化占位。
+                    pic: a.pic.unwrap_or_default(),
                 })
                 .collect(),
             singers: result
@@ -110,6 +142,8 @@ impl ContentService {
                 .map(|s| hmp_core::SearchSinger {
                     mid: s.mid,
                     name: s.name,
+                    // T001R150 头像，同上。
+                    pic: s.pic.unwrap_or_default(),
                 })
                 .collect(),
         })
@@ -120,10 +154,10 @@ impl ContentService {
     /// 三级读取：内存 TTL（L1）→ 磁盘缓存（L2，`cache_dir()/lyrics/`，
     /// 跨重启免重复出网）→ QQ 网络；网络成功后双写回填。
     pub async fn lyric(&self, mid: &str) -> Result<LyricPage, String> {
-        if let Some((at, page)) = self.lyric_cache.lock().unwrap().get(mid) {
-            if fresh(*at, Instant::now(), LYRIC_TTL) {
-                return Ok(page.clone());
-            }
+        if let Some((at, page)) = self.lyric_cache.lock().unwrap().get(mid)
+            && fresh(*at, Instant::now(), LYRIC_TTL)
+        {
+            return Ok(page.clone());
         }
         if let Some((lyric, translation)) = hmp_storage::lyric_cache::read_cached_lyric(mid) {
             let page = LyricPage {
@@ -147,12 +181,11 @@ impl ContentService {
         // L2 落盘（空正文静默跳过；失败仅丢缓存不阻断）。落盘前校验内容
         // 像 LRC（含 `[` 标签）：上游偶发返回未解密的 QRC hex，落盘会把
         // 解密失败的脏数据永久化，存疑内容不缓存、下次请求重试网络。
-        if resp.lyric.contains('[') {
-            if let Err(e) =
+        if resp.lyric.contains('[')
+            && let Err(e) =
                 hmp_storage::lyric_cache::write_cached_lyric(mid, &resp.lyric, &resp.trans)
-            {
-                tracing::warn!(mid, %e, "lyric disk cache write failed");
-            }
+        {
+            tracing::warn!(mid, %e, "lyric disk cache write failed");
         }
         let page = LyricPage {
             lyric: resp.lyric,
@@ -182,10 +215,10 @@ impl ContentService {
         title: &str,
         artist: &str,
     ) -> Result<LyricPage, String> {
-        if let Some((at, page)) = self.lyric_cache.lock().unwrap().get(id) {
-            if fresh(*at, Instant::now(), LYRIC_TTL) {
-                return Ok(page.clone());
-            }
+        if let Some((at, page)) = self.lyric_cache.lock().unwrap().get(id)
+            && fresh(*at, Instant::now(), LYRIC_TTL)
+        {
+            return Ok(page.clone());
         }
         let page = match id.strip_prefix("local:") {
             Some(path) => {
@@ -260,10 +293,10 @@ impl ContentService {
         let Some(credential) = self.credential()? else {
             return Ok(AccountInfo::default());
         };
-        if let Some((at, info)) = self.account_cache.lock().unwrap().as_ref() {
-            if fresh(*at, Instant::now(), ACCOUNT_TTL) {
-                return Ok(info.clone());
-            }
+        if let Some((at, info)) = self.account_cache.lock().unwrap().as_ref()
+            && fresh(*at, Instant::now(), ACCOUNT_TTL)
+        {
+            return Ok(info.clone());
         }
         let mut info = AccountInfo {
             logged_in: true,
@@ -271,40 +304,44 @@ impl ContentService {
             nickname: format!("QQ {}", credential.uin),
             vip_summary: String::new(),
         };
-        // 昵称：音乐基因用户名片（GetProfileReport，2026-09-29 实测可用）；
-        // 主页 GetHomepageHeader 当前服务端返回 10000 空壳，仅作兜底。
-        // 失败保持回退值。
-        if !credential.encrypt_uin.is_empty() {
-            let api = UserApi::new(&self.client);
-            let nick = match api
-                .get_music_gene(&credential.encrypt_uin, Some(&credential))
-                .await
-            {
-                Ok(gene) if !gene.userinfo_card.nick_name.is_empty() => {
-                    Some(gene.userinfo_card.nick_name)
-                }
-                _ => {
-                    let mut nick = None;
-                    if let Ok(data) = api
-                        .get_homepage(&credential.encrypt_uin, Some(&credential))
-                        .await
-                    {
-                        nick = find_str(&data, "nick")
-                            .or_else(|| find_str(&data, "nickname"))
-                            .or_else(|| find_str(&data, "name"))
-                            .map(String::from);
-                    }
-                    nick
-                }
-            };
-            if let Some(nick) = nick {
-                if !nick.is_empty() {
-                    info.nickname = nick;
-                }
+        // 昵称多通道（2026-09-30 重排）：QQ 扫码走三方接入（QQConnectLogin），
+        // 登录响应不含 encryptUin → 旧逻辑整段昵称拉取被 `encrypt_uin` 非空门禁
+        // 跳过，永远显示回退 "QQ {uin}"。通道按「不依赖加密 uin → 依赖」排序：
+        //   1) fcg_get_profile_homepage.fcg（数字 uin 即可，主通道）
+        //   2) 音乐基因 GetProfileReport（加密 uin；2026-09-29 实测可用）
+        //   3) 主页 GetHomepageHeader（加密 uin；当前服务端 10000 空壳，兜底）
+        //   4) vip_login_base 的 isVip（顺带兜底昵称/加密 uin）
+        // 全失败保持回退值；期间回捞到的加密 uin 回写凭证库（下次直接可用）。
+        let api = UserApi::new(&self.client);
+        let mut nick: Option<String> = None;
+        let mut euin = credential.encrypt_uin.clone();
+        if let Ok(data) = LoginApi::new(&self.client)
+            .get_profile_homepage(&credential)
+            .await
+        {
+            nick = find_any_str(&data, &["nick", "NickName", "nickName", "nick_name"]);
+            if euin.is_empty() {
+                euin = find_any_str(&data, &["encryptUin", "encrypt_uin", "ecuin"])
+                    .unwrap_or_default();
             }
         }
+        if nick.is_none()
+            && !euin.is_empty()
+            && let Ok(gene) = api.get_music_gene(&euin, Some(&credential)).await
+        {
+            let card = gene.userinfo_card.nick_name;
+            if !card.is_empty() {
+                nick = Some(card);
+            }
+        }
+        if nick.is_none()
+            && !euin.is_empty()
+            && let Ok(data) = api.get_homepage(&euin, Some(&credential)).await
+        {
+            nick = find_any_str(&data, &["nick", "nickname", "name"]);
+        }
         // VIP 摘要：vip_login_base 的 isVip 标志。失败 → 空串（不猜测）。
-        if let Ok(data) = UserApi::new(&self.client).get_vip_info(&credential).await {
+        if let Ok(data) = api.get_vip_info(&credential).await {
             if let Some(is_vip) = find_flag(&data, "isVip") {
                 info.vip_summary = if is_vip {
                     "VIP 会员".into()
@@ -312,6 +349,22 @@ impl ContentService {
                     "非会员".into()
                 };
             }
+            if nick.is_none() {
+                nick = find_any_str(&data, &["nick", "NickName", "nickName", "nick_name"]);
+            }
+            if euin.is_empty() {
+                euin = find_any_str(&data, &["encryptUin", "encrypt_uin", "ecuin"])
+                    .unwrap_or_default();
+            }
+        }
+        if let Some(patched) = patch_encrypt_uin(&credential, &euin) {
+            // 一次性补救，失败不影响本次展示（下次 AccountStatus 再试）
+            let _ = self.store.save(&patched);
+        }
+        if let Some(nick) = nick
+            && !nick.is_empty()
+        {
+            info.nickname = nick;
         }
         *self.account_cache.lock().unwrap() = Some((Instant::now(), info.clone()));
         Ok(info)
@@ -320,9 +373,8 @@ impl ContentService {
     /// QQ 封面取本地产物（AUDIT §8.4）：下载进 `<data_dir>/covers/<hash>.jpg`
     /// （persist_cover 内容哈希去重，二次请求零网络），返回 `file://` URI。
     pub async fn cover(&self, url: &str) -> Result<String, String> {
-        if !url.starts_with(COVER_HOST_PREFIX) {
-            return Err(format!("cover url must be {COVER_HOST_PREFIX}…"));
-        }
+        let url = normalize_cover_url(url)
+            .ok_or_else(|| format!("cover url host not allowed (expect one of {COVER_HOSTS:?})"))?;
         let bytes = hmp_media::cdn_client()
             .get(url)
             .send()
@@ -395,6 +447,8 @@ impl ContentService {
                             update_time: t.update_time,
                             listen_num: t.listen_num,
                             picurl: t.front_pic_url,
+                            // 榜单总曲数（卡面「N 首」角标）。
+                            total_num: t.total_num,
                             preview: t
                                 .songs
                                 .iter()
@@ -462,6 +516,30 @@ impl ContentService {
         Ok(hmp_core::GuessPage {
             songs: resp.songs.iter().map(project_song).collect(),
         })
+    }
+
+    /// 远端歌单详情（D2 内容动线；免登录只读，委托自由函数）。
+    pub async fn remote_playlist_detail(
+        &self,
+        id: i64,
+    ) -> Result<hmp_core::RemotePlaylistDetail, String> {
+        remote_playlist_detail(&self.client, id).await
+    }
+
+    /// 远端专辑详情（D2 内容动线；免登录只读）。
+    pub async fn remote_album_detail(
+        &self,
+        mid: &str,
+    ) -> Result<hmp_core::RemoteAlbumDetail, String> {
+        remote_album_detail(&self.client, mid).await
+    }
+
+    /// 远端歌手详情（D2 内容动线；免登录只读，含歌手照片）。
+    pub async fn remote_artist_detail(
+        &self,
+        mid: &str,
+    ) -> Result<hmp_core::RemoteArtistDetail, String> {
+        remote_artist_detail(&self.client, mid).await
     }
 }
 
@@ -532,6 +610,29 @@ fn find_str<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     }
 }
 
+/// 多键名依序提取：按 `keys` 顺序首个**非空**命中（服务端同一字段有
+/// camelCase/legacy 多种拼写，泛搜 `name` 之类宽键时放最后）。
+/// 注意空值豁免只在键之间——`find_str` 对单个键返回首个命中（含空），
+/// 不对同键的更深嵌套实例重试。
+fn find_any_str(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|k| find_str(v, k).filter(|s| !s.is_empty()).map(String::from))
+}
+
+/// 用响应里回捞的加密 uin 补全凭证（无变化/空值返回 None）。
+///
+/// QQ 三方接入登录响应不含 `encryptUin`，首次成功后回写凭证库，
+/// 之后依赖加密 uin 的接口（音乐基因名片等）即可直接工作。
+fn patch_encrypt_uin(credential: &Credential, euin: &str) -> Option<Credential> {
+    if !euin.is_empty() && euin != credential.encrypt_uin {
+        let mut patched = credential.clone();
+        patched.encrypt_uin = euin.to_owned();
+        Some(patched)
+    } else {
+        None
+    }
+}
+
 /// 布尔标志提取：任意层级找 key 的 bool/数值形态（isVip 等字段形态不定）。
 fn find_flag(v: &serde_json::Value, key: &str) -> Option<bool> {
     match v {
@@ -567,8 +668,207 @@ fn project_song(s: &hmp_qqmusic_api::models::Song) -> hmp_core::DiscoverNewSong 
         singer,
         album: s.album.name.clone(),
         interval: s.interval,
-        picurl: s.album.pmid.clone(),
+        // 裸 pmid 不是 URL（2026-09-30 修复：此前直接透传，UI 经 CoverGet
+        // 换图时被域守卫拒绝）；套 T002 模板成完整封面地址
+        picurl: cover_url_from_pmid(&s.album.pmid),
+        // 行内链接（D-5）：远端详情行经 `qq:` 前缀跳远端专辑/歌手页；
+        // 空串 → 链接禁用。
+        album_mid: s.album.mid.clone(),
+        artist_mid: s.singer.first().map(|g| g.mid.clone()).unwrap_or_default(),
     }
+}
+
+// ————————————————————————————————————————————————
+// 远端详情数据域（D2 内容动线；免登录只读，PLAN §③ D-3）
+//
+// 自由函数形态（client 显式入参）对齐 reconcile.rs 的 fetch_playlist_songs
+// 先例——wiremock 集成测试可直接注入 mock client（tests/remote_details.rs）。
+// 曲目首窗语义对齐 TopDetailGet 固定页先例（PLAN D-4）：歌单/专辑前 100、
+// 歌手热歌 50 / 专辑 30，total/has_more 交 UI 诚实标注。
+// ————————————————————————————————————————————————
+
+/// 远端歌单详情首窗大小（`CgiGetDiss` 单页请求）。
+const REMOTE_PLAYLIST_WINDOW: u32 = 100;
+/// 远端专辑曲目首窗大小。
+const REMOTE_ALBUM_WINDOW: u32 = 100;
+/// 远端歌手热歌首窗大小（服务端可能忽略 number 按固定条数返回）。
+const REMOTE_ARTIST_SONGS_WINDOW: u32 = 50;
+/// 远端歌手专辑首窗大小。
+const REMOTE_ARTIST_ALBUMS_WINDOW: u32 = 30;
+
+/// 远端歌单详情（`CgiGetDiss`；reconcile `fetch_playlist_songs` 同源接口，
+/// 此处只读展示不落库）。
+pub async fn remote_playlist_detail(
+    client: &QqMusicClient,
+    id: i64,
+) -> Result<hmp_core::RemotePlaylistDetail, String> {
+    let resp = hmp_qqmusic_api::songlist::SonglistApi::new(client)
+        .get_detail(
+            id,
+            0,
+            hmp_qqmusic_api::pagination::Page::new(1, REMOTE_PLAYLIST_WINDOW),
+            true,
+            false,
+            false,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.code != 0 {
+        // 服务端把「歌单不存在」表达为内层 data.code=-100006（songlist.rs 实测记录）
+        return Err(format!("playlist not found (code {})", resp.code));
+    }
+    Ok(project_songlist_detail(id, &resp))
+}
+
+/// `CgiGetDiss` 响应 → `RemotePlaylistDetail`（纯投影，单测锚定）。
+fn project_songlist_detail(
+    id: i64,
+    resp: &hmp_qqmusic_api::songlist::GetSonglistDetailResponse,
+) -> hmp_core::RemotePlaylistDetail {
+    hmp_core::RemotePlaylistDetail {
+        id,
+        name: resp.info.list.title.clone(),
+        creator: resp.info.creator.nick.clone(),
+        picurl: resp.info.list.picurl.clone(),
+        listen_num: resp.info.list.listennum,
+        tracks: resp.songs.iter().map(project_song).collect(),
+        total: resp.total,
+        has_more: resp.hasmore != 0,
+    }
+}
+
+/// 远端专辑详情（`GetAlbumDetail` + `GetAlbumSongList`）。
+pub async fn remote_album_detail(
+    client: &QqMusicClient,
+    mid: &str,
+) -> Result<hmp_core::RemoteAlbumDetail, String> {
+    if mid.is_empty() {
+        return Err("album mid is empty".into());
+    }
+    let api = hmp_qqmusic_api::album::AlbumApi::new(client);
+    let detail = api.get_detail(mid).await.map_err(|e| e.to_string())?;
+    let songs = api
+        .get_song(
+            mid,
+            hmp_qqmusic_api::pagination::Page::new(1, REMOTE_ALBUM_WINDOW),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(project_album_detail(&detail, &songs))
+}
+
+/// 专辑详情两响应 → `RemoteAlbumDetail`（纯投影，单测锚定）。
+fn project_album_detail(
+    detail: &hmp_qqmusic_api::album::GetAlbumDetailResponse,
+    songs: &hmp_qqmusic_api::album::GetAlbumSongResponse,
+) -> hmp_core::RemoteAlbumDetail {
+    let singer = if detail.singers.is_empty() {
+        String::new()
+    } else {
+        detail
+            .singers
+            .iter()
+            .map(|g| g.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
+    // has_more 归一规则 ②（无显式字段，按 total 推算；服务端可能少给条数）
+    let has_more = songs.total_num > songs.song_list.len() as i64;
+    hmp_core::RemoteAlbumDetail {
+        mid: detail.album.album.mid.clone(),
+        name: detail.album.album.name.clone(),
+        singer,
+        singer_mid: detail
+            .singers
+            .first()
+            .map(|g| g.mid.clone())
+            .unwrap_or_default(),
+        company: detail.company.name.clone(),
+        genre: detail.album.genre.clone(),
+        language: detail.album.language.clone(),
+        desc: detail.album.desc.clone(),
+        time_public: detail.album.album.time_public.clone(),
+        picurl: cover_url_from_pmid(&detail.album.album.pmid),
+        tracks: songs.song_list.iter().map(project_song).collect(),
+        total: songs.total_num,
+        has_more,
+    }
+}
+
+/// 远端歌手详情（`GetHomepageHeader` + `GetSingerSongList` + `GetAlbumList`）。
+///
+/// 歌手照片取主页头部 `singer_pic`（§20/§23「歌手照片无数据源」边界就此
+/// 闭合）；歌曲/专辑列表服务端可能忽略 `number`，has_more 按 total 推算。
+pub async fn remote_artist_detail(
+    client: &QqMusicClient,
+    mid: &str,
+) -> Result<hmp_core::RemoteArtistDetail, String> {
+    use hmp_qqmusic_api::pagination::Page;
+    use hmp_qqmusic_api::singer::SingerApi;
+    if mid.is_empty() {
+        return Err("artist mid is empty".into());
+    }
+    let api = SingerApi::new(client);
+    let header = api.get_info(mid).await.map_err(|e| e.to_string())?;
+    let songs = api
+        .get_songs_list(mid, Page::new(1, REMOTE_ARTIST_SONGS_WINDOW))
+        .await
+        .map_err(|e| e.to_string())?;
+    let albums = api
+        .get_album_list(mid, Page::new(1, REMOTE_ARTIST_ALBUMS_WINDOW))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(project_artist_detail(mid, &header, &songs, &albums))
+}
+
+/// 歌手三响应 → `RemoteArtistDetail`（纯投影，单测锚定）。
+fn project_artist_detail(
+    mid: &str,
+    header: &hmp_qqmusic_api::singer::HomepageHeaderResponse,
+    songs: &hmp_qqmusic_api::singer::SingerSongListResponse,
+    albums: &hmp_qqmusic_api::singer::SingerAlbumListResponse,
+) -> hmp_core::RemoteArtistDetail {
+    hmp_core::RemoteArtistDetail {
+        mid: mid.to_string(),
+        name: header.singer.name.clone(),
+        photo_url: singer_photo_url(header),
+        song_total: songs.total_num,
+        album_total: albums.total,
+        tracks: songs.song_list.iter().map(project_song).collect(),
+        albums: albums
+            .album_list
+            .iter()
+            .map(|a| hmp_core::RemoteAlbumBrief {
+                mid: a.album.mid.clone(),
+                name: a.album.name.clone(),
+                picurl: cover_url_from_pmid(&a.album.pmid),
+                // 年份取发行日期前 4 位；无值 → "—"（不伪造）
+                year_text: if a.album.time_public.len() >= 4 {
+                    a.album.time_public[..4].to_string()
+                } else {
+                    "—".into()
+                },
+                track_count: a.total_num,
+            })
+            .collect(),
+        // B2（歌手简介）裁剪：字段预铺恒空（PLAN 修订记录）
+        desc: String::new(),
+    }
+}
+
+/// 歌手照片 URL：`singer_pic` 为空时（2026-10-23 真机实测：live 端点恒空、
+/// fixture 才有值）退 `T001R300x300M000` 模板（`singer_pmid`，y.gtimg.cn
+/// 域内，29KB 实测可取）；两者皆空 → 空串（UI 程序化占位，D-3 域外
+/// 回退口径）。`BaseInfo.avatar` 域为 y.qq.com 不在 `COVER_HOSTS`，不走。
+fn singer_photo_url(header: &hmp_qqmusic_api::singer::HomepageHeaderResponse) -> String {
+    if !header.singer.singer_pic.is_empty() {
+        return header.singer.singer_pic.clone();
+    }
+    let pmid = &header.singer.singer_pmid;
+    if pmid.is_empty() {
+        return String::new();
+    }
+    format!("https://y.gtimg.cn/music/photo_new/T001R300x300M000{pmid}.jpg")
 }
 
 #[cfg(test)]
@@ -595,6 +895,56 @@ mod tests {
         assert_eq!(find_str(&v, "missing"), None);
     }
 
+    /// 歌手照片 URL 三级回退：singer_pic 直通 → pmid T001 模板 → 空串。
+    /// （live 端点 SingerPic 恒空、模板 URL 29KB 实测可取——2026-10-23）
+    #[test]
+    fn singer_photo_url_prefers_pic_then_pmid_template() {
+        let mut header = hmp_qqmusic_api::singer::HomepageHeaderResponse::default();
+        header.singer.singer_pic =
+            "https://y.gtimg.cn/music/photo_new/T001R150x150M000x_1.jpg".into();
+        assert_eq!(
+            singer_photo_url(&header),
+            "https://y.gtimg.cn/music/photo_new/T001R150x150M000x_1.jpg"
+        );
+        header.singer.singer_pic = String::new();
+        header.singer.singer_pmid = "0025NhlN2yWrP4_11".into();
+        assert_eq!(
+            singer_photo_url(&header),
+            "https://y.gtimg.cn/music/photo_new/T001R300x300M0000025NhlN2yWrP4_11.jpg"
+        );
+        header.singer.singer_pmid = String::new();
+        assert_eq!(singer_photo_url(&header), "");
+    }
+
+    #[test]
+    fn find_any_str_skips_empty_and_respects_order() {
+        // 首键命中为空 → 视为未命中，落到次键（键之间豁免空值）
+        let v = serde_json::json!({ "nick": "", "nickname": "胡桃" });
+        assert_eq!(find_any_str(&v, &["nick", "nickname"]), Some("胡桃".into()));
+        // 键名按序优先（camelCase 变体在前的先命中）
+        let v = serde_json::json!({ "NickName": "甲", "nick": "乙" });
+        assert_eq!(find_any_str(&v, &["nick", "NickName"]), Some("乙".into()));
+        assert_eq!(find_any_str(&v, &["NickName", "nick"]), Some("甲".into()));
+        // 全 miss → None
+        assert_eq!(find_any_str(&v, &["missing"]), None);
+    }
+
+    #[test]
+    fn patch_encrypt_uin_only_on_change() {
+        let cred = Credential {
+            uin: "42".into(),
+            encrypt_uin: String::new(),
+            ..Default::default()
+        };
+        // 回捞到新值 → 补全
+        let patched = patch_encrypt_uin(&cred, "e-abc").expect("should patch");
+        assert_eq!(patched.encrypt_uin, "e-abc");
+        assert_eq!(patched.uin, "42");
+        // 同值/空值 → 不动
+        assert!(patch_encrypt_uin(&patched, "e-abc").is_none());
+        assert!(patch_encrypt_uin(&cred, "").is_none());
+    }
+
     #[test]
     fn find_flag_matches_bool_and_number_forms() {
         let v = serde_json::json!({ "vip": { "isVip": true } });
@@ -606,13 +956,56 @@ mod tests {
         assert_eq!(find_flag(&serde_json::json!({}), "isVip"), None);
     }
 
-    /// 封面前缀守卫：非 y.gtimg.cn 拒绝（不出网）。
+    /// URL 归一（纯函数）：允许域 http 升 https；域外/非 http scheme 拒绝。
+    #[test]
+    fn normalize_cover_url_allowlist_and_upgrade() {
+        // 三个允许域全放行，http 一律升 https
+        assert_eq!(
+            normalize_cover_url("http://y.gtimg.cn/a.jpg").as_deref(),
+            Some("https://y.gtimg.cn/a.jpg")
+        );
+        assert_eq!(
+            normalize_cover_url("https://y.gtimg.cn/a.jpg").as_deref(),
+            Some("https://y.gtimg.cn/a.jpg")
+        );
+        assert_eq!(
+            normalize_cover_url("http://qpic.y.qq.com/music_cover/x/300?n=1").as_deref(),
+            Some("https://qpic.y.qq.com/music_cover/x/300?n=1")
+        );
+        assert_eq!(
+            normalize_cover_url(
+                "https://music-file.y.qq.com/songlist/u/a/b.jpg?imageView2/4/w/300/h/300"
+            )
+            .as_deref(),
+            Some("https://music-file.y.qq.com/songlist/u/a/b.jpg?imageView2/4/w/300/h/300")
+        );
+        // 域外 / 伪装 host / 非 http scheme / 空串：拒绝
+        assert_eq!(normalize_cover_url("https://evil.example.com/a.jpg"), None);
+        assert_eq!(
+            normalize_cover_url("https://y.gtimg.cn.evil.com/a.jpg"),
+            None
+        );
+        assert_eq!(normalize_cover_url("file:///etc/passwd"), None);
+        assert_eq!(normalize_cover_url(""), None);
+    }
+
+    /// pmid → T002 模板（空 pmid → 空串）。
+    #[test]
+    fn cover_url_from_pmid_template() {
+        assert_eq!(
+            cover_url_from_pmid("002RDtQX06q5Is_1"),
+            "https://y.gtimg.cn/music/photo_new/T002R300x300M000002RDtQX06q5Is_1.jpg"
+        );
+        assert_eq!(cover_url_from_pmid(""), "");
+    }
+
+    /// 封面域守卫：非允许域拒绝（不出网）；http 形式的允许域升级后放行。
     #[tokio::test]
     async fn cover_rejects_non_gtimg_urls() {
         let svc = ContentService::new(hmp_storage::credential::store_from_env());
         for url in [
-            "http://y.gtimg.cn/a.jpg",
             "https://evil.example.com/a.jpg",
+            "https://y.gtimg.cn.evil.com/a.jpg",
             "file:///etc/passwd",
             "",
         ] {
@@ -721,5 +1114,162 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page, LyricPage::default());
+    }
+
+    // ——— 远端详情纯投影（D2；free 函数的出网部分由 wiremock 集成锚定）———
+
+    /// 构造最小可播 `Song`（models 结构 Default 全空，关键字段逐个给）。
+    fn api_song(
+        mid: &str,
+        name: &str,
+        album_mid: &str,
+        pmid: &str,
+    ) -> hmp_qqmusic_api::models::Song {
+        hmp_qqmusic_api::models::Song {
+            mid: mid.into(),
+            name: name.into(),
+            singer: vec![hmp_qqmusic_api::models::Singer {
+                mid: "smid".into(),
+                name: "歌手甲".into(),
+                ..Default::default()
+            }],
+            album: hmp_qqmusic_api::models::Album {
+                mid: album_mid.into(),
+                name: "专辑甲".into(),
+                pmid: pmid.into(),
+                ..Default::default()
+            },
+            interval: 180,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn project_songlist_detail_maps_fields() {
+        let mut resp = hmp_qqmusic_api::songlist::GetSonglistDetailResponse::default();
+        resp.info.list.title = "华语经典".into();
+        resp.info.list.picurl = "https://qpic.y.qq.com/p.jpg".into();
+        resp.info.list.listennum = 12_345;
+        resp.info.creator.nick = "胡桃".into();
+        resp.songs = vec![api_song("m1", "夜曲", "am1", "pmid1")];
+        resp.total = 268;
+        resp.hasmore = 1;
+        let page = project_songlist_detail(8522132521, &resp);
+        assert_eq!(page.id, 8522132521);
+        assert_eq!(page.name, "华语经典");
+        assert_eq!(page.creator, "胡桃");
+        assert_eq!(page.picurl, "https://qpic.y.qq.com/p.jpg");
+        assert_eq!(page.listen_num, 12_345);
+        assert_eq!(page.total, 268);
+        assert!(page.has_more);
+        // 曲目走 project_song：封面套模板、行内链接带 mid
+        assert_eq!(page.tracks.len(), 1);
+        assert_eq!(
+            page.tracks[0].picurl,
+            "https://y.gtimg.cn/music/photo_new/T002R300x300M000pmid1.jpg"
+        );
+        assert_eq!(page.tracks[0].album_mid, "am1");
+        assert_eq!(page.tracks[0].artist_mid, "smid");
+    }
+
+    #[test]
+    fn project_album_detail_maps_fields_and_cover_template() {
+        let mut detail = hmp_qqmusic_api::album::GetAlbumDetailResponse::default();
+        detail.album.album.mid = "amid".into();
+        detail.album.album.name = "十一月的萧邦".into();
+        detail.album.album.pmid = "pmidX".into();
+        detail.album.album.time_public = "2005-11-01".into();
+        detail.album.desc = "简介".into();
+        detail.album.language = "国语".into();
+        detail.album.genre = "流行".into();
+        detail.company.name = "杰威尔音乐".into();
+        detail.singers = vec![
+            hmp_qqmusic_api::models::Singer {
+                mid: "s1".into(),
+                name: "周杰伦".into(),
+                ..Default::default()
+            },
+            hmp_qqmusic_api::models::Singer {
+                mid: "s2".into(),
+                name: "费玉清".into(),
+                ..Default::default()
+            },
+        ];
+        let songs = hmp_qqmusic_api::album::GetAlbumSongResponse {
+            album_mid: "amid".into(),
+            total_num: 12,
+            song_list: vec![api_song("m1", "夜曲", "amid", "p1")],
+        };
+        let page = project_album_detail(&detail, &songs);
+        assert_eq!(page.name, "十一月的萧邦");
+        assert_eq!(page.singer, "周杰伦 / 费玉清");
+        assert_eq!(page.singer_mid, "s1");
+        assert_eq!(page.company, "杰威尔音乐");
+        assert_eq!(page.time_public, "2005-11-01");
+        // pmid → T002 模板（空 pmid → 空串由 cover_url_from_pmid 单测另锚）
+        assert_eq!(
+            page.picurl,
+            "https://y.gtimg.cn/music/photo_new/T002R300x300M000pmidX.jpg"
+        );
+        assert_eq!(page.total, 12);
+        // total(12) > 返回条数(1) → has_more（归一规则②）
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn project_artist_detail_photo_and_album_briefs() {
+        let mut header = hmp_qqmusic_api::singer::HomepageHeaderResponse::default();
+        header.singer.mid = "smid".into();
+        header.singer.name = "周杰伦".into();
+        header.singer.singer_pic =
+            "https://y.gtimg.cn/music/photo_new/T001R150x150M000x_11.jpg".into();
+        let songs = hmp_qqmusic_api::singer::SingerSongListResponse {
+            total_num: 1012,
+            song_list: vec![api_song("m1", "青花瓷", "am1", "p1")],
+            ..Default::default()
+        };
+        let albums = hmp_qqmusic_api::singer::SingerAlbumListResponse {
+            total: 139,
+            album_list: vec![
+                hmp_qqmusic_api::singer::AlbumBrief {
+                    album: hmp_qqmusic_api::models::Album {
+                        mid: "a1".into(),
+                        name: "范特西".into(),
+                        pmid: "pA".into(),
+                        time_public: "2001-09-14".into(),
+                        ..Default::default()
+                    },
+                    total_num: 10,
+                    ..Default::default()
+                },
+                // 无发行日期 → 年份 "—"（不伪造）
+                hmp_qqmusic_api::singer::AlbumBrief {
+                    album: hmp_qqmusic_api::models::Album {
+                        mid: "a2".into(),
+                        name: "单曲集".into(),
+                        ..Default::default()
+                    },
+                    total_num: 2,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let page = project_artist_detail("smid", &header, &songs, &albums);
+        assert_eq!(page.mid, "smid");
+        assert_eq!(page.name, "周杰伦");
+        assert_eq!(page.photo_url, header.singer.singer_pic);
+        assert_eq!(page.song_total, 1012);
+        assert_eq!(page.album_total, 139);
+        assert_eq!(page.tracks.len(), 1);
+        assert_eq!(page.desc, ""); // B2 裁剪：恒空
+        assert_eq!(page.albums.len(), 2);
+        assert_eq!(page.albums[0].year_text, "2001");
+        assert_eq!(page.albums[0].track_count, 10);
+        assert_eq!(
+            page.albums[0].picurl,
+            "https://y.gtimg.cn/music/photo_new/T002R300x300M000pA.jpg"
+        );
+        assert_eq!(page.albums[1].year_text, "—");
     }
 }

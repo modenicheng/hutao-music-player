@@ -29,18 +29,18 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # 原生依赖的 dev 包：GStreamer（hmp-player-gst）、dbus（ksni 托盘）、
-      # fontconfig（slint 字体栈 fontique→yeslogic-fontconfig-sys）、
-      # wayland（winit→wayland-backend client_system）。缺一个都会在
-      # pkg-config 阶段失败（glib-2.0/gstreamer-player-1.0/dbus-1/fontconfig/wayland-client.pc）。
+      # 原生依赖的 dev 包：alsa（rodio→cpal→alsa-sys 音频输出，ubuntu-24.04
+      # runner 镜像不预装，缺它整个构建在 alsa-sys build script 挂）、
+      # dbus（ksni 托盘）、gtk-3（tray-icon Linux 侧→gtk-sys 走
+      # system-deps/pkg-config）、fontconfig（slint 字体栈
+      # fontique→yeslogic-fontconfig-sys）、wayland（winit→wayland-backend
+      # client_system）。缺一个都会在 pkg-config 阶段失败（alsa.pc /
+      # dbus-1.pc / gtk+-3.0.pc / fontconfig.pc / wayland-client.pc）。
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libglib2.0-dev libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
-            libdbus-1-dev libfontconfig1-dev libwayland-dev \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad
+          sudo apt-get install -y pkg-config libasound2-dev \
+            libdbus-1-dev libgtk-3-dev libfontconfig1-dev libwayland-dev
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
@@ -50,24 +50,60 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # 编译需 dev 包（gstreamer-player-1.0.pc / dbus-1.pc / fontconfig.pc /
-      # wayland-client.pc）；运行时测试（e2e/player-gst）用 fakeaudiosink
-      # （plugins-bad）+ playbin 解码 wav（plugins-good/base）。
+      # 编译需 dev 包（alsa.pc / dbus-1.pc / gtk+-3.0.pc / fontconfig.pc /
+      # wayland-client.pc），清单与 clippy job 保持一致。
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libglib2.0-dev libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
-            libdbus-1-dev libfontconfig1-dev libwayland-dev \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad
-      - run: cargo test --workspace
+          sudo apt-get install -y pkg-config libasound2-dev \
+            libdbus-1-dev libgtk-3-dev libfontconfig1-dev libwayland-dev
+      # 单线程 + nocapture：player_bridge 的平台线程测试 panic 经
+      # resume_unwind 转发，并行输出交错会吞断言详情（S11 CI 实证）。
+      # nocapture：backfill 测试的断言详情经平台线程 panic 转发，默认捕获模式
+      # 在 GitHub Actions 日志里丢失（S11 CI 连续两轮无断言输出）。
+      - run: cargo test --workspace -- --test-threads=1 --nocapture
+        env:
+          RUST_TEST_THREADS: "1"
       - run: cargo doc --no-deps --workspace
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  check-windows:
+    name: check (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Windows 编译面首次进 CI：hmp-smtc 全 crate、daemon transport 命名管道
+      # 分支、hmp-desktop Known Folders/prefs Windows 路径（PORTING「Windows
+      # 适配」章的机器背书）。全局 RUSTFLAGS "-D warnings" 生效 → cfg(windows)
+      # 的 warning 即 fail。首版只 check：clippy 冷缓存（slint + windows-rs）
+      # 预计 15-25 分钟，待 check 稳定后二期评估；fmt 与平台无关，ubuntu 已覆盖。
+      - run: cargo check --workspace --all-targets
+
+  msrv:
+    name: msrv (1.92)
+    runs-on: ubuntu-latest
+    # MSRV 定实 1.92 = 全图依赖 rust_version 顶点（slint 1.18 链），
+    # cargo metadata 聚合核实（S11）；serial_test 4 需 1.93.1 故按 Q1=A
+    # 留 3.x 不抬顶。转正 blocking：声明与依赖集一致后挡回归。
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev \
+            libdbus-1-dev libgtk-3-dev libfontconfig1-dev libwayland-dev
+      - run: cargo check --workspace --all-targets
 
   deny:
     name: deny
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # 2026-10 起 blocking：main 最近 run（cargo-deny-action 步骤级）持续全绿，
+    # deny.toml 维持成熟的 RUSTSEC ignore 纪律；上游新通报变红即 blocking 本意。
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2

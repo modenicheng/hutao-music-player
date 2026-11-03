@@ -2,8 +2,9 @@
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { PageHeader } from "page-parts.slint";
-import { SettingsNav, SettingGroup, SettingRow, SettingCaption, PillOption } from "settings-parts.slint";
+import { SettingsNav, SettingGroup, SettingRow, SettingCaption, PillOption, Switch } from "settings-parts.slint";
 import { Nav } from "nav.slint";
+import { TrackMenu } from "context-menu.slint";
 
 export component SettingsGeneralPage inherits Rectangle {
     background: transparent;
@@ -105,6 +106,20 @@ export component SettingsGeneralPage inherits Rectangle {
                     text: "English";
                     enabled: false;
                     tool-tip: "即将上线";
+                }
+            }
+
+            // —— 右键菜单总开关（TrackMenu.enabled；Rust 回调持久化）———
+            SettingRow {
+                label: "右键菜单";
+                desc: "在曲目列表与播放列表中右键唤起操作菜单";
+                separator: true;
+
+                Switch {
+                    checked: TrackMenu.enabled;
+                    toggled(value) => {
+                        TrackMenu.set-enabled(value);
+                    }
                 }
             }
         }

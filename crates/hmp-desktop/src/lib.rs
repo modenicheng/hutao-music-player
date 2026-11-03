@@ -2,20 +2,20 @@
 
 slint::include_modules!();
 
-pub mod app;
 pub mod backend;
 pub mod bridge;
+pub mod cover_cache;
 pub mod covers;
+pub mod exit_guard;
 pub mod format;
 pub mod library_view;
 pub mod lyrics;
+pub mod menu_bridge;
 pub mod online_covers;
 pub mod player_bridge;
 pub mod prefs;
+pub mod remote_details;
+pub mod track_covers;
 pub mod track_theme;
 
-pub use app::{
-    AppCommand, AppCore, AppEvent, ThemeMode, UiFeatureData, UiLyricData, UiPage, UiQueueData,
-    UiSongData,
-};
 pub use lyrics::parse_lrc;

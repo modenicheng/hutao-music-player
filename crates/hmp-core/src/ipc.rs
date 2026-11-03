@@ -1,6 +1,9 @@
 //! 跨进程控制协议（Unix socket · 长度前缀 JSON 帧）。
 //!
 //! 消息类型与 `PlayerCommand` 同居（spec §4.1）；传输层在 hmp-daemon。
+//! wire 兼容：响应/事件结构体**新增字段一律带 `#[serde(default)]`**——
+//! daemon 是常驻单例，升级窗口内旧进程仍占用端点，其旧形状帧必须可被
+//! 新客户端解码（否则 CLI 全部命令报 `missing field …`，桌面订阅静默失联）。
 
 use serde::{Deserialize, Serialize};
 
@@ -53,10 +56,10 @@ pub enum TrackProvider {
 impl TrackProvider {
     /// 依据 id 前缀识别来源（`local:` 前缀 → 本地）。
     pub fn from_id(id: &str) -> Self {
-        if let Some(rest) = id.strip_prefix("local:") {
-            if !rest.is_empty() {
-                return Self::Local;
-            }
+        if let Some(rest) = id.strip_prefix("local:")
+            && !rest.is_empty()
+        {
+            return Self::Local;
         }
         Self::QqMusic
     }
@@ -213,15 +216,14 @@ pub enum Request {
     },
     /// 账号状态读（登录态 + 昵称/uin/VIP 摘要；AUDIT §8.6）。
     AccountStatus,
-    /// 发起 QQ 扫码登录：生成二维码落盘 `data_dir/`，返回图片路径。
-    /// 同一时刻至多一个进行中的会话（重复 Start 重开新会话）。
+    /// 扫码登录发起：生成二维码 PNG 落盘 `data_dir/`，返回本机路径
+    /// （UI 禁 HTTP，直读本机文件）。
     LoginQrStart,
-    /// 轮询扫码登录进度（客户端 ~1.5s 一次，与 CLI PollInterval 同量级）。
-    /// 无进行中的会话 → `status=4`（不视为协议错误）。
+    /// 扫码登录轮询（无状态短连接驱动；返回当前进度态）。
     LoginQrPoll,
-    /// 取消进行中的扫码登录会话（无会话时幂等 Ok）。
+    /// 扫码登录取消（幂等；无会话也是 Ok）。
     LoginQrCancel,
-    /// 退出登录：远端登出尽力而为 + 删除本地凭证（未登录幂等 Ok）。
+    /// 退出登录（远端登出尽力而为，本地凭证必删；账号缓存同步失效）。
     Logout,
     /// 音质偏好读（config.toml `[quality]`）。
     QualityGet,
@@ -261,6 +263,23 @@ pub enum Request {
         /// 页号（1 基）。
         page: u32,
     },
+    /// 远端歌单详情（免登录；`CgiGetDiss` 只读，D2 内容动线）。
+    /// 与本地库歌单（`library_view::playlist_detail` 按 DB id 直读）互补：
+    /// 服务推荐页/搜索等「不在本地库」的歌单。
+    PlaylistDetailGet {
+        /// 歌单 disstid/tid（数字）。
+        id: i64,
+    },
+    /// 远端专辑详情（免登录；GetAlbumDetail + GetAlbumSongList 只读）。
+    AlbumDetailGet {
+        /// 专辑 albummid。
+        mid: String,
+    },
+    /// 远端歌手详情（免登录；歌手主页头部 + 歌曲/专辑列表只读）。
+    ArtistDetailGet {
+        /// 歌手 singermid。
+        mid: String,
+    },
     /// 优雅退出后端。
     Quit,
 }
@@ -292,9 +311,9 @@ pub enum Response {
     Lyric(LyricPage),
     /// `AccountStatus` 的响应。
     AccountStatus(AccountInfo),
-    /// `LoginQrStart` 的响应（二维码图片本机路径）。
+    /// `LoginQrStart` 的响应（二维码 PNG 本机路径）。
     LoginQr(LoginQrSession),
-    /// `LoginQrPoll` 的响应（扫码进度）。
+    /// `LoginQrPoll` 的响应（扫码进度态）。
     LoginQrState(LoginQrState),
     /// `QualityGet` / `QualitySet` 的响应。
     Quality(QualityPrefDto),
@@ -308,6 +327,12 @@ pub enum Response {
     TopDetail(TopDetailPage),
     /// `GuessGet` 的响应。
     Guess(GuessPage),
+    /// `PlaylistDetailGet` 的响应（远端歌单详情，只读展示）。
+    PlaylistDetail(RemotePlaylistDetail),
+    /// `AlbumDetailGet` 的响应（远端专辑详情，只读展示）。
+    AlbumDetail(RemoteAlbumDetail),
+    /// `ArtistDetailGet` 的响应（远端歌手详情，只读展示）。
+    ArtistDetail(RemoteArtistDetail),
 }
 
 /// 订阅后的事件推送。
@@ -322,6 +347,11 @@ pub enum Event {
     /// 媒体库内容变更（扫描/监听/reconcile/写命令落库后触发；
     /// 客户端按直读契约重查 sqlite，AUDIT §8.9）。
     LibraryChanged,
+    /// daemon 正在优雅退出（`Request::Quit` / 托盘退出 / SIGINT-SIGTERM 已被
+    /// 引擎受理并完成收尾）。订阅客户端收到后应自行优雅退出（如桌面端关窗），
+    /// 而不是落入离线重连——daemon 不会再回来。断流（EOF）语义不变：非优雅
+    /// 死亡（崩溃/kill -9）没有本事件，客户端仍走既有离线重连路径。
+    Shutdown,
 }
 
 /// 后端复合状态（单一状态出口，spec §4.2 `daemon.rs`）。
@@ -335,14 +365,23 @@ pub struct DaemonState {
     pub caps: PlaybackCapabilities,
     /// 命令代际：换曲操作（Play/PlayNext/Next/Previous）执行前置位，
     /// CLI 据此建立「命令已处理」边界（spec §6；final review Finding 1）。
+    #[serde(default)]
     pub seq: u64,
     /// 最近一次命令的错误（解析失败等；成功操作时清空，Finding 2）。
+    #[serde(default)]
     pub last_error: Option<ErrorInfo>,
     /// 当前曲 ReplayGain 标签增益（dB，未 clamp 原值；无标签/QQ 曲目 → None）。
     /// 打磨：CLI status 展示用（MPRIS 无 RG 标准字段，不做非标扩展）。
+    #[serde(default)]
     pub replaygain_db: Option<f64>,
     /// 播放引擎阶段。
+    #[serde(default)]
     pub phase: EnginePhase,
+    /// daemon 构建指纹（hmp-daemon `BUILD_CODE`）。桌面端据此识别「运行中
+    /// daemon 是陈旧构建」（重建不替换长驻进程，AUDIT §18）并自动重启后端；
+    /// 旧 daemon 缺字段 → 空串必然与新桌面不一致 → 同样触发重启。
+    #[serde(default)]
+    pub backend_build: String,
 }
 
 /// 歌单写操作（本地先提交 + outbox；spec §3.3/§5）。
@@ -442,6 +481,9 @@ pub struct SearchAlbum {
     pub name: String,
     /// 歌手名。
     pub singer: String,
+    /// 封面 URL（smartbox `pic`，完整地址；空串 → UI 程序化占位）。
+    #[serde(default)]
+    pub pic: String,
 }
 
 /// 快速搜索歌手结果。
@@ -450,6 +492,9 @@ pub struct SearchSinger {
     /// singermid。
     pub mid: String,
     pub name: String,
+    /// 头像 URL（smartbox `pic`，完整地址；空串 → UI 程序化占位）。
+    #[serde(default)]
+    pub pic: String,
 }
 
 /// 搜索页（歌曲/专辑/歌手三组）。
@@ -492,6 +537,12 @@ pub struct DiscoverNewSong {
     pub interval: i64,
     /// 封面 URL。
     pub picurl: String,
+    /// 专辑 albummid（远端详情行链接用；空串 → 链接禁用）。
+    #[serde(default)]
+    pub album_mid: String,
+    /// 主歌手 singermid（远端详情行链接用；空串 → 链接禁用）。
+    #[serde(default)]
+    pub artist_mid: String,
 }
 
 /// 发现页（推荐歌单 + 新歌两大区块）。
@@ -520,6 +571,9 @@ pub struct TopSummaryDto {
     pub listen_num: i64,
     /// 封面 URL。
     pub picurl: String,
+    /// 榜单总曲数（卡面「N 首」角标；0 = 未知不展示）。
+    #[serde(default)]
+    pub total_num: i64,
     /// 预览前 3 首名次列表（“1. 歌名 - 歌手”）。
     pub preview: Vec<String>,
 }
@@ -582,6 +636,98 @@ pub struct GuessPage {
     pub songs: Vec<DiscoverNewSong>,
 }
 
+/// 远端歌单详情（`PlaylistDetailGet` 的响应；只读展示，D2 内容动线）。
+///
+/// 首窗语义：曲目为服务端前 `WINDOW` 首（对齐 `TopDetailGet` 固定页先例），
+/// `total`/`has_more` 供 UI 诚实标注「展示前 N 首」。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RemotePlaylistDetail {
+    /// 歌单 disstid/tid。
+    pub id: i64,
+    /// 歌单名。
+    pub name: String,
+    /// 创建者昵称（服务端无值 → 空串）。
+    pub creator: String,
+    /// 封面 URL（经 CoverGet 换本地产物）。
+    pub picurl: String,
+    /// 播放数。
+    pub listen_num: i64,
+    /// 曲目（首窗）。
+    pub tracks: Vec<DiscoverNewSong>,
+    /// 歌单歌曲总数。
+    pub total: i64,
+    /// 首窗之外是否还有更多。
+    pub has_more: bool,
+}
+
+/// 远端专辑详情（`AlbumDetailGet` 的响应；只读展示）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RemoteAlbumDetail {
+    /// 专辑 albummid。
+    pub mid: String,
+    /// 专辑名。
+    pub name: String,
+    /// 署名歌手（多人 `"A / B"` 拼接）。
+    pub singer: String,
+    /// 主歌手 singermid（页面歌手链接用；空串 → 链接禁用）。
+    pub singer_mid: String,
+    /// 发行公司（无值 → 空串）。
+    pub company: String,
+    /// 流派文本。
+    pub genre: String,
+    /// 语种文本。
+    pub language: String,
+    /// 简介（无值 → 空串）。
+    pub desc: String,
+    /// 发行日期（YYYY-MM-DD；空串 → UI 显示 "—"）。
+    pub time_public: String,
+    /// 封面 URL（pmid 模板）。
+    pub picurl: String,
+    /// 曲目（首窗）。
+    pub tracks: Vec<DiscoverNewSong>,
+    /// 专辑歌曲总数。
+    pub total: i64,
+    /// 首窗之外是否还有更多。
+    pub has_more: bool,
+}
+
+/// 歌手页专辑网格卡（远端歌手详情的内嵌项）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RemoteAlbumBrief {
+    /// 专辑 albummid（导航参数）。
+    pub mid: String,
+    /// 专辑名。
+    pub name: String,
+    /// 封面 URL（pmid 模板）。
+    pub picurl: String,
+    /// 年份文本（发行日期前 4 位；无值 "—"）。
+    pub year_text: String,
+    /// 曲目数。
+    pub track_count: i64,
+}
+
+/// 远端歌手详情（`ArtistDetailGet` 的响应；只读展示）。
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RemoteArtistDetail {
+    /// 歌手 singermid。
+    pub mid: String,
+    /// 歌手名。
+    pub name: String,
+    /// 歌手照片 URL（主页头部 singer_pic；空串 → 程序化占位）。
+    pub photo_url: String,
+    /// 歌曲总数。
+    pub song_total: i64,
+    /// 专辑总数。
+    pub album_total: i64,
+    /// 热门歌曲（首窗）。
+    pub tracks: Vec<DiscoverNewSong>,
+    /// 专辑（首窗）。
+    pub albums: Vec<RemoteAlbumBrief>,
+    /// 简介（B2 预铺；核心链路不填充，恒空串）。
+    #[serde(default)]
+    pub desc: String,
+}
+
 /// 歌词页（原始 LRC 文本；解析在客户端——桌面 lyrics.rs 复用）。
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LyricPage {
@@ -607,34 +753,34 @@ pub struct AccountInfo {
     pub vip_summary: String,
 }
 
-/// 扫码登录会话（`LoginQrStart` 响应）。
+/// 扫码登录会话（`LoginQrStart` 的响应）：二维码 PNG 已落盘的本机路径。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginQrSession {
-    /// 二维码 PNG 的本机绝对路径（UI 禁 HTTP，直读本机文件）。
+    /// 二维码 PNG 绝对路径（`data_dir/login-qr-{n}.png`）。
     pub qr_path: String,
 }
 
-/// 扫码登录进度（`LoginQrPoll` 响应）。
+/// 扫码登录进度态（`LoginQrPoll` 的响应）。
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LoginQrState {
-    /// 0=等待扫码 1=已扫码待确认 2=登录成功 3=用户拒绝 4=无进行中的会话/失败。
+    /// 进度常量（LoginQrState 的 STATUS_* 系列常量）之一。
     pub status: i32,
-    /// 当前二维码路径（服务端超时自动刷新后路径变化，UI 按 path 变化重载图）。
+    /// 二维码 PNG 当前路径（会话超时自动刷新后变化；终态为空串）。
     pub qr_path: String,
-    /// 展示文案（失败/超时原因等；正常轮询为空）。
+    /// 展示消息（进度提示/失败原因；无消息为空串）。
     pub message: String,
 }
 
 impl LoginQrState {
     /// 等待扫码。
     pub const STATUS_WAITING: i32 = 0;
-    /// 已扫码，等待手机确认。
+    /// 已扫码，待手机确认。
     pub const STATUS_SCANNED: i32 = 1;
     /// 登录成功（凭证已落库）。
     pub const STATUS_DONE: i32 = 2;
     /// 用户在手机上拒绝。
     pub const STATUS_REFUSED: i32 = 3;
-    /// 无进行中的会话 / 失败终态（`message` 携带原因，非协议错误）。
+    /// 会话空闲/终止（未发起、超时、错误；`message` 携带原因）。
     pub const STATUS_IDLE: i32 = 4;
 }
 
@@ -813,10 +959,6 @@ mod tests {
                 artist: "周杰伦".into(),
             },
             Request::AccountStatus,
-            Request::LoginQrStart,
-            Request::LoginQrPoll,
-            Request::LoginQrCancel,
-            Request::Logout,
             Request::QualityGet,
             Request::QualitySet {
                 mode: "flac".into(),
@@ -855,10 +997,68 @@ mod tests {
             }),
             replaygain_db: Some(-6.5),
             phase: EnginePhase::Playing,
+            backend_build: "build-x".into(),
         };
         let frame = encode_frame(&st).unwrap();
         let back: DaemonState = decode_frame(&frame).unwrap();
         assert_eq!(back, st);
+    }
+
+    /// wire 兼容回归：旧 daemon 存活时（升级窗口内旧进程仍占端点）推送的
+    /// 快照缺少后加的 `seq`/`last_error`/`replaygain_db`/`phase` 四字段，
+    /// 新客户端必须解码为默认值而非报 `missing field …`。
+    #[test]
+    fn daemon_state_tolerates_missing_fields_from_older_daemon() {
+        // 旧形状：仅 daemon 初版就有的 playback/queue/caps 三字段。
+        let old_shape = serde_json::json!({
+            "playback": serde_json::to_value(crate::player::PlaybackState::default()).unwrap(),
+            "queue": serde_json::to_value(crate::queue::QueueSummary::default()).unwrap(),
+            "caps": serde_json::to_value(crate::player::PlaybackCapabilities::default()).unwrap(),
+        });
+        // 包长度前缀，走真实帧解码路径。
+        let payload = serde_json::to_vec(&old_shape).unwrap();
+        let mut frame = Vec::with_capacity(4 + payload.len());
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&payload);
+
+        let st: DaemonState = decode_frame(&frame).unwrap();
+        assert_eq!(st, DaemonState::default());
+        assert_eq!(st.seq, 0);
+        assert_eq!(st.last_error, None);
+        assert_eq!(st.replaygain_db, None);
+        assert_eq!(st.phase, EnginePhase::Idle);
+        assert_eq!(st.backend_build, "");
+    }
+
+    /// 订阅流主帧型 `Event::StateChanged` 完整往返（守护 wire 兼容改动
+    /// 不破坏正常快照的序列化）。
+    #[test]
+    fn event_state_changed_roundtrips_through_frame() {
+        let ev = Event::StateChanged(DaemonState {
+            playback: Default::default(),
+            queue: crate::queue::QueueSummary::default(),
+            caps: Default::default(),
+            seq: 42,
+            last_error: Some(ErrorInfo {
+                code: IpcErrorCode::Internal,
+                message: "boom".into(),
+            }),
+            replaygain_db: Some(-3.0),
+            phase: EnginePhase::Loading,
+            backend_build: "build-y".into(),
+        });
+        let frame = encode_frame(&ev).unwrap();
+        let back: Event = decode_frame(&frame).unwrap();
+        assert_eq!(back, ev);
+    }
+
+    /// 新事件变体 `Shutdown`（daemon 优雅退出广播）往返序列化：旧客户端收到
+    /// 会因 unknown variant 断线重连（升级窗口内可接受），新客户端据此退出。
+    #[test]
+    fn event_shutdown_roundtrips_through_frame() {
+        let frame = encode_frame(&Event::Shutdown).unwrap();
+        let back: Event = decode_frame(&frame).unwrap();
+        assert_eq!(back, Event::Shutdown);
     }
 
     /// 新响应变体（Created / CommentList）往返序列化。
@@ -907,10 +1107,12 @@ mod tests {
                 mid: "a".into(),
                 name: "十一月的萧邦".into(),
                 singer: "周杰伦".into(),
+                pic: "https://y.gtimg.cn/music/photo_new/T002R180x180M000a_3.jpg".into(),
             }],
             singers: vec![SearchSinger {
                 mid: "s".into(),
                 name: "周杰伦".into(),
+                pic: String::new(),
             }],
         };
         let resps = vec![
@@ -925,14 +1127,6 @@ mod tests {
                 nickname: "胡桃".into(),
                 uin: "10001".into(),
                 vip_summary: "VIP".into(),
-            }),
-            Response::LoginQr(LoginQrSession {
-                qr_path: "/tmp/hmp/login-qr-1.png".into(),
-            }),
-            Response::LoginQrState(LoginQrState {
-                status: 1,
-                qr_path: "/tmp/hmp/login-qr-1.png".into(),
-                message: String::new(),
             }),
             Response::Quality(QualityPrefDto {
                 mode: "auto".into(),
@@ -949,6 +1143,133 @@ mod tests {
         let frame = encode_frame(&ev).unwrap();
         let back: Event = decode_frame(&frame).unwrap();
         assert_eq!(back, Event::LibraryChanged);
+    }
+
+    /// D2 内容动线新增：远端详情三 Request 往返（帧路径）。
+    #[test]
+    fn remote_detail_requests_roundtrip() {
+        let reqs = vec![
+            Request::PlaylistDetailGet { id: 8522132521 },
+            Request::AlbumDetailGet {
+                mid: "002Neh8l0uciQZ".into(),
+            },
+            Request::ArtistDetailGet {
+                mid: "0025NhlN2yWrP4".into(),
+            },
+        ];
+        for req in reqs {
+            let frame = encode_frame(&req).unwrap();
+            let back: Request = decode_frame(&frame).unwrap();
+            assert_eq!(back, req);
+        }
+    }
+
+    /// D2 内容动线新增：远端详情三响应（含曲目/专辑内嵌结构）完整往返。
+    #[test]
+    fn remote_detail_responses_roundtrip() {
+        let track = DiscoverNewSong {
+            mid: "0039MnYb0qxYhV".into(),
+            name: "夜曲".into(),
+            singer: "周杰伦".into(),
+            album: "十一月的萧邦".into(),
+            interval: 226,
+            picurl: "https://y.gtimg.cn/music/photo_new/T002R300x300M000p.jpg".into(),
+            album_mid: "0024bjiL2aocxT".into(),
+            artist_mid: "0025NhlN2yWrP4".into(),
+        };
+        let playlist = RemotePlaylistDetail {
+            id: 8522132521,
+            name: "华语经典".into(),
+            creator: "胡桃".into(),
+            picurl: "https://qpic.y.qq.com/p.jpg".into(),
+            listen_num: 12_345,
+            tracks: vec![track.clone()],
+            total: 268,
+            has_more: true,
+        };
+        let album = RemoteAlbumDetail {
+            mid: "0024bjiL2aocxT".into(),
+            name: "十一月的萧邦".into(),
+            singer: "周杰伦".into(),
+            singer_mid: "0025NhlN2yWrP4".into(),
+            company: "杰威尔音乐".into(),
+            genre: "流行".into(),
+            language: "国语".into(),
+            desc: "简介".into(),
+            time_public: "2005-11-01".into(),
+            picurl: String::new(),
+            tracks: vec![track],
+            total: 12,
+            has_more: false,
+        };
+        let artist = RemoteArtistDetail {
+            mid: "0025NhlN2yWrP4".into(),
+            name: "周杰伦".into(),
+            photo_url: "https://y.gtimg.cn/music/photo_new/T001R150x150M000s_11.jpg".into(),
+            song_total: 1012,
+            album_total: 139,
+            tracks: Vec::new(),
+            albums: vec![RemoteAlbumBrief {
+                mid: "0024bjiL2aocxT".into(),
+                name: "十一月的萧邦".into(),
+                picurl: String::new(),
+                year_text: "2005".into(),
+                track_count: 12,
+            }],
+            desc: String::new(),
+        };
+        let resps = vec![
+            Response::PlaylistDetail(playlist),
+            Response::AlbumDetail(album),
+            Response::ArtistDetail(artist),
+        ];
+        for resp in resps {
+            let frame = encode_frame(&resp).unwrap();
+            let back: Response = decode_frame(&frame).unwrap();
+            assert_eq!(back, resp);
+        }
+    }
+
+    /// wire 兼容：本轮新增的 serde(default) 字段（SearchPage.pic /
+    /// DiscoverNewSong.album_mid+artist_mid / TopSummaryDto.total_num /
+    /// RemoteArtistDetail.desc）在旧 daemon 帧缺省时解码为默认值而非报
+    /// `missing field`（升级窗口约定，对齐 daemon_state 先例）。
+    #[test]
+    fn extended_dtos_tolerate_missing_fields_from_older_daemon() {
+        // 旧形状 SearchAlbum/SearchSinger（无 pic）
+        let old_search: SearchPage = serde_json::from_value(serde_json::json!({
+            "songs": [{"mid": "m", "name": "n", "singer": "s"}],
+            "albums": [{"mid": "a", "name": "n", "singer": "s"}],
+            "singers": [{"mid": "r", "name": "n"}],
+        }))
+        .unwrap();
+        assert_eq!(old_search.albums[0].pic, "");
+        assert_eq!(old_search.singers[0].pic, "");
+
+        // 旧形状 DiscoverNewSong（无 album_mid/artist_mid）
+        let old_song: DiscoverNewSong = serde_json::from_value(serde_json::json!({
+            "mid": "m", "name": "n", "singer": "s",
+            "album": "a", "interval": 1, "picurl": "u",
+        }))
+        .unwrap();
+        assert_eq!(old_song.album_mid, "");
+        assert_eq!(old_song.artist_mid, "");
+
+        // 旧形状 TopSummaryDto（无 total_num）
+        let old_top: TopSummaryDto = serde_json::from_value(serde_json::json!({
+            "id": 62, "name": "飙升榜", "title_sub": "", "update_time": "",
+            "listen_num": 0, "picurl": "", "preview": [],
+        }))
+        .unwrap();
+        assert_eq!(old_top.total_num, 0);
+
+        // 省缺 serde(default) 字段的 RemoteArtistDetail（B2 预铺的 desc）
+        let artist: RemoteArtistDetail = serde_json::from_value(serde_json::json!({
+            "mid": "r", "name": "n", "photo_url": "", "song_total": 0,
+            "album_total": 0, "tracks": [], "albums": [],
+        }))
+        .unwrap();
+        assert_eq!(artist.desc, "");
     }
 
     #[test]

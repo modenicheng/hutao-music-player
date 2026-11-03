@@ -4,6 +4,7 @@
 //! `EngineHandle.state_rx` 同步应答；Subscribe 后推送 `Event` 帧。
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use hmp_core::ipc::{
     Event, IpcErrorCode, LoginQrState, MAX_FRAME, Request, Response, decode_frame, encode_frame,
@@ -24,10 +25,10 @@ use crate::transport::{IpcListener, IpcStream};
 /// Windows 下任意路径会被 `transport::pipe_name` 确定性映射为
 /// `\\.\pipe\hmp-<sanitized>`；Unix 下须是 socket 文件路径。
 pub fn socket_path() -> PathBuf {
-    if let Ok(ep) = std::env::var("HMP_IPC_ENDPOINT") {
-        if !ep.is_empty() {
-            return PathBuf::from(ep);
-        }
+    if let Ok(ep) = std::env::var("HMP_IPC_ENDPOINT")
+        && !ep.is_empty()
+    {
+        return PathBuf::from(ep);
     }
     // 平台块作尾表达式：Windows 只剩管道名分支，Unix 只剩 socket 路径分支。
     #[cfg(windows)]
@@ -36,21 +37,62 @@ pub fn socket_path() -> PathBuf {
     }
     #[cfg(unix)]
     {
-        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-            if !dir.is_empty() {
-                return PathBuf::from(dir).join("hmp.sock");
-            }
+        if let Some(dir) = std::env::var("XDG_RUNTIME_DIR")
+            .ok()
+            .filter(|d| !d.is_empty())
+        {
+            return PathBuf::from(dir).join("hmp.sock");
         }
         let uid = unsafe { libc::getuid() };
         PathBuf::from(format!("/tmp/hmp-{uid}/hmp.sock"))
     }
 }
 
+/// accept 连续失败上限：按 [`accept_backoff`] 封顶 1s 退避，64 次失败的
+/// 退避总和 ≈ 60s——持续一分钟不可 accept 即事实上不可服务，放弃并优雅
+/// 退出（CLI 侧 `connect_or_spawn` 自然拉起全新实例，优于带病续命）。
+const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 64;
+
+/// accept 错误是否不可恢复（继续重试无意义或有害）。仅两类情形终止：
+/// - Windows：`ERROR_ACCESS_DENIED`（5）——我们不再持有任何管道实例、名字
+///   已被另一 daemon 以 first_pipe_instance 占走；续命只会把自己挂到别人
+///   的管道上，正确行为是让位退出。
+/// - 持续失败达 [`MAX_CONSECUTIVE_ACCEPT_FAILURES`]（serve 循环内判定）。
+///
+/// 其余错误（含 Unix 的 EMFILE/ENFILE/ECONNABORTED 等瞬时错误）退避重试。
+#[cfg(windows)]
+fn accept_failure_is_fatal(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(5) // ERROR_ACCESS_DENIED
+}
+#[cfg(unix)]
+fn accept_failure_is_fatal(_: &std::io::Error) -> bool {
+    // 持 flock 期间 UnixListener 没有不可恢复的 accept 错误类，等待即可。
+    false
+}
+
+/// accept 重试退避：25ms × 2^n 封顶 1s（序列 25/50/100/200/400/800/1000ms
+/// 后钉在 1s）。shift 夹 6 仅防 `<<` 溢出且不改序列（25<<6=1.6s 已超封顶，
+/// 外层 min 真正生效——审核 M2：去掉旧式内层夹 5，封顶才是真 1s，与
+/// 「64 次 ≈60s」估算自洽）。
+fn accept_backoff(consecutive: u32) -> Duration {
+    let shift = consecutive.min(6);
+    Duration::from_millis(25u64 << shift).min(Duration::from_secs(1))
+}
+
 /// 启动服务器（accept 循环；由 daemon 编排退出时机）。
+///
+/// 自愈（AUDIT §16 #1）：accept 错误不再一击退出（旧行为 break 后 daemon
+/// 成「活着但永久不可达」的僵尸，桌面/CLI 均受害）——瞬时错误分类 + 指数
+/// 退避重试；仅 fatal 分类或连续失败达上限才终止，且终止走**优雅退出**：
+/// 发 `Request::Quit`（与 SIGINT / tray / `hmp quit` 同一引擎入口）→ 引擎
+/// 置位 terminated → §19 Shutdown 广播宽限 → serve.rs `server_handle.abort()`
+/// 终止本任务 → 进程退出。不产生任何「活着但不可达」窗口。
 pub async fn serve(mut listener: IpcListener, handle: EngineHandle) {
+    let mut consecutive_failures: u32 = 0;
     loop {
         match listener.accept().await {
             Ok(stream) => {
+                consecutive_failures = 0;
                 let handle = handle.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, handle).await {
@@ -59,8 +101,26 @@ pub async fn serve(mut listener: IpcListener, handle: EngineHandle) {
                 });
             }
             Err(e) => {
-                tracing::error!(%e, "accept failed");
-                break;
+                if accept_failure_is_fatal(&e)
+                    || consecutive_failures >= MAX_CONSECUTIVE_ACCEPT_FAILURES
+                {
+                    tracing::error!(
+                        %e,
+                        consecutive = consecutive_failures,
+                        "accept unrecoverable; requesting graceful shutdown"
+                    );
+                    let _ = handle.command_tx.send(Request::Quit);
+                    return;
+                }
+                let delay = accept_backoff(consecutive_failures);
+                tracing::warn!(
+                    %e,
+                    consecutive = consecutive_failures,
+                    ?delay,
+                    "accept failed; retrying"
+                );
+                tokio::time::sleep(delay).await;
+                consecutive_failures += 1;
             }
         }
     }
@@ -147,6 +207,21 @@ async fn handle_connection(stream: IpcStream, mut handle: EngineHandle) -> std::
                 _ = handle.library_rx.changed(), if subscribed => {
                     handle.library_rx.borrow_and_update();
                     write_frame(&mut wr, &Event::LibraryChanged).await?;
+                }
+                // 优雅退出广播（AUDIT §19）：引擎 terminated 翻转 → 推一帧
+                // `Event::Shutdown` 后断开，订阅客户端（桌面 UI）据此自行优雅
+                // 退出而不落离线重连。先 borrow 再 changed 与 serve.rs
+                // term_wait 同形，覆盖「连接建立时引擎已终止」（宽限窗口内
+                // 新到订阅）的即时触发；watch::changed 取消安全（已见版本记
+                // 在 receiver 上），本臂被抢占后下一轮重建 future 不丢通知。
+                // 仅订阅连接（未订阅的短连接以响应/EOF 收尾）。
+                _ = async {
+                    if !*handle.terminated.borrow() {
+                        let _ = handle.terminated.changed().await;
+                    }
+                }, if subscribed => {
+                    let _ = write_frame(&mut wr, &Event::Shutdown).await;
+                    break;
                 }
             }
         }
@@ -242,10 +317,8 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 Some(Ok(())) => {
                     // 收藏写落库 → 媒体库内容变更（客户端刷新"我喜欢"等页）。
                     handle.library_tx.send_modify(|g| *g += 1);
-                    if !is_local {
-                        if let Some(h) = &handle.sync_handle {
-                            h.trigger();
-                        }
+                    if !is_local && let Some(h) = &handle.sync_handle {
+                        h.trigger();
                     }
                     Response::Ok
                 }
@@ -366,20 +439,18 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 Some(Ok(Some(id))) => {
                     // 歌单结构落库 → 媒体库内容变更。
                     handle.library_tx.send_modify(|g| *g += 1);
-                    if trigger_sync {
-                        if let Some(h) = &handle.sync_handle {
+                    if trigger_sync
+                        && let Some(h) = &handle.sync_handle {
                             h.trigger();
                         }
-                    }
                     Response::Created(id)
                 }
                 Some(Ok(None)) => {
                     handle.library_tx.send_modify(|g| *g += 1);
-                    if trigger_sync {
-                        if let Some(h) = &handle.sync_handle {
+                    if trigger_sync
+                        && let Some(h) = &handle.sync_handle {
                             h.trigger();
                         }
-                    }
                     Response::Ok
                 }
                 Some(Err(rusqlite::Error::InvalidQuery)) => Response::Err {
@@ -604,18 +675,53 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             write_frame(wr, &resp).await?;
         }
         Ok(Request::CoverGet { url }) => {
-            let resp = match &handle.content {
-                Some(svc) => match svc.cover(&url).await {
-                    Ok(path) => Response::Cover(path),
-                    Err(message) => Response::Err {
-                        code: IpcErrorCode::Internal,
-                        message,
+            // 盘级索引优先（v8 cover_cache）：同 URL 已下载过 → 直接回本地产物，
+            // 零出网。URL 内嵌专辑 pmid（pmid 变则 URL 变），按 URL 缓存即内容寻址；
+            // 键取归一化形态，与 reconcile 入库/播放路径写入的模板 URL 同构。
+            let cache_key =
+                crate::content::normalize_cover_url(&url).unwrap_or_else(|| url.clone());
+            let cached = match &handle.library {
+                Some(library) => library
+                    .lock()
+                    .ok()
+                    .and_then(|mut db| db.cover_cache_get(&cache_key).ok().flatten()),
+                None => None,
+            };
+            let resp = if let Some(path) = cached {
+                if let Some(library) = &handle.library
+                    && let Ok(mut db) = library.lock()
+                {
+                    let _ = db.rebind_cover_url(&cache_key, &path);
+                }
+                Response::Cover(path)
+            } else {
+                match &handle.content {
+                    Some(svc) => match svc.cover(&url).await {
+                        Ok(path) => {
+                            // 本地产物回写媒体库：播放解析落库的是远程 https URL，
+                            // UI 禁直连 HTTP——回写后队列/列表投影直接读盘渲染
+                            // （按 URL 匹配幂等；失败仅丢回写不影响本次返回）。
+                            // 同步登记盘级索引，下次同 URL 直接命中。
+                            if let Some(library) = &handle.library
+                                && let Ok(mut db) = library.lock()
+                            {
+                                let _ = db.cover_cache_put(&cache_key, &path);
+                                if let Err(e) = db.rebind_cover_url(&cache_key, &path) {
+                                    tracing::warn!(%e, "cover rebind failed");
+                                }
+                            }
+                            Response::Cover(path)
+                        }
+                        Err(message) => Response::Err {
+                            code: IpcErrorCode::Internal,
+                            message,
+                        },
                     },
-                },
-                None => Response::Err {
-                    code: IpcErrorCode::Internal,
-                    message: "content service unavailable".into(),
-                },
+                    None => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message: "content service unavailable".into(),
+                    },
+                }
             };
             write_frame(wr, &resp).await?;
         }
@@ -689,6 +795,55 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                         }
                     }
                 }
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        // —— 远端详情三读（D2 内容动线；免登录只读，PLAN §③ D-3）———
+        Ok(Request::PlaylistDetailGet { id }) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.remote_playlist_detail(id).await {
+                    Ok(page) => Response::PlaylistDetail(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::AlbumDetailGet { mid }) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.remote_album_detail(&mid).await {
+                    Ok(page) => Response::AlbumDetail(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
+                None => Response::Err {
+                    code: IpcErrorCode::Internal,
+                    message: "content service unavailable".into(),
+                },
+            };
+            write_frame(wr, &resp).await?;
+        }
+        Ok(Request::ArtistDetailGet { mid }) => {
+            let resp = match &handle.content {
+                Some(svc) => match svc.remote_artist_detail(&mid).await {
+                    Ok(page) => Response::ArtistDetail(page),
+                    Err(message) => Response::Err {
+                        code: IpcErrorCode::Internal,
+                        message,
+                    },
+                },
                 None => Response::Err {
                     code: IpcErrorCode::Internal,
                     message: "content service unavailable".into(),
@@ -818,11 +973,16 @@ mod tests {
     impl PlaybackDriver for SDriver {
         fn load(&self, r: LoadRequest) {
             // 同步应用（模拟真实驱动装载臂）：current + Playing。
-            let (track, quality) = (r.track, r.quality);
+            // load_gen 与 current 同拍置值（对齐真实驱动 core.rs completion
+            // 分支行为）：引擎 wait_current_applied 以 (load_gen, current)
+            // 双条件 ACK，不置值会让每次装载等到 5s 超时（F2 Bug 1 修复的
+            // 驱动对齐面，与 engine_tests.rs FakeDriver 同一性质）。
+            let (track, quality, load_gen) = (r.track, r.quality, r.load_gen);
             self.state_tx.send_modify(|s| {
                 s.status = PlaybackStatus::Playing;
                 s.current = Some(track);
                 s.actual_quality = Some(quality);
+                s.load_gen = load_gen;
             });
         }
         fn play(&self) {}
@@ -914,6 +1074,69 @@ mod tests {
         let mut buf = vec![0u8; 65536];
         let n = stream.read(&mut buf).await.unwrap();
         decode_frame::<Response>(&buf[..n]).unwrap()
+    }
+
+    /// daemon 优雅退出广播（AUDIT §19）：订阅连接在引擎 terminated 翻转后
+    /// 收到 `Event::Shutdown`，随后被服务端断开（EOF）——桌面端据此优雅关窗，
+    /// 不落离线重连。quit 路径若发布中间状态，允许先到若干 StateChanged。
+    #[tokio::test]
+    async fn quit_broadcasts_shutdown_to_subscribers() {
+        let (sock, listener) = temp_socket().await;
+        let handle = test_engine(true).await;
+        tokio::spawn(async move { serve(listener, handle).await });
+
+        // 订阅：初始快照帧先到。
+        let mut stream = IpcStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(&encode_frame(&Request::Subscribe).unwrap())
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 65536];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+            .await
+            .expect("等待初始快照超时")
+            .unwrap();
+        let snap: Event = decode_frame(&buf[..n]).unwrap();
+        assert!(matches!(snap, Event::StateChanged(_)));
+
+        // 另一条短连接发 Quit（与 CLI `hmp quit` / tray 退出同源）。
+        let mut quitter = IpcStream::connect(&sock).await.unwrap();
+        quitter
+            .write_all(&encode_frame(&Request::Quit).unwrap())
+            .await
+            .unwrap();
+        let m = tokio::time::timeout(std::time::Duration::from_secs(5), quitter.read(&mut buf))
+            .await
+            .expect("等待 Quit 应答超时")
+            .unwrap();
+        assert!(matches!(
+            decode_frame::<Response>(&buf[..m]).unwrap(),
+            Response::Ok
+        ));
+
+        // 订阅连接：Shutdown 帧（容忍其前的中间状态推送）。
+        // 用生产同款 read_frame（长度前缀循环读）——裸 read() 假设单次
+        // read=整帧，Linux UDS 分帧时序下会拿到半帧/跨帧（S11 CI 实证
+        // "frame length prefix does not match payload"）。
+        loop {
+            let frame =
+                tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut stream))
+                    .await
+                    .expect("等待 Shutdown 帧超时")
+                    .expect("read_frame 错误");
+            assert!(frame.is_some(), "连接在 Shutdown 前被断开");
+            match decode_frame::<Event>(&frame.unwrap()).unwrap() {
+                Event::Shutdown => break,
+                _ => continue,
+            }
+        }
+        // 随后 EOF（服务端断开；EOF 语义保留给非优雅死亡）。
+        let frame =
+            tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut stream))
+                .await
+                .expect("等待 EOF 超时")
+                .expect("read_frame 错误");
+        assert!(frame.is_none(), "Shutdown 后应立即断开（EOF）");
     }
 
     #[tokio::test]
@@ -1377,6 +1600,68 @@ mod tests {
         unsafe {
             std::env::remove_var("HMP_IPC_ENDPOINT");
         }
+    }
+
+    /// accept 自愈决策函数（PLAN T3）：退避序列按审核 M2 修正——25ms×2^n
+    /// 封顶**真** 1s（序列 25/50/100/200/400/800/1000ms），64 次累计 ≈60s
+    /// 与放弃阈值量纲自洽；大 n 不溢出、钉在 1s。
+    #[test]
+    fn accept_backoff_progression_and_cap() {
+        assert_eq!(accept_backoff(0), Duration::from_millis(25));
+        assert_eq!(accept_backoff(1), Duration::from_millis(50));
+        assert_eq!(accept_backoff(2), Duration::from_millis(100));
+        assert_eq!(accept_backoff(3), Duration::from_millis(200));
+        assert_eq!(accept_backoff(4), Duration::from_millis(400));
+        assert_eq!(accept_backoff(5), Duration::from_millis(800));
+        assert_eq!(
+            accept_backoff(6),
+            Duration::from_secs(1),
+            "25<<6=1.6s 应封顶 1s（M2：外层 min 真正生效）"
+        );
+        assert_eq!(
+            accept_backoff(MAX_CONSECUTIVE_ACCEPT_FAILURES),
+            Duration::from_secs(1)
+        );
+        assert_eq!(accept_backoff(1_000), Duration::from_secs(1), "大 n 不溢出");
+        let total: Duration = (0..MAX_CONSECUTIVE_ACCEPT_FAILURES)
+            .map(accept_backoff)
+            .sum();
+        assert!(
+            total >= Duration::from_secs(59) && total < Duration::from_secs(61),
+            "64 次退避总和应 ≈60s: {total:?}"
+        );
+    }
+
+    /// fatal 分类（Windows）：仅 ACCESS_DENIED（管道名被夺让位退出）；
+    /// 其余（含 BUSY、NotFound、池空合成错误）均为可重试。
+    #[cfg(windows)]
+    #[test]
+    fn accept_failure_is_fatal_only_for_access_denied() {
+        assert!(accept_failure_is_fatal(&std::io::Error::from_raw_os_error(
+            5
+        )));
+        assert!(!accept_failure_is_fatal(
+            &std::io::Error::from_raw_os_error(231)
+        ));
+        assert!(!accept_failure_is_fatal(
+            &std::io::Error::from_raw_os_error(2)
+        ));
+        assert!(!accept_failure_is_fatal(&std::io::Error::other(
+            "pool empty"
+        )));
+    }
+
+    /// fatal 分类（Unix）：恒否——持 flock 期间无不可恢复 accept 错误类，
+    /// EMFILE/EACCES 等一律退避重试。
+    #[cfg(unix)]
+    #[test]
+    fn accept_failure_is_fatal_never_on_unix() {
+        assert!(!accept_failure_is_fatal(
+            &std::io::Error::from_raw_os_error(13)
+        ));
+        assert!(!accept_failure_is_fatal(
+            &std::io::Error::from_raw_os_error(24)
+        ));
     }
 }
 

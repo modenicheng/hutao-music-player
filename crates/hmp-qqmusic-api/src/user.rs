@@ -25,7 +25,12 @@ use crate::protocol::cgi::CgiRequest;
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct UserCreatedSonglistResponse {
     /// 歌单列表（上游 jsonpath `$.v_playlist[*]`，元素兼容 [`SongList`] 别名）。
-    #[serde(default, alias = "vecSonglist", alias = "songlist", alias = "v_playlist")]
+    #[serde(
+        default,
+        alias = "vecSonglist",
+        alias = "songlist",
+        alias = "v_playlist"
+    )]
     pub songlist: Vec<SongList>,
     /// 总数。
     #[serde(default)]
@@ -412,9 +417,8 @@ impl<'a> UserApi<'a> {
         );
         let data = self.client.musicu_request(&request, credential).await?;
         let data = data.get("data").cloned().unwrap_or(json!({}));
-        serde_json::from_value(data).map_err(|e| {
-            QqMusicError::InvalidResponse(format!("failed to parse music gene: {e}"))
-        })
+        serde_json::from_value(data)
+            .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse music gene: {e}")))
     }
 }
 

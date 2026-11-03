@@ -1,5 +1,7 @@
 // 歌单详情（PlaylistView.vue）：封面 + 页头（返回/标题/元信息/播放全部）+ 通栏曲目表。
-// 本地投影：创建者/标签/简介/播放数无数据源（媒体库无此域），头部只呈 N 首 + 总时长。
+// 状态机渲染（M3）：0=初始 1=加载中 2=就绪 3=未找到 4=失败（离线/网络）。
+// 本地投影：创建者/标签/简介/播放数无数据源，头部只呈 N 首 + 总时长；
+// 远端（qq: 参数）：创建者/播放数/超窗标注由 remote_details 投影。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { Button, ButtonVariant } from "primitives.slint";
@@ -18,14 +20,34 @@ export component PlaylistPage inherits Rectangle {
         padding-bottom: Theme.space-10;
         spacing: Theme.space-4;
 
-        if !Data.playlist-found: Text {
-            text: "未找到歌单（可能已删除）";
+        if Data.playlist-state == 1: Text {
+            height: 64px;
+            text: "正在加载…";
             color: Theme.muted-foreground;
-            font-size: 14px;
+            font-size: 13.5px;
             horizontal-alignment: center;
+            vertical-alignment: center;
         }
 
-        if Data.playlist-found: Rectangle {
+        if Data.playlist-state == 3: Text {
+            height: 64px;
+            text: "未找到歌单（可能已删除）";
+            color: Theme.muted-foreground;
+            font-size: 13.5px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        if Data.playlist-state == 4: Text {
+            height: 64px;
+            text: "加载失败：无法连接守护进程或网络不可用";
+            color: Theme.muted-foreground;
+            font-size: 13.5px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        if Data.playlist-state == 2: Rectangle {
             // 两段式头部（Vue .playlist-head）：封面 | 页头信息，垂直居中。
             // 子元素勿引用 parent.width（布局首选宽计算成环，会解出负宽）。
             width: parent.width;
@@ -82,7 +104,7 @@ export component PlaylistPage inherits Rectangle {
             }
         }
 
-        if Data.playlist-found: TrackTable {
+        if Data.playlist-state == 2: TrackTable {
             tracks: Data.playlist-tracks;
             show-header: true;
         }

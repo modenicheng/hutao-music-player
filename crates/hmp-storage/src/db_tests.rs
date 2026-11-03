@@ -19,7 +19,7 @@ fn row() -> TrackRow {
 #[test]
 fn migration_creates_v1() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 5); // v5：本地意图幽灵行合并
+    assert_eq!(db.version().unwrap(), 8); // v8：封面 URL → 本地产物索引
     let mut db = db;
     assert_eq!(db.track_id("qq", "mid123").unwrap(), None);
 }
@@ -169,7 +169,7 @@ fn migration_v2_migrates_favorites_into_relations() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        8
     );
     // favorites 表已删除；数据在 relations（track/liked，synced）。
     let count: i64 = conn
@@ -697,7 +697,7 @@ fn mark_pending_with_delete_op_rolls_back_on_op_failure() {
 #[test]
 fn migration_v3_adds_columns_and_tables() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 5);
+    assert_eq!(db.version().unwrap(), 8);
     let cols: Vec<String> = db
         .conn
         .prepare("PRAGMA table_info(local_files)")
@@ -771,7 +771,7 @@ fn migration_v2_to_v3_upgrades_in_place() {
         .conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 5);
+    assert_eq!(v, 8);
     db.conn
         .execute("UPDATE tracks SET genre='Rock' WHERE id=1", [])
         .unwrap();
@@ -1205,4 +1205,348 @@ fn merge_ghost_local_tracks_remaps_relations_and_playlists() {
             .unwrap(),
         1
     );
+}
+
+/// v7 迁移：带 local_files 子行的非规范键扫描行（v5 幽灵谓词不命中的变体，
+/// §18 实锤的 verbatim 重复行）合并进规范键扫描行，relations/歌单链接跟随
+/// 重指向，verbatim 行连同 local_files 删除。幂等。
+#[test]
+fn merge_noncanonical_local_tracks_merges_scan_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("song.flac");
+    std::fs::write(&real, b"x").unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let meta = crate::local::LocalMeta {
+        title: "真标题".into(),
+        ..Default::default()
+    };
+    let tid = db.add_local_file(&real, Some(&meta)).unwrap();
+    let canon_key = format!("local:{}", real.display());
+
+    // 直接造 pre-fix 形态的 verbatim 扫描行（API 现已归一化，只能 raw SQL 造）：
+    // tracks.source_key 与 local_files.path 均带非规范拼写。
+    // Windows = canonicalize 的 \\?\ 前缀形态；Unix = 同目录 /./ 重复拼写。
+    #[cfg(windows)]
+    let raw = std::fs::canonicalize(&real).unwrap();
+    #[cfg(unix)]
+    let raw = dir.path().join(".").join("song.flac");
+    let ghost_key = format!("local:{}", raw.display());
+    assert_ne!(ghost_key, canon_key, "测试前置：ghost 键必须非规范");
+    db.conn
+        .execute(
+            "INSERT INTO tracks (source, source_key, title) VALUES ('local', ?1, ?1)",
+            params![ghost_key],
+        )
+        .unwrap();
+    let gid: i64 = db
+        .conn
+        .query_row(
+            "SELECT id FROM tracks WHERE source='local' AND source_key=?1",
+            params![ghost_key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO local_files (track_id, path) VALUES (?1, ?2)",
+            params![gid, raw.display().to_string()],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO relations (entity_type, provider, entity_key, relation, \
+             desired_state, sync_state, updated_at) \
+             VALUES ('track','local',?1,'liked',1,'synced',0)",
+            params![ghost_key],
+        )
+        .unwrap();
+    db.create_playlist("深夜循环").unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at) \
+             VALUES (1, ?1, 0, 0)",
+            params![gid],
+        )
+        .unwrap();
+    // 播放历史挂在 verbatim 行上（resolve_local 播放即建行；play_events FK 无
+    // CASCADE，不先并入会让 DELETE tracks 失败、迁移整体回滚——§18 实机首跑
+    // 即中招）。
+    db.conn
+        .execute(
+            "INSERT INTO play_events (track_id, started_at, listened_ms) VALUES (?1, 1, 60)",
+            params![gid],
+        )
+        .unwrap();
+
+    db.merge_noncanonical_local_tracks().unwrap();
+
+    // verbatim 行删除、行数回到 1；relation 与歌单链接都指向扫描行
+    let count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM tracks WHERE source = 'local'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(
+        db.relation_desired("track", "local", &canon_key, "liked")
+            .unwrap(),
+        Some(true)
+    );
+    let linked: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM playlist_tracks WHERE track_id = ?1",
+            params![tid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(linked, 1);
+    let history: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM play_events WHERE track_id = ?1",
+            params![tid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(history, 1, "播放历史应并入存活行而非阻塞删除");
+    let orphaned: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM local_files WHERE track_id = ?1",
+            params![gid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphaned, 0, "verbatim 行的 local_files 子行应一并删除");
+    // 幂等：再跑一遍零变化
+    db.merge_noncanonical_local_tracks().unwrap();
+    assert_eq!(
+        db.conn
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE source='local'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+/// v7 迁移 re-key 分支：规范行缺席 → tracks.source_key / local_files.path
+/// 就地归一；归一后 add_local_file 幂等命中同一行，不再衍生重复行。
+#[test]
+fn merge_noncanonical_local_tracks_rekeys_when_target_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("lonely.flac");
+    std::fs::write(&real, b"x").unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    #[cfg(windows)]
+    let raw = std::fs::canonicalize(&real).unwrap();
+    #[cfg(unix)]
+    let raw = dir.path().join(".").join("lonely.flac");
+    let ghost_key = format!("local:{}", raw.display());
+    db.conn
+        .execute(
+            "INSERT INTO tracks (source, source_key, title) VALUES ('local', ?1, ?1)",
+            params![ghost_key],
+        )
+        .unwrap();
+    let gid: i64 = db
+        .conn
+        .query_row(
+            "SELECT id FROM tracks WHERE source='local' AND source_key=?1",
+            params![ghost_key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO local_files (track_id, path) VALUES (?1, ?2)",
+            params![gid, raw.display().to_string()],
+        )
+        .unwrap();
+
+    db.merge_noncanonical_local_tracks().unwrap();
+
+    let canon_key = format!("local:{}", crate::canonical_display_path(&real).display());
+    let key: String = db
+        .conn
+        .query_row(
+            "SELECT source_key FROM tracks WHERE source='local'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(key, canon_key);
+    let path: String = db
+        .conn
+        .query_row(
+            "SELECT path FROM local_files WHERE track_id = ?1",
+            params![gid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(path, canon_key.strip_prefix("local:").unwrap());
+    // 归一后 add_local_file 幂等命中同一行（不衍生重复行）
+    let tid = db.add_local_file(&real, None).unwrap();
+    assert_eq!(tid, gid);
+    let count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM tracks WHERE source='local'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+/// CoverGet 本地产物回写：按远程 URL 匹配改写 cover_uri（同 URL 多曲全改；
+/// 已是目标值时幂等零写）。
+#[test]
+fn rebind_cover_url_rewrites_matching_tracks() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let row = |key: &str, url: &str| crate::TrackRow {
+        source: "qq",
+        source_key: key.into(),
+        title: "晴天".into(),
+        cover_uri: Some(url.into()),
+        ..Default::default()
+    };
+    let url_x = "https://y.gtimg.cn/music/photo_new/T002R300x300M000X.jpg";
+    let url_y = "https://y.gtimg.cn/music/photo_new/T002R300x300M000Y.jpg";
+    let a = db.upsert_track(&row("a", url_x)).unwrap();
+    let b = db.upsert_track(&row("b", url_x)).unwrap();
+    let c = db.upsert_track(&row("c", url_y)).unwrap();
+
+    let local = format!("file://{}", "C:/Users/u/AppData/Local/hmp/covers/aa.jpg");
+    let n = db.rebind_cover_url(url_x, &local).unwrap();
+    assert_eq!(n, 2, "同 URL 两行全改");
+    for tid in [a, b] {
+        let uri: String = db
+            .conn
+            .query_row(
+                "SELECT cover_uri FROM tracks WHERE id = ?1",
+                params![tid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(uri, local, "回写为本地产物 URI");
+    }
+    let other: String = db
+        .conn
+        .query_row(
+            "SELECT cover_uri FROM tracks WHERE id = ?1",
+            params![c],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(other, url_y, "其他 URL 不受影响");
+
+    // 幂等：已是目标值 → 零行写入
+    let n2 = db.rebind_cover_url(url_x, &local).unwrap();
+    assert_eq!(n2, 0, "重复回写幂等");
+}
+
+/// upsert 封面保护：已 rebind 的 file:// 行不被 reconcile/播放 upsert 携带的
+/// 远程 URL 打回；file:// 对 file://（扫描重提取换图）仍放行更新。
+#[test]
+fn upsert_cover_remote_url_never_demotes_local_file() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let url = "https://y.gtimg.cn/music/photo_new/T002R300x300M000X.jpg";
+    let rebound = "file://C:/Users/u/AppData/Local/hmp/covers/aa.jpg";
+
+    // QQ 行 NULL → 远程 URL 入库（reconcile 带封面入库的正常路径）
+    let id = db
+        .upsert_track(&TrackRow {
+            cover_uri: Some(url.into()),
+            ..row()
+        })
+        .unwrap();
+    // rebind 成本地产物
+    db.rebind_cover_url(url, rebound).unwrap();
+    // 再次 upsert 携带远程 URL（下一轮 reconcile）→ 不得降级
+    db.upsert_track(&TrackRow {
+        cover_uri: Some(url.into()),
+        ..row()
+    })
+    .unwrap();
+    let uri: String = db
+        .conn
+        .query_row(
+            "SELECT cover_uri FROM tracks WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(uri, rebound, "file:// 不被远程 URL 覆盖");
+
+    // 本地扫描重提取（内容哈希变 → 新 file:// 路径）→ 放行更新
+    let local_a = "file://C:/Users/u/AppData/Local/hmp/covers/old.jpg";
+    let local_id = db
+        .upsert_track(&TrackRow {
+            source: "local",
+            source_key: "local:C:/m/a.flac".into(),
+            title: "本地曲".into(),
+            cover_uri: Some(local_a.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let newer = "file://C:/Users/u/AppData/Local/hmp/covers/bb.jpg";
+    db.set_track_cover("local:C:/m/a.flac", newer).unwrap();
+    let local_uri: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT cover_uri FROM tracks WHERE id = ?1",
+            params![local_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(local_uri.as_deref(), Some(newer), "file:// 对 file:// 放行");
+
+    // upsert 不带封面（播放路径 stub）→ 保留既有值（COALESCE 原语义）
+    db.upsert_track(&TrackRow {
+        cover_uri: None,
+        ..row()
+    })
+    .unwrap();
+    let after: String = db
+        .conn
+        .query_row(
+            "SELECT cover_uri FROM tracks WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, rebound, "NULL upsert 保留既有封面");
+}
+
+/// cover_cache 索引（v8）：写后可读、重复写幂等覆盖、未命中 None。
+#[test]
+fn cover_cache_roundtrip() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let url = "https://y.gtimg.cn/music/photo_new/T002R300x300M000X.jpg";
+    assert_eq!(db.cover_cache_get(url).unwrap(), None, "未命中");
+
+    db.cover_cache_put(url, "file://covers/aa.jpg").unwrap();
+    assert_eq!(
+        db.cover_cache_get(url).unwrap().as_deref(),
+        Some("file://covers/aa.jpg")
+    );
+
+    // 同 URL 重复下载（不应发生，防御性）：幂等覆盖
+    db.cover_cache_put(url, "file://covers/bb.jpg").unwrap();
+    assert_eq!(
+        db.cover_cache_get(url).unwrap().as_deref(),
+        Some("file://covers/bb.jpg")
+    );
+    let n: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM cover_cache", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "同 URL 只占一行");
 }

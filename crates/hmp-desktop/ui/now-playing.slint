@@ -478,7 +478,9 @@ export component NowPlayingOverlay inherits Rectangle {
                                             y: (parent.height - self.height) / 2;
                                             mouse-cursor: pointer;
                                             clicked => {
-                                                NowPlaying.liked = !NowPlaying.liked;
+                                                // 意图上报 Rust（不本地翻转；
+                                                // Rust 乐观翻转 + daemon 写 + 失败回滚）
+                                                NowPlaying.toggle-liked();
                                             }
                                             AppIcon {
                                                 source: NowPlaying.liked

@@ -1,0 +1,22 @@
+[13:58:52] === S10 repro start (arm=base-sw-1 bin=base exit=quit software=True) ===
+[13:58:52] pre-existing: PID 2712 hmp-desktop.exe PPID 65936
+[13:58:52] pre-existing: PID 46516 hmp-desktop.exe PPID 28500
+[13:58:52] pre-existing: PID 65904 hmp-desktop.exe PPID 40396
+[13:58:59] daemon pid=26840 endpoint=\\.\pipe\hmp-s10-base-sw-1
+[13:58:59] volume gate PASS (user_volume=0) backend_build=6a3c6f734a9a399b
+[13:58:59] exe same-batch: hmp mtime=13:36:05, desktop mtime=13:36:05
+[13:59:00] scan done: D:\coding\hutao-music-player\.worktrees\s10-exit-deadlock\verify-s10\sandbox-base-sw-1\media
+[13:59:00] seeded 10 tracks into playlist 1
+[13:59:12] desktop pid=73588
+[14:02:15] play phase done (180s)
+[14:02:15] GL modules: ApplicationTargetedFeatureDatabase.dll, opengl32.dll, uiautomationcore.dll
+[14:02:15] exit trigger: hmp quit (isolated endpoint)
+[14:03:16] desktop still alive at +60s -> Stop-Process -Force
+[14:03:26] *** ZOMBIE REPRODUCED (pid=73588): force-kill ineffective ***
+[14:03:26] zombie threads=1 Responding=False Handles=243
+[14:03:26]   TID 58176 State=Wait WaitReason=Unknown
+[14:03:26] zombie left in place (取证留现场，重启才清)
+[14:03:26] daemon exited after 2.1s of quit (assert <=15s: True)
+[14:03:26] === verdict: ZOMBIE (elapsed 274s) ===
+[14:03:28] cleanup check pid=26840 alive=False
+[14:03:28] === repro finally done, verdict=ZOMBIE ===

@@ -13,7 +13,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 zbus = { workspace = true }
-zvariant = "5"
 
 [dev-dependencies]
 hmp-player = { path = "../hmp-player" }

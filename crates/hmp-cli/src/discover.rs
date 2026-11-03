@@ -63,7 +63,11 @@ fn print_page(page: &hmp_core::DiscoverPage) -> Result<(), Box<dyn std::error::E
                 p.id,
                 p.title,
                 p.songnum,
-                if p.creator.is_empty() { "-" } else { &p.creator }
+                if p.creator.is_empty() {
+                    "-"
+                } else {
+                    &p.creator
+                }
             )?;
         }
         if page.has_more_playlists {

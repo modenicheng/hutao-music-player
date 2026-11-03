@@ -216,7 +216,12 @@ pub async fn show(
             writeln!(stdout, "{:>3}. {}  {}", t.position, t.title, t.source_key)?;
         }
         if offset + page.len() < total {
-            writeln!(stdout, "（{} / {} 首：--offset 翻页）", offset + page.len(), total)?;
+            writeln!(
+                stdout,
+                "（{} / {} 首：--offset 翻页）",
+                offset + page.len(),
+                total
+            )?;
         }
     }
     stdout.flush()?;

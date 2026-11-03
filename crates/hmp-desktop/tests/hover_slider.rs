@@ -54,33 +54,35 @@ fn hover_slider_chain_reports_and_clears() {
 
     let ui = hmp_desktop::AppWindow::new().unwrap();
     ui.window().set_size(slint::PhysicalSize::new(1280, 800));
-    hmp_desktop::bridge::load_data(&ui);
+    hmp_desktop::bridge::load_data(
+        &ui,
+        &std::sync::Arc::new(hmp_desktop::backend::BackendRuntime::new().unwrap()),
+    );
 
     // 侧栏歌单区已接真数据（Data.sidebar-*）：测试环境无库为空 → 手动播种，
     // 让歌单行 hover 链路的结构覆盖与媒体库数据来源解耦。
     {
         let data = hmp_desktop::Data::get(&ui);
-        let color = slint::Color::from_rgb_u8(0x1e, 0x38, 0x5f);
         data.set_sidebar_created(slint::ModelRc::new(slint::VecModel::from(vec![
             hmp_desktop::PlaylistCover {
                 id: "901".into(),
                 name: "测试歌单甲".into(),
-                c1: color,
-                c2: color,
+                relation: "local".into(),
+                image: hmp_desktop::covers::cover_image("playlist:901"),
             },
             hmp_desktop::PlaylistCover {
                 id: "902".into(),
                 name: "测试歌单乙".into(),
-                c1: color,
-                c2: color,
+                relation: "owned".into(),
+                image: hmp_desktop::covers::cover_image("playlist:902"),
             },
         ])));
         data.set_sidebar_favorited(slint::ModelRc::new(slint::VecModel::from(vec![
             hmp_desktop::PlaylistCover {
                 id: "903".into(),
                 name: "收藏歌单".into(),
-                c1: color,
-                c2: color,
+                relation: "subscribed".into(),
+                image: hmp_desktop::covers::cover_image("playlist:903"),
             },
         ])));
         // 我喜欢列表同样播种：内容页滚动命中的行此前隐式依赖真库
@@ -96,7 +98,6 @@ fn hover_slider_chain_reports_and_clears() {
                 album_mid: "".into(),
                 duration_ms: 200_000,
                 quality: "".into(),
-                cover: slint::Image::default(),
             })
             .collect();
         data.set_liked(slint::ModelRc::new(slint::VecModel::from(rows)));
@@ -185,8 +186,12 @@ fn hover_slider_chain_reports_and_clears() {
     assert!(checked > 0, "内容页滚动后应仍能命中行（checked={checked}）");
     println!("scroll containment checked={checked} last={last_report:?}");
 
-    // Equalizer 共享时钟随 mock 时间推进（Timer→属性→绑定链路存活）
+    // Equalizer 共享时钟随 mock 时间推进（Timer→属性→绑定链路存活）。
+    // S9 R3 后 Timer 由 Player.playing 门控：`running` 绑定经 changed 回调
+    // 接线，而 mock_elapsed_time 内 run_change_handlers 在 Timer 激活之后
+    // 执行——置 playing 后先推一拍接线，再推进点火（真实事件循环无此可见性）。
     hmp_desktop::Player::get(&ui).set_playing(true);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
     let eq = hmp_desktop::EqClock::get(&ui);
     let t0 = eq.get_t();
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(100));

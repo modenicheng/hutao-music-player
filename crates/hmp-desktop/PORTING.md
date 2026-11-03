@@ -1,6 +1,6 @@
 # hmp-tauri (Vue) → hmp-desktop (Slint) 分模块移植
 
-基准：`apps/hmp-tauri`（DESIGN.md v0.13，胡桃木设计语言）。
+基准：`apps/hmp-tauri`（已退役，git 历史可回溯；设计基准现 `docs/DESIGN.md` v0.13，胡桃木设计语言）。
 目标：`crates/hmp-desktop` —— 把 Vue 前端按模块移植成 Slint UI。
 旧 Slint 原型（2026-08 初，`#ff2d55` accent 的另一套 Apple Music 风格）整体废弃，文件随模块移植逐个重写/删除。
 
@@ -33,12 +33,12 @@
 - [x] **M5 设置**：总览三分类卡 + 常规（主题三选真实生效，Theme.set-mode）/ 播放（音质四档 Quality.select + 默认音量 HSlider→Player.set-volume 双写）/ 账号（账号读接口未接入 AUDIT §8.6：资料卡诚实占位 + 退出登录禁用 + FactRow "—"）
 - [x] **M6 播放页（2026-09-09 收口，余一项后端阻塞）**：全屏 overlay（slide-bottom 入/退场 + 软卸载）、RulerProgress 刻度条、控制台、OKLab 取色（TrackPalette global 覆写，见下方 M6 收口记录）、歌词（弹簧跟随+景深+无滚动条）、评论区（编辑部式重排 + 112px 固定过渡带）、队列抽屉 themed 态；**未做**：逐字扫色（QRC 词级时间轴未投影，AUDIT §14）
 - [ ] **M7 收尾**：ESC/键盘语义、焦点可达、reduced-motion 免动画、窄窗（⅓ 宽 683px）断点核对
-- [~] **M8 数据接线**：mock → daemon IPC（2026-09-07 完成首轮：播放/队列/收藏歌单/最近/本地库/侧栏歌单真数据，详见下方 M8 接线记录）；内容页（M4 余量）与歌词（M6）等待后端补接口（docs/AUDIT.md §8）
+- [~] **M8 数据接线**：mock → daemon IPC（2026-09-07 完成首轮：播放/队列/收藏歌单/最近/本地库/侧栏歌单真数据，详见下方 M8 接线记录）；内容页/歌词已接入（ff8050e 内容域 + M6 歌词页）；播放页喜欢键真接线（2026-10-23：换曲后台直读库 `relation_desired` 回填收藏态 + 点击发 `Request::Favorite` IPC 乐观翻转，失败/受理均回读库收敛、反馈条人话，「我喜欢」页经 LibraryChanged→schedule_refresh 自动同步）；**下载/已购两页后端无对应域，诚实空态**（2026-09-29 删除 mock.rs，AUDIT §8.5）
 
 ## 已定工程决策
 
 1. **mock-first**：与 Vue 版同纪律 —— 接口形状即契约（types.ts），mock 数据确定性（同一 FNV-1a 种子），诚实空态/禁用。真实数据接线是 M8。
-2. **app.rs（AppCore）暂不动**：真实后端编排原样保留（编译不引用，无 dead_code 警告），M8 重接；`demo.rs`/旧 `bridge.rs`/旧 `bridge_tests.rs` 随旧 UI 契约删除。
+2. **app.rs（AppCore）已随 M8 删除**（2026-09-29 与 mock.rs 同批，AUDIT §8 缺口记录）；真实后端编排由 `backend.rs`/`bridge.rs` 承担。
 3. **模拟播放桥在 Rust**：`slint::Timer` 250ms 快照推进 position，队列/seek/音量/自动下一曲全实现 —— 对应 Vue 的 BrowserPlayerBridge。**（M8 已由 daemon IPC 真桥替换，见下方接线记录；player_host.rs → player_bridge.rs。）**
 4. **封面用 resvg 运行时栅格化**（slint 同款依赖，256px 缓存 `HashMap<seed, Image>`），保证与 Vue 版同一套确定性封面。
 5. **TrackTable 歌手列简化**：歌手串整体一个链接（→ 主歌手页）；多人合唱逐人分链留到 M4 歌手页落地时评估（Slint struct 无嵌套数组，逐人分链需拆模型）。
@@ -49,13 +49,15 @@
 ## M8 接线记录（2026-09-07，首轮）
 
 **架构**：沿 docs/PROJECT.md §8.6 解耦设计 —— 桌面 UI 是 daemon 的又一个适配器。
-`src/backend.rs`：Unix socket 客户端（长度前缀 JSON 帧，`hmp_core::ipc`），连接失败仿 CLI `connect_or_spawn` 拉起 `hmp serve --background`（`spawn_detached_exe` 定位 current_exe 同目录/PATH 上的 hmp 二进制；flock 单实例仍归 daemon）；彻底失败 → 离线诚实降级（全空态，命令 no-op，daemon 退出不自动复活——`hmp quit` 语义优先）。订阅长连接收 `Event::StateChanged`，快照经 `invoke_from_event_loop` 回 UI 线程（推送 ~10Hz）。队列重建只认 `QueueSummary.revision`。媒体库读 = 直读 `library.sqlite3`（`src/library_view.rs`，CLI 同契约）。
+`src/backend.rs`：平台 IPC 客户端（Windows 命名管道 / Unix socket，长度前缀 JSON 帧，`hmp_core::ipc`），连接失败仿 CLI `connect_or_spawn` 拉起 `hmp serve --background`（`spawn_detached_exe` 定位 current_exe 同目录/PATH 上的 hmp 二进制；flock/first_pipe_instance 单实例仍归 daemon）；彻底失败 → 离线诚实降级（全空态，命令 no-op，daemon 退出不自动复活——`hmp quit` 语义优先）。订阅长连接收 `Event::StateChanged`，快照经 `invoke_from_event_loop` 回 UI 线程（推送 ~10Hz）；**事件帧解码失败 → 记日志断线重连**（不静默跳过，协议版本错配下防 UI 冻结）。队列重建只认 `QueueSummary.revision`。媒体库读 = 直读 `library.sqlite3`（`src/library_view.rs`，CLI 同契约）。
 
 **真数据**：我喜欢 / 最近播放（真实时间戳文案）/ 音乐库（扫描根分组统计）/ 歌单（relation 分流，副标题 "N 首"）/ 侧栏歌单区（Data.sidebar-*，色对按 id 哈希确定性装饰）/ 播放条与队列（DaemonState → Player 单向映射，命令 → Request）。
 
-**M4.5 详情页接线（2026-09-07 第二轮）**：歌单/专辑/歌手三页详情 = 导航时同步直读 sqlite（`library_view::playlist_detail / album_detail / artist_detail`，`with_db` 单连接单投影，失败 → found=false 诚实空态）。**详情页参数约定**：歌单 = DB id；专辑/歌手 = 展示名（远端 mid 要等内容接口，AUDIT §8.2）——`SongRow::to_track_row` 把 `artist_mid/album_mid` 填成展示名，TrackTable 空参禁用链接；歌手页对含分隔符的展示串（如 "张韶涵/HOYO-MiX"）按 `library_artists` 名字做最长包含归一。装卸点 = `bridge::apply_route`（navigate/back 共用）。
+**M4.5 详情页接线（2026-09-07 第二轮；2026-10-23 D2 修订）**：歌单/专辑/歌手三页详情 = 导航时同步直读 sqlite（`library_view::playlist_detail / album_detail / artist_detail`，`with_db` 单连接单投影，失败 → 诚实空态）。**详情页参数约定（D-1 双寻址）**：本地 = 歌单 DB id / 专辑/歌手展示名；远端 = `qq:<disstid|albummid|singermid>` 前缀（daemon 三只读详情接口 `PlaylistDetailGet/AlbumDetailGet/ArtistDetailGet`，桌面 `src/remote_details.rs` 异步装载 + 每页代数计数器丢弃迟到回包）。分流点 = `bridge::apply_route`（本地投影 miss 且带前缀才走远端，本地事实优先）；`load_detail` 对远端参数返回 `DetailData::None`（LibraryChanged 重放 no-op，远端页不被误清）。本地行 `SongRow::to_track_row` 仍填展示名链接；远端行（`remote_track_row`）填 `qq:` 前缀 mid，TrackTable 既有链接零改动。歌手页对含分隔符的展示串（如 "张韶涵/HOYO-MiX"）按 `library_artists` 名字做最长包含归一；本地歌手投影 miss 判定 = 曲目空即 None（空页无信息量且拦远端分流，2026-10-23 起与专辑页口径一致）。三页状态机 `*-state`（0=初始 1=加载中 2=就绪 3=未找到 4=失败）本地/远端两路径共同维护；发现页歌单卡 mid/封面旁路表键统一经 `online_covers::playlist_card_key` 规范化（裸数字 → `qq:` 前缀，两侧同函数防封面静默失配）。
 
-**仍 mock**：下载/已购两页（后端无此域，AUDIT §8.5）。
+**坑位（D2 轮新增）**：远端装载入口在 UI 线程被调（on_navigate 栈内）时 state=1 **直接 set**——勿套 `invoke_from_event_loop`（TestingBackend 下会挂起 mock 泵，`spawn_discover_load` 注释在案）；异步回包再走 invoke。`fetch_cover`（online_covers 通用取图核心）去重账本必须进程级（此前 thread_local + 跨线程 remove 删的是另一线程的账，失败出账从未生效——已改全局 Mutex）。
+
+**诚实空态**：下载/已购两页（后端无此域，AUDIT §8.5；2026-09-29 删除 mock.rs）。
 
 **已知偏差（M8 新增）**：
 - 音质文案由 `actual_quality` 映射，无采样率（"FLAC" 而非 "FLAC · 44.1kHz"，诚实）；
@@ -65,7 +67,7 @@
 - 队列点歌 = `Play(该曲 id)`，整队被该单曲替换（无 PlayAt IPC，AUDIT §8.8）；
 - 队列行 QQ 曲目时长 0:00（`track_meta_batch` 无时长投影，AUDIT §8.11）；
 - 客户端音质偏好暂不生效（与 daemon config.toml 两处存储，AUDIT §8.7）；音量以 daemon 推送为准（含 RG 补偿语义，AUDIT §8.12）；
-- ~~歌手/专辑 mid 真数据行为空串~~（M4.5 收敛：详情页参数改用展示名，本地投影可跳转；QQ-only 歌手/专辑落"本地库无此内容"诚实空态，待内容接口换真 mid）；
+- ~~歌手/专辑 mid 真数据行为空串~~（M4.5 收敛：详情页参数改用展示名，本地投影可跳转；QQ-only 歌手/专辑落"本地库无此内容"诚实空态，待内容接口换真 mid）→ **2026-10-23 D2 闭合**：`qq:` 前缀远端寻址 + daemon 三只读详情接口，远端歌手/专辑/歌单页全量真数据；
 - 库页是启动静态快照（无 LibraryChanged 事件，AUDIT §8.9）。
 
 **后端缺口全集**：docs/AUDIT.md §8（12 条 + 汇总表）。
@@ -150,11 +152,10 @@ Rust 预烘焙：封面等比降采样（≤480）+ 3 趟盒滤波（半径随�
 - 数字等宽（tabular-nums）暂无 Slint 内建开关，接受默认字形；
 - 播放页环境层/控制台无 backdrop-filter：模糊预烘焙进 ambient-cover（降采样+盒滤波+增饱和），控制台半透明底近似；
 - 播放页歌手/专辑链接点击后收起 overlay（Vue 不收起；主视口被全屏层遮住，不收起看不到落点）；
-- 播放页喜欢键仍为 mock 态（换曲回落未点亮，与原型一致）；
 - 歌手列整体一个链接（→ 主歌手页），多人合唱逐人分链待 M4 评估；
 - 文件大小公式修正了 TS 版的量纲 bug（`(kbps*1000*ms)/8` → `kbps*ms/8`，旧式单曲显示 ~26 GB）；
 - 窗口标题栏 CJK 方框是 niri 装饰条字体问题，与应用无关；
-- **无窗口关闭按钮**：`no-frame: true`（绕 CSD 字体问题）且未自绘窗口控制，关窗走 WM；要补自绘按钮留 M4+ 壳层打磨。
+- ~~**无窗口关闭按钮**~~：已由自绘标题栏补齐（`title-bar.slint` minimized/maximized/close 三钮 + winit drag 桥 + 8px resize 边，2026-09-09）。
 
 ## Slint 机制坑位（源码确证，2026-09-06）
 
@@ -181,13 +182,19 @@ Rust 预烘焙：封面等比降采样（≤480）+ 3 趟盒滤波（半径随�
 - **舍入对齐**：TS `Math.round` 在 slint 侧用 `Math.round`、Rust 侧用 `f64::round`；别顺手写成 floor/div_ceil（时长"2 小时 5/6 分钟"、"m:ss" 都栽过）。
 - **`absolute-position` 在 repeater 行 + 嵌套 layout 下双重累计 self.y**（2026-09-09 播放页实测，i-slint 1.17.1 headless）：行 abs-y − 容器 abs-y = 2×self.y（布局 y 被沿祖先链重复累计）——HoverGroup 式「差值法」在歌词页这种嵌套布局里会踩雷；歌词弹簧改用行组件直接上报 `self.y + self.height/2`（布局分配的 y 即内容系偏移，滚动不改它）绕开。做窗口系几何换算前先在 headless 下实测。
 - 视觉 QA 基建：`examples/shot.rs`（`cargo run --release -p hmp-desktop --example shot -- <route> [--theme dark] [--playing] [--queue] [--hover X,Y] [--bus-hover X,Y,W,H]`，playing 走 `invoke_play_tracks` 让 PlayerHost 接管快照）+ `/tmp/hmp-qa2/dshot.sh`（niri 按 PID 找窗口 → focus-workspace/focus-window → `screenshot-window`，焦点校验+尺寸校验+重试）；Vue 对照用 `/tmp/hmp-qa/vshot2.mjs`（1420，视口 1018×1228 dpr=1.25，走真实主题循环切暗色）。winit 下 `dispatch_event(PointerMoved)` 不驱动 hover（testing backend 才行），hover 视觉用 `--bus-hover` 或真实指针。
+- **非布局父级下的容器：width 与 height 都必须显式钉住（2026-10-03 窗口化 drag 回归实测）**：普通 Rectangle 容器的显式 height **不进 preferred 尺寸链**（repeater 无固有尺寸、子元素 width=parent.width 反向引用也不贡献 preferred）→ 外层布局把宿主压成 0 高 + `clip: true` → 整表不可见不可点；行 `width: parent.width` 引用一个靠子 preferred 推导宽度的容器 → 循环解出 0 宽 → 同样全灭。旧写法（VerticalLayout 包行）无此坑：布局会主动上报 preferred。修法：容器与宿主（track-table 的 hg 与行窗口容器）双双显式 `width/height`——布局对显式几何子元素是尊重的（表头 Rectangle 同布局内 `height: row-height` 即先例）。排查利器：testing backend + software renderer `Window::take_snapshot` 落 PNG 亲眼看渲染（`i_slint_backend_testing::TestingBackend::new(TestingBackendOptions { renderer_name: Some("software".into()), ..})`，普通 `init_no_event_loop` 无渲染器会报 take_snapshot not implemented）。
+- **Slint 全局属性桥接唯一合法位 = property 声明处的双向别名**（2026-10-03 Viewport 实证）：元素作用域内语句级 `Global.a: expr;` 与 `Global.a <=> b.c;` 都是 parse error；全局 `in-out` 属性要在组件里声明 `property <T> p <=> Global.a;` 再由 changed 回调命令式回写，且 **changed 不保证初值触发**——初值必须在 `init` 里显式赋一次（Viewport.view-h 漏 init 会让窗口化静默退化全量渲染）。
+- **for 整数即模型，无区间语法**（2026-10-03）：`for i in expr:` 迭代 0..expr-1（"use an integer as a model"）；`for i in 0..expr:` 直接报 "Range expressions are not supported"。另外 for 体内**属性不可命名为 `row`**（"Cannot override property 'row'"，基类无此属性也报）——行数据属性改名（rowd）绕开。
+- **应用层缓存 `slint::Image` = 钉死 Slint 内部 5MB 纹理 LRU**（2026-10-03 内存审计）：`Image::load_from_path` 走 Slint 全局 5MB 权重 LRU，但应用层 HashMap 持有 Image 强引用后底层解码位图永不被逐出——任何手写无界 Image 缓存都是 RSS 单调增长（曾达 2.4GB）。统一走 `crate::cover_cache::get_or_load(path, max_side)`（字节加权 LRU 64MB + 装载即降采样，256=行/卡/侧栏、512=播放页大图），勿再手写。
+- **右键检测只能在现有 TouchArea 的 `pointer-event` 内做，勿加覆盖层**（2026-10-04 右键菜单落地，i-slint-core `items/input_items.rs` 确证）：TouchArea 对**所有按键**在 Down/Up 都派发 `pointer-event`（`event.button == PointerEventButton.right`），`clicked` 仅左键；右键 Down 会 GrabMouse 保证释放落回本区。加覆盖 TouchArea 会以最顶层命中截断行 hover 链（见 HoverGroup 注）。**启用的行内 TouchArea（歌手链接/队列移除钮/TextLink）对所有按键 grab，会吞掉右键**——转发给行宿主：`HoverItem.context-requested(x, y)`，坐标用 `self.absolute-position − 行.absolute-position + self.mouse-x/y` 换算回行内（TextLink 同款，原语内置 `context-enabled`/`context-requested`）。
+- **PopupWindow 四事实 + 一限制**（2026-10-04 右键菜单，lower_popups.rs / window.rs / popup.rs 确证）：① 编译期从父树**摘除**（不参与布局/命中），可安全声明在行委托甚至布局内；② 定位锚定声明处父元素，x/y 在 `show()` 时求值且**跟踪锚元素**（滚动跟随）、`place_popup` 自动钳制进窗口（底缘行弹层上收）；③ 锚行卸载（虚拟化滚出窗口）→ Drop 自动关闭；④ 默认策略是 **CloseOnClick**（lower_popups.rs 兜底 value 0；2026-10-23 源码复核更正本条 2026-10-04 的错误记载——并非 CloseOnClickOutside）：弹层内完整点击也关（含禁用行）；点外 press 关闭与 ESC 关闭由 CloseOnClick / CloseOnClickOutside **两策略同供**（ESC 先于业务 esc-scope 收口）。**弹层内切换的二级面板（picker 类）必须显式 `close-policy: close-on-click-outside;`**，否则面板被框架当帧关闭、不可达（S6 验收缺陷 #1 教训）。限制：**宿主组件不能访问 popup 自有属性**（"Cannot access property ... from enclosing component"，lower_popups 校验；`show()/close()` 调用除外）——打开坐标等经 global 传递（TrackMenu.open-x/y）。
 
 ## 构建与启动（M8 起）
 
 - 构建：`cargo build --release`（桌面启动会自动拉起 daemon，需要 `hmp` 二进制在 PATH 或与桌面二进制同目录）。
 - 测试：`cargo test -p hmp-desktop`（mock/nav/format 纯逻辑单测 + backend/library_view 投影单测）。
 - 启动：`cargo run --release -p hmp-desktop --bin hmp-desktop`（niri 下逻辑目标 1024×1152 半宽 / 2048×1152 全宽）。
-  - 启动即连接 daemon socket（`$XDG_RUNTIME_DIR/hmp.sock`），连不上自动 `hmp serve --background`（CLI 同款）；失败降级离线（全空态、命令无效）。
+  - 启动即连接 daemon IPC 端点（Windows 命名管道 / Unix socket，同 `server::socket_path()`），连不上自动 `hmp serve --background`（CLI 同款）；失败降级离线（全空态、命令无效）。
   - 库页数据 = 启动时直读 `$XDG_DATA_HOME/hmp/library.sqlite3` 的静态快照：先 `hmp scan ~/Music` 入库本地曲目，QQ 侧 `hmp login` + `hmp library sync`。
   - 播放/收藏/歌单写全走 daemon（与 CLI/MPRIS 同一状态源）；`hmp quit` 后 UI 呈离线空态，不自动复活后端。
 - 视觉 QA：`cargo run --release -p hmp-desktop --example shot -- <route> [--param <值>] [--theme dark] [--queue] [--playing]`（真实应用宿主，route 如 library/recent/local/downloads/purchased/playlist/album/artist/settings*）+ `/tmp/hmp-qa2/dshot3.sh <name> <args…>`（niri 截图；**不隔离 XDG_DATA_HOME**，直读真实用户库；daemon 需已在跑，播放态用 `hmp play` 预置）。

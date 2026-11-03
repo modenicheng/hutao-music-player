@@ -87,7 +87,7 @@ pub struct GetSonglistDetailResponse {
 /// 创建/删除歌单响应（上游 `CreateDeleteSonglistResp`）。
 ///
 /// 除顶层 `retCode` 外，tid/dirId/dirName 位于 `$.result` 子对象
-/// （由 [`extract_result_fields`] 提取；2026-09-29 实测确认）。
+/// （由 `extract_result_fields` 提取；2026-09-29 实测确认）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct CreateDeleteSonglistResp {
     /// 返回码（0=成功）。

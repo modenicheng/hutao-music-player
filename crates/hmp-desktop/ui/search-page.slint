@@ -1,12 +1,117 @@
 // 搜索页：smartbox 快速搜索（daemon Search IPC，免登录）。
-// 数据源无时长/专辑列 → 表格收起两列；结果行点击 → 播放该曲。
-// 状态机：0=初始 1=搜索中 2=有结果 3=无结果 4=失败（离线/网络错误）。
+// 三 tab（歌曲/专辑/歌手，C6）：计数徽章直接绑模型长度（M4 零桥接成本）；
+// 专辑 CoverCard 网格 / 歌手圆形头像卡（SearchView.vue 基准），点击经
+// qq: 前缀深入远端详情（D2 动线衔接）。
+// 状态机：0=初始 1=搜索中 2=有结果 3=无结果（三组全空） 4=失败（离线）。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, Button, ButtonVariant } from "primitives.slint";
-import { PageHeader } from "page-parts.slint";
+import { PageHeader, CoverCardGrid } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
+import { Nav, Route } from "nav.slint";
 import { Data } from "stores.slint";
+import { ArtistCardData } from "data.slint";
+
+// tab 胶囊（Vue .search-tab：label + 计数徽章；active = 品牌软底 + 描边）。
+component SearchTab inherits Rectangle {
+    in property <string> label;
+    in property <int> count;
+    in property <bool> active;
+    callback clicked();
+
+    height: 30px;
+    border-radius: Theme.pill(self.height);
+    border-width: 1px;
+    border-color: root.active ? Theme.accent.transparentize(0.55) : transparent;
+    background: root.active
+        ? Theme.accent.transparentize(0.88)
+        : (touch.has-hover ? Theme.muted : transparent);
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 6px;
+        alignment: center;
+        cross-axis-alignment: center;
+
+        Text {
+            vertical-alignment: center;
+            text: root.label;
+            color: root.active ? Theme.foreground : Theme.muted-foreground;
+            font-size: 13px;
+            font-weight: root.active ? 600 : 400;
+        }
+
+        // 计数徽章（M4：模型长度直绑）
+        Rectangle {
+            width: badge-text.preferred-width + 12px;
+            height: 17px;
+            border-radius: Theme.pill(self.height);
+            background: root.active ? Theme.accent.transparentize(0.78) : Theme.muted;
+
+            badge-text := Text {
+                width: parent.width;
+                height: parent.height;
+                text: root.count;
+                color: root.active ? Theme.foreground : Theme.muted-foreground;
+                font-size: 10.5px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// 歌手圆形头像卡（SearchView.vue .artist-card：圆头像 + 名字居中）。
+component ArtistCard inherits Rectangle {
+    in property <ArtistCardData> card;
+    callback clicked();
+
+    width: 104px;
+    height: 130px;
+    background: transparent;
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        width: 96px;
+        height: 96px;
+        border-radius: self.width / 2;
+        clip: true;
+        background: Theme.muted;
+        drop-shadow-blur: touch.has-hover ? 8px : 2px;
+        drop-shadow-color: #241F1B.transparentize(touch.has-hover ? 0.86 : 0.92);
+        drop-shadow-offset-y: touch.has-hover ? 2px : 1px;
+
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.card.cover;
+            image-fit: ImageFit.cover;
+        }
+    }
+
+    Text {
+        y: 102px;
+        width: parent.width;
+        text: root.card.name;
+        color: Theme.foreground;
+        font-size: 12px;
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+}
 
 export component SearchPage inherits Rectangle {
     background: transparent;
@@ -110,8 +215,8 @@ export component SearchPage inherits Rectangle {
             }
         }
 
-        // —— 结果 / 状态———
-        if Data.search-state == 1: Text {
+        // —— 状态———
+        if Data.search-state == 1 && Data.search-results.length == 0 && Data.search-albums.length == 0 && Data.search-artists.length == 0: Text {
             height: 64px;
             text: "搜索中…";
             color: Theme.muted-foreground;
@@ -144,27 +249,103 @@ export component SearchPage inherits Rectangle {
             vertical-alignment: center;
         }
 
-        // —— 结果（对齐 Vue：搜索中保留旧结果弱化显示，不整块卸载）———
-        if Data.search-state == 2 || (Data.search-state == 1 && Data.search-results.length > 0): VerticalLayout {
-            spacing: Theme.space-2;
-
-            Text {
-                text: "共 \{Data.search-count} 条";
-                color: Theme.muted-foreground;
-                font-size: 13px;
+        // —— 结果区（对齐 Vue：搜索中保留旧结果弱化显示，不整块卸载）———
+        if Data.search-state == 2 || (Data.search-state == 1 && (Data.search-results.length > 0 || Data.search-albums.length > 0 || Data.search-artists.length > 0)): VerticalLayout {
+            spacing: Theme.space-4;
+            // 搜索中（state==1）旧结果整体弱化
+            opacity: Data.search-state == 1 ? 0.5 : 1;
+            animate opacity {
+                duration: Theme.duration-fast;
+                easing: cubic-bezier(0.2, 0, 0, 1);
             }
 
-            TrackTable {
-                tracks: Data.search-results;
-                show-header: true;
-                show-album: false;
-                show-duration: false;
-                // 搜索中（state==1）旧结果整体弱化
-                opacity: Data.search-state == 1 ? 0.5 : 1;
-                animate opacity {
-                    duration: Theme.duration-fast;
-                    easing: cubic-bezier(0.2, 0, 0, 1);
+            // —— tab 胶囊行（C6；计数徽章绑模型长度，M4）———
+            HorizontalLayout {
+                spacing: 8px;
+
+                SearchTab {
+                    label: "歌曲";
+                    count: Data.search-results.length;
+                    active: Data.search-tab == 0;
+                    clicked => {
+                        Data.search-tab = 0;
+                    }
                 }
+                SearchTab {
+                    label: "专辑";
+                    count: Data.search-albums.length;
+                    active: Data.search-tab == 1;
+                    clicked => {
+                        Data.search-tab = 1;
+                    }
+                }
+                SearchTab {
+                    label: "歌手";
+                    count: Data.search-artists.length;
+                    active: Data.search-tab == 2;
+                    clicked => {
+                        Data.search-tab = 2;
+                    }
+                }
+            }
+
+            // —— 歌曲区（现状不动：窄投影无专辑/时长列 → 收起两列）———
+            if Data.search-tab == 0 && Data.search-results.length > 0: VerticalLayout {
+                spacing: Theme.space-2;
+
+                Text {
+                    text: "共 \{Data.search-count} 条";
+                    color: Theme.muted-foreground;
+                    font-size: 13px;
+                }
+
+                TrackTable {
+                    tracks: Data.search-results;
+                    show-header: true;
+                    show-album: false;
+                    show-duration: false;
+                }
+            }
+
+            // —— 专辑区：封面卡网格（mid = qq:albummid → 远端专辑详情）———
+            if Data.search-tab == 1 && Data.search-albums.length > 0: CoverCardGrid {
+                width: parent.width;
+                cards: Data.search-albums;
+                row-count: Data.search-albums.length;
+                card-clicked(mid) => {
+                    Nav.navigate(Route.album, mid);
+                }
+            }
+
+            // —— 歌手区：圆形头像卡网格（mid = qq:singermid → 远端歌手页）———
+            if Data.search-tab == 2 && Data.search-artists.length > 0: Rectangle {
+                width: parent.width;
+                // 行数自撑容器高度（同 CoverCardGrid 摆卡模式）
+                height: artist-rows > 0 ? artist-rows * 146px + (artist-rows - 1) * 16px : 0px;
+
+                property <int> artist-cols: Math.max(1, Math.floor((self.width + 16px) / 120px));
+                property <int> artist-rows: Math.ceil(Data.search-artists.length / artist-cols);
+
+                for artist[index] in Data.search-artists: ArtistCard {
+                    card: artist;
+                    x: Math.mod(index, artist-cols) * 120px;
+                    y: Math.floor(index / artist-cols) * (146px + 16px);
+                    clicked => {
+                        Nav.navigate(Route.artist, artist.mid);
+                    }
+                }
+            }
+
+            // —— 当前 tab 空兜底（三组不全空但本组无结果）———
+            if (Data.search-tab == 0 && Data.search-results.length == 0)
+                || (Data.search-tab == 1 && Data.search-albums.length == 0)
+                || (Data.search-tab == 2 && Data.search-artists.length == 0): Text {
+                height: 64px;
+                text: "该分类下没有相关结果";
+                color: Theme.muted-foreground;
+                font-size: 13.5px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
         }
     }

@@ -14,7 +14,7 @@ fn main() {
     println!("—— all output devices ——");
     if let Ok(devices) = host.output_devices() {
         for device in devices {
-            let name = device.name().unwrap_or_else(|e| format!("<name err: {e}>"));
+            let name = device.to_string();
             let configs = device
                 .supported_output_configs()
                 .map(|configs| configs.count())
@@ -24,7 +24,7 @@ fn main() {
     }
     println!("—— default_output_device ——");
     match host.default_output_device() {
-        Some(device) => println!("name: {:?}", device.name().ok()),
+        Some(device) => println!("name: {device}"),
         None => println!("none"),
     }
     println!("—— production open_default_output() ——");

@@ -102,7 +102,7 @@ fn main() -> Result<(), slint::PlatformError> {
         hmp_desktop::Theme::get(&ui).set_mode(mode);
     }
 
-    bridge::load_data(&ui);
+    bridge::load_data(&ui, &runtime);
     bridge::bind(
         &ui,
         std::sync::Arc::clone(&prefs),

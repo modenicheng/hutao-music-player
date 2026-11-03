@@ -49,7 +49,9 @@ const HALF_BLOCKS: [char; 4] = [' ', '▀', '▄', '█'];
 
 /// `width` 的、不小于 `min` 的最小约数；不存在返回 1。
 fn smallest_divisor_ge(width: u32, min: u32) -> u32 {
-    (min..=width).find(|&f| width % f == 0).unwrap_or(1)
+    (min..=width)
+        .find(|&f| width.is_multiple_of(f))
+        .unwrap_or(1)
 }
 
 /// 半块渲染：每字符承载 2 行 × 1 列像素（原生分辨率）。

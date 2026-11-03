@@ -5,7 +5,7 @@
 //! 命令 no-op。全部 UI 写发生在 UI 线程（回调与订阅投递闭包内）。
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -13,10 +13,12 @@ use std::time::{Duration, Instant};
 use slint::{ComponentHandle, Global, Model, ModelRc, TimerMode, VecModel, Weak};
 
 use hmp_core::ipc::{DaemonState, Request, Response};
-use hmp_core::{AudioQuality, LoopMode, PlaybackState, PlaybackStatus, PlayerCommand, TrackId};
+use hmp_core::{
+    AudioQuality, LoopMode, PlaybackState, PlaybackStatus, PlayerCommand, TrackId, TrackProvider,
+};
 
 use crate::backend::{BackendRuntime, QueueRowMeta, UiStateEvent};
-use crate::{AppWindow, CommentRow, LyricRow, NowPlaying, Player, TrackRow};
+use crate::{AppWindow, CommentRow, LyricRow, NowPlaying, Player, QueueRow};
 
 /// seek 落点确认容忍：daemon 推送位置与目标差 ≤ 此值视为已生效
 /// （播放中位置持续前进，容忍取推送周期量级）。
@@ -72,6 +74,26 @@ thread_local! {
     static SENT_META: RefCell<HashMap<String, SentMeta>> = RefCell::new(HashMap::new());
 }
 
+/// 单曲命令（右键菜单下一首播放/加入队列）发送前的显示元数据登记：
+/// 与 [`dispatch_command`] 的 PlayList 同一覆盖层，新入队曲目若不在
+/// 库投影里，队列行标题不回退成 mid。须在 UI 线程调用（回调内即满足）。
+pub(crate) fn remember_meta(mid: &str, title: &str, artists: &str, album: &str, duration_ms: i32) {
+    if mid.is_empty() {
+        return;
+    }
+    SENT_META.with(|cell| {
+        cell.borrow_mut().insert(
+            mid.to_string(),
+            SentMeta {
+                title: title.to_string(),
+                artists: artists.to_string(),
+                album: album.to_string(),
+                duration_ms,
+            },
+        );
+    });
+}
+
 // 反馈条宿主 weak + 消退定时器（UI 线程独占；invoke_from_event_loop 落地）。
 thread_local! {
     static FEEDBACK_UI: RefCell<Weak<AppWindow>> = RefCell::new(Weak::default());
@@ -81,23 +103,60 @@ thread_local! {
 /// 命令派发（命令-查询分离 + 错误浮出）：受理（`Response::Ok`）即静默，
 /// 真实结果经状态推送呈现；被拒/传输失败 → 反馈条给用户可读的解释
 /// （未登录等用户可自救的错误给人话文案，其余透传 daemon 消息）。
-fn dispatch_command(runtime: &Arc<BackendRuntime>, ui_weak: &Weak<AppWindow>, req: Request) {
+pub(crate) fn dispatch_command(
+    runtime: &Arc<BackendRuntime>,
+    ui_weak: &Weak<AppWindow>,
+    req: Request,
+) {
+    let runtime = Arc::clone(runtime);
+    let ui_weak = ui_weak.clone();
+    runtime.spawn(async move {
+        report_command_result(&ui_weak, crate::backend::request(req).await);
+    });
+}
+
+/// [`dispatch_command`] 的受理回调变体：命令被 daemon 接受（`Response::Ok`）
+/// 后在 UI 线程执行钩子（右键菜单歌单写入后触发库刷新，让列表即时落账；
+/// 其余命令的真实结果本就走推送，无需钩子）。错误路径与 dispatch 一致。
+pub(crate) fn dispatch_command_on_ok(
+    runtime: &Arc<BackendRuntime>,
+    ui_weak: &Weak<AppWindow>,
+    req: Request,
+    on_ok: impl FnOnce(&AppWindow) + Send + 'static,
+) {
     let runtime = Arc::clone(runtime);
     let ui_weak = ui_weak.clone();
     runtime.spawn(async move {
         match crate::backend::request(req).await {
-            Ok(Response::Ok) => {}
-            Ok(Response::Err { code, message }) => {
-                show_feedback(&ui_weak, friendly_error(code, &message));
+            Ok(Response::Ok) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        on_ok(&ui);
+                    }
+                });
             }
-            // 查询型响应不会出现在命令路径；宽容忽略。
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("{e}: 播放命令未送达");
-                show_feedback(&ui_weak, "播放服务未连接，操作没有生效".into());
-            }
+            result => report_command_result(&ui_weak, result),
         }
     });
+}
+
+/// 命令响应 → 反馈条（受理静默；被拒/未连接给人话）。
+fn report_command_result(
+    ui_weak: &Weak<AppWindow>,
+    result: Result<Response, crate::backend::BackendError>,
+) {
+    match result {
+        Ok(Response::Ok) => {}
+        Ok(Response::Err { code, message }) => {
+            show_feedback(ui_weak, friendly_error(code, &message));
+        }
+        // 查询型响应不会出现在命令路径；宽容忽略。
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("{e}: 播放命令未送达");
+            show_feedback(ui_weak, "播放服务未连接，操作没有生效".into());
+        }
+    }
 }
 
 /// daemon 拒绝码 → 用户可读文案。
@@ -130,6 +189,133 @@ fn show_feedback(ui_weak: &Weak<AppWindow>, message: String) {
                 });
         });
     });
+}
+
+// ————————————————————————————————————————————————————————————
+// 喜欢（收藏）：换曲回填 + 点击写（daemon Favorite，本地先提交 spec §3.3；
+// QQ 远端由 daemon SyncWorker 消费 outbox 异步同步，UI 只表达本地事实）
+// ———————————————————————————————————————————————————————————
+
+/// 收藏写未送达（守护进程不可达/拉起失败）反馈文案（report_command_result
+/// 「播放服务未连接」同句式）。
+const FAVORITE_UNREACHABLE_TEXT: &str = "收藏服务未连接，操作没有生效";
+
+/// 收藏写回包动作（纯逻辑决策表，单测钉行为）。
+#[derive(Debug, Clone, PartialEq)]
+enum FavoriteOutcome {
+    /// 受理：刷新库页（「我喜欢」即时落账）+ 回读库收敛心形。
+    Accepted,
+    /// 未生效：反馈条人话（携带最终文案）+ 回读库回滚心形。
+    Rejected(String),
+    /// 传输失败/离线：反馈条 + 回读库回滚心形。
+    Unreachable,
+}
+
+/// 回包 → 动作映射。查询型响应不会出现在收藏命令路径；意外形态按
+/// 「未生效」诚实收敛（与 report_command_result 的宽容忽略不同——收藏
+/// 路径有 UI 乐观态在途，任何非 Ok 都必须回读库对齐）。
+fn favorite_outcome(result: &Result<Response, crate::backend::BackendError>) -> FavoriteOutcome {
+    match result {
+        Ok(Response::Ok) => FavoriteOutcome::Accepted,
+        Ok(Response::Err { code, message }) => {
+            FavoriteOutcome::Rejected(friendly_error(*code, message))
+        }
+        Ok(_) => FavoriteOutcome::Rejected("操作未生效：守护进程应答异常".into()),
+        Err(_) => FavoriteOutcome::Unreachable,
+    }
+}
+
+/// source/key 分流（CLI `provider_of` 同语义：local → ("local", id 全串含
+/// `local:` 前缀)；qq → ("qq", mid)。本地键归一化由 storage
+/// `canonical_local_key` 内部统一，两侧无需预处理）。
+fn favorite_provider_of(id: &str) -> (&'static str, String) {
+    if TrackProvider::from_id(id) == TrackProvider::Local {
+        ("local", id.to_string())
+    } else {
+        ("qq", id.to_string())
+    }
+}
+
+/// 当前曲收藏态（本地事实视图；CLI `hmp favorite list` 同契约直读
+/// library.sqlite3）：库缺失/不可用 → None（调用方静默降级保持中性态）。
+fn liked_of(mid: &str) -> Option<bool> {
+    let path = hmp_storage::data_dir().join("library.sqlite3");
+    if !path.exists() {
+        return None;
+    }
+    let mut db = hmp_storage::LibraryDb::open(&path).ok()?;
+    Some(liked_in_db(&mut db, mid))
+}
+
+/// 库事实查询（纯逻辑，单测锚点）：relation_desired 按 (source, key) 直查；
+/// 无关系行 / 查询失败 → false（desired_state 才是本地事实，1=已收藏）。
+fn liked_in_db(db: &mut hmp_storage::LibraryDb, mid: &str) -> bool {
+    let (source, key) = favorite_provider_of(mid);
+    db.relation_desired("track", source, &key, "liked")
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
+/// 换曲收藏态回填：后台读库 → UI 线程按 current_mid 守卫写入（换曲/清空
+/// 在途的陈包必弃，spawn_comment_fetch 同构）。阻塞 rusqlite 毫秒级，
+/// runtime 工作线程执行（backend 队列投影同惯例）。
+fn spawn_liked_backfill(ui_weak: &Weak<AppWindow>, runtime: &Arc<BackendRuntime>, mid: String) {
+    let ui_weak = ui_weak.clone();
+    runtime.spawn(async move {
+        let liked = liked_of(&mid);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            if Player::get(&ui).get_current_mid() != mid.as_str() {
+                return; // 曲已切走：陈包丢弃
+            }
+            // 库不可用（None）保持中性 false（换曲时已先置 false）。
+            NowPlaying::get(&ui).set_liked(liked.unwrap_or(false));
+        });
+    });
+}
+
+/// 收藏写回包应用（UI 线程）：mid 守卫后按 favorite_outcome 决策执行。
+/// 受理与失败都回读库：daemon 在应答 Ok 前已同步落库（server.rs 无 await
+/// 间隔），失败路径即「诚实回滚到点击前」，多连点交错时收敛到库事实
+/// （最后到达 daemon 者胜出；backend 冷启动重试可致到达序 ≠ 点击序，
+/// 极端倒挂窗口下终值可能与最后一次点击意图相反——已知边界，不做在途
+/// 串行化）。
+fn apply_favorite_reply(
+    ui_weak: &Weak<AppWindow>,
+    runtime: &Arc<BackendRuntime>,
+    mid: String,
+    result: Result<Response, crate::backend::BackendError>,
+) {
+    let Some(ui) = ui_weak.upgrade() else {
+        return;
+    };
+    // 曲已切走：写已作用于旧曲（库页刷新交给 LibraryChanged 推送），
+    // 不回滚也不回填当前曲。
+    if Player::get(&ui).get_current_mid() != mid.as_str() {
+        return;
+    }
+    match favorite_outcome(&result) {
+        FavoriteOutcome::Accepted => {
+            // 「我喜欢」页即时落账：受理后主动刷新（与 daemon LibraryChanged
+            // 推送互补，推送丢失/离线窗口期不落空——menu_bridge 歌单写同款
+            // 双保险）。
+            crate::bridge::schedule_refresh(&ui, runtime);
+            // 心形收敛确认：读回应等于乐观值；在途交错时以库事实为准。
+            spawn_liked_backfill(ui_weak, runtime, mid);
+        }
+        FavoriteOutcome::Rejected(message) => {
+            show_feedback(ui_weak, message);
+            spawn_liked_backfill(ui_weak, runtime, mid);
+        }
+        FavoriteOutcome::Unreachable => {
+            tracing::warn!("收藏命令未送达（daemon 不可达）");
+            show_feedback(ui_weak, FAVORITE_UNREACHABLE_TEXT.into());
+            spawn_liked_backfill(ui_weak, runtime, mid);
+        }
+    }
 }
 
 /// 绑定 Player global 命令回调并挂载订阅任务（bootstrap：首连在订阅循环内
@@ -398,6 +584,50 @@ pub fn bind(ui: &AppWindow, runtime: Arc<BackendRuntime>, prefs: Arc<Mutex<crate
         });
     }
 
+    {
+        // 喜欢键：乐观翻转 + daemon Favorite 写（本地先提交；QQ 远端由
+        // SyncWorker 异步同步）。回包三分支见 apply_favorite_reply——受理与
+        // 失败都回读库收敛，多连点终态 = 库事实（最后到达者胜出；到达序 ≠
+        // 点击序的极端倒挂窗口见其文档注释）。
+        let runtime = Arc::clone(&runtime);
+        let ui_weak = ui_weak.clone();
+        NowPlaying::get(ui).on_toggle_liked(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let player = Player::get(&ui);
+            let mid = player.get_current_mid().to_string();
+            if mid.is_empty() {
+                return; // 无曲不可收藏
+            }
+            let np = NowPlaying::get(&ui);
+            let desired = !np.get_liked();
+            np.set_liked(desired); // 乐观翻转（回包后回读库收敛/回滚）
+            let (source, key) = favorite_provider_of(&mid);
+            // 库外新行的建行标题：展示题缺失回退 id（CLI favorite add 同款）。
+            let shown_title = player.get_title().to_string();
+            let title = if shown_title.is_empty() {
+                mid.clone()
+            } else {
+                shown_title
+            };
+            let runtime_for_reply = Arc::clone(&runtime);
+            let ui_weak_for_reply = ui_weak.clone();
+            runtime.spawn(async move {
+                let result = crate::backend::request(Request::Favorite {
+                    source: source.to_string(),
+                    key,
+                    title,
+                    desired,
+                })
+                .await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    apply_favorite_reply(&ui_weak_for_reply, &runtime_for_reply, mid, result);
+                });
+            });
+        });
+    }
+
     bind_ui_toggles(ui, &runtime);
 
     // —— 订阅：DaemonState 推送 → Player global（UI 线程应用）———
@@ -474,6 +704,12 @@ fn apply_event(
     // 刷新库页与当前详情页（AUDIT §8.9；UI 线程只做模型落地，不再同步读库）。
     if event.library_changed {
         crate::bridge::schedule_refresh(&ui, runtime);
+        // 当前曲心形随库事实走：后台 reconcile / CLI 收藏写也反映到播放页。
+        // 与在途点击写交错时会瞬时读回旧值再由回包翻回——终态正确，仅闪动。
+        let mid = player.get_current_mid().to_string();
+        if !mid.is_empty() {
+            spawn_liked_backfill(&ui.as_weak(), runtime, mid);
+        }
         return;
     }
 
@@ -482,7 +718,13 @@ fn apply_event(
     if let Some(rows) = &event.queue_rows {
         let mids: Vec<String> = rows.iter().map(|row| row.mid.clone()).collect();
         *queue_mids.lock().expect("queue mids") = mids;
-        let track_rows: Vec<TrackRow> = rows.iter().map(row_from_meta).collect();
+        // S9 R1b：重建立即（字符串/结构），本地行封面 miss 不再 90 连发同步
+        // 解码——热行缓存探测命中即同步直出，冷行占位 + 异步逐行回填。
+        let mut pending_covers: Vec<(String, String)> = Vec::new();
+        let track_rows: Vec<QueueRow> = rows
+            .iter()
+            .map(|row| row_from_meta(row, &mut pending_covers))
+            .collect();
         let total_ms: u64 = rows.iter().map(|row| row.duration_ms.max(0) as u64).sum();
         player.set_queue_meta(
             format!(
@@ -493,12 +735,50 @@ fn apply_event(
             .into(),
         );
         player.set_queue(ModelRc::new(VecModel::from(track_rows)));
+        // 回填排程（换装语义：空批也换装——旧代在途条目随之作废）。
+        // pending 计数是 E3 口径：换曲一次重建的 miss 解码数可从日志读出。
+        if !pending_covers.is_empty() {
+            tracing::debug!(
+                rows = rows.len(),
+                pending = pending_covers.len(),
+                "queue rebuild: local row covers scheduled for backfill"
+            );
+        }
+        schedule_queue_cover_backfill(ui_weak.clone(), pending_covers.into());
+        // QQ 远程封面行预取 + 回包原地换图（2026-10-04 封面审计①）：队列行
+        // 封面在投影时固化，daemon rebind_cover_url 不触发队列重建——不回填
+        // 则抽屉里非当前曲整场会话占位。去重/失败出账在 track_covers。
+        let remote_covers: Vec<(String, String)> = rows
+            .iter()
+            .filter_map(|row| {
+                let uri = row.cover_uri.as_deref()?;
+                (uri.starts_with("http://") || uri.starts_with("https://"))
+                    .then(|| (row.mid.clone(), uri.to_string()))
+            })
+            .collect();
+        if !remote_covers.is_empty() {
+            let ui_weak = ui_weak.clone();
+            crate::track_covers::prefetch_tracks_with(
+                runtime,
+                remote_covers,
+                Some(Arc::new(move |mid, image| {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        update_queue_row_cover(&Player::get(&ui), &mid, image);
+                    }
+                })),
+            );
+        }
     }
 
     let Some(state) = event.state else {
         apply_offline(&player, ui_weak);
         // 订阅只在在线↔离线翻转时投递一次空态：提示一次，不随重试刷屏。
-        show_feedback(ui_weak, "播放服务未连接，播放操作暂不可用".into());
+        // 可操作原因（陈旧构建/缺二进制等，自带修复指引）优先于笼统提示
+        // ——「点了没反应」式离线是排障黑洞（§21「前端不能播放」实锤）。
+        let reason = event
+            .offline_reason
+            .unwrap_or_else(|| "播放服务未连接，播放操作暂不可用".into());
+        show_feedback(ui_weak, reason);
         return;
     };
     let mids = queue_mids.lock().expect("queue mids").clone();
@@ -517,6 +797,77 @@ fn apply_offline(player: &Player, ui_weak: &Weak<AppWindow>) {
     player.set_shuffle(false);
     LAST_SHOWN_ERROR.with(|cell| *cell.borrow_mut() = None);
     clear_now_playing(player, ui_weak);
+}
+
+// ——— S9 R1b：队列封面异步逐行回填 ———
+//
+// 换曲/结构变化的重投影保留（模型立即重建），但本地 file:// 行的封面装载
+// 从「重建派发内 ≤90 次 get_or_load 同步解码」改为：热行缓存探测命中即同步
+// 直出（零解码零闪烁），冷行占位 + 登记 pending，单一 repeating Timer
+// （16ms × ≤6 行/tick）在 UI 线程分批真装载并原地换图。世代语义由「队列
+// 换装 + 单一 Timer」吸收（PLAN §2.1 D3）：每次重建整体替换 pending，在途
+// 批次自然作废（不为已淘汰行解码）；队列耗尽/空批换装即停表，不留常开 Timer
+// （与 R3 EqClock 门控同纪律）。
+
+/// 每 tick 回填行数上限：90 行冷启动 ≈ 15 tick ≈ 240ms 填满，批间让出渲染/输入。
+const COVER_BACKFILL_BATCH: usize = 6;
+/// tick 间隔（≈1 帧）。
+const COVER_BACKFILL_TICK: Duration = Duration::from_millis(16);
+
+thread_local! {
+    /// 待回填行（mid, 封面盘路径）；换装语义见上，全部 UI 线程触碰。
+    static PENDING_COVERS: RefCell<VecDeque<(String, String)>> =
+        const { RefCell::new(VecDeque::new()) };
+    /// 回填驱动 Timer（default = 未激活；耗尽/空换装即 stop）。
+    static COVER_BACKFILL_TIMER: RefCell<slint::Timer> = RefCell::new(slint::Timer::default());
+}
+
+/// 登记一批待回填封面并起动回填 Timer：pending 整体换装（旧代在途条目作废）；
+/// 空批 = 新模型无冷行 → 清队停表。
+fn schedule_queue_cover_backfill(ui_weak: Weak<AppWindow>, pending: VecDeque<(String, String)>) {
+    let idle = pending.is_empty();
+    PENDING_COVERS.with(|cell| *cell.borrow_mut() = pending);
+    if idle {
+        COVER_BACKFILL_TIMER.with(|cell| cell.borrow().stop());
+        return;
+    }
+    COVER_BACKFILL_TIMER.with(|cell| {
+        cell.borrow()
+            .start(slint::TimerMode::Repeated, COVER_BACKFILL_TICK, move || {
+                process_cover_backfill_tick(&ui_weak)
+            });
+    });
+}
+
+/// 单个回填 tick：drain ≤BATCH 条真装载（get_or_load：LRU 记账照旧）并按 mid
+/// 原地换图（mid 已不在当前模型 → no-op）；批耗尽/窗口已亡即停表。
+fn process_cover_backfill_tick(ui_weak: &Weak<AppWindow>) {
+    let batch: Vec<(String, String)> = PENDING_COVERS.with(|cell| {
+        let mut queue = cell.borrow_mut();
+        let take = COVER_BACKFILL_BATCH.min(queue.len());
+        queue.drain(..take).collect()
+    });
+    if batch.is_empty() {
+        stop_cover_backfill();
+        return;
+    }
+    let Some(ui) = ui_weak.upgrade() else {
+        stop_cover_backfill();
+        return;
+    };
+    let player = Player::get(&ui);
+    for (mid, path) in &batch {
+        if let Some(image) = crate::cover_cache::get_or_load(path, 256) {
+            update_queue_row_cover(&player, mid, image);
+        }
+    }
+    if PENDING_COVERS.with(|cell| cell.borrow().is_empty()) {
+        stop_cover_backfill();
+    }
+}
+
+fn stop_cover_backfill() {
+    COVER_BACKFILL_TIMER.with(|cell| cell.borrow().stop());
 }
 
 // daemon `last_error` 已展示消息（去重：状态推送 ~10Hz 携带同一错误，
@@ -590,7 +941,7 @@ fn apply_daemon_state(
     player.set_duration_ms(duration);
     push_time_text(player, player.get_position_ms(), duration);
 
-    // 换曲检测：重置播放页 mock 态（喜欢回落）并重拉歌词/评论。
+    // 换曲检测：重置播放页瞬态（喜欢先熄灭、回填库事实）并重拉歌词/评论。
     let mid = track.id.0.clone();
     let mid_changed = PREV_MID.with(|cell| {
         let mut prev = cell.borrow_mut();
@@ -600,25 +951,25 @@ fn apply_daemon_state(
         }
         changed
     });
-    if mid_changed {
-        if let Some(ui) = ui_weak.upgrade() {
-            let np = NowPlaying::get(&ui);
-            np.set_liked(false);
-            np.set_active_line(-1);
-            LYRIC_STAMPS.with(|cell| cell.borrow_mut().clear());
-            // 本地/QQ 同一歌词管线：本地曲 daemon 先读同目录 .lrc/内嵌标签，
-            // 缺失再按标题+歌手检索 QQ 兜底（本地优先）；QQ 曲按 mid 直取。
-            np.set_lyrics_loading(true);
-            spawn_lyric_fetch(
-                ui_weak,
-                runtime,
-                mid.clone(),
-                track.title.clone(),
-                track.artist_names(),
-            );
-            COMMENT_KEY.with(|cell| *cell.borrow_mut() = None);
-            maybe_load_comments(runtime, ui_weak);
-        }
+    if mid_changed && let Some(ui) = ui_weak.upgrade() {
+        let np = NowPlaying::get(&ui);
+        // 中性过渡先熄灭，真实收藏态由后台回填（库事实，陈包守卫）。
+        np.set_liked(false);
+        spawn_liked_backfill(ui_weak, runtime, mid.clone());
+        np.set_active_line(-1);
+        LYRIC_STAMPS.with(|cell| cell.borrow_mut().clear());
+        // 本地/QQ 同一歌词管线：本地曲 daemon 先读同目录 .lrc/内嵌标签，
+        // 缺失再按标题+歌手检索 QQ 兜底（本地优先）；QQ 曲按 mid 直取。
+        np.set_lyrics_loading(true);
+        spawn_lyric_fetch(
+            ui_weak,
+            runtime,
+            mid.clone(),
+            track.title.clone(),
+            track.artist_names(),
+        );
+        COMMENT_KEY.with(|cell| *cell.borrow_mut() = None);
+        maybe_load_comments(runtime, ui_weak);
     }
 
     // 进度展示：拖拽中（seeking）或落点未确认（松手 seek 后旧位置推送在途）
@@ -673,10 +1024,10 @@ fn apply_daemon_state(
     // QQ 远程封面：UI 禁直连 HTTP → 经 daemon CoverGet 换本地产物
     // （先程序化占位，回包后按 mid 复核防串台；每 mid 每进程只请求一次，
     // daemon 侧 covers/ 目录按内容哈希持久去重）。
-    if let Some(cover) = track.cover.as_ref() {
-        if cover.url.starts_with("https://") {
-            spawn_cover_fetch(ui_weak, runtime, track.id.0.clone(), cover.url.clone());
-        }
+    if let Some(cover) = track.cover.as_ref()
+        && cover.url.starts_with("https://")
+    {
+        spawn_cover_fetch(ui_weak, runtime, track.id.0.clone(), cover.url.clone());
     }
     let quality = playback.actual_quality.as_ref();
     player.set_track_quality(quality.map(quality_label).unwrap_or_default().into());
@@ -857,6 +1208,39 @@ fn like_count_text(count: i64) -> String {
     }
 }
 
+/// 失败重试退避下限/上限：10Hz 状态推送驱动重试，失败指数退避防打爆
+/// （daemon 在跑而 CDN 抖动时每帧重试 = 每帧一次真出网）。
+const COVER_RETRY_MIN: Duration = Duration::from_secs(2);
+const COVER_RETRY_MAX: Duration = Duration::from_secs(60);
+
+thread_local! {
+    /// mid → (最早可重试时刻, 当前退避时长)。失败翻倍封顶，成功即清除。
+    static COVER_RETRY: RefCell<HashMap<String, (Instant, Duration)>> =
+        RefCell::new(HashMap::new());
+}
+
+/// 退避窗口未过（该 mid 刚失败过）→ true。
+fn cover_fetch_backed_off(mid: &str) -> bool {
+    COVER_RETRY.with(|map| {
+        map.borrow()
+            .get(mid)
+            .is_some_and(|&(at, _)| Instant::now() < at)
+    })
+}
+
+/// 失败记账：退避翻倍（首次 COVER_RETRY_MIN，封顶 COVER_RETRY_MAX）。
+/// 重试总发生在上次时刻过期之后，指数序列取自存储的时长而非时刻差。
+fn cover_fetch_schedule_retry(mid: &str) {
+    COVER_RETRY.with(|map| {
+        let mut map = map.borrow_mut();
+        let backoff = map
+            .get(mid)
+            .map(|&(_, b)| (b * 2).min(COVER_RETRY_MAX))
+            .unwrap_or(COVER_RETRY_MIN);
+        map.insert(mid.to_owned(), (Instant::now() + backoff, backoff));
+    });
+}
+
 /// 异步取 QQ 封面本地产物（CoverGet）；完成时当前曲仍是发起曲才应用。
 fn spawn_cover_fetch(
     ui_weak: &Weak<AppWindow>,
@@ -864,11 +1248,16 @@ fn spawn_cover_fetch(
     mid: String,
     url: String,
 ) {
-    // 去重：状态推送 ~10Hz，同一 mid 只发起一次（失败也不再重试，下一次
-    // 换曲回来时自然重试）。
+    // 去重：状态推送 ~10Hz，同一 mid 在途/已成功只发起一次。失败出账 +
+    // 指数退避（2026-10-04 封面审计⑤：冷启动 daemon 未就绪/StaleBackend
+    // 恢复窗口内的一次失败不再让该曲整个会话占位——退避窗口过后自动重试，
+    // daemon 命中盘缓存毫秒回）。
     thread_local! {
-        static REQUESTED: RefCell<std::collections::HashSet<String>> =
-            RefCell::new(std::collections::HashSet::new());
+        static REQUESTED: RefCell<HashSet<String>> =
+            RefCell::new(HashSet::new());
+    }
+    if cover_fetch_backed_off(&mid) {
+        return;
     }
     let first_request = REQUESTED.with(|set| set.borrow_mut().insert(mid.clone()));
     if !first_request {
@@ -879,28 +1268,63 @@ fn spawn_cover_fetch(
     runtime.spawn(async move {
         // 取色键与同步路径一致（mid|url）：真图落地后下一帧推送同键零重算
         let cover_key = format!("{mid}|{url}");
-        let Ok(Response::Cover(uri)) = crate::backend::request(Request::CoverGet { url }).await
-        else {
-            return;
-        };
-        let path = uri.strip_prefix("file://").unwrap_or(&uri).to_string();
-        let ui_weak = ui_weak.clone();
-        let mid = mid.clone();
-        let _ = slint::invoke_from_event_loop(move || {
-            let Some(ui) = ui_weak.upgrade() else {
-                return;
-            };
-            let player = Player::get(&ui);
-            if player.get_current_mid() != mid.as_str() {
-                return; // 换曲竞态：迟到的封面不得串台
+        match crate::backend::request(Request::CoverGet { url }).await {
+            Ok(Response::Cover(uri)) => {
+                COVER_RETRY.with(|map| {
+                    map.borrow_mut().remove(&mid);
+                });
+                let path = crate::covers::file_uri_to_path(&uri).unwrap_or(uri);
+                let ui_weak = ui_weak.clone();
+                let mid = mid.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = ui_weak.upgrade() else {
+                        return;
+                    };
+                    let player = Player::get(&ui);
+                    // 当前曲取图回包落 512 桶（播放页大图）；同一 Image 句柄原地
+                    // 复用进队列行（QueueRow.cover），无额外位图拷贝。
+                    let Some(image) = crate::cover_cache::get_or_load(&path, 512) else {
+                        return;
+                    };
+                    // 队列抽屉行内原地换图：与当前曲无关——迟到的封面同样更新抽屉行
+                    // （daemon 已回写 cover_uri，此后队列重建直接读盘，此处补本次会话）
+                    update_queue_row_cover(&player, &mid, image.clone());
+                    if player.get_current_mid() != mid.as_str() {
+                        return; // 换曲竞态：播放条/取色只认当前曲
+                    }
+                    player.set_cover(image.clone());
+                    // 真图取色覆写程序化占位的取色
+                    crate::track_theme::apply_cover(&ui_weak, &cover_key, &image);
+                });
             }
-            if let Some(image) = load_cover_cached(&path) {
-                player.set_cover(image.clone());
-                // 真图取色覆写程序化占位的取色
-                crate::track_theme::apply_cover(&ui_weak, &cover_key, &image);
+            _ => {
+                // 失败：出账 + 指数退避，下一帧推送到达退避窗口末尾后自动重试
+                cover_fetch_schedule_retry(&mid);
+                REQUESTED.with(|set| {
+                    set.borrow_mut().remove(&mid);
+                });
             }
-        });
+        }
     });
+}
+
+/// 队列模型中同 mid 行的封面原地更新（抽屉渲染 QueueRow.cover）。
+fn update_queue_row_cover(player: &Player, mid: &str, image: slint::Image) {
+    let model = player.get_queue();
+    let Some(vec_model) = model.as_any().downcast_ref::<slint::VecModel<QueueRow>>() else {
+        return;
+    };
+    for i in 0..vec_model.iter().count() {
+        let mut row = match vec_model.row_data(i) {
+            Some(r) => r,
+            None => continue,
+        };
+        if row.mid.as_str() == mid {
+            row.cover = image;
+            vec_model.set_row_data(i, row);
+            return;
+        }
+    }
 }
 
 /// 控制台两端时间标签（DESIGN「两端时间 tabular-nums，剩余以 -m:ss」）：
@@ -1017,10 +1441,12 @@ fn quality_tier(quality: &AudioQuality) -> i32 {
     }
 }
 
-/// 队列投影行 → TrackRow（UI 线程：slint::Image 只能在此构造）。
+/// 队列投影行 → QueueRow（UI 线程：slint::Image 只能在此构造）。
+/// 队列抽屉是 TrackRow.cover 唯一消费方（36×36），故队列行单独走带 cover 的
+/// QueueRow，表格 TrackRow 不再背图（MEMFIX-CONTRACT 第 1/2 条）。
 /// 歌手/专辑 mid 在 IPC ID 投影里不存在（链接型列在队列抽屉未使用）。
-fn row_from_meta(meta: &QueueRowMeta) -> TrackRow {
-    let mut row = TrackRow {
+fn row_from_meta(meta: &QueueRowMeta, pending_covers: &mut Vec<(String, String)>) -> QueueRow {
+    let mut row = QueueRow {
         mid: meta.mid.as_str().into(),
         source: if hmp_core::TrackProvider::from_id(&meta.mid) == hmp_core::TrackProvider::Local {
             1
@@ -1034,7 +1460,7 @@ fn row_from_meta(meta: &QueueRowMeta) -> TrackRow {
         album_mid: "".into(),
         duration_ms: meta.duration_ms,
         quality: "".into(),
-        cover: queue_cover(meta),
+        cover: queue_cover(meta, pending_covers),
     };
     // 库外曲目（搜索结果等，daemon stub 只有 id）标题回退 mid 时，用
     // play-tracks 发出时的 UI 行元数据补真名（仅显示层，不写库）。
@@ -1053,16 +1479,23 @@ fn row_from_meta(meta: &QueueRowMeta) -> TrackRow {
     row
 }
 
-/// 队列行封面：本地库 file:// 封面直接读盘（扩列投影带出）；QQ 远程 URL
-/// 程序化占位（列表行不做逐行网络取图，仅当前曲经 CoverGet 换真图）。
-fn queue_cover(meta: &QueueRowMeta) -> slint::Image {
-    if let Some(uri) = &meta.cover_uri {
-        if !uri.starts_with("http://") && !uri.starts_with("https://") {
-            let path = uri.strip_prefix("file://").unwrap_or(uri);
-            if let Some(image) = load_cover_cached(path) {
-                return image;
-            }
+/// 队列行封面：本地库 file:// 封面 **探测** cover_cache 256 桶（抽屉行
+/// 36×36，行桶与表格/侧栏同档）——命中（会话内常态）同步直出，零解码零
+/// 闪烁；未命中占位 + 登记 `pending_covers` 交回填 Timer 异步分批真装载
+/// （S9 R1b：重建派发内不再 90 连发同步全尺寸解码）。远程 URL 先程序化
+/// 占位，队列落地的预取回包原地换图（apply_event →
+/// track_covers::prefetch_tracks_with）。
+fn queue_cover(meta: &QueueRowMeta, pending_covers: &mut Vec<(String, String)>) -> slint::Image {
+    if let Some(uri) = &meta.cover_uri
+        && !uri.starts_with("http://")
+        && !uri.starts_with("https://")
+        && let Some(path) = crate::covers::file_uri_to_path(uri)
+    {
+        if let Some(image) = crate::cover_cache::get_if_cached(&path, 256) {
+            return image;
         }
+        pending_covers.push((meta.mid.clone(), path));
+        return crate::covers::cover_image(&cover_seed(meta));
     }
     crate::covers::cover_image(&cover_seed(meta))
 }
@@ -1077,39 +1510,32 @@ fn cover_seed(meta: &QueueRowMeta) -> String {
     }
 }
 
-/// 当前曲封面：本地路径 / `file://` → 磁盘图（按 URL 缓存）；
+/// 当前曲封面：本地路径 / `file://` → 磁盘图（cover_cache 512 桶——播放页
+/// 大图消费方最大 336px 逻辑像素，512 余量充足）；
 /// http(s)（UI 禁 HTTP 为项目原则，封面代理缺失）→ 按 mid 程序化占位；
 /// 无封面 → 程序化占位。
 fn cover_for_track(mid: &str, cover: Option<&hmp_core::CoverRef>) -> slint::Image {
-    if let Some(url) = cover.map(|c| c.url.as_str()) {
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            let path = url.strip_prefix("file://").unwrap_or(url);
-            if let Some(image) = load_cover_cached(path) {
+    if let Some(url) = cover.map(|c| c.url.as_str())
+        && !url.starts_with("http://")
+        && !url.starts_with("https://")
+    {
+        // file:// 双形态（persist_cover 宽容形态 `file://C:\...` 与历史
+        // 规范形态 `file:///C:/...`）都收：裸剥前缀把规范形态解析成
+        // `/C:/...`（Windows 读不到）→ 盘上有图恒占位（§18 库行实锤）。
+        if let Some(path) = crate::covers::file_uri_to_path(url) {
+            if let Some(image) = crate::cover_cache::get_or_load(&path, 512) {
                 return image;
             }
+            tracing::debug!(path, "cover file unreadable; fallback to placeholder");
         }
     }
     crate::covers::cover_image(&format!("album:{mid}"))
 }
 
-/// 磁盘封面按路径缓存（thread_local：slint::Image 非 Send，且本函数只在
-/// UI 线程被调用；与 covers.rs 的缓存策略一致）。
-fn load_cover_cached(path: &str) -> Option<slint::Image> {
-    thread_local! {
-        static CACHE: RefCell<HashMap<String, slint::Image>> = RefCell::new(HashMap::new());
-    }
-    CACHE.with(|cache| {
-        if let Some(image) = cache.borrow().get(path) {
-            return Some(image.clone());
-        }
-        let image = slint::Image::load_from_path(std::path::Path::new(path)).ok()?;
-        cache.borrow_mut().insert(path.to_owned(), image.clone());
-        Some(image)
-    })
-}
-
 #[cfg(test)]
-mod tests {
+// pub(crate)：bridge.rs 的 AppWindow 测试共用本模块的测试平台 Once 初始化
+//（i-slint-backend-testing 的 platform 是进程级单例，二次 init 即 panic）。
+pub(crate) mod tests {
     use super::*;
 
     fn playback_with(duration_ms: u64, position_ms: u64) -> PlaybackState {
@@ -1118,6 +1544,34 @@ mod tests {
             position: Duration::from_millis(position_ms),
             ..PlaybackState::default()
         }
+    }
+
+    /// 失败退避序列（2026-10-04 封面审计⑤）：首次 2s，逐次翻倍，60s 封顶；
+    /// 退避窗口内 10Hz 推送不发起请求。
+    #[test]
+    fn cover_retry_backoff_doubles_and_caps() {
+        let mid = "backoff-test-mid";
+        assert!(!cover_fetch_backed_off(mid), "无失败史不退避");
+        let mut expect = COVER_RETRY_MIN;
+        for round in 1..=7 {
+            cover_fetch_schedule_retry(mid);
+            assert!(
+                cover_fetch_backed_off(mid),
+                "第 {round} 次失败后应进退避窗口"
+            );
+            let stored = COVER_RETRY.with(|m| m.borrow().get(mid).copied());
+            let Some((at, backoff)) = stored else {
+                panic!("第 {round} 次失败应记账");
+            };
+            assert_eq!(backoff, expect, "第 {round} 次失败退避时长");
+            assert!(at > Instant::now());
+            expect = (expect * 2).min(COVER_RETRY_MAX);
+        }
+        assert_eq!(expect, COVER_RETRY_MAX, "翻倍应在 60s 封顶");
+        COVER_RETRY.with(|m| {
+            m.borrow_mut().remove(mid);
+        });
+        assert!(!cover_fetch_backed_off(mid), "清除后退避解除");
     }
 
     #[test]
@@ -1216,7 +1670,8 @@ mod tests {
                 },
             )]);
         });
-        let row = row_from_meta(&meta);
+        let mut pending = Vec::new();
+        let row = row_from_meta(&meta, &mut pending);
         assert_eq!(row.title, "夜曲");
         assert_eq!(row.artists, "周杰伦");
         assert_eq!(row.album, "十一月的萧邦");
@@ -1245,7 +1700,8 @@ mod tests {
             duration_ms: 1_000,
             cover_uri: None,
         };
-        let row = row_from_meta(&local);
+        let mut pending = Vec::new();
+        let row = row_from_meta(&local, &mut pending);
         assert_eq!(row.source, 1);
         assert_eq!(row.mid, "local:/music/a.flac");
         assert_eq!(row.duration_ms, 1_000);
@@ -1258,10 +1714,366 @@ mod tests {
             duration_ms: 0,
             cover_uri: None,
         };
-        let row = row_from_meta(&qq);
+        let mut pending = Vec::new();
+        let row = row_from_meta(&qq, &mut pending);
         assert_eq!(row.source, 0);
         assert_eq!(row.title, "003Z3i2C");
         assert_eq!(row.quality, "", "音质未知 → 徽章留空");
         assert!(row.cover.size().width > 0, "封面回退程序化占位");
+    }
+
+    // —— 喜欢（收藏）接线 ——
+
+    /// source/key 分流与 CLI `provider_of` 同构（local 键保留 `local:` 前缀，
+    /// 归一化交 storage canonical_local_key）。
+    #[test]
+    fn favorite_provider_split_matches_cli() {
+        assert_eq!(
+            favorite_provider_of("local:/a/b.flac"),
+            ("local", "local:/a/b.flac".to_string())
+        );
+        assert_eq!(
+            favorite_provider_of("003aQm4F3GJHZq"),
+            ("qq", "003aQm4F3GJHZq".to_string())
+        );
+    }
+
+    /// 库事实真值表（in-memory 库）：无行 → false；收藏 → true；取消 → false；
+    /// 本地键写入/查询两侧同持 `local:` 前缀口径。
+    #[test]
+    fn liked_in_db_truth_table() {
+        let mut db = hmp_storage::LibraryDb::open_in_memory().unwrap();
+        assert!(!liked_in_db(&mut db, "mid-unknown"), "无关系行 → false");
+        db.add_favorite("qq", "mid-1", "晴天").unwrap();
+        assert!(liked_in_db(&mut db, "mid-1"));
+        db.set_relation("track", "qq", "mid-1", "liked", false)
+            .unwrap();
+        assert!(
+            !liked_in_db(&mut db, "mid-1"),
+            "取消（desired=false）→ false"
+        );
+        db.add_favorite("local", "local:/tmp/x.flac", "x").unwrap();
+        assert!(liked_in_db(&mut db, "local:/tmp/x.flac"));
+    }
+
+    /// 回包决策表：受理 / 被拒（携带人话文案）/ 未送达（离线）三行钉。
+    #[test]
+    fn favorite_outcome_decision_table() {
+        use hmp_core::IpcErrorCode;
+        assert_eq!(
+            favorite_outcome(&Ok(Response::Ok)),
+            FavoriteOutcome::Accepted
+        );
+        let rejected = favorite_outcome(&Ok(Response::Err {
+            code: IpcErrorCode::Internal,
+            message: "library unavailable".into(),
+        }));
+        assert!(
+            matches!(rejected, FavoriteOutcome::Rejected(ref msg) if msg.contains("操作未生效")),
+            "被拒应携带人话文案：{rejected:?}"
+        );
+        assert_eq!(
+            favorite_outcome(&Err(crate::backend::BackendError::NoBackendBinary)),
+            FavoriteOutcome::Unreachable
+        );
+        assert!(FAVORITE_UNREACHABLE_TEXT.contains("未连接"));
+    }
+
+    // —— S9 R1b：队列封面异步逐行回填（AppWindow 全链）——
+
+    /// AppWindow 测试专用平台线程：slint platform 是进程级单例且**线程亲和**
+    ///（set_platform 记住所在线程，他线程 AppWindow::new 即 Err「platform was
+    /// initialized in another thread」），而 libtest 给每个测试开新线程——
+    /// 因此所有 AppWindow 测试（本模块 + bridge.rs 先例）都经此投递到同一条
+    /// 常驻 worker 线程串行执行；panic 用 catch_unwind 捕获后回放（worker
+    /// 不死、后续测试可继续）。
+    pub(crate) fn run_on_platform_thread<T: Send + 'static>(
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        type Task = Box<dyn FnOnce() + Send + 'static>;
+        static TASK_TX: std::sync::OnceLock<std::sync::mpsc::Sender<Task>> =
+            std::sync::OnceLock::new();
+        let (result_tx, result_rx) =
+            std::sync::mpsc::sync_channel::<Result<T, Box<dyn std::any::Any + Send>>>(1);
+        let task: Task = Box::new(move || {
+            let _ = result_tx.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)));
+        });
+        let tx = TASK_TX.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Task>();
+            std::thread::Builder::new()
+                .name("slint-test-platform".into())
+                .spawn(move || {
+                    i_slint_backend_testing::init_no_event_loop();
+                    while let Ok(task) = rx.recv() {
+                        task();
+                    }
+                })
+                .expect("spawn slint test platform thread");
+            tx
+        });
+        tx.send(task).expect("platform worker alive");
+        match result_rx.recv().expect("platform worker replied") {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// 平台线程上的逐测试复位：thread_local（CACHE / 回填队列与 Timer）在
+    /// 常驻线程上跨测试存活，起点必须显式清零。
+    fn reset_backfill_for_test() {
+        crate::cover_cache::clear_for_test();
+        PENDING_COVERS.with(|cell| cell.borrow_mut().clear());
+        COVER_BACKFILL_TIMER.with(|cell| cell.borrow().stop());
+    }
+
+    /// 素材目录（cover_cache 测试同款：temp + 进程号，不引 tempfile dev-dep）。
+    fn backfill_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("hmp-pb-bf-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 落一张 w×h 渐变 PNG（400×200 → 256 桶缩为 256×128；占位是 256×256
+    /// 方形——尺寸比即「真图 vs 占位」判据）。
+    fn backfill_png(dir: &std::path::Path, name: &str, w: u32, h: u32) -> std::path::PathBuf {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 0x40, 0xFF])
+        });
+        let path = dir.join(name);
+        img.save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        path
+    }
+
+    fn cover_file_uri(path: &std::path::Path) -> String {
+        // 规范 file URI：Windows `C:\a\b` → `file:///C:/a/b`；Unix `/a/b` →
+        // `file:///a/b`（勿对已是绝对路径的 Unix 形态再拼前导斜杠——否则得
+        // `file:////tmp/...`，file_uri_to_path 解析回双前导斜杠，与预装载
+        // 路径键失配——S11 CI Linux 实证）。
+        let p = path.to_string_lossy().replace('\\', "/");
+        if p.starts_with('/') {
+            format!("file://{p}")
+        } else {
+            format!("file:///{p}")
+        }
+    }
+
+    fn row_meta_with_cover(mid: &str, cover: &std::path::Path) -> QueueRowMeta {
+        QueueRowMeta {
+            mid: mid.into(),
+            title: mid.into(),
+            artists: "".into(),
+            album: "".into(),
+            duration_ms: 0,
+            cover_uri: Some(cover_file_uri(cover)),
+        }
+    }
+
+    /// 投 queue_rows 事件（state=None 走离线尾；队列分支在前，不受影响）。
+    fn apply_queue_rows(
+        ui: &AppWindow,
+        runtime: &Arc<BackendRuntime>,
+        queue_mids: &Mutex<Vec<String>>,
+        rows: Vec<QueueRowMeta>,
+    ) {
+        apply_event(
+            &ui.as_weak(),
+            runtime,
+            queue_mids,
+            &Mutex::new(EchoGuard::default()),
+            UiStateEvent {
+                state: None,
+                queue_rows: Some(rows),
+                library_changed: false,
+                offline_reason: None,
+            },
+        );
+    }
+
+    fn queue_rows_of(ui: &AppWindow) -> Vec<QueueRow> {
+        let model = Player::get(ui).get_queue();
+        let vec = model
+            .as_any()
+            .downcast_ref::<VecModel<QueueRow>>()
+            .expect("queue model is VecModel");
+        (0..vec.iter().count())
+            .filter_map(|i| vec.row_data(i))
+            .collect()
+    }
+
+    fn cover_misses() -> u64 {
+        crate::cover_cache::cache_stats().3
+    }
+
+    /// 相对基线的 miss 增量（测试线程上的绝对值不受其他测试影响）。
+    fn cache_delta(base: u64) -> u64 {
+        cover_misses() - base
+    }
+
+    /// 热行同步直出 + 冷行占位 + 分批回填全链（mock 时间逐 tick 驱动 Timer）。
+    #[test]
+    fn queue_rebuild_backfills_covers_in_batches() {
+        run_on_platform_thread(|| {
+            reset_backfill_for_test();
+            let ui = AppWindow::new().unwrap();
+            let runtime = Arc::new(BackendRuntime::new().unwrap());
+            let queue_mids = Mutex::new(Vec::<String>::new());
+            let dir = backfill_dir("batch");
+
+            // 热行：预装载进 cover_cache（重建探测命中 → 同步直出，零解码）
+            let hot = backfill_png(&dir, "hot.png", 400, 200);
+            assert!(crate::cover_cache::get_or_load(hot.to_str().unwrap(), 256).is_some());
+            let misses_after_warm = cover_misses();
+            assert_eq!(misses_after_warm, 1);
+
+            let mut metas = vec![row_meta_with_cover("hot-1", &hot)];
+            for i in 0..7 {
+                metas.push(row_meta_with_cover(
+                    &format!("cold-{i}"),
+                    &backfill_png(&dir, &format!("cold{i}.png"), 400, 200),
+                ));
+            }
+            apply_queue_rows(&ui, &runtime, &queue_mids, metas);
+
+            // 重建即刻：热行真图（256×128），冷行全部占位（256×256），且零解码
+            let rows = queue_rows_of(&ui);
+            assert_eq!(rows.len(), 8);
+            let hot_size = rows[0].cover.size();
+            assert_eq!(
+                (hot_size.width, hot_size.height),
+                (256, 128),
+                "热行探测命中应同步直出真图"
+            );
+            assert_eq!(
+                cache_delta(misses_after_warm),
+                0,
+                "重建派发内不应发生任何解码"
+            );
+            for row in &rows[1..] {
+                let s = row.cover.size();
+                assert_eq!((s.width, s.height), (256, 256), "冷行应先占位");
+            }
+
+            // 分批边界：7 冷行 / 批 6 → 首个 tick 恰 6 行换真图，第 2 个 tick 清尾
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            let rows = queue_rows_of(&ui);
+            let real = rows[1..]
+                .iter()
+                .filter(|r| r.cover.size().height == 128)
+                .count();
+            assert_eq!(real, COVER_BACKFILL_BATCH, "首个 tick 恰回填一批");
+            assert_eq!(cache_delta(misses_after_warm), 6);
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            let rows = queue_rows_of(&ui);
+            assert!(
+                rows.iter().all(|r| r.cover.size().height == 128),
+                "全部行应回填为真图：{:?}",
+                rows.iter().map(|r| r.cover.size()).collect::<Vec<_>>()
+            );
+            assert_eq!(cache_delta(misses_after_warm), 7);
+
+            // 耗尽即停表：再推时间无新解码
+            let misses = cover_misses();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(64));
+            assert_eq!(cover_misses(), misses, "队列耗尽后 Timer 应停表");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// 换装竞态（PLAN §2.1 D3）：回填中途再重建 → 旧代剩余条目随换装丢弃
+    /// （以 miss 计数差断言不再解码），新代只回填自己的未命中行。
+    #[test]
+    fn queue_rebuild_swap_drops_inflight_backfill() {
+        run_on_platform_thread(|| {
+            reset_backfill_for_test();
+            let ui = AppWindow::new().unwrap();
+            let runtime = Arc::new(BackendRuntime::new().unwrap());
+            let queue_mids = Mutex::new(Vec::<String>::new());
+            let dir = backfill_dir("swap");
+
+            // 第一代：8 冷行
+            let gen1: Vec<QueueRowMeta> = (0..8)
+                .map(|i| {
+                    row_meta_with_cover(
+                        &format!("g1-{i}"),
+                        &backfill_png(&dir, &format!("g1-{i}.png"), 400, 200),
+                    )
+                })
+                .collect();
+            apply_queue_rows(&ui, &runtime, &queue_mids, gen1);
+            // 一个 tick：回填 6 行，余 2 条在途
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            assert_eq!(cover_misses(), 6, "首个 tick 恰 6 次解码");
+
+            // 第二代重建（4 行全新路径）：pending 换装，2 条第一代在途条目作废
+            let gen2: Vec<QueueRowMeta> = (0..4)
+                .map(|i| {
+                    row_meta_with_cover(
+                        &format!("g2-{i}"),
+                        &backfill_png(&dir, &format!("g2-{i}.png"), 400, 200),
+                    )
+                })
+                .collect();
+            apply_queue_rows(&ui, &runtime, &queue_mids, gen2);
+            let rows = queue_rows_of(&ui);
+            assert_eq!(rows.len(), 4, "模型应为第二代");
+            for row in &rows {
+                assert_eq!(row.cover.size().height, 256, "二代冷行应占位");
+            }
+
+            // 第二代回填完：6（一代）+ 4（二代）= 10；被作废的 2 条不再解码
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            assert_eq!(cover_misses(), 10, "旧代在途条目应随换装丢弃");
+            let rows = queue_rows_of(&ui);
+            assert!(
+                rows.iter().all(|r| r.cover.size().height == 128),
+                "第二代全部回填为真图"
+            );
+            // 停表后再推时间无变化
+            let misses = cover_misses();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(64));
+            assert_eq!(cover_misses(), misses);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// mid 已不在模型 → set_row_data 不命中、无 panic；耗尽即停表。
+    #[test]
+    fn backfill_mid_missing_from_model_is_noop() {
+        run_on_platform_thread(|| {
+            reset_backfill_for_test();
+            let ui = AppWindow::new().unwrap();
+            let dir = backfill_dir("ghost");
+            let path = backfill_png(&dir, "ghost.png", 400, 200);
+            // 直接排程：模型为空（ghost mid 不在），tick 解码成功但换图 no-op
+            schedule_queue_cover_backfill(
+                ui.as_weak(),
+                vec![("ghost-mid".into(), path.to_str().unwrap().to_owned())].into(),
+            );
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+            assert_eq!(cover_misses(), 1, "ghost 行仍解码（装载照旧），换图 no-op");
+            let misses = cover_misses();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(64));
+            assert_eq!(cover_misses(), misses, "耗尽后停表");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// 空队列重建 → 不启 Timer（t 推进无副作用）。
+    #[test]
+    fn empty_queue_rebuild_starts_no_timer() {
+        run_on_platform_thread(|| {
+            reset_backfill_for_test();
+            let ui = AppWindow::new().unwrap();
+            let runtime = Arc::new(BackendRuntime::new().unwrap());
+            let queue_mids = Mutex::new(Vec::<String>::new());
+            apply_queue_rows(&ui, &runtime, &queue_mids, vec![]);
+            assert!(queue_rows_of(&ui).is_empty());
+            let misses = cover_misses();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+            assert_eq!(cover_misses(), misses, "空队列不应起动回填 Timer");
+        });
     }
 }

@@ -77,10 +77,10 @@ pub fn map_business_code(code: i64, allow_error_codes: Option<&[i64]>) -> Option
     if code == 0 {
         return None;
     }
-    if let Some(allowed) = allow_error_codes {
-        if allowed.contains(&code) {
-            return None;
-        }
+    if let Some(allowed) = allow_error_codes
+        && allowed.contains(&code)
+    {
+        return None;
     }
     match code {
         2000 => Some(QqMusicError::SignatureRequired),
@@ -103,13 +103,13 @@ pub fn unwrap_cgi_batch(body: &Value, expected_count: usize) -> Result<Vec<Value
         .as_object()
         .ok_or_else(|| QqMusicError::InvalidResponse("response is not a JSON object".into()))?;
 
-    if let Some(code) = obj.get("code").and_then(|v| v.as_i64()) {
-        if code != 0 {
-            return Err(QqMusicError::QqApi {
-                code,
-                message: "global error".into(),
-            });
-        }
+    if let Some(code) = obj.get("code").and_then(|v| v.as_i64())
+        && code != 0
+    {
+        return Err(QqMusicError::QqApi {
+            code,
+            message: "global error".into(),
+        });
     }
 
     let mut out = Vec::with_capacity(expected_count);

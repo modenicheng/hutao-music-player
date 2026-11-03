@@ -326,7 +326,7 @@ fn thumbnail_reference(source: &CoverSource) -> WindowsResult<RandomAccessStream
     match source {
         CoverSource::File(path) => {
             let path = HSTRING::from(path.to_string_lossy().as_ref());
-            let file = StorageFile::GetFileFromPathAsync(&path)?.get()?;
+            let file = StorageFile::GetFileFromPathAsync(&path)?.join()?;
             RandomAccessStreamReference::CreateFromFile(&file)
         }
         CoverSource::Uri(value) => Uri::CreateUri(&HSTRING::from(value))

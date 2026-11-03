@@ -46,11 +46,18 @@ pub struct FakeDriver {
     pub state_tx: watch::Sender<PlaybackState>,
     pub events_tx: broadcast::Sender<PlayerEvent>,
     pub loads: Mutex<Vec<(String, u64)>>,
+    /// 每次装载是否携带进程内源（LoadRequest.stream 接线断言）。
+    pub stream_seen: Mutex<Vec<bool>>,
     pub commands: Mutex<Vec<PlayerCommand>>,
     /// 置位后下一次 load 不更新 current（模拟驱动装载失败 → wait 超时）。
     pub fail_next_load: std::sync::atomic::AtomicBool,
     /// 剩余失败次数（连续多次装载失败，如回滚也失败；0=不失败）。
     pub fail_remaining: std::sync::atomic::AtomicU32,
+    /// 置位后下一次 load 异步发同代 Error 事件（模拟真实驱动装载期
+    /// 解码失败，core.rs completion Err 分支：status=Error + Error 事件）。
+    /// 异步（20ms 延迟）对齐真实驱动时序——Error 事件总在 load() 返回后
+    /// 到达（同步发会在 wait_current_applied 订阅前丢失，落入超时兜底）。
+    pub error_next_load: std::sync::atomic::AtomicBool,
     /// `play()` 调用计数（点当前曲「确保播放」断言用）。
     pub plays: std::sync::atomic::AtomicU32,
 }
@@ -67,9 +74,11 @@ impl FakeDriver {
             state_tx,
             events_tx,
             loads: Mutex::new(Vec::new()),
+            stream_seen: Mutex::new(Vec::new()),
             commands: Mutex::new(Vec::new()),
             fail_next_load: std::sync::atomic::AtomicBool::new(false),
             fail_remaining: std::sync::atomic::AtomicU32::new(0),
+            error_next_load: std::sync::atomic::AtomicBool::new(false),
             plays: std::sync::atomic::AtomicU32::new(0),
         });
         (d, state_rx, events_rx)
@@ -87,8 +96,23 @@ impl FakeDriver {
         self.fail_remaining
             .store(n, std::sync::atomic::Ordering::SeqCst);
     }
+    /// 置位后下一次装载异步发同代 Error（解码失败模拟，见字段注释）。
+    pub fn set_error_load(&self, on: bool) {
+        self.error_next_load
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+    }
     pub fn emit(&self, ev: PlayerEvent) {
         let _ = self.events_tx.send(ev);
+    }
+    /// 模拟驱动播放中错误（§16 #2 引擎收口测试）：status=Error + 同代
+    /// Error 事件——对齐 T2 真实驱动 ticker 的错误分支形态。
+    pub fn emit_playback_error(&self, load_gen: u64) {
+        self.state_tx
+            .send_modify(|s| s.status = PlaybackStatus::Error);
+        let _ = self.events_tx.send(PlayerEvent::Error {
+            load_gen,
+            error: hmp_core::HmpError::Playback("source read error: synthetic mid-read".into()),
+        });
     }
     /// 仅 URI 列表（断言便捷；loads 同时记录装载代际）。
     pub fn load_uris(&self) -> Vec<String> {
@@ -102,11 +126,41 @@ impl FakeDriver {
 }
 
 impl PlaybackDriver for FakeDriver {
+    // fetch_update 在 rustc 1.99 改名 try_update（纯更名，语义不变）；try_update
+    // 本身不存在于工作区 MSRV 1.85，升 MSRV 前只能留旧名 + 压弃用告警
+    // （CI RUSTFLAGS=-D warnings 会把它判死）。
+    #[allow(deprecated)]
     fn load(&self, request: LoadRequest) {
+        self.stream_seen
+            .lock()
+            .unwrap()
+            .push(request.stream.is_some());
         self.loads
             .lock()
             .unwrap()
             .push((request.uri.clone(), request.load_gen));
+        if self
+            .error_next_load
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            // 解码失败模拟：状态 → Error、异步发同代 Error 事件（对齐
+            // core.rs completion Err 分支；current/load_gen 保持旧装载）。
+            // 异步 20ms：真实驱动 Error 事件总在 load() 返回后到达。
+            self.state_tx
+                .send_modify(|s| s.status = PlaybackStatus::Error);
+            let events_tx = self.events_tx.clone();
+            let failed_gen = request.load_gen;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let _ = events_tx.send(PlayerEvent::Error {
+                    load_gen: failed_gen,
+                    error: hmp_core::HmpError::Playback(
+                        "decode media stream: unsupported codec (fake decode failure)".into(),
+                    ),
+                });
+            });
+            return;
+        }
         if self
             .fail_next_load
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -122,11 +176,15 @@ impl PlaybackDriver for FakeDriver {
             return; // 失败模拟：current 不更新 → wait_current_applied 超时
         }
         // 模拟真实驱动：装载即把 current 更新为目标曲目并进入 Playing。
+        // load_gen 与 current 同拍置值（对齐真实驱动 core.rs completion 分支
+        // 行为）：wait_current_applied 以 (load_gen, current) 双条件 ACK，
+        // 同步 fake 不置值会让所有装载等到超时（F2 Bug 1 修复的驱动对齐面）。
         let (track, quality) = (request.track.clone(), request.quality);
         self.state_tx.send_modify(|s| {
             s.status = PlaybackStatus::Playing;
             s.current = Some(track);
             s.actual_quality = Some(quality);
+            s.load_gen = request.load_gen;
         });
     }
     fn play(&self) {
@@ -272,6 +330,7 @@ fn clone_error(e: &EngineError) -> EngineError {
         EngineError::TrackNotFound => EngineError::TrackNotFound,
         EngineError::PlaylistNotFound(m) => EngineError::PlaylistNotFound(m.clone()),
         EngineError::QualityUnavailable(m) => EngineError::QualityUnavailable(m.clone()),
+        EngineError::LoadFailed(m) => EngineError::LoadFailed(m.clone()),
         EngineError::Timeout => EngineError::Timeout,
         EngineError::Internal(m) => EngineError::Internal(m.clone()),
     }
@@ -625,6 +684,115 @@ async fn preload_consumed_on_eos() {
             .map(|t| t.id.as_ref()),
         Some("b")
     );
+}
+
+/// 包装解析器：`resolve_track` 先睡眠 `delay`（测试注入慢解析；计数在
+/// 睡眠**前**递增——超时取消时 FakeResolver 内部计数不会推进，本计数器
+/// 才能区分「预解析被超时放弃」与「预解析成功写槽」）。
+#[derive(Debug)]
+struct DelayTrackResolver {
+    inner: Arc<FakeResolver>,
+    delay: std::time::Duration,
+    attempts: std::sync::atomic::AtomicU32,
+}
+
+impl SourceResolver for DelayTrackResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        self.inner.resolve_source_ids(src)
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let delay = self.delay;
+        let inner = self.inner.clone();
+        let id = id.clone();
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            inner.resolve_track(&id).await
+        })
+    }
+}
+
+/// §16 开放项（预解析无总超时）：注入短超时后，慢于超时的预解析被放弃
+/// （槽永不写入），Next 走按需解析（attempt 计数递增）；引擎不 hang、
+/// 不产生 last_error（预解析失败静默语义不变）。
+#[tokio::test]
+async fn preload_resolve_timeout_gives_up() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(DelayTrackResolver {
+        inner: FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]),
+        delay: std::time::Duration::from_millis(400),
+        attempts: std::sync::atomic::AtomicU32::new(0),
+    });
+    let handle = PlaybackEngine::start_with_options(
+        driver.clone(),
+        resolver.clone(),
+        Arc::new(|| true),
+        None,
+        std::time::Duration::from_secs(5),
+        None,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(50), // 预解析超时 ≪ delay
+        LIST_RESOLVE_TIMEOUT,
+    );
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref())
+                == Some("a")
+        },
+        "装载 a 完成",
+    )
+    .await;
+    // 预解析尝试发生但被 50ms 超时放弃（400ms 延迟远未到）→ 槽空。
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    assert_eq!(
+        resolver.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a 装载 + 预解析 b 各一次尝试"
+    );
+    assert!(handle.state_rx.borrow().last_error.is_none());
+    // Next：缓存未命中（超时放弃）→ 按需解析 b（第三次尝试）→ 成功装载。
+    handle
+        .cmd(Request::Command(PlayerCommand::Next))
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            handle
+                .state_rx
+                .borrow()
+                .playback
+                .current
+                .as_ref()
+                .map(|t| t.id.as_ref())
+                == Some("b")
+        },
+        "Next 经按需解析装载 b",
+    )
+    .await;
+    assert_eq!(
+        resolver.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "超时放弃的预解析不被消费，Next 重新解析"
+    );
+    assert!(handle.state_rx.borrow().last_error.is_none());
 }
 
 /// G2：RG 增益在装载时叠加到用户音量；SetVolume 后仍叠加；换曲自动切换。
@@ -1306,12 +1474,15 @@ impl PlaybackDriver for SlowDriver {
             .unwrap()
             .push((request.uri.clone(), request.load_gen));
         let st = self.inner.state_tx.clone();
-        let track = request.track.clone();
+        let (track, quality, load_gen) = (request.track.clone(), request.quality, request.load_gen);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             st.send_modify(|s| {
                 s.status = PlaybackStatus::Playing;
                 s.current = Some(track);
+                s.actual_quality = Some(quality);
+                // load_gen 与 current 同拍置值（对齐真实驱动 completion 行为）。
+                s.load_gen = load_gen;
             });
         });
     }
@@ -1322,6 +1493,107 @@ impl PlaybackDriver for SlowDriver {
         self.inner.command(PlayerCommand::Stop);
     }
     fn set_volume(&self, _v: f64) {}
+    fn command(&self, cmd: PlayerCommand) {
+        self.inner.command(cmd);
+    }
+    fn shutdown(&self) {}
+    fn subscribe_state(&self) -> watch::Receiver<PlaybackState> {
+        self.inner.subscribe_state()
+    }
+    fn subscribe_events(&self) -> broadcast::Receiver<PlayerEvent> {
+        self.inner.subscribe_events()
+    }
+}
+
+/// 装载延迟落地且可编程失败的驱动变体（模拟真实 Rodio 异步管道：装载任务
+/// 完成**之后**才更新 current/load_gen；失败则状态保持旧装载、只发同代
+/// Error 事件——core.rs completion 两分支的忠实对照）。同步 FakeDriver 的
+/// 「load 即应用」会掩盖「装载在途」窗口，正是同曲重载假 ACK（F2 Bug 1）
+/// 被掩盖的原因；本驱动 50ms 后落地，用于复现该窗口。
+struct DeferredDriver {
+    inner: Arc<FakeDriver>,
+}
+
+impl DeferredDriver {
+    fn new() -> (
+        Arc<Self>,
+        watch::Receiver<PlaybackState>,
+        broadcast::Receiver<PlayerEvent>,
+    ) {
+        let (inner, sr, er) = FakeDriver::new();
+        (Arc::new(Self { inner }), sr, er)
+    }
+}
+
+impl PlaybackDriver for DeferredDriver {
+    // 同 FakeDriver::load：MSRV 1.85 无 try_update，压 fetch_update 弃用告警。
+    #[allow(deprecated)]
+    fn load(&self, request: LoadRequest) {
+        self.inner
+            .stream_seen
+            .lock()
+            .unwrap()
+            .push(request.stream.is_some());
+        self.inner
+            .loads
+            .lock()
+            .unwrap()
+            .push((request.uri.clone(), request.load_gen));
+        // 失败标志在 load() 时消费（与 FakeDriver 同语义），延迟落地。
+        let fail = self
+            .inner
+            .fail_next_load
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+            || self
+                .inner
+                .fail_remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok();
+        let st = self.inner.state_tx.clone();
+        let events = self.inner.events_tx.clone();
+        let (track, quality, load_gen) = (request.track.clone(), request.quality, request.load_gen);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if fail {
+                // 模拟真实驱动装载失败（completion Err 分支）：current/load_gen
+                // 保持旧装载，仅 status=Error + 同代 Error 事件。
+                st.send_modify(|s| {
+                    s.status = PlaybackStatus::Error;
+                    s.buffering = None;
+                });
+                let _ = events.send(PlayerEvent::Error {
+                    load_gen,
+                    error: hmp_core::HmpError::Playback(format!("deferred load {load_gen} failed")),
+                });
+            } else {
+                st.send_modify(|s| {
+                    s.status = PlaybackStatus::Playing;
+                    s.current = Some(track);
+                    s.actual_quality = Some(quality);
+                    s.load_gen = load_gen;
+                });
+            }
+        });
+    }
+    fn play(&self) {
+        self.inner.play();
+    }
+    fn pause(&self) {
+        self.inner.pause();
+    }
+    fn seek(&self, p: std::time::Duration) {
+        self.inner.seek(p);
+    }
+    fn stop(&self) {
+        self.inner.stop();
+    }
+    fn set_volume(&self, v: f64) {
+        self.inner.set_volume(v);
+    }
     fn command(&self, cmd: PlayerCommand) {
         self.inner.command(cmd);
     }
@@ -1505,6 +1777,822 @@ async fn stale_gen_error_is_ignored() {
     );
 }
 
+/// §16 开放项 #2：播放中（同代）读错误 → 显式收口——last_error 置位、
+/// 会话以 reason="error" 闭合、phase=Failed；**不 on_ended、不 advance**
+/// （队列不前移、无新装载），不再静默跳歌。
+#[tokio::test]
+async fn midplay_error_sets_last_error_closes_session_holds() {
+    use hmp_storage::LibraryDb;
+
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+    let library = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+    let (handle, _st) = start_engine_with_library(driver.clone(), resolver, library.clone()).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_idle().await;
+    let load_gen = driver.loads.lock().unwrap()[0].1;
+    let loads_before = driver.loads.lock().unwrap().len();
+
+    driver.emit_playback_error(load_gen);
+    wait_idle().await;
+
+    let s = handle.state_rx.borrow();
+    assert!(
+        s.last_error.is_some(),
+        "播放中错误必须浮出 last_error（否则 UI 无感知）"
+    );
+    assert_eq!(s.phase, hmp_core::EnginePhase::Failed);
+    assert_eq!(
+        s.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("a"),
+        "错误后停在原曲（队列不前移）"
+    );
+    assert_eq!(s.queue.current, Some(0), "队列游标不动");
+    drop(s);
+    assert_eq!(
+        driver.loads.lock().unwrap().len(),
+        loads_before,
+        "错误收口不得触发换曲装载"
+    );
+    // 会话以 reason="error" 闭合（listened_ms = 当前位置 0）。
+    {
+        let mut lib = library.lock().unwrap();
+        let recent = lib.recent_plays(10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].reason, "error");
+        assert!(recent[0].ended_at.is_some(), "错误即闭合会话");
+    }
+}
+
+/// seek 失败事件（驱动刻意保持播放态、status 不变 Error）不得按播放故障
+/// 收口：无 last_error、阶段保持 Playing、播放继续（core.rs 既有语义）。
+#[tokio::test]
+async fn seek_failure_error_not_treated() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]);
+    let (handle, _st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_idle().await;
+    let load_gen = driver.loads.lock().unwrap()[0].1;
+    let loads_before = driver.loads.lock().unwrap().len();
+
+    // seek 失败形态：同代 Error 事件但 status 保持 Playing（不置 Error）。
+    driver.emit(PlayerEvent::Error {
+        load_gen,
+        error: hmp_core::HmpError::Playback("seek audio stream: not buffered".into()),
+    });
+    wait_idle().await;
+
+    let s = handle.state_rx.borrow();
+    assert!(s.last_error.is_none(), "seek 失败不宣告播放器故障");
+    assert_eq!(s.phase, hmp_core::EnginePhase::Playing);
+    assert_eq!(
+        s.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("a"),
+        "seek 失败后当前曲不变"
+    );
+    drop(s);
+    assert_eq!(driver.loads.lock().unwrap().len(), loads_before);
+}
+
+/// M1：`resolve_source_ids` 第一次成功（播种列表），此后报错——模拟
+/// QueueAppend 解析失败置 last_error 且旧曲在播的常态窗口。
+#[derive(Debug)]
+struct OneShotSourceResolver {
+    inner: Arc<FakeResolver>,
+    used: std::sync::atomic::AtomicBool,
+}
+
+impl SourceResolver for OneShotSourceResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        if !self.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.inner.resolve_source_ids(src)
+        } else {
+            Box::pin(async {
+                Err(EngineError::Internal(
+                    "source resolution unavailable".into(),
+                ))
+            })
+        }
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        self.inner.resolve_track(id)
+    }
+}
+
+/// M1：无关错误（QueueAppend 解析失败置 last_error，旧曲在播）不得锁死
+/// 播放错误收口——守卫 (c) 按代际判重而非全局 last_error。若误用
+/// `last_error.is_none()` 判重，本测试收口被跳过（phase 停留 Playing）。
+#[tokio::test]
+async fn unrelated_resolve_error_does_not_lock_error_treatment() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(OneShotSourceResolver {
+        inner: FakeResolver::new(vec![vec![TrackId::new("a"), TrackId::new("b")]]),
+        used: std::sync::atomic::AtomicBool::new(false),
+    });
+    let (handle, _st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_idle().await;
+    // QueueAppend 解析失败：last_error 置位，a 继续在播（常态窗口）。
+    handle
+        .cmd(Request::QueueAppend(PlayRequest::Playlist(
+            hmp_core::PlaylistId::new("123"),
+        )))
+        .await
+        .unwrap();
+    wait_idle().await;
+    assert!(
+        handle.state_rx.borrow().last_error.is_some(),
+        "前置：解析失败已置 last_error"
+    );
+    assert_eq!(
+        handle
+            .state_rx
+            .borrow()
+            .playback
+            .current
+            .as_ref()
+            .map(|t| t.id.as_ref()),
+        Some("a"),
+        "前置：旧曲仍在播"
+    );
+
+    // 播放中错误（同代 + 驱动 Error 态）→ 收口必须仍然生效。
+    let load_gen = driver.loads.lock().unwrap()[0].1;
+    driver.emit_playback_error(load_gen);
+    wait_idle().await;
+    let s = handle.state_rx.borrow();
+    assert_eq!(
+        s.phase,
+        hmp_core::EnginePhase::Failed,
+        "无关 last_error 不得锁死错误收口（M1 按代际判重）"
+    );
+    assert_eq!(
+        s.last_error.as_ref().map(|e| e.message.as_str()),
+        Some("playback error: source read error: synthetic mid-read"),
+        "last_error 更新为播放错误本体"
+    );
+}
+
+/// P1（独立审计）：降档失败回滚不清 `error_handled_gen` → 陈旧代际毒化。
+/// 序列：A 在播（gen1）→ Play B 装载 gen2 解码失败（标记 Some(2)）→ 降档
+/// 重试复现已失败档硬失败 → 回滚复原 current_gen=1 → Play C 恰又得 gen2
+/// 且成功 → C 播放中真实读错误 → 守卫 (c) Some(2)==current_gen(2) 误判
+/// 「已处理」抑制收口。回归：回滚复原代际时同步清除标记，后续同代播放
+/// 错误正常收口（last_error + Failed + 停在原曲，不静默跳歌）。
+#[tokio::test]
+async fn degrade_rollback_does_not_poison_error_collection() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![
+        vec![TrackId::new("a")],
+        vec![TrackId::new("b")],
+        vec![TrackId::new("c")],
+    ]);
+    let (handle, st) = start_engine(driver.clone(), resolver).await;
+    // ① A 起播（gen=1，回滚锚点 prev 建立）。
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().playback.current.as_ref().map(|t| t.id.as_ref()) == Some("a"),
+        "A 起播",
+    )
+    .await;
+
+    // ② Play B：装载 gen=2 解码失败（error_handled_gen=Some(2)）→ 降档
+    //    重试复现已失败档（FakeResolver 无档位概念，trait 默认无视排除）→
+    //    硬失败回滚 A（current_gen 复原为 1，loads: a(1)→b(2)✗→a(1)）。
+    driver.set_error_load(true);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            let loads_done = driver.loads.lock().unwrap().len() == 3;
+            loads_done
+                && st.borrow().last_error.is_some()
+                && st.borrow().phase == hmp_core::EnginePhase::Playing
+        },
+        "降档硬失败：错误发布 + 回滚重载 A 完成 + 阶段恢复 Playing",
+    )
+    .await;
+
+    // ③ Play C：current_gen 自 1 复推 → 恰得 gen=2（被毒化代际）且成功。
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("c"))))
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            st.borrow().playback.current.as_ref().map(|t| t.id.as_ref()) == Some("c")
+                && st.borrow().playback.status == PlaybackStatus::Playing
+        },
+        "C 起播",
+    )
+    .await;
+    let c_gen = driver.loads.lock().unwrap()[3].1;
+    assert_eq!(c_gen, 2, "前置：C 的装载代际恰为被降档失败毒化的 gen=2");
+
+    // ④ C 播放中真实读错误（同代 + 驱动 Error 态）→ 必须收口。
+    driver.emit_playback_error(c_gen);
+    wait_until(
+        || {
+            st.borrow()
+                .last_error
+                .as_ref()
+                .map(|e| e.message.contains("source read error"))
+                .unwrap_or(false)
+        },
+        "陈旧 error_handled_gen 不得抑制同代播放错误收口（P1）",
+    )
+    .await;
+    let s = st.borrow();
+    assert_eq!(s.phase, hmp_core::EnginePhase::Failed);
+    assert_eq!(
+        s.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("c"),
+        "错误后停在原曲"
+    );
+    drop(s);
+    assert_eq!(
+        driver.loads.lock().unwrap().len(),
+        4,
+        "收口不触发换曲装载（不静默跳歌）"
+    );
+}
+
+// ── §16 开放项 #1：解析移后台 FIFO worker（命令循环去阻塞） ──────────────
+
+/// 每次调用弹出一个延迟（耗尽后 0）的解析器包装——「慢先快后」与「解析
+/// 窗口期命令即时性」测试的时序原语。
+#[derive(Debug)]
+struct PerCallDelayResolver {
+    inner: Arc<FakeResolver>,
+    delays: Mutex<Vec<std::time::Duration>>,
+}
+
+impl SourceResolver for PerCallDelayResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        let inner = self.inner.clone();
+        let delay = {
+            let mut delays = self.delays.lock().unwrap();
+            if delays.is_empty() {
+                std::time::Duration::ZERO
+            } else {
+                delays.remove(0)
+            }
+        };
+        let src = src.clone();
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            inner.resolve_source_ids(&src).await
+        })
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        self.inner.resolve_track(id)
+    }
+}
+
+/// 首个 `resolve_source_ids` 永不完成（M4 超时测试的「永挂」作业），其后
+/// 转交 inner 正常返回。
+#[derive(Debug)]
+struct HangFirstResolver {
+    inner: Arc<FakeResolver>,
+    hung: std::sync::atomic::AtomicBool,
+}
+
+impl SourceResolver for HangFirstResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        let inner = self.inner.clone();
+        let hang = !self.hung.swap(true, std::sync::atomic::Ordering::SeqCst);
+        let src = src.clone();
+        Box::pin(async move {
+            if hang {
+                // 永挂（超时后被 worker 弃置，子任务自灭）。
+                let () = std::future::pending().await;
+            }
+            inner.resolve_source_ids(&src).await
+        })
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        self.inner.resolve_track(id)
+    }
+}
+
+/// 首个 `resolve_source_ids` panic（O2 worker 存活测试），其后转交 inner。
+#[derive(Debug)]
+struct PanicFirstResolver {
+    inner: Arc<FakeResolver>,
+    panicked: std::sync::atomic::AtomicBool,
+}
+
+impl SourceResolver for PanicFirstResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        let inner = self.inner.clone();
+        let do_panic = !self
+            .panicked
+            .swap(true, std::sync::atomic::Ordering::SeqCst);
+        let src = src.clone();
+        Box::pin(async move {
+            if do_panic {
+                panic!("synthetic resolver job panic (O2)");
+            }
+            inner.resolve_source_ids(&src).await
+        })
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        self.inner.resolve_track(id)
+    }
+}
+
+/// 首作业挂起至放行门打开、其后转交 inner（队列满测试的「仅首作业延迟」
+/// 慢作业）。门用 watch<bool>（异步等待，免 check-then-wait 竞态）。
+#[derive(Debug)]
+struct GatedFirstResolver {
+    inner: Arc<FakeResolver>,
+    gate: watch::Receiver<bool>,
+    first: std::sync::atomic::AtomicBool,
+}
+
+impl SourceResolver for GatedFirstResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        let inner = self.inner.clone();
+        let mut gate = self.gate.clone();
+        let is_first = !self.first.swap(true, std::sync::atomic::Ordering::SeqCst);
+        let src = src.clone();
+        Box::pin(async move {
+            if is_first {
+                let _ = gate.wait_for(|open| *open).await;
+            }
+            inner.resolve_source_ids(&src).await
+        })
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        self.inner.resolve_track(id)
+    }
+}
+
+/// §16 #1 核心回归：慢列表解析（歌单分页秒级）期间播放控制命令必须即时
+/// 生效——红：旧内联 await 冻结命令循环至解析完成（300ms）；绿：解析在
+/// 后台 FIFO worker，SetVolume 即时落到驱动状态。
+#[tokio::test]
+async fn slow_list_resolve_does_not_block_playback_commands() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(PerCallDelayResolver {
+        inner: FakeResolver::new(vec![
+            vec![TrackId::new("a")],                    // 首播曲目（即时）
+            vec![TrackId::new("b"), TrackId::new("c")], // 慢解析的歌单
+        ]),
+        delays: Mutex::new(vec![
+            std::time::Duration::ZERO,
+            std::time::Duration::from_millis(300),
+        ]),
+    });
+    let (handle, st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().playback.status == PlaybackStatus::Playing,
+        "首播起曲",
+    )
+    .await;
+
+    // 慢 Play(歌单) 在途期间发 SetVolume：必须即时生效（不等解析完成）。
+    handle
+        .cmd(Request::Play(PlayRequest::Playlist(
+            hmp_core::PlaylistId::new("123"),
+        )))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await; // 解析已在途
+    let sent_at = std::time::Instant::now();
+    handle
+        .cmd(Request::Command(PlayerCommand::SetVolume(0.4)))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().playback.volume == 0.4,
+        "解析在途时 SetVolume 必须即时生效",
+    )
+    .await;
+    assert!(
+        sent_at.elapsed() < std::time::Duration::from_millis(200),
+        "解析在途时命令不得排队等待（红：旧内联冻结剩余 ~250ms），实际 {:?}",
+        sent_at.elapsed()
+    );
+    // 收尾：慢作业本身仍正确提交（b 起播）。
+    wait_until(
+        || st.borrow().playback.current.as_ref().map(|t| t.id.as_ref()) == Some("b"),
+        "慢解析完成并提交",
+    )
+    .await;
+}
+
+/// §16 #1：QueueAppend 的解析同样离环（不冻结命令窗口）。
+#[tokio::test]
+async fn queue_append_resolve_is_offloop() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(PerCallDelayResolver {
+        inner: FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("b")]]),
+        delays: Mutex::new(vec![
+            std::time::Duration::ZERO,
+            std::time::Duration::from_millis(300),
+        ]),
+    });
+    let (handle, st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().playback.status == PlaybackStatus::Playing,
+        "首播起曲",
+    )
+    .await;
+
+    handle
+        .cmd(Request::QueueAppend(PlayRequest::Playlist(
+            hmp_core::PlaylistId::new("123"),
+        )))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let sent_at = std::time::Instant::now();
+    handle
+        .cmd(Request::Command(PlayerCommand::SetVolume(0.4)))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().playback.volume == 0.4,
+        "QueueAppend 解析在途时 SetVolume 必须即时生效",
+    )
+    .await;
+    assert!(
+        sent_at.elapsed() < std::time::Duration::from_millis(200),
+        "QueueAppend 解析不得冻结命令循环，实际 {:?}",
+        sent_at.elapsed()
+    );
+    wait_until(|| st.borrow().queue.len == 2, "解析完成后追加落地").await;
+    assert!(
+        driver.loads.lock().unwrap().len() == 1,
+        "QueueAppend 不触发装载"
+    );
+}
+
+/// O3 措辞：慢先快后仍按派发序应用——单串行 FIFO worker 下完成序 ≡
+/// 派发序：装载顺序 [a, c] 且队列终态 = 后发者（若改成并行 worker，
+/// 乱序应用会使本测试红）。
+#[tokio::test]
+async fn resolve_replies_apply_in_dispatch_order() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(PerCallDelayResolver {
+        inner: FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("c")]]),
+        delays: Mutex::new(vec![
+            std::time::Duration::from_millis(300),
+            std::time::Duration::ZERO,
+        ]),
+    });
+    let (handle, st) = start_engine(driver.clone(), resolver).await;
+    let seq0 = st.borrow().seq;
+    // 背靠背两个 Play：慢的在前、快的在后——提交序必须仍是 [a, c]。
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("c"))))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().playback.current.as_ref().map(|t| t.id.as_ref()) == Some("c"),
+        "两个 Play 均按派发序提交",
+    )
+    .await;
+    assert_eq!(
+        driver.load_uris(),
+        vec!["fake://a".to_string(), "fake://c".to_string()],
+        "装载顺序 = 派发序（慢先快后仍按派发序应用）"
+    );
+    assert_eq!(st.borrow().queue.len, 1, "队列终态 = 后发者");
+    assert_eq!(st.borrow().seq, seq0 + 2, "两个命令各自推进一次");
+}
+
+/// M2 变体断言：慢 Play 受理后（seq 未推进）Stop → seq 按丢弃条数越过
+/// 受理值；迟到的回包不装载、不换队列、阶段保持 Idle。
+#[tokio::test]
+async fn stop_drops_pending_resolve() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(PerCallDelayResolver {
+        inner: FakeResolver::new(vec![vec![TrackId::new("b")]]),
+        delays: Mutex::new(vec![std::time::Duration::from_millis(400)]),
+    });
+    let (handle, st) = start_engine(driver.clone(), resolver).await;
+    let seq0 = st.borrow().seq;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().phase == hmp_core::EnginePhase::Resolving,
+        "受理即进入 Resolving",
+    )
+    .await;
+    assert_eq!(st.borrow().seq, seq0, "受理不推进 seq（既有语义）");
+    handle
+        .cmd(Request::Command(PlayerCommand::Stop))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().seq == seq0 + 1,
+        "Stop 按丢弃条数推进 seq（M2）",
+    )
+    .await;
+    assert_eq!(st.borrow().phase, hmp_core::EnginePhase::Idle);
+    // 迟到回包（400ms 后）被 token 失效丢弃：无装载、无队列、阶段不动。
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    assert!(driver.loads.lock().unwrap().is_empty(), "迟到回包不得装载");
+    let s = st.borrow();
+    assert!(s.playback.current.is_none());
+    assert_eq!(s.queue.len, 0, "迟到回包不得换队列");
+    assert_eq!(s.phase, hmp_core::EnginePhase::Idle);
+}
+
+/// §16 #1 新交互语义钉死：解析在途期间 EOS 先按旧队列续播，解析完成后
+/// 整表替换装载起播曲（旧实现循环冻结、不可能出现此交错；新行为对用户
+/// 更顺——行为变化 #1，PR 描述明示）。
+#[tokio::test]
+async fn eos_during_pending_resolve_then_list_applies() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(PerCallDelayResolver {
+        inner: FakeResolver::new(vec![
+            vec![TrackId::new("x"), TrackId::new("y")],
+            vec![TrackId::new("b"), TrackId::new("c")],
+        ]),
+        delays: Mutex::new(vec![
+            std::time::Duration::ZERO,
+            std::time::Duration::from_millis(300),
+        ]),
+    });
+    let (handle, st) = start_engine(driver.clone(), resolver).await;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("x"))))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().playback.current.as_ref().map(|t| t.id.as_ref()) == Some("x"),
+        "起播 x",
+    )
+    .await;
+    let x_gen = driver.loads.lock().unwrap()[0].1;
+    // 慢 Play(歌单) 在途时 x 曲尾 → 先按旧队列续播 y。
+    handle
+        .cmd(Request::Play(PlayRequest::Playlist(
+            hmp_core::PlaylistId::new("123"),
+        )))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    driver.emit(PlayerEvent::PlaybackEnded { load_gen: x_gen });
+    wait_until(
+        || st.borrow().playback.current.as_ref().map(|t| t.id.as_ref()) == Some("y"),
+        "解析在途时 EOS 先续播旧队列",
+    )
+    .await;
+    // 解析完成 → 整表替换装载起播曲 b。
+    wait_until(
+        || st.borrow().playback.current.as_ref().map(|t| t.id.as_ref()) == Some("b"),
+        "回包到达后整表替换",
+    )
+    .await;
+    assert_eq!(
+        driver.load_uris(),
+        vec![
+            "fake://x".to_string(),
+            "fake://y".to_string(),
+            "fake://b".to_string()
+        ],
+        "装载序列：x（首播）→ y（EOS 续播）→ b（回包替换）"
+    );
+    assert_eq!(st.borrow().queue.len, 2, "终态队列 = 新列表");
+}
+
+/// M4：列表解析每作业总超时——注入 100ms + 首作业永挂的解析器 →
+/// `last_error` 含 "source resolution timed out"（M5：复用 Internal 变
+/// 体）、seq 推进、队列不变，且 worker 存活（随后正常 Play 成功）。
+#[tokio::test]
+async fn list_resolve_timeout() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(HangFirstResolver {
+        inner: FakeResolver::new(vec![vec![TrackId::new("z")]]),
+        hung: std::sync::atomic::AtomicBool::new(false),
+    });
+    let handle = PlaybackEngine::start_with_options(
+        driver.clone(),
+        resolver,
+        Arc::new(|| true),
+        None,
+        std::time::Duration::from_secs(5),
+        None,
+        std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
+        std::time::Duration::from_millis(100),
+    );
+    let st = handle.state_rx.clone();
+    let seq0 = st.borrow().seq;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            st.borrow()
+                .last_error
+                .as_ref()
+                .map(|e| e.message.contains("source resolution timed out"))
+                .unwrap_or(false)
+        },
+        "永挂作业应在注入超时后报错",
+    )
+    .await;
+    let s = st.borrow();
+    assert_eq!(s.seq, seq0 + 1, "超时失败推进 seq（确定性结果边界）");
+    assert_eq!(s.queue.len, 0, "队列不变");
+    assert_eq!(s.phase, hmp_core::EnginePhase::Idle);
+    drop(s);
+    // worker 存活：随后正常 Play 成功（第二个作业不永挂）。
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("z"))))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().playback.current.as_ref().map(|t| t.id.as_ref()) == Some("z"),
+        "worker 存活，后续作业正常完成",
+    )
+    .await;
+}
+
+/// M4/O4：请求通道满 → `try_send` 即时拒绝（"resolver queue full"），且
+/// QueueAppend 满拒绝**不推进 seq**（O4：与 Stop 弃置必推进区分）；
+/// worker 恢复后前 N 个正常 append。
+#[tokio::test]
+async fn resolver_queue_full_fails_fast() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let stub_lists: Vec<Vec<TrackId>> = (0..25)
+        .map(|i| vec![TrackId::new(format!("q{i}"))])
+        .collect();
+    let (gate_tx, gate_rx) = watch::channel(false);
+    let resolver = Arc::new(GatedFirstResolver {
+        inner: FakeResolver::new(stub_lists),
+        gate: gate_rx,
+        first: std::sync::atomic::AtomicBool::new(false),
+    });
+    let (handle, st) = start_engine(driver.clone(), resolver).await;
+    let seq0 = st.borrow().seq;
+
+    // 连发 QueueAppend 直到通道满（容量 16 + 1 在途 → 第 18 个左右拒绝）。
+    let mut accepted: usize = 0;
+    let mut rejected = false;
+    for _ in 0..25 {
+        handle
+            .cmd(Request::QueueAppend(PlayRequest::Playlist(
+                hmp_core::PlaylistId::new("p"),
+            )))
+            .await
+            .unwrap();
+        wait_idle().await;
+        if st
+            .borrow()
+            .last_error
+            .as_ref()
+            .map(|e| e.message == "resolver queue full")
+            .unwrap_or(false)
+        {
+            rejected = true;
+            break;
+        }
+        accepted += 1;
+    }
+    assert!(
+        rejected,
+        "25 个追加内应出现队列满拒绝（容量 {RESOLVE_QUEUE_CAPACITY}）"
+    );
+    assert_eq!(
+        st.borrow().seq,
+        seq0,
+        "O4：QueueAppend 满拒绝不推进 seq（受理亦不推进）"
+    );
+    // 放行 → worker 恢复，被受理的追加逐个落地。
+    gate_tx.send(true).unwrap();
+    wait_until(
+        || st.borrow().queue.len == accepted,
+        "worker 恢复后被受理的追加全部落地",
+    )
+    .await;
+    assert!(
+        driver.loads.lock().unwrap().is_empty(),
+        "QueueAppend 不触发装载"
+    );
+}
+
+/// O2：单作业 panic 不杀 worker——首作业 panic 报 Internal（"resolver
+/// panicked"）、登记清空（随后的 Stop 无可弃置 → seq 不推进），第二个
+/// 作业正常完成。
+#[tokio::test]
+async fn resolver_job_panic_does_not_kill_worker() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(PanicFirstResolver {
+        inner: FakeResolver::new(vec![vec![TrackId::new("b")]]),
+        panicked: std::sync::atomic::AtomicBool::new(false),
+    });
+    let (handle, st) = start_engine(driver.clone(), resolver).await;
+    let seq0 = st.borrow().seq;
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            st.borrow()
+                .last_error
+                .as_ref()
+                .map(|e| e.message.contains("resolver panicked"))
+                .unwrap_or(false)
+        },
+        "panic 作业应报 Internal 错误",
+    )
+    .await;
+    assert_eq!(st.borrow().seq, seq0 + 1, "Play 失败推进 seq");
+    assert_eq!(st.borrow().phase, hmp_core::EnginePhase::Idle);
+    // 登记已清空：Stop 无可弃置 → seq 不再推进。
+    let seq1 = st.borrow().seq;
+    handle
+        .cmd(Request::Command(PlayerCommand::Stop))
+        .await
+        .unwrap();
+    wait_idle().await;
+    assert_eq!(st.borrow().seq, seq1, "登记已清空，Stop 不再推进 seq");
+    // worker 存活：第二个作业（QueueAppend）正常完成。
+    handle
+        .cmd(Request::QueueAppend(PlayRequest::Playlist(
+            hmp_core::PlaylistId::new("p"),
+        )))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().queue.len == 1,
+        "worker 存活，后续作业正常完成",
+    )
+    .await;
+}
+
 /// 同代 EOS = 真实曲尾：装载完成后立即到达也须续播（旧 500ms 窗口会丢短曲）。
 #[tokio::test]
 async fn same_gen_eos_advances_immediately() {
@@ -1540,6 +2628,8 @@ async fn failed_load_rolls_back_to_previous_track() {
         std::time::Duration::from_millis(300),
         None,
         std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
+        LIST_RESOLVE_TIMEOUT,
     );
     // 先成功播放 a（gen=1）。
     handle
@@ -1593,6 +2683,8 @@ async fn first_load_failure_has_no_rollback() {
         std::time::Duration::from_millis(300),
         None,
         std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
+        LIST_RESOLVE_TIMEOUT,
     );
     driver.set_fail_load(true);
     handle
@@ -2320,6 +3412,8 @@ async fn rollback_failure_only_warns() {
         std::time::Duration::from_millis(300),
         None,
         std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
+        LIST_RESOLVE_TIMEOUT,
     );
     handle
         .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
@@ -2363,6 +3457,8 @@ async fn rollback_restores_gen_then_eos_advances() {
         std::time::Duration::from_millis(300),
         None,
         std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
+        LIST_RESOLVE_TIMEOUT,
     );
     handle
         .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
@@ -2386,6 +3482,326 @@ async fn rollback_restores_gen_then_eos_advances() {
         s.playback.current.as_ref().unwrap().id,
         TrackId::new("c"),
         "回滚后同代 EOS 应触发续播（current_gen 复原语义）"
+    );
+}
+
+// ---- F2 Bug 1 回归：wait_current_applied 必须校验 load_gen（同曲重载假 ACK） ----
+
+/// 轮询等待复合状态 playback.load_gen 到达 `gen`（DeferredDriver 装载延迟
+/// 落地，`wait_idle` 不消耗真实时间；超时即失败，不悬挂）。
+async fn wait_playback_gen(st: &mut watch::Receiver<DaemonState>, expected_gen: u64) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if st.borrow().playback.load_gen == expected_gen {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "3s 内 playback.load_gen 未到达 {expected_gen}"
+        );
+        st.changed().await.unwrap();
+    }
+}
+
+/// 轮询等待条件成立（驱动侧 loads 长度 / 状态字段等无 watch 通知的边界）。
+async fn wait_until(f: impl Fn() -> bool, msg: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !f() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "3s 内未满足边界条件：{msg}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// F2 Bug 1：同曲重载（再次 Play 同 mid）且装载异步落地时，不得凭旧装载的
+/// 同 id current 提前 ACK——引擎必须等到新装载代际应用（驱动完成装载时
+/// current 与 load_gen 同拍置值）才提交队列/会话/last_load。同步 FakeDriver
+/// 的「load 即应用」会掩盖该窗口，故用 DeferredDriver（50ms 后落地）复现
+/// 真实时序。回归前：wait_current_applied 只看 current id → 立即 ACK，
+/// seq 越过边界的首个发布仍是旧装载（gen=1）；修复后：该发布已携带 gen=2。
+#[tokio::test]
+async fn same_track_reload_acks_only_after_load_gen_applied() {
+    let (driver, _sr, _er) = DeferredDriver::new();
+    // 两次 Play 各弹一个解析列表。
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("a")]]);
+    let handle = PlaybackEngine::start(driver.clone(), resolver, Arc::new(|| true));
+    let mut st = handle.state_rx.clone();
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    // 前置：首载（gen=1）已应用、命令完成（seq 边界）。
+    wait_playback_gen(&mut st, 1).await;
+    let seq1 = st.borrow().seq;
+    assert_eq!(seq1, 1, "首条 Play 命令已完成");
+    // 同曲重载：gen=2 装载在途 50ms。
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        {
+            let s = st.borrow();
+            if s.seq > seq1 {
+                assert_eq!(
+                    s.playback.load_gen, 2,
+                    "seq 首次推进时必须已应用 gen=2 装载（不得凭旧装载假 ACK）"
+                );
+                assert_eq!(
+                    s.playback.current.as_ref().map(|t| t.id.as_ref()),
+                    Some("a")
+                );
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "3s 内重载未完成（seq 未推进）"
+        );
+        st.changed().await.unwrap();
+    }
+    assert_eq!(
+        driver.inner.load_uris(),
+        vec!["fake://a", "fake://a"],
+        "同曲重载应真实重载（两条装载记录）"
+    );
+}
+
+/// F2 Bug 1：同曲重载装载**失败**（异步落地后只发同代 Error 事件、状态保持
+/// 旧装载）时，不得凭旧装载同 id current 假成功——必须走失败路径：回滚重载
+/// 上一曲（原代际）、发布 last_error。回归前：假 ACK → 引擎提交队列/会话/
+/// last_load（无回滚、无错误），随后 Error 事件只 publish、状态污染——
+/// 装载记录停在 2 条（超时即假 ACK 证据）。
+#[tokio::test]
+async fn same_track_reload_failure_rolls_back_not_fake_ack() {
+    let (driver, _sr, _er) = DeferredDriver::new();
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("a")]]);
+    let handle = PlaybackEngine::start(driver.clone(), resolver, Arc::new(|| true));
+    let mut st = handle.state_rx.clone();
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_playback_gen(&mut st, 1).await;
+    // 重载同曲但装载延迟失败（Error gen=2；current/load_gen 保持旧装载）。
+    driver.inner.set_fail_load(true);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    // 边界：回滚重载出现（第 3 条装载记录）；假 ACK 时永不出现。
+    wait_until(
+        || driver.inner.loads.lock().unwrap().len() >= 3,
+        "失败装载后应回滚重载上一曲（疑似假 ACK：失败装载被当成功提交）",
+    )
+    .await;
+    // 回滚完成后 last_error 才发布（rollback_load 返回之后）。
+    wait_until(
+        || st.borrow().last_error.is_some(),
+        "同曲重载失败必须发布错误（假 ACK 时无错误、无回滚）",
+    )
+    .await;
+    let s = st.borrow();
+    assert_eq!(
+        s.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("a"),
+        "失败后旧装载（同曲）仍是当前曲"
+    );
+    assert_eq!(
+        s.playback.load_gen, 1,
+        "回滚后恢复上一装载代际（失败装载 gen=2 不得提交）"
+    );
+    assert_eq!(s.phase, hmp_core::EnginePhase::Playing);
+    drop(s);
+    assert_eq!(
+        driver.inner.load_uris(),
+        vec!["fake://a", "fake://a", "fake://a"],
+        "首载 + 失败重载 + 回滚重载"
+    );
+}
+
+/// F2 Bug 1 守护（回滚路径 gen 校验不回归）：换曲装载异步失败 → 回滚重载
+/// 上一曲（以 prev.load_gen 调用 wait_current_applied）必须被 gen 校验正确
+/// 确认——不因新代际在途而假失败，也不绕过校验；确认后 seek 回旧位置并续播。
+#[tokio::test]
+async fn rollback_after_async_load_failure_confirms_previous_gen() {
+    let (driver, _sr, _er) = DeferredDriver::new();
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a")], vec![TrackId::new("b")]]);
+    let handle = PlaybackEngine::start(driver.clone(), resolver, Arc::new(|| true));
+    let mut st = handle.state_rx.clone();
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_playback_gen(&mut st, 1).await;
+    // 旧曲位置推进（回滚后应 seek 回此处；watch 值同步可见，无竞态）。
+    driver
+        .inner
+        .state_tx
+        .send_modify(|s| s.position = std::time::Duration::from_secs(12));
+    // Play(b) 延迟失败（Error gen=2）→ 回滚重载 a（gen=1）。
+    driver.inner.set_fail_load(true);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+        .await
+        .unwrap();
+    wait_until(
+        || driver.inner.loads.lock().unwrap().len() >= 3,
+        "失败装载后应回滚重载上一曲",
+    )
+    .await;
+    wait_until(|| st.borrow().last_error.is_some(), "装载失败应发布错误").await;
+    let s = st.borrow();
+    assert!(s.last_error.is_some(), "装载失败应发布错误");
+    assert_eq!(
+        s.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("a"),
+        "回滚后旧曲恢复为当前曲"
+    );
+    assert_eq!(
+        s.playback.load_gen, 1,
+        "回滚装载沿用原代际（prev.load_gen=1）"
+    );
+    assert_eq!(s.phase, hmp_core::EnginePhase::Playing);
+    drop(s);
+    assert_eq!(
+        driver.inner.load_uris(),
+        vec!["fake://a", "fake://b", "fake://a"],
+        "失败装载 + 回滚重载"
+    );
+    assert!(
+        driver
+            .inner
+            .commands
+            .lock()
+            .unwrap()
+            .contains(&PlayerCommand::Seek(std::time::Duration::from_secs(12))),
+        "回滚应 seek 回旧位置"
+    );
+}
+
+/// 测试用进程内源（`MediaStreamSource` 最小实现：open 出空 Cursor）。
+#[derive(Debug)]
+struct TestSource {
+    len: u64,
+}
+
+impl hmp_core::MediaStreamSource for TestSource {
+    fn len(&self) -> u64 {
+        self.len
+    }
+    fn open(&self) -> std::io::Result<Box<dyn hmp_core::MediaStream>> {
+        Ok(Box::new(std::io::Cursor::new(Vec::new())))
+    }
+}
+
+/// 按 id 决定是否携带进程内源的解析器（stream 接线测试：远端流式 vs
+/// 缓存命中/本地 file:// 形态）。
+#[derive(Debug)]
+struct StreamResolver {
+    stream_ids: Vec<TrackId>,
+}
+
+impl SourceResolver for StreamResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        let stubs = match src {
+            PlayRequest::Track(id) => vec![hmp_core::TrackStub {
+                id: id.clone(),
+                title: id.to_string(),
+                artists: Vec::new(),
+                album: None,
+                duration_ms: None,
+            }],
+            _ => Vec::new(),
+        };
+        Box::pin(async move { Ok(stubs) })
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        let id = id.clone();
+        let with_stream = self.stream_ids.contains(&id);
+        Box::pin(async move {
+            let media = with_stream.then(|| hmp_media::PreparedMedia {
+                uri: format!("cdn://{id}"),
+                source: Some(
+                    Arc::new(TestSource { len: 8 }) as Arc<dyn hmp_core::MediaStreamSource>
+                ),
+            });
+            Ok(ResolvedTrack {
+                track: Track {
+                    id: id.clone(),
+                    title: format!("t-{id}"),
+                    artists: vec![],
+                    album: None,
+                    duration: Some(std::time::Duration::from_secs(60)),
+                    cover: None,
+                    url: Some(format!("cdn://{id}")),
+                    available_qualities: vec![],
+                },
+                uri: format!("cdn://{id}"),
+                media,
+                quality: hmp_core::AudioQuality::Mp3_128,
+                replaygain_db: None,
+            })
+        })
+    }
+}
+
+/// 新链路接线：解析器产出的进程内源（`PreparedMedia.source`）经引擎递给
+/// 驱动（`LoadRequest.stream`）；缓存命中/本地形态（media=None）装载不带
+/// stream；装载失败回滚重建 LoadRequest 时带回 `AppliedLoad.source`
+/// （旧源可重复 `open`，恢复旧曲播放）。
+#[tokio::test]
+async fn load_passes_stream_source_and_rollback_reuses_it() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    // s1 携带进程内源（远端流式）；s2 不携带（缓存命中 file:// 形态）。
+    let resolver = Arc::new(StreamResolver {
+        stream_ids: vec![TrackId::new("s1")],
+    });
+    let handle = PlaybackEngine::start_with_options(
+        driver.clone(),
+        resolver,
+        Arc::new(|| true),
+        None,
+        std::time::Duration::from_millis(300),
+        None,
+        std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
+        LIST_RESOLVE_TIMEOUT,
+    );
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("s1"))))
+        .await
+        .unwrap();
+    wait_idle().await;
+    assert_eq!(driver.load_uris(), vec!["cdn://s1"]);
+
+    // 换 s2 且装载失败（current 不更新 → 超时）→ 回滚重载 s1。
+    driver.set_fail_load(true);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("s2"))))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+    assert_eq!(
+        driver.load_uris(),
+        vec!["cdn://s1", "cdn://s2", "cdn://s1"],
+        "失败装载 + 回滚重载"
+    );
+    assert_eq!(
+        *driver.stream_seen.lock().unwrap(),
+        vec![true, false, true],
+        "流式曲目装载带 stream；file:// 形态不带；回滚重载带回旧 source"
     );
 }
 
@@ -2510,6 +3926,8 @@ async fn session_restores_after_restart() {
         std::time::Duration::from_secs(5),
         Some(sp.clone()),
         std::time::Duration::from_millis(0), // 节流 0 → 每次 publish 都写
+        PRELOAD_RESOLVE_TIMEOUT,
+        LIST_RESOLVE_TIMEOUT,
     );
     h1.cmd(Request::Command(PlayerCommand::SetVolume(0.37)))
         .await
@@ -2524,16 +3942,18 @@ async fn session_restores_after_restart() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(sp.exists(), "会话文件应已写入");
     // 第二代引擎：同路径恢复。
-    let (driver2, _, _) = FakeDriver::new();
+    let (driver, _, _) = FakeDriver::new();
     let resolver2 = FakeResolver::new(vec![vec![TrackId::new("qq:r1")]]);
     let h2 = PlaybackEngine::start_with_options(
-        driver2.clone(),
+        driver.clone(),
         resolver2,
         Arc::new(|| true),
         None,
         std::time::Duration::from_secs(5),
         Some(sp.clone()),
         std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
+        LIST_RESOLVE_TIMEOUT,
     );
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let st = h2.state_rx.borrow().clone();
@@ -2549,7 +3969,7 @@ async fn session_restores_after_restart() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let seeks: Vec<PlayerCommand> = driver2
+    let seeks: Vec<PlayerCommand> = driver
         .commands
         .lock()
         .unwrap()
@@ -2576,6 +3996,8 @@ async fn position_persist_is_throttled() {
         std::time::Duration::from_secs(5),
         Some(sp.clone()),
         std::time::Duration::from_secs(5), // 长节流
+        PRELOAD_RESOLVE_TIMEOUT,
+        LIST_RESOLVE_TIMEOUT,
     );
     h.cmd(Request::Play(PlayRequest::Track(TrackId::new("qq:t1"))))
         .await
@@ -2618,6 +4040,8 @@ async fn session_persist_failure_is_swallowed() {
         std::time::Duration::from_secs(5),
         Some(sp),
         std::time::Duration::from_millis(0),
+        PRELOAD_RESOLVE_TIMEOUT,
+        LIST_RESOLVE_TIMEOUT,
     );
     h.cmd(Request::Play(PlayRequest::Track(TrackId::new("qq:f1"))))
         .await
@@ -2758,4 +4182,380 @@ async fn play_list_load_failure_keeps_old_queue() {
         Some("a"),
         "旧曲继续是当前曲"
     );
+}
+
+// ---- §16 开放项修复：装载期解码失败降档重试（音质回退链覆盖解码期） ----
+
+/// 降档解析器：首次 resolve 返回 Flac（将被驱动装载失败），之后的 resolve
+/// 返回 Mp3_128；记录每次 resolve_track_excluding 收到的排除集（断言失败档
+/// 被真实排除）。
+#[derive(Debug)]
+struct DegradeResolver {
+    calls: std::sync::atomic::AtomicU32,
+    excludes: Mutex<Vec<Vec<hmp_core::AudioQuality>>>,
+}
+
+impl SourceResolver for DegradeResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &hmp_core::PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        // 与 FakeResolver::new 的弹列式供应对齐：Play(Track(a)) 供给 [a]。
+        let ids: Vec<TrackId> = match src {
+            hmp_core::PlayRequest::Track(id) => vec![id.clone()],
+            other => {
+                panic!("DegradeResolver 只支持 Track 源，实际 {other:?}");
+            }
+        };
+        Box::pin(async move {
+            Ok(ids
+                .into_iter()
+                .map(|id| hmp_core::TrackStub {
+                    id: id.clone(),
+                    title: format!("t-{id}"),
+                    artists: vec![],
+                    album: None,
+                    duration_ms: Some(60_000),
+                })
+                .collect())
+        })
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        let id = id.clone();
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            let quality = if call == 0 {
+                hmp_core::AudioQuality::Flac
+            } else {
+                hmp_core::AudioQuality::Mp3_128
+            };
+            Ok(ResolvedTrack {
+                track: Track {
+                    id: id.clone(),
+                    title: format!("t-{id}"),
+                    artists: vec![],
+                    album: None,
+                    duration: Some(std::time::Duration::from_secs(60)),
+                    cover: None,
+                    url: Some(format!("fake://{id}")),
+                    available_qualities: vec![quality.clone()],
+                },
+                uri: format!("fake://{id}"),
+                media: None,
+                quality,
+                replaygain_db: None,
+            })
+        })
+    }
+    fn resolve_track_excluding(
+        &self,
+        track_id: &TrackId,
+        exclude: &[hmp_core::AudioQuality],
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        self.excludes.lock().unwrap().push(exclude.to_vec());
+        self.resolve_track(track_id)
+    }
+}
+
+/// §16 开放项：装载期解码失败（驱动 Error 事件）→ 排除失败档降档重试，
+/// 低档装载成功则正常提交播放（此前整次装载直接失败，无降档）。
+#[tokio::test]
+async fn load_decode_failure_degrades_to_next_quality() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(DegradeResolver {
+        calls: std::sync::atomic::AtomicU32::new(0),
+        excludes: Mutex::new(Vec::new()),
+    });
+    let (handle, st) =
+        start_engine(driver.clone(), resolver.clone() as Arc<dyn SourceResolver>).await;
+    driver.set_error_load(true);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+
+    wait_until(
+        || {
+            let s = st.borrow();
+            s.phase == hmp_core::EnginePhase::Playing
+                && s.playback.actual_quality.as_ref() == Some(&hmp_core::AudioQuality::Mp3_128)
+        },
+        "解码失败降档后应以 Mp3_128 进入 Playing",
+    )
+    .await;
+    let s = st.borrow();
+    assert!(
+        s.last_error.is_none(),
+        "降档成功后不得残留错误：{:?}",
+        s.last_error
+    );
+    drop(s);
+    // 两次装载（Flac 失败 + Mp3_128 成功）、两次解析（第二次带排除集）。
+    assert_eq!(
+        driver.load_uris(),
+        vec!["fake://a", "fake://a"],
+        "应装载两次（失败档 + 降档）"
+    );
+    assert_eq!(
+        resolver.excludes.lock().unwrap().as_slice(),
+        [vec![hmp_core::AudioQuality::Flac]],
+        "重试解析必须排除失败档 Flac"
+    );
+    assert_eq!(
+        resolver.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "降档重试应二次解析"
+    );
+    assert_eq!(driver.plays.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// §16 开放项边界：解析器无视排除集（恒返回同一档）时，降档重试必须
+/// 有界——重试解析复现已失败档即按失败收口（Failed + last_error），且
+/// 不得再次装载同一份坏数据（守卫在装载前拦截，全程仅 1 次装载）。
+#[tokio::test]
+async fn load_decode_failure_without_resolvable_alternative_terminates() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    // FakeResolver 的 resolve_track_excluding 走 trait 默认实现（无视排除），
+    // 恒返回 Mp3_128——模拟「没有更低档位可试」。
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a")]]);
+    let (handle, st) = start_engine(driver.clone(), resolver).await;
+    driver.set_error_load(true);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+
+    wait_until(
+        || st.borrow().last_error.is_some(),
+        "重试解析复现已失败档应按失败收口并发布错误",
+    )
+    .await;
+    let s = st.borrow();
+    assert_eq!(
+        s.phase,
+        hmp_core::EnginePhase::Idle,
+        "无可降档位且无旧曲 → 失败后阶段恢复 Idle（restore_phase_after_failure）"
+    );
+    assert_eq!(
+        s.last_error.as_ref().map(|e| e.code),
+        Some(IpcErrorCode::Internal),
+        "解码失败经 LoadFailed 映射 Internal"
+    );
+    drop(s);
+    assert_eq!(
+        driver.loads.lock().unwrap().len(),
+        1,
+        "复现已失败档 → 不再装载（守卫在装载前收口），不得无限装载"
+    );
+}
+
+/// 降档耗尽解析器：resolve_track 返回 Flac（将被装载失败）；重试
+/// resolve_track_excluding 直接报回退链耗尽（真实 QqSourceResolver 在排除集
+/// 覆盖全链时的行为：QualityUnavailable "every quality already failed
+/// loading"）。记录是否被带排除集调用。
+#[derive(Debug)]
+struct ExhaustResolver {
+    excludes: Mutex<Vec<Vec<hmp_core::AudioQuality>>>,
+}
+
+impl SourceResolver for ExhaustResolver {
+    fn resolve_source_ids(
+        &self,
+        src: &hmp_core::PlayRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<hmp_core::TrackStub>, EngineError>> + Send + '_>>
+    {
+        let ids: Vec<TrackId> = match src {
+            hmp_core::PlayRequest::Track(id) => vec![id.clone()],
+            other => panic!("ExhaustResolver 只支持 Track 源，实际 {other:?}"),
+        };
+        Box::pin(async move {
+            Ok(ids
+                .into_iter()
+                .map(|id| hmp_core::TrackStub {
+                    id: id.clone(),
+                    title: format!("t-{id}"),
+                    artists: vec![],
+                    album: None,
+                    duration_ms: Some(60_000),
+                })
+                .collect())
+        })
+    }
+    fn resolve_track(
+        &self,
+        id: &TrackId,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        let id = id.clone();
+        Box::pin(async move {
+            Ok(ResolvedTrack {
+                track: Track {
+                    id: id.clone(),
+                    title: format!("t-{id}"),
+                    artists: vec![],
+                    album: None,
+                    duration: Some(std::time::Duration::from_secs(60)),
+                    cover: None,
+                    url: Some(format!("fake://{id}")),
+                    available_qualities: vec![hmp_core::AudioQuality::Flac],
+                },
+                uri: format!("fake://{id}"),
+                media: None,
+                quality: hmp_core::AudioQuality::Flac,
+                replaygain_db: None,
+            })
+        })
+    }
+    fn resolve_track_excluding(
+        &self,
+        _track_id: &TrackId,
+        exclude: &[hmp_core::AudioQuality],
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        self.excludes.lock().unwrap().push(exclude.to_vec());
+        Box::pin(async {
+            Err(EngineError::QualityUnavailable(
+                "every quality already failed loading: flac".into(),
+            ))
+        })
+    }
+}
+
+/// §16 边界补全：降档重试中解析器报回退链耗尽（排除集覆盖全链）时，
+/// 必须回滚旧曲并复原代际——真实驱动 perform_load 先 sink.clear()，失败
+/// 装载已清掉旧曲音频，不回滚用户只剩静音、旧曲 EOS 被当旧代过滤。
+#[tokio::test]
+async fn resolve_exhaustion_after_load_failure_rolls_back_previous_track() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = Arc::new(ExhaustResolver {
+        excludes: Mutex::new(Vec::new()),
+    });
+    // ExhaustResolver 按请求 id 供 stub（resolve_source_ids），resolve_track
+    // 对 a/b 都返回 Flac：首 Play(a) 建队起播（gen=1），Play(b) 触发
+    // 失败装载 + 降档重试耗尽。
+    let (handle, st) = start_engine(driver.clone(), resolver.clone()).await;
+    // 首曲起播（gen=1，Flac 正常装载）。
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("a"))))
+        .await
+        .unwrap();
+    wait_until(
+        || st.borrow().playback.load_gen == 1,
+        "首曲 Flac 装载应已应用（gen=1）",
+    )
+    .await;
+    // 旧曲位置推进（回滚后应 seek 回此处）。
+    driver
+        .state_tx
+        .send_modify(|s| s.position = std::time::Duration::from_secs(7));
+    // 换 b：首档 Flac 装载失败（Error gen=2）→ 重试解析报链耗尽 → 回滚 a。
+    driver.set_error_load(true);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+        .await
+        .unwrap();
+
+    wait_until(
+        || st.borrow().last_error.is_some(),
+        "降档重试解析耗尽应按失败收口并发布错误",
+    )
+    .await;
+    // 重试解析确实带着排除集发生（失败档 Flac 被真实排除）。
+    assert_eq!(
+        resolver.excludes.lock().unwrap().as_slice(),
+        [vec![hmp_core::AudioQuality::Flac]],
+        "重试解析必须排除失败档 Flac"
+    );
+    let s = st.borrow();
+    assert_eq!(
+        s.last_error.as_ref().map(|e| e.code),
+        Some(IpcErrorCode::QualityUnavailable),
+        "链耗尽经 QualityUnavailable 映射对应错误码"
+    );
+    assert_eq!(
+        s.playback.current.as_ref().map(|t| t.id.as_ref()),
+        Some("a"),
+        "回滚后旧曲恢复为当前曲（不得静音无曲）"
+    );
+    assert_eq!(
+        s.playback.load_gen, 1,
+        "回滚装载沿用原代际（prev.load_gen=1）"
+    );
+    assert_eq!(s.phase, hmp_core::EnginePhase::Playing, "旧曲继续播放");
+    drop(s);
+    assert_eq!(
+        driver.load_uris(),
+        vec!["fake://a", "fake://b", "fake://a"],
+        "首载 + 失败装载 + 回滚重载"
+    );
+    assert!(
+        driver
+            .commands
+            .lock()
+            .unwrap()
+            .contains(&PlayerCommand::Seek(std::time::Duration::from_secs(7))),
+        "回滚应 seek 回旧位置"
+    );
+}
+
+/// S12（S3 审计 P4，AUDIT §25）：restore_phase_after_failure 的判据回归。
+/// 端到端形态（装载成功→Stop→失败 Play）在 FakeDriver 下不可稳定构造——
+/// fake 的同步 load() 无条件翻 Playing，与真驱动时序不同构（探针实证）。
+/// 故直测判据：watch 状态驱动 status=Stopped 而 current 仍在（真实错位形态）
+/// 时，phase 必须落在 Idle 而非 Playing；status=Playing 时才落 Playing。
+#[tokio::test]
+async fn phase_restore_uses_driver_status_not_current() {
+    let (driver, _sr, _er) = FakeDriver::new();
+    let resolver = FakeResolver::new(vec![vec![TrackId::new("a")]]);
+    let handle = PlaybackEngine::start_with_options(
+        driver.clone(),
+        resolver,
+        Arc::new(|| true),
+        None,
+        std::time::Duration::from_millis(300),
+        None,
+        std::time::Duration::from_secs(5),
+        PRELOAD_RESOLVE_TIMEOUT,
+        LIST_RESOLVE_TIMEOUT,
+    );
+    // 驱动状态直接构造「已装载但已停止」形态（current 在、status=Stopped）
+    // ——修复前的判据 current.is_some() 在此返回 Playing（错位），修复后判
+    // status 返回 Idle。
+    driver.state_tx.send_modify(|s| {
+        s.status = hmp_core::PlaybackStatus::Stopped;
+        s.current = Some(hmp_core::Track::new(hmp_core::TrackId::new("a"), "a"));
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // 经由真实失败路径触发 restore：失败装载（Error 事件）+ 队列回滚。
+    // 直接驱动 restore 的私有性使端到端更诚实——Play b 失败。
+    driver
+        .error_next_load
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    handle
+        .cmd(Request::Play(PlayRequest::Track(TrackId::new("b"))))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    // 不变式断言（按 status 分派，S12 判据）：Stopped/Idle 不得 Playing；
+    // Error 是回滚重载窗口的瞬时态（Deferred/真驱动 completion Err 置
+    // Error、重载完成后回 Playing），Playing 恢复语义保持不动。
+    let st = handle.state_rx.borrow().clone();
+    match st.playback.status {
+        hmp_core::PlaybackStatus::Stopped | hmp_core::PlaybackStatus::Empty => assert_ne!(
+            st.phase,
+            hmp_core::EnginePhase::Playing,
+            "S3-P4 错位回归：status={:?} current={:?} phase={:?}",
+            st.playback.status,
+            st.playback.current.as_ref().map(|t| t.id.0.clone()),
+            st.phase
+        ),
+        hmp_core::PlaybackStatus::Error | hmp_core::PlaybackStatus::Playing => {
+            assert_eq!(st.phase, hmp_core::EnginePhase::Playing)
+        }
+        _ => {}
+    }
 }

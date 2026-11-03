@@ -720,7 +720,10 @@ async fn refresh_other_branch_preserves_login_type_int() {
     };
 
     let new_cred = login.refresh_credential(&old).await.unwrap();
-    assert_eq!(new_cred.login_type, hmp_qqmusic_api::credential::LoginType::Other("6".into()));
+    assert_eq!(
+        new_cred.login_type,
+        hmp_qqmusic_api::credential::LoginType::Other("6".into())
+    );
 }
 
 /// refresh QQ 分支：musicid 必须按数值下发（上游 Credential.musicid 为 int）。

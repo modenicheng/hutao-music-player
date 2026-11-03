@@ -14,7 +14,6 @@
 //! - local_files 的 file_size/format/mtime 列无读 API → 容量按现文件 stat 聚合，
 //!   格式取源键路径扩展名（与 local_files.format 同源），last_scan 诚实显示 "—"。
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -23,7 +22,6 @@ use hmp_storage::{LibraryDb, TrackMeta};
 use slint::Image;
 
 use crate::TrackRow;
-use crate::covers::cover_image;
 use crate::format::{format_bytes, format_long_duration};
 
 /// 最近播放页装载条数（页头统计与表格同一份；预览由桥侧截取前 5）。
@@ -54,9 +52,12 @@ pub struct SongRow {
     pub duration_ms: i32,
     /// 音质徽章文案；无损以下为空（对齐 mock 纪律）。
     pub quality: String,
-    /// 本地封面 URI（`file://…`，扫描期 extract 落盘）；QQ http 封面不落 UI
-    /// （项目原则禁 HTTP）→ None，渲染时走程序化封面。
+    /// 本地封面 URI（`file://…`，扫描提取/rebind 回写产物）；缺失 → 渲染时
+    /// 走程序化封面。QQ http 封面不落此列（项目原则禁 HTTP）。
     pub cover_uri: Option<String>,
+    /// QQ 远程封面 URL（库内 tracks.cover_uri 的 http 形态，预取输入）：
+    /// UI 禁直连 HTTP，交列表预取器经 daemon CoverGet 换本地产物后原地补图。
+    pub remote_cover: Option<String>,
     /// 命中的扫描根（本地行；监视文件夹过滤的分组归属，来自 root 前缀匹配）。
     pub folder: Option<String>,
 }
@@ -80,6 +81,11 @@ pub struct PlaylistEntry {
     pub name: String,
     /// 副标题 "N 首"——媒体库无播放计数，不伪造"X次播放"。
     pub subtitle: String,
+    /// QQ 歌单封面本地产物（reconcile 取得后回写；None → 程序化占位）。
+    pub cover_uri: Option<String>,
+    /// 歌单归属：`local`=纯本地，`owned`=QQ 自建（右键"加入播放列表"
+    /// 按曲源兼容性预禁用用）。
+    pub relation: String,
 }
 
 /// 五个库页的一次性静态快照。
@@ -212,20 +218,8 @@ fn liked_rows(
         favs.into_iter()
             .map(|f| match f.source.as_str() {
                 "local" => match local_by_key.get(f.source_key.as_str()) {
-                    Some(t) => SongRow {
-                        mid: t.source_key.clone(),
-                        source: 1,
-                        title: t.title.clone(),
-                        artists: t.artist.clone().unwrap_or_default(),
-                        album: t.album.clone().unwrap_or_default(),
-                        duration_ms: t.duration_ms.unwrap_or(0) as i32,
-                        quality: quality_text(format_of_key(&t.source_key)),
-                        cover_uri: t
-                            .album
-                            .as_deref()
-                            .and_then(|album| album_covers.get(album).cloned()),
-                        folder: None,
-                    },
+                    // 与详情投影共用口径（时长/音质/封面按专辑聚合）
+                    Some(t) => song_row_from_local(t, album_covers),
                     // 收藏先于扫描入库（无 local_files 行）：稀疏行诚实展示。
                     None => SongRow {
                         mid: f.source_key.clone(),
@@ -236,10 +230,12 @@ fn liked_rows(
                         duration_ms: 0,
                         quality: quality_text(format_of_key(&f.source_key)),
                         cover_uri: None,
+                        remote_cover: None,
                         folder: None,
                     },
                 },
-                // QQ 行：无时长/音质/封面读 API（http 封面 UI 禁网）→ 程序化占位。
+                // QQ 行：时长/歌手/专辑/封面走 track_meta_batch 库内缓存
+                // （远程封面 URL 交预取器，见 song_row_from_qq）。
                 _ => song_row_from_qq(&f.source_key, f.title, qq_meta.get(f.source_key.as_str())),
             })
             .collect(),
@@ -284,6 +280,7 @@ fn recent_rows(
                             .album
                             .as_deref()
                             .and_then(|album| album_covers.get(album).cloned()),
+                        remote_cover: None,
                         folder: None,
                     },
                     None => {
@@ -297,6 +294,7 @@ fn recent_rows(
                             duration_ms: 0,
                             quality,
                             cover_uri: None,
+                            remote_cover: None,
                             folder: None,
                         }
                     }
@@ -347,6 +345,7 @@ fn local_rows(
                     .album
                     .as_deref()
                     .and_then(|album| album_covers.get(album).cloned()),
+                remote_cover: None,
                 folder: root_idx.map(|i| roots[i].clone()),
             }
         })
@@ -375,6 +374,8 @@ fn playlist_entries(db: &mut LibraryDb) -> Option<(Vec<PlaylistEntry>, Vec<Playl
             id: p.id.to_string(),
             name: p.name,
             subtitle: format!("{} 首", p.track_count),
+            cover_uri: p.cover_uri,
+            relation: p.relation.clone(),
         };
         if p.relation == "subscribed" {
             favorited.push(entry);
@@ -397,6 +398,8 @@ pub struct PlaylistDetail {
     pub name: String,
     pub tracks: Vec<SongRow>,
     pub total_ms: u64,
+    /// 封面本地产物 URI（QQ 歌单 reconcile 回写；None → 程序化占位）。
+    pub cover_uri: Option<String>,
 }
 
 /// 专辑详情（AlbumView.vue 的本地投影：发行厂牌/简介/收藏计数无数据源）。
@@ -435,12 +438,12 @@ pub fn playlist_detail(id: i64) -> Option<PlaylistDetail> {
 }
 
 fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
-    let name = db
+    let (name, cover_uri) = db
         .list_playlists()
         .ok()?
         .into_iter()
         .find(|p| p.id == id)
-        .map(|p| p.name)?;
+        .map(|p| (p.name, p.cover_uri))?;
     let rows = db.playlist_tracks(id).ok()?;
     let local_by_key = local_track_map(db)?;
     let album_covers = album_cover_map(db)?;
@@ -461,6 +464,7 @@ fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
                     duration_ms: 0,
                     quality: quality_text(format_of_key(&row.source_key)),
                     cover_uri: None,
+                    remote_cover: None,
                     folder: None,
                 },
             },
@@ -474,6 +478,7 @@ fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
     let total_ms: u64 = tracks.iter().map(|r| r.duration_ms.max(0) as u64).sum();
     Some(PlaylistDetail {
         name,
+        cover_uri,
         tracks,
         total_ms,
     })
@@ -538,6 +543,12 @@ fn artist_detail_from(db: &mut LibraryDb, param: &str) -> Option<ArtistDetail> {
             name = canonical;
             tracks = db.local_tracks_by_artist(&name).ok()?;
         }
+    }
+    // 本地投影 miss 判定（D2c）：曲目空 = 该歌手不在本地库（含 qq: 远端
+    // 参数——精确 artist 匹配必空）。空曲目页无信息量且会拦掉远端分流，
+    // 退回 None 走「未找到」/远端装载（专辑页同口径：分组无命中即 None）。
+    if tracks.is_empty() {
+        return None;
     }
 
     let album_covers = album_cover_map(db)?;
@@ -633,21 +644,34 @@ fn song_row_from_local(t: &LibraryTrackRow, album_covers: &HashMap<String, Strin
             .album
             .as_deref()
             .and_then(|album| album_covers.get(album).cloned()),
+        remote_cover: None,
         folder: None,
     }
 }
 
-/// QQ 行 → SongRow：无时长/音质/封面读 API（http 封面 UI 禁网）→ 诚实置空。
+/// QQ 行 → SongRow：时长/歌手/专辑/封面走 track_meta_batch 库内缓存（reconcile
+/// 曲目缓存与播放路径写入）。封面分流：`file://`（rebind 回写产物）直接读盘；
+/// 远程 URL 是预取输入（UI 禁直连 HTTP），交列表预取器经 daemon CoverGet 换图；
+/// 全缺 → 程序化占位。此前 cover_uri 无条件置空——库里明明有 rebind 产物，
+/// 列表页也永远显示占位（2026-10-03 封面审计三断点之一）。
 fn song_row_from_qq(source_key: &str, title: String, meta: Option<&TrackMeta>) -> SongRow {
+    let (cover_uri, remote_cover) = match meta.and_then(|m| m.cover_uri.clone()) {
+        Some(uri) if uri.starts_with("http") => (None, Some(uri)),
+        Some(uri) => (Some(uri), None),
+        None => (None, None),
+    };
     SongRow {
         mid: source_key.to_string(),
         source: 0,
         title,
         artists: meta.and_then(|m| m.artist.clone()).unwrap_or_default(),
         album: meta.and_then(|m| m.album.clone()).unwrap_or_default(),
-        duration_ms: 0,
+        // 时长走库内缓存（track_meta_batch 读 tracks.duration_ms；reconcile
+        // 曲目缓存/播放路径写入）——此前恒 0，详情页"总时长"永远 0:00。
+        duration_ms: meta.and_then(|m| m.duration_ms).unwrap_or(0) as i32,
         quality: String::new(),
-        cover_uri: None,
+        cover_uri,
+        remote_cover,
         folder: None,
     }
 }
@@ -709,17 +733,11 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 impl SongRow {
-    /// SongRow → TrackRow。封面分流：`file://` 本地封面读盘（按路径缓存，
-    /// 失败回退程序化封面）；QQ http 封面/无封面 → 程序化占位（seed = 源键，
-    /// 缺键回退标题，保证同实体各处同图、UI 零 HTTP）。
+    /// SongRow → TrackRow。表格行不带封面（TrackRow 已剥 `cover` 字段）：
+    /// 12+ 个表格模型每行背全尺寸位图是 RSS 2.4GB 的根因之一，表格只承担
+    /// 文本列；侧栏/详情头图/卡片的封面由行外消费点各自取图，队列行走
+    /// QueueRow（player_bridge 队列投影）。
     pub fn to_track_row(&self) -> TrackRow {
-        let seed = if self.mid.is_empty() {
-            &self.title
-        } else {
-            &self.mid
-        };
-        let cover =
-            local_cover_image(self.cover_uri.as_deref()).unwrap_or_else(|| cover_image(seed));
         TrackRow {
             mid: self.mid.clone().into(),
             source: self.source,
@@ -732,30 +750,21 @@ impl SongRow {
             album_mid: self.album.clone().into(),
             duration_ms: self.duration_ms,
             quality: self.quality.clone().into(),
-            cover,
         }
     }
 }
 
-/// 本地封面读盘（`file://` URI）。缓存按 URI（即路径）去重——同一专辑封面
-/// 被多条曲目复用。注意 slint::Image 非 Send/Sync（covers.rs 同款约束），
-/// `Mutex<HashMap>` 编译不过 → thread_local；装载与 UI 消费同在主线程。
+/// 本地封面读盘（`file://` URI）→ cover_cache 256 桶（对外签名不变，契约第 5
+/// 条；bridge.rs 侧栏/详情/卡片调用点自动受益于降采样）。同一专辑封面被多条
+/// 曲目复用：file_uri_to_path 后同路径同 key，cover_cache（(路径, 桶) 加权
+/// LRU）天然去重。QQ http 封面：项目原则禁 HTTP，不绕。
 pub fn local_cover_image(uri: Option<&str>) -> Option<Image> {
     let uri = uri?;
     if !uri.starts_with("file://") {
-        return None; // QQ http 封面：项目原则禁 HTTP，不绕
+        return None;
     }
-    thread_local! {
-        static CACHE: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new());
-    }
-    CACHE.with(|cache| {
-        if let Some(hit) = cache.borrow().get(uri) {
-            return Some(hit.clone());
-        }
-        let image = Image::load_from_path(Path::new(uri.strip_prefix("file://")?)).ok()?;
-        cache.borrow_mut().insert(uri.to_owned(), image.clone());
-        Some(image)
-    })
+    let path = crate::covers::file_uri_to_path(uri)?;
+    crate::cover_cache::get_or_load(&path, 256)
 }
 
 #[cfg(test)]
@@ -863,7 +872,10 @@ mod tests {
         assert_eq!(qq.mid, "mid-9");
         assert_eq!(qq.artists, "周杰伦");
         assert_eq!(qq.album, "叶惠美");
-        assert_eq!(qq.duration_ms, 0, "QQ 行时长无读 API，诚实置 0");
+        assert_eq!(
+            qq.duration_ms, 269_000,
+            "QQ 行时长走 track_meta_batch 库内缓存"
+        );
         assert_eq!(qq.quality, "");
     }
 
@@ -1077,6 +1089,7 @@ mod tests {
             title: "晴天".into(),
             artist: Some("周杰伦".into()),
             album: Some("叶惠美".into()),
+            duration_ms: Some(200_000),
             ..Default::default()
         })
         .unwrap();
@@ -1087,14 +1100,82 @@ mod tests {
         let detail = playlist_detail_from(&mut db, p).expect("detail ok");
         assert_eq!(detail.name, "晚间循环");
         assert_eq!(detail.tracks.len(), 2);
-        assert_eq!(detail.total_ms, 180_000, "QQ 行 0ms，本地行 180s");
+        assert_eq!(
+            detail.total_ms, 380_000,
+            "QQ 行 200s（库内缓存时长）+ 本地行 180s"
+        );
         // position 序：先加的 QQ 行在前。
         assert_eq!(detail.tracks[0].mid, "mid-9");
         assert_eq!(detail.tracks[0].artists, "周杰伦");
+        assert_eq!(detail.tracks[0].duration_ms, 200_000, "QQ 行时长走缓存");
         assert_eq!(detail.tracks[1].mid, key);
         assert_eq!(detail.tracks[1].quality, "FLAC");
 
         assert!(playlist_detail_from(&mut db, p + 100).is_none());
+    }
+
+    /// QQ 行时长投影：track_meta_batch 的 duration_ms 流入 SongRow
+    /// （回归：此前恒 0，歌单详情页"总时长"永远 0:00）。
+    #[test]
+    fn qq_row_carries_cached_duration() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        db.upsert_track(&hmp_storage::TrackRow {
+            source: "qq",
+            source_key: "mid-dur".into(),
+            title: "有时长".into(),
+            duration_ms: Some(95_000),
+            ..Default::default()
+        })
+        .unwrap();
+        let meta = db.track_meta_batch("qq", &["mid-dur".to_owned()]).unwrap();
+        let row = song_row_from_qq("mid-dur", "有时长".into(), Some(&meta[0]));
+        assert_eq!(row.duration_ms, 95_000);
+        // 无缓存行/无时长列 → 诚实 0。
+        let row = song_row_from_qq("mid-none", "无时长".into(), None);
+        assert_eq!(row.duration_ms, 0);
+    }
+
+    /// QQ 行封面投影（2026-10-03 封面审计回归：此前无条件置空——库里已有
+    /// rebind 产物列表页也显示占位）：file:// → cover_uri 直读盘；http →
+    /// remote_cover 预取输入；两者按 cover_uri 形态分流。
+    #[test]
+    fn qq_row_splits_cover_into_local_and_remote() {
+        let meta = |cover: Option<&str>| hmp_storage::TrackMeta {
+            source: "qq".into(),
+            source_key: "mid".into(),
+            title: "曲".into(),
+            artist: None,
+            album: None,
+            duration_ms: None,
+            cover_uri: cover.map(String::from),
+        };
+        let rebound = song_row_from_qq(
+            "mid",
+            "曲".into(),
+            Some(&meta(Some("file://C:/covers/aa.jpg"))),
+        );
+        assert_eq!(
+            rebound.cover_uri.as_deref(),
+            Some("file://C:/covers/aa.jpg")
+        );
+        assert_eq!(rebound.remote_cover, None, "本地产物不再预取");
+
+        let remote = song_row_from_qq(
+            "mid",
+            "曲".into(),
+            Some(&meta(Some(
+                "https://y.gtimg.cn/music/photo_new/T002R300x300M000x.jpg",
+            ))),
+        );
+        assert_eq!(remote.cover_uri, None, "http 封面不落 UI 直读列（禁网）");
+        assert_eq!(
+            remote.remote_cover.as_deref(),
+            Some("https://y.gtimg.cn/music/photo_new/T002R300x300M000x.jpg")
+        );
+
+        let none = song_row_from_qq("mid", "曲".into(), Some(&meta(None)));
+        assert_eq!(none.cover_uri, None);
+        assert_eq!(none.remote_cover, None);
     }
 
     /// 专辑详情：按名精确（NOCASE）命中组行与曲目；子串名不误命中。
@@ -1161,9 +1242,9 @@ mod tests {
         assert_eq!(resolved.name, "群星");
         assert_eq!(resolved.tracks.len(), 2);
 
-        // 完全无关的名字 → 空详情（found 但无内容）；空参 → None。
-        let empty = artist_detail_from(&mut db, "不存在的歌手").expect("detail ok");
-        assert!(empty.tracks.is_empty() && empty.albums.is_empty());
+        // 完全无关的名字 → None（本地 miss：空曲目页无信息量且拦远端分流，
+        // 退「未找到」/远端装载——D2c）；空参 → None。
+        assert!(artist_detail_from(&mut db, "不存在的歌手").is_none());
         assert!(artist_detail_from(&mut db, "").is_none());
     }
 }

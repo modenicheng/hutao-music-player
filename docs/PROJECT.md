@@ -3,7 +3,7 @@
 > 项目名：hutao-music-player
 > 缩写：HMP
 > 主程序命令：`hmp`
-> 当前阶段：CLI 原型（login/search/play 闭环）/ 主项目 crate 骨架
+> 当前阶段：CLI 与 Slint 桌面端双前端全量接常驻 daemon（播放/队列/歌词/封面/媒体库真数据）；Windows SMTC / Linux MPRIS 系统集成已落地
 > 目标平台：Windows 与 Linux 桌面；Windows 使用 SMTC，Linux 使用 MPRIS
 > 文档用途：作为仓库内的项目总纲、架构说明、开发路线和验收标准
 
@@ -46,7 +46,7 @@ Rust 2024
 HMP 首先服务以下用户：
 
 - 主要使用 QQ 音乐账号和会员曲库；
-- 使用 Linux 桌面，尤其是 Wayland 合成器；
+- 使用 Windows 或 Linux 桌面（Linux 尤其 Wayland 合成器）；
 - 希望系统媒体键、状态栏、通知中心、锁屏或桌面 Shell 能完整控制播放器；
 - 不需要直播、社区、短视频、K 歌、弹幕、游戏专区等附属功能；
 - 关注内存、后台 CPU、启动时间和长期运行稳定性；
@@ -135,7 +135,7 @@ HMP 的正式目标包括：
 原因：
 
 - 常见格式解码不需要额外媒体 SDK 或插件树；
-- `stream-download` 将 HTTP(S) 媒体转换为可缓存、可 Seek 的输入；
+- 远端媒体经 hmp-media 的进程内随机访问源（`MediaStreamSource` → `Read+Seek` reader，后台预取）直连解码器，本地文件直接 `File` 打开；
 - 支持常见音频格式；
 - CPAL 同时支持 Windows 与 Linux 音频设备；
 - 保持 `PlaybackDriver` 边界，队列、解析和桌面协议不依赖具体音频实现。
@@ -294,13 +294,15 @@ pub struct PlaybackState {
 | 搜索 | 已接入 | 使用 QQ Music Rust API |
 | 播放控制 | 已接入 | 播放、暂停、上一首、下一首、Seek、音量 |
 | 队列展示 | 已接入 | 展示 AppCore 当前真实队列 |
-| 歌词展示 | 部分接入 | 已接入接口与空状态，按真实返回展示 |
-| 推荐内容 | 开发中 / 演示数据 | 当前使用本地演示数据 |
-| 收藏与资料库同步 | 开发中 | 尚未接入账号云端同步 |
+| 歌词展示 | 已接入 | 行级 LRC+翻译（本地 sidecar/内嵌 → QQ 兜底，三级缓存） |
+| 推荐内容 | 已接入 | 发现/排行榜/猜你喜欢三域（daemon 真数据） |
+| 收藏与资料库同步 | 已接入 | QQ 收藏/歌单 reconcile + 本地扫描 |
 
 ---
 
 ## 5. Cargo 工作区设计
+
+> 注：本节为方案期结构快照，crate 命名与现状有出入（如 `hmp-qqmusic` 实名 `hmp-qqmusic-api`，`hmp` 二进制在 `hmp-cli`）；实际成员以根 `Cargo.toml` 为准。
 
 ### 5.1 推荐的初始结构
 
@@ -804,7 +806,7 @@ pub enum AudioQuality {
 
 是否自动回退由设置控制。发生回退时 UI 应提示一次，不应静默让用户误以为正在播放目标音质。
 
-> **加密音质**：QQ 音乐的无损及以上音质（FLAC/HiRes/Atmos/Master，即 `.mflac`/`.mgg`/`.mmp4` 等）为加密文件，需要客户端用接口返回的 `ekey` 解密后才能播放。HMP 已实现 QMC2 解密（`hmp-qqmusic-api::algorithms::qmc2` + `hmp-media` 下载/解密/缓存），经本地回环解密代理（127.0.0.1 随机端口，Range 按需解密）流式播放，支持边下边播与即时 Seek；CDN 不支持 Range 时回退整文件解密缓存，无损链已恢复（`Master → HiRes → Atmos → Flac → Mp3_320 → Mp3_128`）；OGG 系列（`.mgg`，`O8M1` 等）尚未纳入回退链，属后续项。
+> **加密音质**：QQ 音乐的无损及以上音质（FLAC/HiRes/Atmos/Master，即 `.mflac`/`.mgg`/`.mmp4` 等）为加密文件，需要客户端用接口返回的 `ekey` 解密后才能播放。HMP 已实现 QMC2 解密（`hmp-qqmusic-api::algorithms::qmc2` + `hmp-media` 拉取/解密/缓存），经进程内随机访问解密源（`hmp_core::MediaStreamSource` → `DecryptReader`，`Read+Seek` + 后台分块预取，按绝对偏移即时解密）直连播放器，支持边下边播与即时 Seek，并顺带把顺序播放流 tee 进播放缓存（drop 后后台补齐剩余区间，二次播放全离线）；CDN 不支持 Range 时回退整文件解密缓存，无损链已恢复（`Master → HiRes → Atmos → Flac → Mp3_320 → Mp3_128`）；OGG 系列（`.mgg`，`O8M1` 等）尚未纳入回退链，属后续项。
 
 ---
 
@@ -831,7 +833,7 @@ Error
 选择歌曲
 → 查询播放 URL
 → 校验 URL 和有效期
-→ 设置 Rodio URI（加密音质经本地解密代理 http://127.0.0.1:port 按 Range 取明文，Seek 即 Range 重定位）
+→ 设置 Rodio 装载（远端音质经 `LoadRequest.stream` 携带进程内解密源 `MediaStreamSource`，Seek 即 reader 偏移重定位；本地文件按 `file://` URI 打开）
 → 进入 Loading
 → preroll
 → Playing
@@ -876,9 +878,10 @@ pub struct PlaybackQueue {
 
 ### 8.6 后台播放（service + tray）
 
-`hmp serve` 启动常驻后端（CLI 遥控命令自动拉起：连接 `$XDG_RUNTIME_DIR/hmp.sock`
-失败时 spawn `hmp serve --background`），单例 Unix socket（`$XDG_RUNTIME_DIR/hmp.sock`，
-回退 `/tmp/hmp-{uid}.sock`）。
+`hmp serve` 启动常驻后端（CLI 遥控命令自动拉起：连接端点失败时 spawn
+`hmp serve --background`），单例 IPC 端点：Unix socket（`$XDG_RUNTIME_DIR/hmp.sock`，
+回退 `/tmp/hmp-{uid}.sock`）或 Windows 命名管道（`\\.\pipe\hmp`，
+`FILE_FLAG_FIRST_PIPE_INSTANCE` 单例）。
 
 ```text
 hmp play <track-id|playlist:<id>|album:<id>>   # 播放/换队列
@@ -1396,15 +1399,15 @@ test(qqmusic): add vkey response fixture
 
 ### v0.0.1：工作区骨架
 
-- [ ] 创建 workspace；
-- [ ] 创建核心 crate；
-- [ ] CI；
-- [ ] fmt / clippy / test；
-- [ ] tracing；
-- [ ] 基础文档；
-- [ ] Slint 空窗口；
-- [ ] Rodio 初始化测试；
-- [ ] MPRIS 注册测试。
+- [x] 创建 workspace；
+- [x] 创建核心 crate；
+- [x] CI；
+- [x] fmt / clippy / test；
+- [x] tracing；
+- [x] 基础文档；
+- [x] Slint 空窗口；
+- [x] Rodio 初始化测试；
+- [x] MPRIS 注册测试。
 
 ### v0.1.0：最小可播放版本
 
@@ -1415,7 +1418,7 @@ test(qqmusic): add vkey response fixture
 - [x] Rodio 播放（hmp-player）；
 - [x] 播放 / 暂停（PlayerCommand::TogglePlay）；
 - [x] Seek（UI 进度条 / MPRIS position）；
-- [~] 封面（占位渐变；远程封面下载待接入）；
+- [x] 封面（CoverGet 管线：远程三域白名单 + 本地产物回写 + 歌单封面 v6，无源时中性占位）；
 - [x] 完整基础 MPRIS（playerctl 实测）；
 - [x] 最小搜索 UI（Slint，Apple Music 风格）；
 - [x] 底部播放栏。
@@ -1424,31 +1427,31 @@ test(qqmusic): add vkey response fixture
 
 ### v0.2.0：账号和歌单
 
-- [ ] 用户资料；
-- [ ] 用户歌单；
-- [ ] 歌单详情；
-- [ ] 播放队列；
-- [ ] 上一首 / 下一首；
-- [ ] 循环和随机；
-- [ ] 登录态刷新；
-- [ ] 重启恢复。
+- [x] 用户资料（`hmp account profile`；昵称受 QQ 服务端 code 10000 影响回退 uin，见 AUDIT §8）；
+- [x] 用户歌单；
+- [x] 歌单详情；
+- [x] 播放队列；
+- [x] 上一首 / 下一首；
+- [x] 循环和随机；
+- [x] 登录态刷新；
+- [x] 重启恢复。
 
 ### v0.3.0：歌词和缓存
 
-- [ ] 原文歌词；
-- [ ] 翻译歌词；
-- [ ] 歌词自动滚动；
-- [ ] 封面缓存；
-- [ ] 歌词缓存；
-- [ ] SQLite 迁移；
+- [x] 原文歌词；
+- [x] 翻译歌词；
+- [x] 歌词自动滚动；
+- [x] 封面缓存；
+- [x] 歌词缓存；
+- [x] SQLite 迁移；
 - [ ] 缓存清理设置。
 
 ### v0.4.0：桌面体验
 
-- [ ] 媒体键；
+- [x] 媒体键；
 - [ ] 通知；
-- [ ] 单实例；
-- [ ] 托盘可选；
+- [x] 单实例；
+- [x] 托盘可选（Linux SNI / Windows 通知区，无桌面会话自动跳过）；
 - [ ] 高 DPI；
 - [ ] 中文输入法验证；
 - [ ] Niri / KDE / GNOME 测试；
@@ -1573,13 +1576,13 @@ playerctl -p hmp position 60
 
 ## 23. 项目一句话说明
 
-建议 README 使用：
+与现行 README 首段保持一致：
 
-> HMP is a lightweight, Rust-native QQ Music player for Linux with complete MPRIS integration.
+> HMP is a lightweight, Rust-native QQ Music player for Windows and Linux (MPRIS on Linux, SMTC on Windows).
 
 中文：
 
-> HMP 是一个面向 Linux 的轻量 Rust QQ 音乐播放器，重点提供完整的 MPRIS 系统媒体控制体验。
+> HMP 是一个跨平台（Windows / Linux）的轻量 Rust QQ 音乐播放器：Linux 侧提供完整 MPRIS 系统媒体控制，Windows 侧接入 SMTC 与托盘。
 
 ---
 

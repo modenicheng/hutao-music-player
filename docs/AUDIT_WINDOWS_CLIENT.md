@@ -6,7 +6,7 @@
 - 尝试过 npx @electron/asar：无 asar 可解，方案弃用，改用二进制字符串提取（grep -aoE）。
 - `musicu.fcg` 字面量不出现在任何 DLL 中（协议层封装在 WNS/私有传输内），但域名 u.y.qq.com 等存在；`music.*` 命名空间与本项目完全同构，可直接复用网关调用。
 - 排行榜/发现页：QQMusic_Protocol.dll 中**没有任何 toplist/board 模块字符串**；WebkitCache（235MB）+ Log/qmbrowser 证明客户端内嵌浏览器加载 Web 页面（发现页/排行榜/会员页走内嵌 Web + 传统 bin/*.fcg CGI，如 fcg_vip_login.fcg、fcg_get_profile_homepage.fcg）。
-- 中间产物已固化在 /tmp/qqmusic_audit/：modules_all.txt（官方144模块）、context_4domains.txt（模块+参数上下文）、methods_raw.txt（328个 method/回调名）。
+- 中间产物当时固化于易失路径 /tmp/qqmusic_audit/（modules_all.txt / context_4domains.txt / methods_raw.txt），现已不保证存在；四域关键结论已在正文自含。
 
 ## A. 本项目已实现模块清单（crates/hmp-qqmusic-api/src）
 

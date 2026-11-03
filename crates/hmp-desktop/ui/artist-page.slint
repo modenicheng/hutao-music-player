@@ -1,5 +1,9 @@
 // 歌手详情（ArtistView.vue）：hero（左图右信息：返回/大名字/统计带）+ 热门歌曲
-// + 专辑网格。本地投影：照片/简介/MV/相似歌手无数据源，如实缺席。
+// + 专辑网格。
+// 状态机渲染（M3）：0=初始 1=加载中 2=就绪 3=未找到 4=失败（离线/网络）。
+// 本地投影：照片/简介/MV/相似歌手无数据源，如实缺席；远端（qq: 参数）：
+// 照片 = 主页头部 singer_pic（§20/§23 边界闭合）、统计带 = 歌曲/专辑总数
+// （+首窗标注）、专辑网格卡 qq:albummid 导航（二级深入）+ 异步换图。
 import { Theme } from "theme.slint";
 import { PageHeader, SectionHeader, CoverCardGrid } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
@@ -16,14 +20,34 @@ export component ArtistPage inherits Rectangle {
         padding-bottom: Theme.space-10;
         spacing: Theme.space-6;
 
-        if !Data.artist-found: Text {
-            text: "本地媒体库中没有该歌手";
+        if Data.artist-state == 1: Text {
+            height: 64px;
+            text: "正在加载…";
             color: Theme.muted-foreground;
-            font-size: 14px;
+            font-size: 13.5px;
             horizontal-alignment: center;
+            vertical-alignment: center;
         }
 
-        if Data.artist-found: Rectangle {
+        if Data.artist-state == 3: Text {
+            height: 64px;
+            text: "本地媒体库中没有该歌手";
+            color: Theme.muted-foreground;
+            font-size: 13.5px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        if Data.artist-state == 4: Text {
+            height: 64px;
+            text: "加载失败：无法连接守护进程或网络不可用";
+            color: Theme.muted-foreground;
+            font-size: 13.5px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        if Data.artist-state == 2: Rectangle {
             // hero：封面照 | 页头（名字 + 统计），垂直居中。子元素勿引用
             // parent.width（布局首选宽计算成环，会解出负宽）。
             width: parent.width;
@@ -66,7 +90,7 @@ export component ArtistPage inherits Rectangle {
             }
         }
 
-        if Data.artist-found && Data.artist-tracks.length > 0: VerticalLayout {
+        if Data.artist-state == 2 && Data.artist-tracks.length > 0: VerticalLayout {
             spacing: Theme.space-4;
 
             SectionHeader {
@@ -78,7 +102,7 @@ export component ArtistPage inherits Rectangle {
             }
         }
 
-        if Data.artist-found && Data.artist-albums.length > 0: VerticalLayout {
+        if Data.artist-state == 2 && Data.artist-albums.length > 0: VerticalLayout {
             spacing: Theme.space-4;
 
             SectionHeader {
@@ -88,13 +112,15 @@ export component ArtistPage inherits Rectangle {
                 width: parent.width;
                 cards: Data.artist-albums;
                 row-count: Data.artist-albums.length;
-                card-clicked(name) => {
-                    Nav.navigate(Route.album, name);
+                card-clicked(mid) => {
+                    // 本地卡 mid = 专辑展示名、远端卡 mid = qq:albummid——
+                    // 两者都是 Route.album 的合法参数（apply_route 自行分流）
+                    Nav.navigate(Route.album, mid);
                 }
             }
         }
 
-        if Data.artist-found && Data.artist-tracks.length == 0 && Data.artist-albums.length == 0: Text {
+        if Data.artist-state == 2 && Data.artist-tracks.length == 0 && Data.artist-albums.length == 0: Text {
             height: 64px;
             text: "该歌手在本地媒体库中暂无曲目";
             color: Theme.muted-foreground;

@@ -1,7 +1,7 @@
 //! MPRIS 元数据（`Track` → `a{sv}`）。
 
 use hmp_core::{AudioQuality, Track};
-use zvariant::{OwnedValue, Value};
+use zbus::{OwnedVariant, Variant};
 
 /// MPRIS 播放状态字符串（spec: Playing/Paused/Stopped）。
 pub fn playback_status(status: hmp_core::PlaybackStatus) -> &'static str {
@@ -22,24 +22,24 @@ pub fn loop_status(mode: hmp_core::LoopMode) -> &'static str {
 }
 
 /// 从领域曲目构建 MPRIS Metadata 字典（`mpris:trackid` 必填）。
-pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedValue)> {
-    let mut meta: Vec<(&'static str, OwnedValue)> = Vec::new();
+pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedVariant)> {
+    let mut meta: Vec<(&'static str, OwnedVariant)> = Vec::new();
 
     // mpris:trackid —— 必填，格式 /org/hmp/track/<id>。
     // 本地 id（如 `local:/home/a/song.flac` 含 `:`/`/`/`.`）不能直接作 ObjectPath
     // 元素：直接拼接会解析失败 → 全部退化为 `/org/hmp/track/unknown`，
     // 本地曲目失去唯一 MPRIS identity（P1）。改用稳定编码：可直用时直用，
     // 否则 FNV-1a 64 哈希 hex（唯一、稳定、跨重启不变）。
-    let track_id_path: zvariant::ObjectPath = track_id_object_path(&track.id.0);
+    let track_id_path: zbus::ObjectPath = track_id_object_path(&track.id.0);
     meta.push((
         "mpris:trackid",
-        OwnedValue::try_from(Value::ObjectPath(track_id_path)).expect("object path"),
+        OwnedVariant::try_from(Variant::ObjectPath(track_id_path)).expect("object path"),
     ));
 
     if !track.title.is_empty() {
         meta.push((
             "xesam:title",
-            OwnedValue::try_from(Value::from(track.title.clone())).expect("str"),
+            OwnedVariant::try_from(Variant::from(track.title.clone())).expect("str"),
         ));
     }
     if !track.artists.is_empty() {
@@ -48,31 +48,31 @@ pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedValue)> {
         let artists: Vec<String> = track.artists.iter().map(|a| a.name.clone()).collect();
         meta.push((
             "xesam:artist",
-            OwnedValue::try_from(Value::from(artists.clone())).expect("arr"),
+            OwnedVariant::try_from(Variant::from(artists.clone())).expect("arr"),
         ));
         // xesam:albumArtist —— 数据源无独立专辑歌手时回退为歌曲歌手
         // （QQ 音乐详情不提供专辑歌手字段，多数 MPRIS 客户端依赖该键展示）。
         meta.push((
             "xesam:albumArtist",
-            OwnedValue::try_from(Value::from(artists)).expect("arr"),
+            OwnedVariant::try_from(Variant::from(artists)).expect("arr"),
         ));
     }
     if let Some(album) = &track.album {
         meta.push((
             "xesam:album",
-            OwnedValue::try_from(Value::from(album.name.clone())).expect("str"),
+            OwnedVariant::try_from(Variant::from(album.name.clone())).expect("str"),
         ));
     }
     if let Some(cover) = &track.cover {
         meta.push((
             "mpris:artUrl",
-            OwnedValue::try_from(Value::from(cover.url.clone())).expect("str"),
+            OwnedVariant::try_from(Variant::from(cover.url.clone())).expect("str"),
         ));
     }
     if let Some(url) = &track.url {
         meta.push((
             "xesam:url",
-            OwnedValue::try_from(Value::from(url.clone())).expect("str"),
+            OwnedVariant::try_from(Variant::from(url.clone())).expect("str"),
         ));
     }
     if let Some(duration) = track.duration {
@@ -80,13 +80,13 @@ pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedValue)> {
         let us = duration.as_micros() as i64;
         meta.push((
             "mpris:length",
-            OwnedValue::try_from(Value::from(us)).expect("i64"),
+            OwnedVariant::try_from(Variant::from(us)).expect("i64"),
         ));
     }
     if let Some(q) = track.available_qualities.first() {
         meta.push((
             "xesam:audioQuality",
-            OwnedValue::try_from(Value::from(quality_label(q))).expect("str"),
+            OwnedVariant::try_from(Variant::from(quality_label(q))).expect("str"),
         ));
     }
     meta
@@ -94,9 +94,9 @@ pub fn metadata_from_track(track: &Track) -> Vec<(&'static str, OwnedValue)> {
 
 /// 曲目 id → MPRIS ObjectPath（稳定、唯一、可直用时保持可读）。
 /// pub(crate)：SetPosition 的 stale TrackId 校验复用同一编码。
-pub(crate) fn track_id_object_path(id: &str) -> zvariant::ObjectPath<'static> {
+pub(crate) fn track_id_object_path(id: &str) -> zbus::ObjectPath<'static> {
     let direct = format!("/org/hmp/track/{id}");
-    if let Ok(p) = zvariant::ObjectPath::try_from(direct.as_str()) {
+    if let Ok(p) = zbus::ObjectPath::try_from(direct.as_str()) {
         return p.to_owned();
     }
     format!("/org/hmp/track/{:016x}", fnv1a64(id.as_bytes()))
@@ -185,7 +185,7 @@ mod tests {
             Ok("https://example.com/stream.mp3".to_owned())
         );
         let album_artists = map["xesam:albumArtist"]
-            .downcast_ref::<zvariant::Array>()
+            .downcast_ref::<zbus::Array>()
             .unwrap();
         assert_eq!(album_artists.len(), 1);
         assert_eq!(album_artists.get::<&str>(0).unwrap().unwrap(), "孙燕姿");

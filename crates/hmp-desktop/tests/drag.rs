@@ -77,7 +77,10 @@ fn drag_progress_and_scroll_thumb() {
 
     let ui = hmp_desktop::AppWindow::new().unwrap();
     ui.window().set_size(slint::PhysicalSize::new(1280, 800));
-    hmp_desktop::bridge::load_data(&ui);
+    hmp_desktop::bridge::load_data(
+        &ui,
+        &std::sync::Arc::new(hmp_desktop::backend::BackendRuntime::new().unwrap()),
+    );
     settle();
 
     // —— 1. 主进度条：拖拽本地回显，松手一次 seek ———
@@ -140,7 +143,6 @@ fn drag_progress_and_scroll_thumb() {
                 album_mid: "".into(),
                 duration_ms: 200_000,
                 quality: "".into(),
-                cover: slint::Image::default(),
             })
             .collect();
         let count = rows.len() as i32;

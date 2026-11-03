@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 hmp-core = { path = "../hmp-core" }
 hmp-qqmusic-api = { path = "../hmp-qqmusic-api" }
+image = { workspace = true }
 keyring = { workspace = true }
 lofty = { workspace = true }
 toml = { workspace = true }

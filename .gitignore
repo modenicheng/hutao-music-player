@@ -9,6 +9,11 @@
 .vscode/
 *.iml
 
+# AI 代理工具产物（ZCode 会话/插件，本地临时）
+.v2c/
+.zcode/
+.zcodeignore
+
 # 环境变量 / 凭据（严禁提交）
 .env
 .env.*
@@ -31,8 +36,4 @@ third_party/
 
 # 本地视觉 QA 截图（PORTING.md 只引用路径）
 /.shots/
-
-# tauri 生成物与 sidecar（prepare-sidecar.mjs 拷贝产物）
-apps/hmp-tauri/.vite/
-apps/hmp-tauri/src-tauri/binaries/
-apps/hmp-tauri/src-tauri/gen/
+__pycache__/

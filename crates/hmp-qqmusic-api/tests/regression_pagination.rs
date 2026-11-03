@@ -10,7 +10,7 @@
 use hmp_qqmusic_api::client::QqMusicClient;
 use hmp_qqmusic_api::comment::CommentApi;
 use hmp_qqmusic_api::config::ClientConfig;
-use hmp_qqmusic_api::pagination::{DEFAULT_NUM, MAX_NUM, UNKNOWN_TOTAL, Page, Paged, PagedView};
+use hmp_qqmusic_api::pagination::{DEFAULT_NUM, MAX_NUM, Page, Paged, PagedView, UNKNOWN_TOTAL};
 use hmp_qqmusic_api::singer::{IndexType, SingerApi};
 use hmp_qqmusic_api::songlist::SonglistApi;
 use hmp_qqmusic_api::user::UserApi;
@@ -24,8 +24,20 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn page_clamps_page_number_and_size() {
     // page 钳制 ≥1；num 钳制 1..=100（QQ 服务端通用上限）。
     assert_eq!(Page::new(0, 0), Page { page: 1, num: 1 });
-    assert_eq!(Page::new(0, 500), Page { page: 1, num: MAX_NUM });
-    assert_eq!(Page::new(3, 101), Page { page: 3, num: MAX_NUM });
+    assert_eq!(
+        Page::new(0, 500),
+        Page {
+            page: 1,
+            num: MAX_NUM
+        }
+    );
+    assert_eq!(
+        Page::new(3, 101),
+        Page {
+            page: 3,
+            num: MAX_NUM
+        }
+    );
     assert_eq!(Page::new(2, 50), Page { page: 2, num: 50 });
 }
 
@@ -43,7 +55,12 @@ fn page_next_keeps_num_and_saturates() {
     assert_eq!(Page::new(1, 20).next(), Page::new(2, 20));
     assert_eq!(Page::first().next(), Page::new(2, DEFAULT_NUM));
     assert_eq!(
-        Page { page: u32::MAX, num: 5 }.next().page,
+        Page {
+            page: u32::MAX,
+            num: 5
+        }
+        .next()
+        .page,
         u32::MAX,
         "u32 溢出饱和"
     );
@@ -118,8 +135,7 @@ fn fav_songlist_paged_uses_server_hasmore() {
     assert_eq!(view.next_page(), Some(Page::new(2, 10)));
 
     let last: UserFavSonglistResponse =
-        serde_json::from_value(json!({"hasmore": 0, "v_list": [], "total": 12}))
-            .unwrap();
+        serde_json::from_value(json!({"hasmore": 0, "v_list": [], "total": 12})).unwrap();
     assert!(!last.paged(Page::new(2, 10)).has_more);
 }
 
@@ -310,7 +326,9 @@ async fn songlist_detail_derives_song_begin_and_song_num() {
                     && param["disstid"] == json!(9785418994i64)
             },
         ))
-        .respond_with(ok_sub(json!({"total_song_num": 30, "songlist": [], "hasmore": 0})))
+        .respond_with(ok_sub(
+            json!({"total_song_num": 30, "songlist": [], "hasmore": 0}),
+        ))
         .expect(1)
         .mount(&server)
         .await;
@@ -343,7 +361,10 @@ async fn hot_comments_derive_page_num_zero_based() {
         .await;
     let client = client_for(&server.uri());
     let api = CommentApi::new(&client);
-    let resp = api.get_hot_comments(107192080, Page::new(2, 20)).await.unwrap();
+    let resp = api
+        .get_hot_comments(107192080, Page::new(2, 20))
+        .await
+        .unwrap();
     let view = resp.paged(Page::new(2, 20));
     assert!(view.items.is_empty());
     assert!(!view.has_more);

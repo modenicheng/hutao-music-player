@@ -18,9 +18,9 @@
 
 use std::time::Duration;
 
+use hmp_qqmusic_api::QqMusicClient;
 use hmp_qqmusic_api::credential::Credential;
 use hmp_qqmusic_api::login::{LoginApi, PollInterval, QR, QRLoginType};
-use hmp_qqmusic_api::QqMusicClient;
 use tokio_util::sync::CancellationToken;
 
 fn load_credential() -> Option<Credential> {
@@ -89,7 +89,12 @@ async fn main() {
     });
     let start = std::time::Instant::now();
     match login
-        .wait_qrcode_login(&qr, PollInterval::default(), Duration::from_secs(120), Some(&token))
+        .wait_qrcode_login(
+            &qr,
+            PollInterval::default(),
+            Duration::from_secs(120),
+            Some(&token),
+        )
         .await
     {
         Ok(_) => println!("UNEXPECTED wait_qrcode_login: Done（二维码被扫？）"),

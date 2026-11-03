@@ -1,4 +1,4 @@
-# 后端审计报告（2026-09-03，Linux 侧）
+# 后端审计报告（滚动更新；2026-09-03 始于 Linux 侧，§18 起含 Windows 专题）
 
 > 全程自主推进的会话记录。决策原则：**明确 bug 直接修**；需要产品/语义决策的只记录不动手。
 > 基线：`5ffe34f`（工作树含上次会话遗留的 QR/NodeToken 成品改动）。
@@ -85,17 +85,20 @@
 2. **`list_favorites` INNER JOIN**：reconcile-only 的 QQ 收藏（未播放/未缓存过）不显示
    ——首次登录后「QQ 上几百首收藏，列表只有十几首」的观感。需要决定：LEFT JOIN +
    占位标题，或 reconcile 时补建 tracks 行。
+   **2026-10-02 大幅缓解**：`reconcile_playlist_tracks`（§17）为歌单曲目建了 tracks 行，
+   收藏曲目随之获得真实元数据；彻底关闭仍需 LEFT JOIN 决策。
 3. **播放路径创建的 local_files 行是二等行**（无 scan_root/generation）：daemon 关机期间
    删除的文件永不标记 missing，直到下次扫描。
-4. **`delete_playlists_absent` FK 地雷**：subscribed 歌单一旦有曲目缓存就会 FK 失败
-   （当前写路径拒绝 subscribed，暂不可达；缓存功能落地前必须先清理子行）。
-5. proxy 多区间 Range 返回 416（RFC 建议 200 全量）；`stream_range_body` 对空流
-   会挂起自定义 `Source` 实现者（内置实现不触发）。
-6. decrypt 全文件读取用 `std::fs::read` 在 async 上下文（百毫秒级 worker 停顿，
-   可 spawn_blocking）。
-7. **顶层短命令别名缺失**：main.rs 的设计注释说「高频短命令保留为 alias」，但
-   `hmp quality/loop/shuffle/history` 不存在（文档曾是这么写的，本轮已把文档对齐到
-   `hmp player quality` 等）。是否补顶层别名是产品决策。
+4. ~~**`delete_playlists_absent` FK 地雷**：subscribed 歌单一旦有曲目缓存就会 FK 失败~~
+   **已拆除**（2026-10-02）：歌单曲目缓存随 `reconcile_playlist_tracks` 落地（§17），
+   `purge_tracks_of_absent_playlists` 在删除歌单前按同一谓词清理子行（含 subscribed），
+   wiremock 集成测试覆盖远端取消收藏整行删除不炸 FK。
+5. ~~proxy 多区间 Range 返回 416；`stream_range_body` 对空流会挂起~~
+   **已随回环代理整体删除而失效**（2026-09-30 进程内随机访问解密源取代，载体不存在）。
+6. ~~decrypt 全文件读取用 `std::fs::read` 在 async 上下文~~ **已失效**
+   （流式改造后无 async 上下文全文件读取路径）。
+7. **顶层短命令别名**：已补齐（main.rs 有 Pause/Resume/Next/Prev/Stop/Seek/Volume
+   顶层别名；quality/loop/shuffle/history 维持子命令，与 USAGE 一致）。
 8. 桌面端（hmp-desktop）UI 文案仍中文：独立产品面，未动。
 9. 登录超时判定按消息文案（已双语容错）；QQ 服务端改协议时可考虑按 code 判定。
 
@@ -392,9 +395,10 @@
 
 - FLAC 标签文件级乱码（`立春 - 薛凯琪.flac` 下载时双重编码，库内其余曲目正常）
   ——数据问题不修代码；如需处理应在下载链路做编码探测。
-- `show-overlay` 无挂载组件（M6 播放页未移植，点击封面区暂无响应，已知缺口）。
-- 运维提醒：协议演进后需重启 daemon；桌面自动拉起只认 current_exe 同目录与
-  PATH 的 `hmp`，release 部署需同步重建。
+- ~~`show-overlay` 无挂载组件~~ 已接线（player-bar → player_bridge，M6 播放页收口）。
+- 运维提醒：协议演进后需重启 daemon（DaemonState 新增字段已带 `#[serde(default)]`，
+  旧 daemon 快照可解码；unknown variant 类破坏性变更仍需重启）；桌面自动拉起只认
+  current_exe 同目录与 PATH 的 `hmp`，release 部署需同步重建。
 
 ## §15 播放页（M6）初移植——歌词页 & 评论（2026-09-08）
 
@@ -435,3 +439,369 @@ LRC，QRC 词级时间轴未透出）；景深无 blur（Slint 无滤镜），�
 4. `%` 不是取模（`Math.mod`）；字符串拼接用 `"\{expr}"` 模板；
 5. 函数体内未声明标识符直接赋值解析错（局部量用 let，或内联表达式）；
 6. 负 delta 滚轮 = 向下滚。
+
+## §16 播放与 IPC 深度审计（2026-10-01，三路子代理专项：播放链路 / IPC 生命周期 / 文档交叉核对）
+
+**零号发现（环境级）**：真机常驻 daemon 跑的是 d3298a3 时代（21:31 构建）二进制，
+aeb2437（明文无 Range 回退）提交于其后 22:36、**从未进入任何可执行文件**——重构
+提交后的播放实测全部发生在陈旧进程上。纪律：改播放/IPC 链后必须重建 + `hmp quit`
+再实测；`tasklist` 核对进程二进制 mtime（PORTING 排查口诀的 daemon 常驻版）。
+
+**本轮修复（5 项，全部红→绿回归）**：
+
+1. **DecryptReader 窗口内 seek 恰落 `fetched_until` 双向永久挂起**（探针实锤）：
+   Seek in-window 分支单调推进 `consumed_until` + notify；read 饥饿兜底 notify。
+   经 rodio `try_seek` 阻塞反馈可瘫痪整个音频驱动（hmp-media/stream/reader.rs）。
+2. **`wait_current_applied` 忽略 `load_gen` 假 ACK**：同曲重载时旧装载同 id 立即
+   ACK、失败无回滚——改双条件（gen+id）；FakeDriver 系补置 load_gen（hmp-daemon/engine.rs）。
+3. **装载期暂停被覆盖**：completion 分支硬编码 `sink.play()`——Pause 在 Loading 态
+   记录意图、completion 保持 Paused（hmp-player/core.rs）。
+4. **DaemonState 新增字段无 serde default**（E2E 实锤：旧 daemon 存活时新客户端
+   全部 `protocol error: missing field`；桌面订阅解码失败静默 continue → UI 永久冻结）：
+   四字段补 default + ipc.rs 头部立 wire 兼容约定 + 桌面解码失败断线重连 + CLI
+   附 `hmp quit` 重试提示（hmp-core/ipc.rs、hmp-desktop/backend.rs、hmp-cli/client.rs）。
+5. **`hmp quit` 在 daemon 未运行时先 spawn 再杀**（慢盘下留孤儿 daemon）：
+   `connect_existing` 纯连接，端点无监听 = 幂等成功（hmp-cli/main.rs）。
+
+**开放项（按优先级，未修）**：
+
+- IPC：accept 循环一错即停摆无自愈（server.rs break）；单实例管道 + 1s BUSY 重试
+  预算在连接风暴下可能耗尽（实测裸连 97% BUSY）；客户端读响应无超时。
+- 播放：中途读错误被 rodio 视为 EOS → 静默跳歌无 Error 态；`try_seek` 阻塞命令循环
+  最长 30s；~~音质回退链不覆盖解码期失败~~（**2026-10-02 关闭**，见 §17：engine 降档
+  循环覆盖装载与解码期失败，Timeout 不降档为有意边界）；预解析期无总超时。
+- 引擎命令循环内联 await 解析（歌单/专辑秒级）→ 播放控制命令排队，UI 感知「点了
+  没反应几秒」。
+- 其余见 §4（footer 误报流式路径残余、INNER JOIN 收藏残余、local_files 二等行）
+  与 PORTING.md（设备热插拔不迁移、逐字歌词、P9 喜欢键）。
+
+## §17 远程播放报错归因 + 歌单曲目缓存落地（2026-10-02，双代理并行修复）
+
+1. **远程曲目播放失败被误报为「音质不存在」**：逐档取流探针实锤——存量凭证连免 VIP
+   的 MP3_128 也 `104003`、免登录试听 RS02 正常 → 凭证被服务端判过期（`hmp auth`
+   Expiry: expired），**音质 map 本身无误**（SongFileType 常量 ↔ `quality_to_file_type`
+   ↔ `quality_from_file_type` ↔ `available_from_sizes` 三表逐一核对自洽；`models::File`
+   补建模 `size_hires`）。旧代码全链失败后返回 `QualityUnavailable("")`（取流响应缺
+   midurlinfo 时消息恒空，诊断黑洞）。修复：全链鉴权类错误码（104003 等，`is_auth_
+   result_code`）归因为 `NotLoggedIn`（可操作文案）；混合失败才逐档带标签报
+   `QualityUnavailable`；engine 降档重试守卫前移到装载前（复现已失败档/达
+   `MAX_LOAD_DEGRADES`=8 不再装载同一份坏数据）；降档中解析失败（链耗尽）必回滚旧曲
+   （真实驱动 `perform_load` 先 `sink.clear()`，不回滚=静音，含回归测试）。
+   **用户侧动作：`hmp login` 重新扫码恢复远程播放。** 风险：VIP-only 曲 + 有效非 VIP
+   凭证同码型，也会报 NotLoggedIn（上游码型无法区分，比空文案更可操作）。
+2. **歌单曲目数量恒 0**：reconcile 自始只写 playlists 行、从未写 playlist_tracks
+   （§4.4 所述「缓存功能未落地」缺口，非回归；API 层 live 核验零故障）。落地第四腿
+   `reconcile_playlist_tracks`：逐歌单 `CgiGetDiss` 快照差集合入（远端增/删/元数据
+   COALESCE 只升不降；页上限 20，超限视为不完整放弃落库防误删）；**owned 行
+   remote_id 存 dirid 而详情接口只认 tid** → listing 就地建 dirid→tid 映射（免二次
+   出网）；「我喜欢」（remote_id=201）特判走 `get_fav_song`；pending 意图在场本地
+   胜出零出网。§4.4 FK 地雷随之拆除，§4.2 INNER JOIN 收藏观感被顺带大幅缓解。
+   live 验证：22/22 歌单落库 4566 条链接，抽样三个歌单曲目数与远端 `total_song_num`
+   全等。已知边界：远端重排序不回写本地 position；>2000 首歌单本轮放弃（用户最大
+   1591 首，无实际影响）。
+
+## §18 陈旧 daemon 自动重启 + 本地封面三断点 + 侧栏圆角（2026-10-02，用户三报并行修复）
+
+1. **「无法播放远端音源，报 no available audio quality: result=104003」＝陈旧常驻
+   daemon 再度咬人**：报错文案逐字是 5c5429e 之前的旧格式（新代码全档鉴权失败只
+   可能报 `not logged in or credentials expired` 或带档位前缀的聚合串，e2e 锚定）
+   ——daemon 是脱离会话的长驻进程（单实例锁），重建只换了 hmp-desktop.exe
+   （18:42），daemon 实际跑的 `target/release/hmp.exe` 还是 10-01 产物（进程
+   18:54 才启动，二进制是旧的）。侧栏「已登录」只是本地存在性检查
+   （`account_status` 600s 缓存，不验服务端有效性），与 104003 并不矛盾。逐档
+   探针复核：存量凭证全档 104003、RS02 正常 → 服务端会话仍失效，用户侧尚未重新
+   扫码。修复（收口而非再绕）：①hmp-daemon 新增 build.rs 构建指纹（`src/**.rs`
+   + `Cargo.toml` 的 FNV-1a，自带实现跨工具链稳定；无 rerun-if 指令 → 包内变更
+   即重跑，桌面端依赖 daemon crate 必然连带重链、两侧取值恒同源），经
+   `DaemonState.backend_build`（serde default 兼容旧 daemon 缺字段 = 空串）随
+   状态推送；②桌面 `connect_or_spawn` 就绪后以 `Request::Status` 短连接核对指
+   纹，不一致（= 运行中 daemon 是旧代码）→ `Quit` 优雅退出 + 磁盘二进制重新拉
+   起 + 复核一次；仍不一致 → 新 `BackendError::StaleBackend`（磁盘二进制本身
+   过旧，报错点名「重新构建/重装」）。自愈闭环：新桌面 × 旧 daemon 进程 → 自动
+   换新；旧磁盘二进制 → 明确报错，不再「看着是新的跑着是旧的」。
+   **用户侧动作不变：远程播放真正恢复仍需 `hmp login` 重新扫码（本次会话实锤
+   凭证仍未续）。**
+2. **本地曲目播放无封面（三断点叠加，非单因）**：①桌面 `cover_for_track` 裸
+   `strip_prefix("file://")`——规范形态 `file:///C:/...` 被解析成 `/C:/...`
+   （Windows 读不到，covers.rs 注释早有记载的根因之一）→ 改用现成的
+   `covers::file_uri_to_path` 双形态解析，加载失败补 debug 日志（此前静默）；②
+   storage `read_meta` 内嵌封面 2MB 上限把 3000px JPEG（3-6MB 常见）整张静默滤
+   成「无封面」（LocalMeta 注释还写着「前 2MB」，与行为相悖）→ 上限抬到 32MB，
+   并补 primary tag 之外的全 tag 兜底（歌词提取同款 primary → 全 tag 语义）；
+   ③数据侧：8224023（2026-09-26）写路径归一化之前，旧 daemon 以
+   `local:\\?\C:\...` verbatim 键入库，归一化后同文件另建规范键行 → verbatim
+   行沦为永久重复（cover_uri 恒 NULL 的库页双卡；v5 `merge_ghost_local_tracks`
+   只认「无 local_files 的意图幽灵」，带子行的 verbatim 扫描行永远漏网）→ v7
+   迁移 `merge_noncanonical_local_tracks`：规范行在场 → relations/歌单链接/
+   **播放历史（play_events，FK 无 CASCADE，verbatim 行由播放创建几乎必然带子
+   行——本迁移实机首跑即因漏搬它 DELETE 失败回滚、daemon 回退内存库，教训：
+   动 tracks 行先盘 REFERENCES 子表）**搬迁后删行（含 local_files 子行）；缺席
+   → `source_key` 与 `local_files.path` 就地改键；路径不存在跳过等下次（幂等，
+   含两分支回归测试）。附：covers/ 目录
+   里两个被 DB 引用的本地封面文件丢失属历史数据损伤（全仓无 eviction 代码路
+   径，疑 2026-09-09 双数据目录事故遗毒）；`resolve_local` 每次解析都重提取重
+   落盘、scan 全量 `set_track_cover`，重播/重扫即自愈，不加代码。
+3. **侧栏歌单封面直角**：`border-radius: Theme.radius-sm` 早就设了，缺的是
+   `clip: true`——Slint 圆角只裁自身背景、不裁子 Image。宽窄两栏两处封面按
+   queue-drawer 缩略图同款模板补齐 clip + `background: Theme.muted` +
+   `image-fit: ImageFit.cover`。
+
+## §19 优雅退出全链路广播（2026-10-02，用户报「托盘退出后 desktop 还在运行」）
+
+**现象**：托盘「退出」（或 `hmp quit` / SIGINT）后 daemon 正常退出，但桌面窗口
+仍开着——订阅流只是断流（EOF），桌面端落入既有离线路径（窗口保持、每 2s 重
+连、播放操作全部 no-op），成为离线僵尸；两进程间没有优雅关闭消息，退出只对
+daemon 单方面生效。
+
+**根因两点**：①协议层没有「daemon 正在优雅退出」的事件——EOF 既表示优雅退出
+也表示崩溃，客户端无从区分，只能按「可能恢复」走重连；②桌面订阅循环的拉起
+资格按 `last_revision.is_none()` 判定，daemon 在 Subscribe 与首帧之间的窗口内
+退出（EOF 竞态）会被误判为首连，把用户刚退出的 daemon 复活——即「tray 退出但
+daemon 依然运行」的另一个形态。
+
+**修复**（发送方 + 接收方 + 时序三段收口）：
+1. 协议：`Event::Shutdown` 新变体（hmp-core ipc.rs；serde unknown variant 对旧
+   客户端 = 解码失败断线重连，升级窗口内退化为既有行为，wire 兼容不变）。
+2. daemon server：订阅连接 select 臂监听引擎 `terminated`（sticky watch，与
+   state/library 两臂同形；先 borrow 再 changed 覆盖宽限窗口内新到订阅的即时
+   触发）→ 推 `Event::Shutdown` 后断开。`watch::changed` 取消安全，臂被抢占
+   后下一轮重建 future 不丢通知。未订阅短连接不受影响（响应/EOF 收尾）。
+3. daemon serve：`term_wait` 后新增 1s 订阅广播宽限（`SUBSCRIBER_SHUTDOWN_GRACE`）
+   ——编排任务与各连接任务并发调度，进程退出会先杀掉连接任务，不留窗口客户端
+   只见 EOF。回环链路一帧极小，1s 足够且不强制。
+4. 桌面 backend：收到 `Event::Shutdown` → `slint::quit_event_loop()` 整窗退出
+   （可跨线程调用；runtime 随 main 结束销毁，订阅任务一并终止），不再重连；
+   拉起资格改 `ever_connected`（本进程曾成功连上即永不拉起），EOF 竞态复活
+   daemon 的窗口就此关闭。
+5. 语义边界：崩溃/kill -9 等非优雅死亡没有 Shutdown 事件，桌面端仍走离线重连
+   （不自动拉活，与「用户显式退出后不得复活」的既有契约一致）；陈旧构建重启
+   流程（§18）中桌面端自己发 Quit 时无订阅在场（首连阶段），不会误触发自杀；
+   若另有订阅中的旧桌面实例，会随旧 daemon 一起退出（单实例卫生，可接受）。
+
+**回归**：`quit_broadcasts_shutdown_to_subscribers`（server.rs：订阅 → 短连接
+Quit → 断言 Shutdown 帧先于 EOF，容忍其前的中间状态推送）+
+`event_shutdown_roundtrips_through_frame`（ipc.rs 序列化往返）。
+EOF 语义不变：非优雅死亡依旧无事件。
+
+## §20 封面链路四断点总修 + 列表封面预取（2026-10-03，用户报「大部分歌曲封面显示不出来」+「打开列表就应请求封面并缓存」）
+
+**量化证据**（实机库直查）：4172 首 QQ 曲目中 4167 首 `tracks.cover_uri IS NULL`
+（99.9%），covers/ 目录仅 37 个文件——封面链路实质上只对「恰好播放过的曲 +
+发现页歌单卡」工作，列表页全线占位。
+
+**四个断点**（上游到 UI）：
+1. **入库丢封面**：reconcile `qq_track_row`/`repair_stub_metadata` 手握
+   `song.album.pmid`（API 模型早有该字段）却写 `cover_uri: None`，注释还写着
+   「远程 URL 由 CoverGet 域守卫链路接管」——域守卫只是校验器，不生产 URL。
+   只有「恰好播放过」的曲经播放路径（player.rs T002 模板）落过 URL → 5/4172。
+   → 两处 upsert 带 `cover_url_from_pmid`（T002R300x300M000 模板，与播放路径
+   同款）；空 pmid → None（COALESCE 保留既有）。
+2. **投影丢列**：桌面 `song_row_from_qq` 把 `track_meta_batch` 读出的
+   `cover_uri` 无条件置空（注释「http 封面 UI 禁网 → 程序化占位」）——把
+   「禁直连」错当「禁用」，库里明明有 rebind 回写的 file:// 产物也看不到。
+   → SongRow 拆双列：`cover_uri`（file:// 直读盘）/ `remote_cover`（http，
+   预取输入，UI 不直连）。
+3. **无盘级缓存**：CoverGet 每次请求都出网下载，persist_cover 只按内容去重
+   文件，URL→文件映射只在 tracks.cover_uri 一个地方（还是 NULL）。
+   → v8 迁移 `cover_cache(url PK, file_uri, fetched_at)`：CoverGet 命中索引
+   零出网直接回本地产物（URL 内嵌专辑 pmid，pmid 变则 URL 变，按 URL 缓存即
+   内容寻址，无需 TTL）；下载成功双写索引 + `rebind_cover_url`。
+4. **无预取**：只有 discover 歌单卡与当前播放曲有异步补图，歌曲行列表
+   （歌单详情/我喜欢/榜单/猜你喜欢/最近播放）从不发 CoverGet。
+   → 新模块 `track_covers`：列表落地即按 (mid, url) 清单批量预取（信号量
+   8 并发；进程内 mid|url 去重，失败不重试——下次进页面盘缓存毫秒回）；
+   URL→Image 旁路缓存让刷新重建模型立即拿到图（discover 刷新回退占位的
+   已知缺陷不再复现）；回包广播全部 8 个曲目列表模型（同曲多列表在途竞态
+   一并覆盖）。挂接点：apply_snapshot（我喜欢+最近播放）、歌单/专辑/歌手
+   详情、discover 新歌/榜单/猜你喜欢。
+
+**配套防御**：upsert 的 cover_uri 分支加 CASE——已 rebind 的 `file://` 行
+不得被下一轮 reconcile 携带的远程 URL 打回（否则投影退化回占位还要再走一轮
+CoverGet）；file:// 对 file:// 仍放行（扫描重提取换图可生效）。
+
+**回归**：storage `cover_cache_roundtrip` /
+`upsert_cover_remote_url_never_demotes_local_file`；daemon wiremock
+`reconcile_tracks_carry_cover_url_and_rebind_survives_resync`（pmid 落库 +
+空 pmid 不落 + rebind 存活重放）；desktop `qq_row_splits_cover_into_local_and_remote`、
+`targets_from_rows_keeps_qq_remote_only`、`all_slots_are_distinct_and_complete`。
+
+**已知边界**：存量库的 URL 回填靠 daemon 首轮 reconcile 全量 upsert（4566
+条歌单链接，分钟级）；远端换封面（同 pmid 换图）不会自动失效盘缓存——QQ
+封面 pmid 与图片内容绑定，实际不发生；排行榜分类页头图、歌手照片仍无数据源。
+## §21 桌面前端内存治理（2026-10-03，btop 实测桌面 RSS 2.4G vs 播放核心 18M）
+
+**现象**：hmp-desktop 常驻内存 2.4GB 且随浏览单调增长不回落；同链路的 hmp
+播放核心仅 18MB——增长源全部在 UI 进程。
+
+**根因四项**（三路只读子代理审计 + 逐点代码核实）：
+1. **四套「只进不出」的 `HashMap<String, slint::Image>` 线程本地缓存**钉住解码
+   位图：covers.rs 占位封面（按 seed）、library_view.rs 本地封面（按 URI）、
+   player_bridge.rs 磁盘封面（按路径）、online_covers.rs 发现页封面。关键放大
+   器：`Image::load_from_path` 本走 Slint 内部 5MB 权重 LRU，但应用层强引用
+   把解码位图永久钉住，LRU 形同虚设；且 URI/路径/seed 三套 key 互不相通，同一
+   封面文件最多被解码并钉住两份。
+2. **占位封面按曲目 mid 播种**：2026-09-30 改版后同类占位像素逐字节相同
+   （covers.rs 测试自己断言），但每曲仍按 seed 各存一份 256×256 RGBA
+   （256KB/条）——1 万行收藏 ≈ 2.5GB，单项即可解释观测值。
+3. **`TrackRow.cover` 是纯死重**：`ui/track-table.slint` 全文无 image 元素，
+   12+ 个表格模型（收藏/最近/本地/下载/已购/搜索/榜单/队列）每行背一张全尺寸
+   封面，唯一消费方是 queue-drawer 36×36 缩略——为一张 36px 图付 8-36MB/行。
+4. **零虚拟化**：全部列表 `for` repeater 全量实例化（4566 行 × 15-20 元素）。
+
+**修复四项**（linked worktree fix/desktop-mem-2.4g，四子代理契约并行 + 主代理
+集成；隔离自并行改封面的另一会话线）：
+1. **占位封面缓存按图标类型收口**（covers.rs）：key = `icon_path_for(seed)` 三
+   类静态串，条目封顶 3；`cover_image(seed)` 签名不变。测试 `cover_image_cache
+   _is_capped_by_icon_kind`。
+2. **统一 cover_cache（新 src/cover_cache.rs）**：字节加权 LRU，key=(路径，
+   max_side 桶)，CAP 64MB 超限逐最久未用；装载即 `image` 解码 → thumbnail
+   降采样 → rgba8——缓存的与交给 UI 的都是小图。三处旧缓存删除并路由：
+   library_view（256）、player_bridge（队列行 256 / 当前曲 512）、online_covers
+   （256）；`local_cover_image` 对外签名不变（bridge 侧栏/详情/卡片调用点自动
+   受益）。LRU 逐出/命中/降采样 ×4 测试。
+3. **TrackRow 剥 cover + QueueRow 分型**（data.slint/stores.slint）：表格行不
+   背位图；队列行走 QueueRow（TrackRow 全字段 + cover，消费方仅 queue-drawer）；
+   `play-tracks([TrackRow],int)` 契约不变；搜索/发现行与 `to_track_row` 删封面
+   构造，bridge 侧栏/详情/卡片封面保留。to_track_row 的 mid 播种 256KB/曲 复
+   制路径就此消失。
+4. **曲目表窗口化虚拟化**（新 ui/viewport.slint 全局 + track-table 行窗口）：
+   顶层 Scroll 把滚动状态经 property 声明处双向别名 + changed/init 命令式回写
+   进 Viewport 全局（y/view-h/origin-y）；TrackTable 只实例化可见窗
+   （ceil(view-h/pitch)+2×8 overscan）行，行按绝对索引绝对定位
+   （y=(window-start+offset)×pitch），占位高度=N×pitch 不变（滚动条几何不变）；
+   view-h≤0（无头/未回写）退化全量渲染。**集成实测踩三坑**（已录 PORTING 坑位）：
+   ①非布局父级容器必须显式钉 width+height（显式 height 不进 preferred 链 +
+   repeater 无固有尺寸 → HoverGroup 被 layout 压成 0 高 + clip → 整表不可见
+   不可点，take_snapshot 截图定位）；②语句级全局绑定/别名均 parse error，唯
+   property 声明处双向别名合法；③for 整数即模型、无 `0..N` 区间、for 体内
+   `row` 不可作属性名。
+   附：**track_theme 单次有界解码**（Applied 摘除全尺寸封面常驻，只留 64×64
+   采样 ≤16KB；sample/ambient 共享一次 to_rgba8→480px 有界缓冲，换曲瞬态
+   双份全图拷贝消失）。
+5. **hover × 虚拟滚动专项验证**（用户点名风险面）：testing backend + software
+   renderer 探针实测——滚动后 hover 上报正常；**被 hover 行被滚出窗口卸载时
+   HoverBus 自清**（HoverItem 退出自校验在实例几何跳变时自然触发 leave，比旧
+   行为的高亮滞留更干净）；微动指针恢复上报；跨窗口边界的块飞行/黏滞形变与
+   旧行为等价。drag 回归（thumb 跳转深滚后点行索引差 >20 行 + 1:1 拖拽比例）
+   全绿。
+
+**回归**：lib 66 测试全绿（含 cover_cache LRU×4、covers 封顶、track_theme 有界
+解码）；drag/hover_slider/hover_stretch/svg_icon 集成测试全绿；clippy
+`--all-targets` 零警告；`cargo fmt --check` 干净。内存水位验证留待真机长跑
+（预期：RSS 有界于 64MB cover_cache + 模型字符串 + GPU 纹理，不再随浏览单调
+增长）。
+
+**已知边界**：滚动中 hover 块位置仍是上报时刻快照（旧行为即如此，鼠标微动即
+刷新）；队列行 cover 取 256 桶（36px 缩略余量充足）；占位图三类共享同一位图
+句柄（Slint 纹理单份）；远端 URL 封面仍走程序化占位（UI 零 HTTP 原则不变）。
+
+**与 §20（封面链路四断点）的语义合并**：两线同日并行，track_covers 预取的
+UI 侧模型回填（`apply_cover` 广播 8 个表格模型行 + `COVER_IMAGES`/
+`IMAGE_CACHE` 两个无界线程本地位图缓存）与本节 ②「表格行不背图」正面冲突，
+合并时摘除回填保留预取——预取的价值（daemon 盘缓存预热 + rebind_cover_url
+库内升级）不变，播放/队列抽屉/详情页随后的封面读取经 cover_cache 直读盘；
+签名去 `ui` 参数（纯 IPC 派发）。另有：共享 target 目录被两 worktree 交替
+构建产出「幽灵编译错误」（daemon 直查绿、作依赖编译红，冷跑独立 target 即
+消失）——多 worktree 共享 CARGO_TARGET_DIR 不可靠，与 §20 前科同类。
+
+## §22 「前端又不能播放音频」——§20 后陈旧 hmp.exe 未重建 + StaleBackend 无限 churn（2026-10-03，用户报）
+
+**现象**：桌面前端完全无法播放（用户口径「前端又不能播放音频了」）。此前 §16
+零号发现、§18 已两度实锤「陈旧常驻 daemon」，本轮为同一陷阱的第三次复发，但
+形态升级：**磁盘上的二进制本身是旧的**，重启 daemon 解决不了。
+
+**根因链**（实锤证据）：
+1. §20（8f9d5b9，10-03 02:29）改了 hmp-daemon 三个源文件（content/reconcile/
+   server），但 release `hmp.exe` 停留在 10-02 21:57（edc304f 之后 8 分钟构建，
+   早于 §20）；`hmp-desktop.exe` 却在 10-03 10:44 重建——**桌面新、磁盘后端旧**
+   的错位组合。推测成因：只跑了 `cargo build --release -p hmp-desktop`（或等价
+   单包构建），§20 备注里「重建 release daemon+desktop」的后半句没落地。
+2. 指纹实锤：桌面 exe 内嵌 `BUILD_CODE=5c2c5827f3fd9a2c`（HEAD 构建），陈旧
+   daemon 按其源码必然报另一指纹 → `verify_backend_generation` Quit+重拉（同一
+   个旧 exe）→ 复核仍不一致 → `StaleBackend` → 订阅循环按离线降级，前端整体
+   不可播。§21 修复期只有桌面端被重建，指纹握手正确拦下了这次错位——机制
+   工作正常，但暴露出两个次生缺陷。
+3. **次生缺陷 A（本轮修复）**：`connect_or_spawn` 失败后订阅循环每 2s 重试，
+   每轮都对陈旧 daemon 执行 Quit+重拉——磁盘二进制不换就无限 churn，且把
+   CLI/托盘本可用的 daemon 反复杀起。修复：`verify_backend_generation` 记账
+   「重启后仍不一致」时的磁盘二进制形态（mtime+len，`STALE_BINARY_SEEN`），
+   磁盘未变则快速失败不再 Quit（daemon 存活，CLI 可用）；重建二进制（stamp
+   变化）自动恢复完整重启核对（自愈，无需重启桌面端）。纯决策逻辑
+   `restart_worthwhile` 单测钉死。
+4. **次生缺陷 B（本轮修复）**：离线原因从未到过用户眼前——toast 恒为「播放
+   服务未连接」，`StaleBackend` 的可操作文案（「请重新构建/安装 hmp 后端二进
+   制」）只进日志。修复：`UiStateEvent` 增 `offline_reason`（仅 StaleBackend/
+   NoBackendBinary/SpawnTimeout 三类可操作错误携带，IO/协议断连沿用笼统提示
+   防 OS 文案刷屏），离线翻转的一次性 toast 直接展示原因与修复指引。
+
+**验证**：`hmp status` 实测新 daemon `backend_build=5c2c5827f3fd9a2c` 与桌面端
+一致；本地曲（tone.wav）Playing 位置推进零错误；远程 QQ 曲以 Flac 全档播放
+（`hmp auth` 的「Expiry: expired」为陈旧标志，实际取流健康——与 §17 的
+104003 失效签名不同，勿混淆）。hmp-desktop lib 测试全绿（新增 3 例）。
+
+**教训**：①「重建」必须落到所有链接 hmp-daemon 的二进制（hmp.exe 与
+hmp-desktop 同源同指纹），单包构建是本仓库的高频事故源；②握手拦下错位只是
+兜底，UI 必须把拦下的事实说给用户（本次 toast 修复后，同类事故用户可自救）；
+③离线 churn 与静默原因叠加，把一次「重建一下」的环境事故放大成「前端坏了」。
+
+## §23 远端封面显示链路复审（2026-10-04，用户报「远端封面无法被正确显示」）
+
+**实机量化**（%LOCALAPPDATA%/hmp）：tracks 表 3935/4172 QQ 曲目已带 T002 模板
+远程 URL（§20 断点①修复生效），但 `cover_cache` 表 **0 行**、covers/ 目录
+38 个文件最后落盘 10-03 10:44（早于含修复的 release hmp.exe 11:44 构建）——
+**新 daemon 运行期间零封面下载**。直连探针实测 y.gtimg.cn 封面 URL 下载
+200/25KB 真 JPEG；手动拉起 HEAD daemon 后 IPC `CoverGet` 78ms 下载落盘、
+二次请求 510µs 盘缓存命中、`rebind_cover_url` 一条 URL 命中 62 行同封面曲目
+——**daemon 侧下载/落盘/盘缓存/rebind 全链路健康，断点在桌面端消费侧**。
+
+**两个断点**（上溯到 UI）：
+1. **队列抽屉非当前曲 QQ 行封面永不补图**：队列行封面在投影时固化
+   （`row_from_meta` → `queue_cover`，远程 URL 落程序化占位），daemon
+   `rebind_cover_url` 刻意不改媒体库代际（封面补齐不触发整页重查），队列
+   模型只在 `queue.revision` 变化时重建——预取（track_covers）回包又全部
+   丢弃（§21 语义合并时摘除回填）。组合结果：只有当前曲有
+   `spawn_cover_fetch` 原地换图，抽屉里其余 QQ 曲**整场会话占位**。
+   → `track_covers::prefetch_tracks_with`（带 `OnCover` 回包回调）：队列
+   落地（apply_event queue_rows 分支）对远程封面行发起预取，回包经
+   `invoke_from_event_loop` 落 256 桶 → `update_queue_row_cover` 原地换图。
+   预取/回填全走 daemon 盘缓存与 rebind，去重/并发语义不变。
+2. **三处进程级死去重「失败永不重试」**：`REQUESTED` 记账在发起时插入、
+   从不释放——冷启动窗口（daemon 未就绪 / StaleBackend 恢复中 / 网络瞬断）
+   内的请求全部失败且**永久在账**，该图整个会话占位（与 §22 的离线窗口
+   正面叠加：StaleBackend 期间列表落地 → 预取全灭 → daemon 恢复后 UI 仍
+   不再问）。→ 改「失败出账」：`track_covers`/`online_covers` 失败即移除
+   记账（触发源=进页面/队列重建，低频自然重试）；`spawn_cover_fetch` 由
+   10Hz 推送驱动，另加指数退避（2s 起步 ×2 封顶 60s，序列取自存储的时长
+   而非时刻差——重试总发生在上次时刻过期后，按时刻差翻倍会恒停最小值），
+   成功清除退避。三处触发纪律记录在各自模块 doc。
+
+**回归**：desktop lib 73 测试全绿（新增 `failed_request_releases_dedup_key`、
+`cover_retry_backoff_doubles_and_caps`）；clippy `--all-targets` 零警告。
+daemon 侧实测见上（探针法：起 HEAD daemon + 直发 CoverGet，观察首下/命中
+/rebind 行数）。
+
+**已知边界**：队列行预取失败的重试依赖下次队列重建（换曲/加歌/重开会话）
+——不换曲的静止队列不自动重试（当前曲除外，10Hz 退避重试兜底）；歌手照片、
+榜单头图仍无数据源（§20 已知边界不变）；队列行回填图 256 桶（≤256KB/行）
+与 §21「QueueRow 背 cover」契约一致，内存有界。
+
+## §24 桌面验收补账——右键菜单视觉验收 + §21 内存长跑证伪（2026-10-23，S6 流；发现与独立审计双代理验证）
+
+1. **右键菜单视觉验收（A 项）**：testing backend + software renderer 截 12 张（浅/暗 × 曲目表/队列/歌单上下文 × hover/禁用/钳制变体），9 PASS——面板几何（216 定宽/高度公式）、分隔线、禁用 opacity、hover 暖色、底右缘钳制逐张对照 context-menu.slint 内嵌规格实证；3 张（picker 系）转为缺陷证据。
+2. **缺陷（高）：右键菜单「加入播放列表…」二级 picker 不可达**——track-table.slint:301 / queue-drawer.slint:365 的 PopupWindow 未设 close-policy，slint 1.17.1 默认 close-on-click（PORTING.md:188 原记载写反——缺陷漏网的认知根源，已更正）使弹层内任意完整点击（含禁用行）即关菜单。行为级证据：press-only/release-only 菜单存活、full-click 必关、picker.png≡picker-local.png（md5 同）。**修复：S7 流（close-on-click-outside）。**
+3. **缺陷（严重）：§21 内存有界性证伪（B 项 FAIL）**——隔离真机 21 分钟长跑（音量 0、独立管道/独立数据目录、守护进程对照正常 max WS 68MB）：WS 平台斜率 +9.2~+11.1MB/min（对口径不敏感）、双窗漂移 147MB、P4 静置 115s 无驱动爬升 +127MB（超 cover_cache 64MB CAP 两倍）、P5 重播起播 20s 内 PM 单刻暴增 +2.27GB 后桌面进程死亡（死亡机制不单独归因，暴增本身系进程自身分配行为）。独立审计从 CSV 重算全部数字精确重现、混杂排除（外部内存压力不可能造成 commit 增长；封面缓存冷填充不可解释静置期爬升）。**根因调查立项 S8（开放项最高优先级）。** 附：全量模式浏览代理 6min WS 平坦（41MB）——§21 根因 3（表格剥图）与模型重建方向有效；窗口化虚拟化无法无头代理（Viewport.y 在 window-start 公式自相消，方法学边界入册 PORTING）。
+4. 产物：docs/verify/2026-10-23/（REPORT、RSS 曲线 PNG+CSV、12 张截图、真机眼验 runbook）；QA 基建 examples/shot-menu.rs 入库。
+
+## §25 内存有界性根因与修复闭环（2026-10-23/24，S8 调查 + S9 修复 + E1 双臂复验，双代理验证）
+
+1. **根因（S8 只读调查，docs/verify/2026-10-23/mem-rca-FINDINGS.md）**：①平台斜率与双窗漂移 = 确定缺陷链「换曲/自动切曲 → 全量队列重投影 + 90 行 cover_cache(256) 装载 × miss 全尺寸 1200² 解码（6.5MB 触摸/条）> 64MB CAP → LRU 循环打爆」；③P4 静置爬升仓内穷尽排除（引擎/订阅/SyncWorker/watcher/定时器面全静默、daemon 同步增长）→ 系统态依赖；④P5 PM +2.27GB 超 app 侧核算 8~40 倍、PM:WS=13.6:1 签名 → GL/WDDM commit 放大相容。
+2. **修复（S9）**：R1b 队列封面异步逐行回填（16ms×6/tick、换装作废、热行 get_if_cached 同步零闪烁、探测不更新 LRU stamp）；R2 派生封面 `<hash>.512.jpg`（persist_cover 五调用点含 CLI scan 写侧、读侧三级回退、互锚 hmp-core::media::derived_cover_name、双向兼容独立回滚）；R3 EqClock 播放门控 + Equalizer paused||!visible 自门控（暂停冻结经绝对相位机制数学等价）。
+3. **E1 复验（docs/verify/2026-10-24-mem-e1/，同日同机双臂各 23.5min）**：fix 臂四判据全 PASS（max WS 246MB、斜率 -0.02MB/min、P5 36/36 存活、daemon 50MB 含迁移期、派生件 90 个 ≈23KB/张）；**基线臂当日亦有界（250MB/+0.166）——S6 失效签名跨日非平稳，主分量系系统态（当日内存压力）**，与 S8 排除论证闭环；修复全指标 ≤ 基线，机制级消灭由测试钉死（重建派发内解码 0 次/批恰 6/换装作废/门控往返）。真库护栏 94 文件前后零变化。
+4. **新登记**：①`hmp quit` 后桌面挂死成不可杀僵尸（两臂均有、基线同——退出路径死锁，**开放项 S10 候选**）；②backend_build 指纹只哈希 hmp-daemon/src/**（R2 落 hmp-storage 不入指纹，E1 两臂同指纹实锤）——依赖级陈旧检测失明，纪律防线不变；③E3 回填计数日志未落盘（stdout 未重定向，口径缺口）；④R1a（daemon revision 不 bump）留作远期候选；⑤播放期不可见行 EQ 求值残留（打磨项）。
+
+## §26 quit 后桌面僵尸挂死——根因与修复（2026-10-24，S10 流；调查四阶段+审计六发续接双代理验证）
+
+1. **根因（cdb 符号化栈实锤，置信度实锤级）**：非 GL。`ExitProcess → LdrShutdownProcess → TLS/FLS 析构 → thread_local RefCell<slint::Timer> drop（bridge.rs schedule_refresh 回调闭包捕获 Arc<BackendRuntime>，退出时为最后引用）→ BackendRuntime::drop → tokio Runtime::drop → BlockingPool::shutdown 在 oneshot 上死等已被 ExitProcess 杀死的 blocking 线程 → loader 关停期 WaitOnAddress 永久挂起（TerminateProcess 亦无法清出）`。GL 理论（初审通过）被 software 对照臂证伪——无 igd* 驱动模块仍复现僵尸且两臂逐帧同栈；「不可杀」的本质是 loader 关停期的线程困死。
+2. **修复（T7）**：`BackendRuntime` 持 `&'static Runtime`（Box::leak，进程同寿，任何退出路径不再触发 shutdown 握手）+ 契约单测（句柄消亡后在途任务继续，旧实现必红）。forget(ui)/KeepWindowShown 方案随前提证伪 revert；2s 用户态看门狗保留为纯纵深（对 loader 期挂死无效，如实注释）。
+3. **验收（9 臂真机，隔离端点）**：基线（a5a0236）quit×2+software×1 = **3/3 ZOMBIE**（3 分钟短周期即复现）；fix2 quit 2/2 + X 关窗 1/1 = **全部 1.1s CLEAN_EXIT**（自然 drop 与 GL 销毁照常——基线臂自证该段无罪）。GL 后端实测 WGL（M1 预测成立）。
+4. **方法论遗产**：①对照臂设计直接推翻了双代理一致认可的假设——「为佐证而设的对照臂」可能是最有价值的实验；②cdb 在 Windows Kits 默认路径（前任「缺席」误判贻误一轮）；③配额驱逐链下「增量落盘+续接代理」模式六发接力完成审计。

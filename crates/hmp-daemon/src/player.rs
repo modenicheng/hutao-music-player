@@ -90,13 +90,17 @@ impl PlaybackDriver for RodioDriver {
     }
 }
 
-/// 解析完成的曲目（含解密 guard，随 daemon 存活）。
+/// 解析完成的曲目（远端流式路径含进程内解密源）。
 pub struct ResolvedTrack {
     /// 领域曲目元数据。
     pub track: Track,
-    /// 播放 URI（http://127.0.0.1 代理或 CDN 直连）。
+    /// 播放 URI（远端流式 = 原 CDN url，仅元数据/日志；CDN 无 Range
+    /// 回退与播放缓存命中 = `file://`）。
     pub uri: String,
-    /// 解密代理 guard（明文播放期间必须持有；换曲时被引擎替换 Drop）。
+    /// 进程内解密源（流式路径 `Some`，字节流经 `source` 直供播放器）；
+    /// 缓存命中/回退（`file://`）与本地曲目为 `None`。生命周期随
+    /// reader/引擎 `AppliedLoad.source`（reader 存活即源存活，无需
+    /// 引擎单独保活）。
     pub media: Option<hmp_media::PreparedMedia>,
     /// 本次实际选定的音质（媒体库重构 B3：actual vs available 分离）。
     pub quality: AudioQuality,
@@ -106,7 +110,7 @@ pub struct ResolvedTrack {
 
 impl std::fmt::Debug for ResolvedTrack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `PreparedMedia` 不实现 Debug；只呈现是否持有 guard。
+        // `PreparedMedia` 不实现 Debug；只呈现是否持有进程内源。
         f.debug_struct("ResolvedTrack")
             .field("track", &self.track)
             .field("uri", &self.uri)
@@ -126,6 +130,10 @@ pub enum EngineError {
     PlaylistNotFound(String),
     #[error("no available audio quality: {0}")]
     QualityUnavailable(String),
+    /// 驱动装载失败（打开/解码错误，驱动 Error 事件即时返回）。引擎据此
+    /// 触发音质降档重试（AUDIT §16 开放项：解码期失败纳入回退链）。
+    #[error("driver load failed: {0}")]
+    LoadFailed(String),
     #[error("driver did not apply the load before the load timeout")]
     Timeout,
     #[error("internal error: {0}")]
@@ -151,6 +159,18 @@ pub trait SourceResolver: Send + Sync + std::fmt::Debug {
         &self,
         track_id: &TrackId,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>>;
+
+    /// 同 [`SourceResolver::resolve_track`]，但排除指定音质档位
+    /// （装载期解码失败降档重试：失败档不得再次解析出来，否则死循环）。
+    /// 默认忽略排除（fake/本地解析器无音质链概念）；生产解析器覆写。
+    fn resolve_track_excluding(
+        &self,
+        track_id: &TrackId,
+        exclude: &[AudioQuality],
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        let _ = exclude;
+        self.resolve_track(track_id)
+    }
 
     /// 直接按 URI 解析（MPRIS `OpenUri`；默认不支持，本地解析器实现 `file://`）。
     fn resolve_uri(
@@ -227,7 +247,20 @@ impl SourceResolver for QqSourceResolver {
         let track_id = track_id.clone();
         Box::pin(async move {
             let credential = self.load_credential()?;
-            resolve_track_impl(&self.client, &credential, &track_id).await
+            resolve_track_impl(&self.client, &credential, &track_id, &[]).await
+        })
+    }
+
+    fn resolve_track_excluding(
+        &self,
+        track_id: &TrackId,
+        exclude: &[AudioQuality],
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedTrack, EngineError>> + Send + '_>> {
+        let track_id = track_id.clone();
+        let exclude = exclude.to_vec();
+        Box::pin(async move {
+            let credential = self.load_credential()?;
+            resolve_track_impl(&self.client, &credential, &track_id, &exclude).await
         })
     }
 }
@@ -252,24 +285,15 @@ fn quality_to_file_type(q: &AudioQuality) -> Option<SongFileType> {
     }
 }
 
-/// 后台回填播放缓存（幂等；失败仅日志，不影响当次流式播放）。
-/// `ekey` 空串 = 明文。回填完成后二次播放经 `cached_playable_uri` 全离线。
-fn spawn_cache_fill(url: String, ekey: String) {
-    tokio::spawn(async move {
-        let ekey_opt = (!ekey.is_empty()).then_some(ekey.as_str());
-        match hmp_media::cache_fill(&url, ekey_opt).await {
-            Ok(Some(uri)) => tracing::debug!(url, uri, "playback cache filled"),
-            Ok(None) => {}
-            Err(e) => tracing::warn!(url, %e, "playback cache fill failed"),
-        }
-    });
-}
-
 /// 解析单个曲目 → 可播放 URI + 元数据（音质回退 + QMC2 解密）。
+///
+/// `exclude`：跳过的音质档位（装载期解码失败降档重试时由引擎传入失败档，
+/// 防止同一坏档被再次解析出来）。
 pub async fn resolve_track_impl(
     client: &QqMusicClient,
     credential: &hmp_storage::credential::Credential,
     track_id: &TrackId,
+    exclude: &[AudioQuality],
 ) -> Result<ResolvedTrack, EngineError> {
     let song_api = SongApi::new(client);
     let detail = song_api
@@ -312,16 +336,40 @@ pub async fn resolve_track_impl(
 
     // 音质回退链：来自持久化偏好（`hmp quality`；Auto = 文档化链
     // Master→HiRes→Atmos→Flac→Mp3_320→Mp3_128，固定档位则从该档起降级）。
-    let chain = hmp_storage::Config::load().quality.chain();
+    // 排除失败档（解码期降档重试）后为空 → 无档可试。
+    let chain: Vec<AudioQuality> = hmp_storage::Config::load()
+        .quality
+        .chain()
+        .into_iter()
+        .filter(|q| !exclude.contains(q))
+        .collect();
+    if chain.is_empty() {
+        return Err(EngineError::QualityUnavailable(format!(
+            "every quality already failed loading: {}",
+            exclude
+                .iter()
+                .map(|q| q.to_alias())
+                .collect::<Vec<_>>()
+                .join("/")
+        )));
+    }
     let file_info = SongFileInfo {
         mid: track_id.as_ref().to_owned(),
         file_type: None,
         song_type: 0,
         media_mid: Some(media_mid),
     };
-    let mut last_error = None;
+    // 逐档错误聚合（此前只留最后一档错误，且取流响应缺 midurlinfo 时
+    // 恒为空串——诊断黑洞）；`all_auth` 追踪「是否所有失败档都是鉴权码」：
+    // 全链鉴权失败（凭证过期/未登录）时上游表现为每档 result=104003/101404，
+    // 应上报 NotLoggedIn（可操作：重新登录）而非误导性的音质不可用。
+    let mut rung_errors: Vec<String> = Vec::new();
+    let mut all_auth = true;
     for quality in chain {
+        let alias = quality.to_alias();
         let Some(file_type) = quality_to_file_type(&quality) else {
+            all_auth = false;
+            rung_errors.push(format!("{alias}: no file type mapping"));
             continue;
         };
         let urls = song_api
@@ -351,33 +399,42 @@ pub async fn resolve_track_impl(
                                 tracing::debug!(%e, "playback cache lookup failed; streaming");
                             }
                         }
-                        if file_type.is_encrypted {
-                            match hmp_media::prepare_stream(&remote_uri, ekey_opt, None).await {
-                                Ok(p) => {
-                                    // 首播流式秒开，后台回填全量缓存供二次播放离线
-                                    spawn_cache_fill(remote_uri.clone(), item.ekey.clone());
-                                    let uri = p.uri.clone();
-                                    found = Some((file_type, uri, Some(p)));
-                                    break;
-                                }
-                                Err(e) => {
-                                    last_error = Some(format!("QMC2 decrypt failed: {e}"));
-                                    continue;
-                                }
+                        // 加密/明文统一经 prepare_media：加密走 QMC2 流密码，
+                        // 明文（ekey 空且无内嵌 footer）走 IdentityCipher 直通。
+                        // CDN 支持 Range → 进程内随机访问源（uri 保留原 CDN url，
+                        // 播放字节流经 source 直供播放器）；无 Range → hmp-media
+                        // 自动回退全量下载-解密-缓存（uri = file://，source None）。
+                        // 流式 reader 自带 tee 边播边缓存（顺序消费写入缓存，
+                        // drop 后后台补齐剩余区间），二次播放由上方
+                        // cached_playable_uri 命中——解析层不再后台二次全量下载
+                        // （未播放的预解析曲目不回填缓存）。
+                        match hmp_media::prepare_media(&remote_uri, ekey_opt, None).await {
+                            Ok(p) => {
+                                let uri = p.uri.clone();
+                                found = Some((file_type, uri, Some(p)));
+                                break;
                             }
-                        } else {
-                            // 明文无需解密 guard：直接播放 CDN URL（media: None）
-                            spawn_cache_fill(remote_uri.clone(), String::new());
-                            found = Some((file_type, remote_uri, None));
-                            break;
+                            Err(e) => {
+                                all_auth = false;
+                                rung_errors.push(format!("{alias}: prepare media failed: {e}"));
+                                continue;
+                            }
                         }
                     } else {
-                        last_error = Some(format!("result={}", item.result));
+                        all_auth &= is_auth_result_code(item.result);
+                        rung_errors.push(format!("{alias}: result={}", item.result));
                     }
+                }
+                if resp.data.is_empty() {
+                    // 服务端应答缺 midurlinfo（异常形态）：归因不明，
+                    // 保守不视为鉴权失败。
+                    all_auth = false;
+                    rung_errors.push(format!("{alias}: empty midurlinfo"));
                 }
             }
             Err(e) => {
-                last_error = Some(e.to_string());
+                all_auth &= is_auth_transport_error(&e);
+                rung_errors.push(format!("{alias}: {e}"));
             }
         }
         if let Some((file_type, uri, media)) = found {
@@ -416,9 +473,35 @@ pub async fn resolve_track_impl(
             });
         }
     }
-    Err(EngineError::QualityUnavailable(
-        last_error.unwrap_or_default(),
-    ))
+    debug_assert!(
+        !rung_errors.is_empty(),
+        "chain non-empty and nothing succeeded → 每档必有错误记录"
+    );
+    if all_auth {
+        // 全链鉴权失败：凭证缺失/过期/无权限（未登录时 load_credential 已拦，
+        // 这里是「有凭证但服务端判无效」的实况）。上报 NotLoggedIn 而非
+        // QualityUnavailable（2026-10-02 实机：过期凭证全链 104003，用户看到
+        // 「音质不存在」实为登录态失效）。
+        return Err(EngineError::NotLoggedIn);
+    }
+    Err(EngineError::QualityUnavailable(rung_errors.join("; ")))
+}
+
+/// 取流单项业务码是否为鉴权类失败（101404=需登录，104003=无权限/需登录态；
+/// 见 `UrlinfoItem::result` 文档与 2026-08-06/09-29 取流实测记录）。
+fn is_auth_result_code(result: i64) -> bool {
+    result == 101404 || result == 104003
+}
+
+/// 取流请求级错误是否为鉴权类失败（凭证缺失/过期变体；业务码形态见
+/// [`is_auth_result_code`]）。
+fn is_auth_transport_error(e: &hmp_qqmusic_api::QqMusicError) -> bool {
+    matches!(
+        e,
+        hmp_qqmusic_api::QqMusicError::AuthenticationRequired
+            | hmp_qqmusic_api::QqMusicError::CredentialExpired
+            | hmp_qqmusic_api::QqMusicError::LoginAuthExpired
+    )
 }
 
 /// 解析源为 TrackId 列表（单曲/歌单/专辑；歌单/专辑分页拉取，
@@ -516,13 +599,26 @@ fn song_stub(s: &hmp_qqmusic_api::models::Song) -> Option<hmp_core::TrackStub> {
 }
 
 /// 从 QQ size 字段探测可用音质（确定映射的档位，从高到低；媒体库重构 B3）。
+///
+/// 仅映射有独立 size 字段的档位（线上 JSON 键名 2026-10-02 实机 dump 核对）：
+/// `size_hires`→HiRes、`size_dolby`→Atmos、`size_flac`→Flac、
+/// `size_192aac`→Aac、`size_320mp3`→Mp3_320、`size_128mp3`→Mp3_128。
+/// 臻品母带在 `size_new` 数组内（索引→档位无上游文档，不猜）。
+/// 注意 Atmos 的 size 字段是杜比全景声（D0M4）而回退链尝试的是臻品音质
+/// 2.0（Q0M0）——家族内近似档；取流失败/解码失败由回退链降档兜底。
 pub fn available_from_sizes(f: &hmp_qqmusic_api::models::File) -> Vec<AudioQuality> {
     let mut available = Vec::new();
+    if f.size_hires > 0 {
+        available.push(AudioQuality::HiRes);
+    }
     if f.size_dolby > 0 {
         available.push(AudioQuality::Atmos);
     }
     if f.size_flac > 0 {
         available.push(AudioQuality::Flac);
+    }
+    if f.size_192aac > 0 {
+        available.push(AudioQuality::Aac);
     }
     if f.size_320mp3 > 0 {
         available.push(AudioQuality::Mp3_320);
@@ -634,21 +730,103 @@ mod tests {
             media_mid: "m".into(),
             size_128mp3: 1,
             size_320mp3: 1,
+            size_192aac: 1,
             size_flac: 1,
+            size_hires: 1,
             size_dolby: 1,
             ..Default::default()
         };
         assert_eq!(
             available_from_sizes(&all),
             vec![
+                AudioQuality::HiRes,
                 AudioQuality::Atmos,
                 AudioQuality::Flac,
+                AudioQuality::Aac,
                 AudioQuality::Mp3_320,
                 AudioQuality::Mp3_128
             ]
         );
         let none = hmp_qqmusic_api::models::File::default();
         assert!(available_from_sizes(&none).is_empty());
+    }
+
+    /// 音质三表自洽回归（2026-10-02「远程曲目无法播放」排查锚点）：
+    /// `available_from_sizes` 覆盖的档位 ↔ `quality_to_file_type` 前缀 ↔
+    /// `quality_from_file_type` 反向映射须一致；HiRes 有意共用 MASTER
+    /// （上游无独立 Hi-Res 类型），正向映射为 MASTER、反向归 Master。
+    #[test]
+    fn quality_maps_roundtrip_consistently() {
+        // 正向：ordered 全档位均可映射（回退链每档都真实被尝试，不会静默跳档）。
+        for q in AudioQuality::ordered() {
+            assert!(quality_to_file_type(&q).is_some(), "{q:?} 应有文件类型映射");
+        }
+        // 反向：映射出的文件类型经 quality_from_file_type 回到原档位
+        // （HiRes 例外：与 Master 同档 AIM0，反向归 Master——有意设计）。
+        for q in AudioQuality::ordered() {
+            let t = quality_to_file_type(&q).unwrap();
+            let back = quality_from_file_type(&t);
+            let expected = if q == AudioQuality::HiRes {
+                AudioQuality::Master
+            } else {
+                q.clone()
+            };
+            assert_eq!(back, expected, "{q:?} → {t:?} → {back:?} 反向映射不一致");
+        }
+        // size 字段（与线上 JSON 键同名）覆盖档位从高到低有序。
+        // Master 不在 size 探测范围（臻品系列 size 在 size_new 数组内，
+        // 索引→档位无上游文档）；Aac 可探测但不在文档化回退链内。
+        let f = hmp_qqmusic_api::models::File {
+            size_hires: 1,
+            size_dolby: 1,
+            size_flac: 1,
+            size_192aac: 1,
+            size_320mp3: 1,
+            size_128mp3: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            available_from_sizes(&f),
+            vec![
+                AudioQuality::HiRes,
+                AudioQuality::Atmos,
+                AudioQuality::Flac,
+                AudioQuality::Aac,
+                AudioQuality::Mp3_320,
+                AudioQuality::Mp3_128
+            ]
+        );
+    }
+
+    /// 鉴权类失败分类：取流业务码（101404 需登录 / 104003 无权限）与
+    /// 请求级错误变体；其余（网络/HTTP/普通业务码）不得误判为鉴权。
+    /// 回归锚点：过期凭证全链 104003 必须上报 NotLoggedIn 而非
+    /// QualityUnavailable（2026-10-02 实机复现「音质不存在」误导）。
+    #[test]
+    fn auth_failure_classification() {
+        assert!(is_auth_result_code(104003));
+        assert!(is_auth_result_code(101404));
+        assert!(!is_auth_result_code(0));
+        assert!(!is_auth_result_code(1));
+        assert!(!is_auth_result_code(1014040));
+
+        use hmp_qqmusic_api::QqMusicError;
+        assert!(is_auth_transport_error(
+            &QqMusicError::AuthenticationRequired
+        ));
+        assert!(is_auth_transport_error(&QqMusicError::CredentialExpired));
+        assert!(is_auth_transport_error(&QqMusicError::LoginAuthExpired));
+        assert!(!is_auth_transport_error(&QqMusicError::Network(
+            "timeout".into()
+        )));
+        assert!(!is_auth_transport_error(&QqMusicError::Http {
+            status: 503,
+            message: "unavailable".into()
+        }));
+        assert!(!is_auth_transport_error(&QqMusicError::QqApi {
+            code: 1,
+            message: "fail".into()
+        }));
     }
 
     /// 分页：以服务端 hasmore/total 为终止条件，超过 3 页也能取全（旧代码 3×100 截断）。

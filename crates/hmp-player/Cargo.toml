@@ -9,8 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 hmp-core = { path = "../hmp-core" }
-rodio = { version = "0.21.1", features = ["tracing"] }
-stream-download = { version = "0.22.0", default-features = false, features = ["reqwest-rustls", "temp-storage"] }
+rodio = { version = "0.23", features = ["tracing"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }

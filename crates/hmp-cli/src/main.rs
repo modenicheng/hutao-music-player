@@ -54,7 +54,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     // —— 高频 alias（保留）——
-    /// Play (track / playlist:<id> / album:<id>; controls the daemon).
+    /// Play (track / `playlist:<id>` / `album:<id>`; controls the daemon).
     Play { source: String },
     /// Play next (insert after current and play).
     PlayNext { source: String },
@@ -86,7 +86,7 @@ enum Command {
     Search { keyword: String },
     /// Lyrics for a track (local sidecar/embedded first, QQ search fallback).
     Lyric {
-        /// Track id (QQ mid or local:<path>).
+        /// Track id (QQ mid or `local:<path>`).
         id: String,
         /// Title (local-track QQ search fallback).
         #[arg(long, default_value = "")]
@@ -238,7 +238,7 @@ enum PlaylistCmd {
     Create { name: String },
     /// Rename a playlist.
     Rename { id: i64, name: String },
-    /// Add a track (QQ mid or local:<path>).
+    /// Add a track (QQ mid or `local:<path>`).
     Add { id: i64, track: String },
     /// Remove a track by position.
     Remove { id: i64, position: i64 },
@@ -343,7 +343,7 @@ enum CommentCmd {
 /// `hmp favorite` 子命令。
 #[derive(Subcommand)]
 enum FavoriteCmd {
-    /// Like a track (QQ mid or local:<path>).
+    /// Like a track (QQ mid or `local:<path>`).
     Add { id: String },
     /// Unlike a track.
     Remove { id: String },
@@ -409,7 +409,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             commands::cmd_status(&mut c, cli.json).await?;
             Ok(())
         }
-        Command::Quit => run_remote(commands::quit_req()).await,
+        Command::Quit => run_quit(cli.json).await,
         Command::Serve { background } => {
             if background {
                 hmp_daemon::serve::run_background().await
@@ -418,9 +418,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Search { keyword } => search::run(&keyword, cli.json).await,
-        Command::Lyric { id, title, artist } => {
-            lyric::run(&id, &title, &artist, cli.json).await
-        }
+        Command::Lyric { id, title, artist } => lyric::run(&id, &title, &artist, cli.json).await,
         Command::Discover { page, area } => discover::run(page, &area, cli.json).await,
         Command::Top { top_id, page, num } => match top_id {
             Some(id) => top::detail(id, page, num, cli.json).await,
@@ -434,9 +432,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Favorite(cmd) => match cmd {
             FavoriteCmd::Add { id } => favorite::add(&id).await,
             FavoriteCmd::Remove { id } => favorite::remove(&id).await,
-            FavoriteCmd::List { offset, limit } => {
-                favorite::list(offset, limit, cli.json).await
-            }
+            FavoriteCmd::List { offset, limit } => favorite::list(offset, limit, cli.json).await,
         },
 
         // —— 二级命令面 ——
@@ -485,11 +481,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
         Command::Playlist(cmd) => match cmd {
             PlaylistCmd::List { scope } => playlist::list(scope.as_deref(), cli.json).await,
-            PlaylistCmd::Show {
-                id,
-                offset,
-                limit,
-            } => playlist::show(id, offset, limit, cli.json).await,
+            PlaylistCmd::Show { id, offset, limit } => {
+                playlist::show(id, offset, limit, cli.json).await
+            }
             PlaylistCmd::Create { name } => playlist::create(&name).await,
             PlaylistCmd::Rename { id, name } => playlist::rename(id, &name).await,
             PlaylistCmd::Add { id, track } => playlist::add(id, &track).await,
@@ -545,9 +539,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 num,
             } => comment::list(&mid, &sort, page, num, cli.json).await,
             CommentCmd::Post { mid, text } => comment::post(&mid, &text).await,
-            CommentCmd::Reply { mid, cm_id, text } => {
-                comment::reply(&mid, &cm_id, &text).await
-            }
+            CommentCmd::Reply { mid, cm_id, text } => comment::reply(&mid, &cm_id, &text).await,
             CommentCmd::Delete { cm_id } => comment::delete(&cm_id).await,
         },
     }
@@ -558,6 +550,41 @@ async fn run_remote(command: impl Into<Request>) -> Result<(), Box<dyn std::erro
     let mut client = client::DaemonClient::connect_or_spawn().await?;
     commands::cmd_simple(&mut client, command.into()).await?;
     Ok(())
+}
+
+/// `hmp quit`：仅连接已在运行的 daemon（[`client::DaemonClient::connect_existing`]），
+/// 绝不自动拉起——quit 若走 `connect_or_spawn` 会先 spawn 再 kill；spawn 后
+/// 3s 就绪窗口内连不上时还会报 startup timed out 并留下刚拉起的 daemon。
+/// 端点上没有 daemon 在听 = daemon 未运行 = 目标态已达成：打印提示并以
+/// 退出码 0 结束（幂等语义）；其余错误照常上抛。
+async fn run_quit(json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = match client::DaemonClient::connect_existing().await {
+        Ok(c) => c,
+        Err(e) if endpoint_absent(&e) => {
+            if json {
+                output::print(&serde_json::json!({ "daemon": "not running" }))?;
+            } else {
+                println!("daemon not running");
+            }
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    commands::cmd_simple(&mut client, commands::quit_req()).await?;
+    Ok(())
+}
+
+/// 连接错误是否等于「端点上没有 daemon 在听」：NotFound = 端点不存在
+/// （Windows 管道未建 / Unix socket 文件缺失）；ConnectionRefused =
+/// Unix 残留 socket 文件但无监听进程（daemon 崩溃残留）。两者语义一致：
+/// daemon 未运行。
+fn endpoint_absent(e: &client::CliError) -> bool {
+    matches!(
+        e,
+        client::CliError::Io(err)
+            if err.kind() == std::io::ErrorKind::NotFound
+                || err.kind() == std::io::ErrorKind::ConnectionRefused
+    )
 }
 
 /// 解析循环模式字符串。
@@ -576,5 +603,33 @@ fn parse_bool(s: &str) -> Result<bool, Box<dyn std::error::Error>> {
         "on" => Ok(true),
         "off" => Ok(false),
         _ => Err(format!("unknown value: {s} (on / off)").into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// quit 幂等分支映射：NotFound / ConnectionRefused = daemon 未运行；
+    /// 其余错误（协议/响应错）不吞。
+    #[test]
+    fn endpoint_absent_matches_only_no_listener_errors() {
+        let not_found = client::CliError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "pipe missing",
+        ));
+        let refused = client::CliError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "stale socket",
+        ));
+        assert!(endpoint_absent(&not_found));
+        assert!(endpoint_absent(&refused));
+
+        let permission_denied = client::CliError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ));
+        assert!(!endpoint_absent(&permission_denied));
+        assert!(!endpoint_absent(&client::CliError::Protocol("boom".into())));
     }
 }

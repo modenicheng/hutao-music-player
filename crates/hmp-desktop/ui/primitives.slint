@@ -143,6 +143,10 @@ export component TextLink inherits Rectangle {
     in property <string> text;
     in property <length> font-size: 13px;
     in property <TextHorizontalAlignment> alignment: TextHorizontalAlignment.left;
+    /** 右键转发开关（行宿主右键菜单的行内链接路径，默认关） */
+    in property <bool> context-enabled: false;
+    /** 右键释放：参数 = 相对本链接的 x/y（宿主负责换算回行内坐标） */
+    callback context-requested(length, length);
     callback clicked;
 
     height: font-size * 1.5;
@@ -153,6 +157,14 @@ export component TextLink inherits Rectangle {
         mouse-cursor: pointer;
         clicked => {
             root.clicked();
+        }
+        // TouchArea 对所有按键 grab：不开转发的话行内链接会吞掉右键
+        pointer-event(event) => {
+            if (root.context-enabled
+                && event.kind == PointerEventKind.up
+                && event.button == PointerEventButton.right) {
+                root.context-requested(self.mouse-x, self.mouse-y);
+            }
         }
     }
 
@@ -175,8 +187,12 @@ export component TextLink inherits Rectangle {
 // 所有实例同相位（对齐 Vue 负 delay 的跨实例相位一致）。33ms ≈ 30fps 采样：
 // 900ms 摆动周期的视觉足够，且把持续重绘压力压到 debug 构建可承受
 // （debug 全场景重绘 ~30fps，16ms 采样只会空转重绘；release 实测 ~200fps）。
-// 暂停的 EQ 走 paused 三元分支、不注册对 t 的依赖——无动画时零重绘开销，
-// 因此时钟常跑即可，无需播放门控。
+// 播放门控（S9 R3）：宿主 EqClockHost.running 接 Player.playing——暂停/停止
+// 期 Timer 停表（静止期 33ms 唤醒与 t 自增归零，不再整窗无谓重绘）；播放期
+// 行为不变。暂停 EQ 的视觉由 paused/frozen 机制冻结在暂停瞬间（changed
+// paused 复算 offset），恢复时 Timer 重启、EQ 按 EqClock.t 绝对相位续摆
+// （动画函数是绝对时间的纯函数，停表期间 t 不前进 = 暂停语义），恢复即时
+// 性与门控前完全一致。
 // 驱动 Timer 挂在宿主组件上（Slint 的 global 不能有子元素），见 app.slint。
 export global EqClock {
     in-out property <duration> t: 0ms;
@@ -184,12 +200,16 @@ export global EqClock {
 
 /** EqClock 驱动宿主：AppWindow 挂载一次即可 */
 export component EqClockHost inherits Rectangle {
+    // 播放门控（S9 R3）：false → Timer 停表，true → 从整间隔重启；
+    // 默认 true = 未接线时保持常跑动画（防呆）。
+    in property <bool> running: true;
     background: transparent;
     width: 0px;
     height: 0px;
 
     Timer {
         interval: 33ms;
+        running: root.running;
         triggered => {
             EqClock.t += 33ms;
         }
@@ -210,10 +230,13 @@ export component Equalizer inherits Rectangle {
     height: 14px;
     clip: true;
 
-    // 本地相位：暂停期间把 EqClock 的流逝量扣除，冻结在暂停瞬间
+    // 本地相位：暂停期间把 EqClock 的流逝量扣除，冻结在暂停瞬间。
+    // 可见性自门控（S9 R3/T3c）：非当前行实例（宿主绑 visible:false）不注册
+    // 对 EqClock.t 的依赖——播放期不再因不可见 EQ 的求值牵动整窗重绘；
+    // 重新可见时回到活分支 = 全局绝对相位（与当前行切换语义一致）。
     property <duration> offset: 0ms;
     property <duration> frozen: 0ms;
-    property <duration> t: root.paused ? root.frozen : EqClock.t - root.offset;
+    property <duration> t: (root.paused || !self.visible) ? root.frozen : EqClock.t - root.offset;
 
     changed paused => {
         if (self.paused) {
@@ -535,7 +558,14 @@ export component HoverItem inherits Rectangle {
     in property <bool> suppress-indicator: false;
     /** 所属 HoverGroup 的 id（使用方以 hg.group-id 传入） */
     in property <int> group-id: -1;
+    /** 右键菜单接入开关（默认关 = 非列表宿主右键无动作；TrackMenu.enabled
+        常作全局闸，使用方属性再叠加逐列表选择） */
+    in property <bool> context-enabled: false;
     callback clicked;
+    /** 右键释放（菜单原生打开时机，clicked 不含右键）：参数 = 指针相对本行的 x/y。
+        检测在 item-touch 的 pointer-event 内（勿加覆盖 TouchArea：会以最顶层
+        命中截断行 hover 链，见 HoverGroup 注） */
+    callback context-requested(length, length);
     out property <bool> hovered: item-touch.has-hover;
     background: transparent;
 
@@ -552,6 +582,17 @@ export component HoverItem inherits Rectangle {
         mouse-cursor: pointer;
         clicked => {
             root.clicked();
+        }
+
+        // 右键检测：TouchArea 对所有按键在 Down/Up 都派发 pointer-event
+        // （i-slint-core input_items.rs；clicked 仅左键），右键 Down 会
+        // GrabMouse 保证释放落回本行。菜单在释放时打开（Windows 原生语义）。
+        pointer-event(event) => {
+            if (root.context-enabled
+                && event.kind == PointerEventKind.up
+                && event.button == PointerEventButton.right) {
+                root.context-requested(self.mouse_x, self.mouse_y);
+            }
         }
 
         changed has-hover => {
@@ -596,8 +637,8 @@ export component Scroll inherits Rectangle {
         width: parent.width;
         height: parent.height;
         // 纵向滚动：视口宽固定为自身宽（默认绑定取内容最小宽会成环）
-        viewport-width: self.width;
-        viewport-height: content.preferred-height;
+        content-width: self.width;
+        content-height: content.preferred-height;
 
         content := VerticalLayout {
             @children
@@ -606,15 +647,15 @@ export component Scroll inherits Rectangle {
 
     /** 观察滚动位置（changed 只能挂自身属性，走别名）；播放页歌词弹簧
      * 需要程序化回写视口，对外可写（in-out） */
-    in-out property <length> scroll-offset <=> flick.viewport-y;
+    in-out property <length> scroll-offset <=> flick.content-y;
     /** 内容全高（弹簧 clamp 的滚动上限 = self - view-height） */
-    out property <length> content-height: flick.viewport-height;
+    out property <length> content-height: flick.content-height;
     property <bool> thumb-active: false;
-    property <length> scrollable: max(flick.viewport-height - flick.height, 0px);
+    property <length> scrollable: max(flick.content-height - flick.height, 0px);
     property <length> thumb-h: scrollable <= 0px ? flick.height
-        : min(flick.height, max(flick.height * flick.height / flick.viewport-height, 24px));
+        : min(flick.height, max(flick.height * flick.height / flick.content-height, 24px));
     property <length> thumb-y: scrollable <= 0px ? 0px
-        : (-flick.viewport-y) * (flick.height - thumb-h) / scrollable;
+        : (-flick.content-y) * (flick.height - thumb-h) / scrollable;
 
     function wake() {
         thumb-active = true;
@@ -656,7 +697,7 @@ export component Scroll inherits Rectangle {
                     // 点击轨道即定位：thumb 中心吸附到指针处（overlay 滚动条惯例），
                     // 随后按抓取点 1:1 拖拽——不吸附的话抓取点被钳进 thumb，
                     // 第一次移动会出现跳变
-                    flick.viewport-y = -clamp(
+                    flick.content-y = -clamp(
                             self.mouse-y - root.thumb-h / 2,
                             0px,
                             flick.height - root.thumb-h,
@@ -668,7 +709,7 @@ export component Scroll inherits Rectangle {
             }
             moved => {
                 if (root.scrollable > 0px && flick.height > root.thumb-h) {
-                    flick.viewport-y = -clamp(
+                    flick.content-y = -clamp(
                             self.mouse-y - grab-offset,
                             0px,
                             flick.height - root.thumb-h,

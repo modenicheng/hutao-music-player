@@ -156,6 +156,8 @@ pub struct PlaylistRow {
     pub last_sync_error: Option<String>,
     /// 最近一次状态变更时间（退避节流用）。
     pub updated_at: Option<i64>,
+    /// 封面本地产物 URI（`file://…`；reconcile 取得后回写，NULL = 尚未获取）。
+    pub cover_uri: Option<String>,
 }
 
 /// 本地歌单内曲目。
@@ -308,10 +310,16 @@ impl LibraryDb {
         self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))
     }
 
-    /// v5 迁移步骤（幂等）：合并本地意图幽灵行（见 [`merge_ghost_local_tracks`]）。
+    /// v5 迁移步骤（幂等）：合并本地意图幽灵行（见 `merge_ghost_local_tracks`）。
     /// 独立暴露供迁移测试直接驱动。
     pub fn merge_ghost_local_tracks(&mut self) -> rusqlite::Result<()> {
         merge_ghost_local_tracks(&self.conn)
+    }
+
+    /// v7 迁移步骤（幂等）：合并非规范键本地扫描行
+    /// （见 `merge_noncanonical_local_tracks`）。独立暴露供迁移测试直接驱动。
+    pub fn merge_noncanonical_local_tracks(&mut self) -> rusqlite::Result<()> {
+        merge_noncanonical_local_tracks(&self.conn)
     }
 
     /// 幂等写入/更新曲目元数据；返回 track id。
@@ -328,7 +336,14 @@ impl LibraryDb {
                  album = COALESCE(excluded.album, tracks.album),
                  artist = COALESCE(excluded.artist, tracks.artist),
                  duration_ms = COALESCE(excluded.duration_ms, tracks.duration_ms),
-                 cover_uri = COALESCE(excluded.cover_uri, tracks.cover_uri),
+                 cover_uri = CASE
+                   -- 本地产物（file://）是终态：reconcile/播放 upsert 携带的
+                   -- 远程 URL 不得把已 rebind 的行打回远程形态（否则 UI 投影
+                   -- 退化回占位，还要再走一轮 CoverGet 才能恢复）。file:// 对
+                   -- file:// 仍放行——扫描重提取的内嵌图换图（内容哈希变路径）可生效。
+                   WHEN tracks.cover_uri LIKE 'file://%' AND excluded.cover_uri LIKE 'http%'
+                     THEN tracks.cover_uri
+                   ELSE COALESCE(excluded.cover_uri, tracks.cover_uri) END,
                  album_artist = COALESCE(excluded.album_artist, tracks.album_artist),
                  track_number = COALESCE(excluded.track_number, tracks.track_number),
                  disc_number = COALESCE(excluded.disc_number, tracks.disc_number),
@@ -434,7 +449,7 @@ impl LibraryDb {
 
     /// 最近播放（LRU 视图）：一曲一行，按最近一次播放倒序——播放即移到最前，
     /// 同曲重复播放不产生重复行（行字段取该曲最近一次会话）。
-    /// GUI 历史页用这份；会话流水（含同曲多条）走 [`recent_plays`]（CLI history）。
+    /// GUI 历史页用这份；会话流水（含同曲多条）走 `recent_plays`（CLI history）。
     pub fn recent_tracks(&mut self, limit: u32) -> rusqlite::Result<Vec<RecentPlay>> {
         let mut stmt = self.conn.prepare(
             r#"SELECT p.track_id, t.title, t.artist, t.source, t.source_key,
@@ -883,6 +898,78 @@ impl LibraryDb {
             params![source_key, cover_uri],
         )?;
         Ok(())
+    }
+
+    /// 远程封面 URL → 本地产物 URI 回写（daemon `CoverGet` 下载成功后调用）：
+    /// 播放解析落库的是远程 https URL，UI 禁直连 HTTP，列表/队列
+    /// 投影从此读盘渲染。按 URL 匹配（同封面多曲一改全改）；目标已相同
+    /// 时零行写入（幂等，重复下载不产生写放大）。不改媒体库代际——封面
+    /// 补齐不触发整页重查，UI 队列行由桌面端取图回包原地更新。
+    pub fn rebind_cover_url(
+        &mut self,
+        remote_url: &str,
+        local_uri: &str,
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE tracks SET cover_uri = ?2
+             WHERE cover_uri = ?1 AND cover_uri <> ?2",
+            params![remote_url, local_uri],
+        )
+    }
+
+    /// 封面 URL → 本地产物索引读（v8，daemon `CoverGet` 盘级缓存：
+    /// 同一 URL 全生命周期只下载一次，命中零出网）。封面 URL 内嵌
+    /// 专辑 pmid，pmid 变则 URL 变——按 URL 缓存即内容寻址，无需 TTL。
+    pub fn cover_cache_get(&mut self, url: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT file_uri FROM cover_cache WHERE url = ?1",
+                params![url],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    /// 封面 URL → 本地产物索引写（下载落盘成功后调用；重复下载幂等覆盖）。
+    pub fn cover_cache_put(&mut self, url: &str, file_uri: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO cover_cache (url, file_uri, fetched_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(url) DO UPDATE SET file_uri = ?2, fetched_at = ?3",
+            params![url, file_uri, now_unix()],
+        )?;
+        Ok(())
+    }
+
+    /// 歌单封面回写（reconcile 取得本地产物后调用；仅未设置时写入——
+    /// 已有封面不回退，远端换封面待后续轮次再议）。
+    pub fn set_playlist_cover(
+        &mut self,
+        remote_id: &str,
+        cover_uri: &str,
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE playlists SET cover_uri = ?2
+             WHERE provider = 'qq' AND remote_id = ?1 AND (cover_uri IS NULL OR cover_uri = '')",
+            params![remote_id, cover_uri],
+        )
+    }
+
+    /// 尚无封面的 QQ 歌单（remote_id 列表；封面补抓的输入）。
+    pub fn qq_playlists_missing_cover(&mut self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT remote_id FROM playlists WHERE provider = 'qq' AND remote_id IS NOT NULL AND (cover_uri IS NULL OR cover_uri = '')")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    /// 标题仍为 mid 的 QQ 曲（stub 元数据修复的输入；逐批限额）。
+    pub fn qq_stub_title_keys(&mut self, limit: i64) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_key FROM tracks WHERE source = 'qq' AND title = source_key LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| r.get::<_, String>(0))?;
+        rows.collect()
     }
 
     /// 写入完整元数据（tracks 行 + track_artists 重写）。
@@ -1570,7 +1657,7 @@ impl LibraryDb {
     pub fn playlists_pending(&mut self) -> rusqlite::Result<Vec<PlaylistRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.id, p.name, p.created_at, p.provider, p.remote_id, p.relation, \
-             p.sync_state, p.retry_count, p.last_sync_error, p.updated_at,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
+             p.sync_state, p.retry_count, p.last_sync_error, p.updated_at, p.cover_uri,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
              FROM playlists p WHERE p.relation != 'local' AND p.sync_state != 'synced' \
              ORDER BY p.updated_at",
         )?;
@@ -1586,7 +1673,8 @@ impl LibraryDb {
                 retry_count: r.get(7)?,
                 last_sync_error: r.get(8)?,
                 updated_at: r.get(9)?,
-                track_count: r.get(10)?,
+                cover_uri: r.get(10)?,
+                track_count: r.get(11)?,
             })
         })?;
         rows.collect()
@@ -1813,7 +1901,7 @@ impl LibraryDb {
     pub fn list_playlists(&mut self) -> rusqlite::Result<Vec<PlaylistRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.id, p.name, p.created_at, p.provider, p.remote_id, p.relation, \
-             p.sync_state, p.retry_count, p.last_sync_error, p.updated_at,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
+             p.sync_state, p.retry_count, p.last_sync_error, p.updated_at, p.cover_uri,\n                    (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) \
              FROM playlists p ORDER BY p.created_at",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1828,7 +1916,8 @@ impl LibraryDb {
                 retry_count: r.get(7)?,
                 last_sync_error: r.get(8)?,
                 updated_at: r.get(9)?,
-                track_count: r.get(10)?,
+                cover_uri: r.get(10)?,
+                track_count: r.get(11)?,
             })
         })?;
         rows.collect()
@@ -2085,6 +2174,98 @@ pub(crate) fn merge_ghost_local_tracks(conn: &Connection) -> rusqlite::Result<()
     Ok(())
 }
 
+/// v7：合并非规范键的本地扫描行。写路径归一化（`canonical_local_key`，
+/// 2026-09-26）之前，resolve_local/add_local_file 以原始拼写入库——Windows
+/// 上是 canonicalize 产出的 `local:\\?\C:\...`。归一化后同一文件会另建规范键
+/// 行，旧 verbatim 行沦为永久重复（cover_uri 恒 NULL 的库页双卡，§18 实锤：
+/// 同一文件两行一有一无封面）。v5 只合并没有 local_files 子行的意图幽灵；
+/// 本迁移处理**带 local_files 的 verbatim 扫描行**：规范行在场 → 搬迁
+/// relations/歌单链接后删除 verbatim 行（连同其 local_files）；规范行缺席 →
+/// 就地改键（tracks.source_key 与 local_files.path 同步，后续扫描/播放命中
+/// 同一行不再衍生重复）。路径已不存在（盘移除/已删）→ canonicalize 失败键不
+/// 变 → 跳过等下次（幂等）。
+pub(crate) fn merge_noncanonical_local_tracks(conn: &Connection) -> rusqlite::Result<()> {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id, source_key FROM tracks WHERE source = 'local'")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (tid, key) in rows {
+        let canon = canonical_local_key("local", &key);
+        if canon == key {
+            continue;
+        }
+        // 目标规范行在场（扫描行或残余意图行）→ 整行合并后删除。
+        let target: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM tracks WHERE source = 'local' AND source_key = ?1 AND id <> ?2",
+                params![canon, tid],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(target) = target {
+            // relations：意图搬到规范键；规范键已有同 relation 行则弃旧保既有。
+            let rels: Vec<(String, i64)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT relation, desired_state FROM relations \
+                     WHERE entity_type = 'track' AND provider = 'local' AND entity_key = ?1",
+                )?;
+                let mapped = stmt.query_map(params![key], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (relation, desired) in rels {
+                conn.execute(
+                    "INSERT INTO relations (entity_type, provider, entity_key, relation, \
+                     desired_state, sync_state, last_remote_state, updated_at) \
+                     VALUES ('track', 'local', ?1, ?2, ?3, 'synced', ?3, ?4) \
+                     ON CONFLICT(entity_type, provider, entity_key, relation) DO NOTHING",
+                    params![canon, relation, desired, now_unix()],
+                )?;
+                conn.execute(
+                    "DELETE FROM relations WHERE entity_type = 'track' AND provider = 'local' \
+                     AND entity_key = ?1 AND relation = ?2",
+                    params![key, relation],
+                )?;
+            }
+            // 歌单链接重指向（表无 (playlist_id, track_id) 唯一约束，直接 UPDATE）。
+            conn.execute(
+                "UPDATE playlist_tracks SET track_id = ?1 WHERE track_id = ?2",
+                params![target, tid],
+            )?;
+            // 播放历史并入存活行：verbatim 行由 resolve_local 播放创建，几乎
+            // 必然带 play_events，其 FK 无 CASCADE——不先搬走 DELETE tracks 会
+            // FK 失败、整个迁移回滚、开库失败回退内存库（§18 实机首跑即中招）。
+            conn.execute(
+                "UPDATE play_events SET track_id = ?1 WHERE track_id = ?2",
+                params![target, tid],
+            )?;
+            // verbatim 扫描行带 local_files 子行（v5 幽灵没有）：先删子行再删行。
+            conn.execute("DELETE FROM local_files WHERE track_id = ?1", params![tid])?;
+            conn.execute("DELETE FROM tracks WHERE id = ?1", params![tid])?;
+        } else {
+            // 规范行缺席 → 就地改键；local_files.path 唯一，孤儿残留冲突时放弃
+            // 本行（幂等，不砖化）。
+            let clean_path = canon.strip_prefix("local:").unwrap_or(&canon);
+            let conflict: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM local_files WHERE path = ?1 AND track_id <> ?2",
+                params![clean_path, tid],
+                |r| r.get(0),
+            )?;
+            if conflict == 0 {
+                conn.execute(
+                    "UPDATE tracks SET source_key = ?1 WHERE id = ?2",
+                    params![canon, tid],
+                )?;
+                conn.execute(
+                    "UPDATE local_files SET path = ?1 WHERE track_id = ?2",
+                    params![clean_path, tid],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 逐级迁移到最新 user_version。
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -2168,8 +2349,69 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
             }
         }
     }
+    if current < 6 {
+        // v6：歌单封面 URI（reconcile 取本地产物后回写；NULL = 尚未获取）。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute_batch(MIGRATION_V6)?;
+            conn.pragma_update(None, "user_version", 6)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+    }
+    if current < 7 {
+        // v7（Rust 迁移，需 fs::canonicalize）：合并非规范键本地扫描行（§18）。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            merge_noncanonical_local_tracks(conn)?;
+            conn.pragma_update(None, "user_version", 7)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+    }
+    if current < 8 {
+        // v8：封面 URL → 本地产物索引（daemon CoverGet 盘级缓存）。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute_batch(MIGRATION_V8)?;
+            conn.pragma_update(None, "user_version", 8)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+    }
     Ok(())
 }
+
+/// v8：封面 URL → 本地产物索引（daemon `CoverGet` 下载落盘后登记，
+/// 后续同 URL 请求直接命中，零出网）。
+const MIGRATION_V8: &str = r#"
+CREATE TABLE cover_cache (
+  url TEXT PRIMARY KEY,
+  file_uri TEXT NOT NULL,
+  fetched_at INTEGER NOT NULL
+);
+"#;
+
+/// v6：playlists 封面 URI。
+const MIGRATION_V6: &str = "ALTER TABLE playlists ADD COLUMN cover_uri TEXT;";
 
 /// v2：统一关系表（收藏/订阅 = durable outbox 一体）+ 歌单远端身份 +
 /// owned 歌单曲目操作 outbox + QQ numeric song id（comment biz_id 映射）。

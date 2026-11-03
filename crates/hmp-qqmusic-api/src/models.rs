@@ -124,6 +124,9 @@ pub struct File {
     /// SQ 无损 FLAC。
     #[serde(default)]
     pub size_flac: i64,
+    /// Hi-Res（24Bit/192kHz 档；线上 JSON 键，2026-10-02 实机 dump 核对）。
+    #[serde(default)]
+    pub size_hires: i64,
     /// DTS:X 音效。
     #[serde(default)]
     pub size_dts: i64,

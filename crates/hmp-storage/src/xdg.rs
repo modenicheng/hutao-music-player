@@ -10,10 +10,8 @@ use std::path::PathBuf;
 
 #[cfg(unix)]
 fn from_env_or_home(env: &str, fallback_dir: &str) -> PathBuf {
-    if let Some(v) = std::env::var_os(env) {
-        if !v.is_empty() {
-            return PathBuf::from(v);
-        }
+    if let Some(v) = std::env::var_os(env).filter(|v| !v.is_empty()) {
+        return PathBuf::from(v);
     }
     // HOME 是 XDG 规范回退。
     let home = std::env::var_os("HOME")
@@ -27,15 +25,15 @@ fn from_env_or_home(env: &str, fallback_dir: &str) -> PathBuf {
 /// 极端服务环境）。
 #[cfg(windows)]
 fn windows_dir(xdg_var: &str, folder_var: &str, profile_part: &str) -> PathBuf {
-    if let Some(v) = std::env::var_os(xdg_var) {
-        if !v.is_empty() {
-            return PathBuf::from(v);
-        }
+    if let Some(v) = std::env::var_os(xdg_var)
+        && !v.is_empty()
+    {
+        return PathBuf::from(v);
     }
-    if let Some(v) = std::env::var_os(folder_var) {
-        if !v.is_empty() {
-            return PathBuf::from(v);
-        }
+    if let Some(v) = std::env::var_os(folder_var)
+        && !v.is_empty()
+    {
+        return PathBuf::from(v);
     }
     std::env::var_os("USERPROFILE")
         .filter(|v| !v.is_empty())

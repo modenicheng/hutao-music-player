@@ -150,14 +150,22 @@ export component PillOption inherits Rectangle {
         spacing: 6.4px;
         alignment: LayoutAlignment.center;
 
-        if icon.width > 0: AppIcon {
-            source: root.icon;
-            icon-color: fore ? Theme.foreground : Theme.muted-foreground;
+        // 定高图标在布局交叉轴默认顶放（PORTING.md 坑位；Button 同款修法）：
+        // 包一层撑满交叉轴的容器再手动居中，图标才与文本同轴线
+        if icon.width > 0: Rectangle {
             width: 16.8px;
-            height: 16.8px;
-            animate icon-color {
-                duration: Theme.duration-fast;
-                easing: cubic-bezier(0.2, 0, 0, 1);
+
+            AppIcon {
+                source: root.icon;
+                icon-color: fore ? Theme.foreground : Theme.muted-foreground;
+                width: 16.8px;
+                height: 16.8px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                animate icon-color {
+                    duration: Theme.duration-fast;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
+                }
             }
         }
         Text {
@@ -194,6 +202,51 @@ export component DisabledSwitch inherits Rectangle {
         drop-shadow-blur: 2px;
         drop-shadow-color: #241F1B.transparentize(0.88);
         drop-shadow-offset-y: 1px;
+    }
+}
+
+// —— 开关（布尔设置：右键菜单启停等）—— DisabledSwitch 的可交互版：
+// 同款 36×20 pill 轨 + 15.2px thumb + 阴影；checked 时轨道 primary、
+// thumb 换 primary-foreground 并滑至右端（fast 缓动与全仓一致）
+export component Switch inherits Rectangle {
+    in-out property <bool> checked: false;
+    callback toggled(bool);
+
+    width: 36px;
+    height: 20px;
+    border-radius: Theme.pill(self.height);
+    background: root.checked ? Theme.primary : Theme.muted;
+    border-width: 1px;
+    border-color: Theme.border;
+    accessible-role: checkbox;
+    accessible-checked: root.checked;
+    animate background {
+        duration: Theme.duration-fast;
+        easing: cubic-bezier(0.2, 0, 0, 1);
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+
+    Rectangle {
+        x: root.checked ? parent.width - self.width - 2.4px : 2.4px;
+        y: (parent.height - self.height) / 2;
+        width: 15.2px;
+        height: 15.2px;
+        border-radius: Theme.pill(self.height);
+        background: root.checked ? Theme.primary-foreground : Theme.surface-3;
+        drop-shadow-blur: 2px;
+        drop-shadow-color: #241F1B.transparentize(0.88);
+        drop-shadow-offset-y: 1px;
+        animate x {
+            duration: Theme.duration-fast;
+            easing: cubic-bezier(0.2, 0, 0, 1);
+        }
     }
 }
 
@@ -323,12 +376,19 @@ export component CategoryCard inherits Rectangle {
                 }
             }
 
-            AppIcon {
-                source: Icons.expand_more;
-                icon-color: Theme.muted-foreground;
+            // 右箭头（expand_more 旋转 -90°）：同 PillOption 图标坑，包居中容器
+            Rectangle {
                 width: 14.4px;
-                height: 14.4px;
-                rotation-angle: -90deg;
+
+                AppIcon {
+                    source: Icons.expand_more;
+                    icon-color: Theme.muted-foreground;
+                    width: 14.4px;
+                    height: 14.4px;
+                    rotation-angle: -90deg;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                }
             }
         }
     }

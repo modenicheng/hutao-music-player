@@ -61,11 +61,7 @@ fn print_page(page: &CommentPage) -> Result<(), Box<dyn std::error::Error>> {
             page.total,
             page.page,
             page.comments.len(),
-            if page.has_more {
-                ", more pages"
-            } else {
-                ""
-            }
+            if page.has_more { ", more pages" } else { "" }
         )?;
         for c in &page.comments {
             let time = format_time(c.time);

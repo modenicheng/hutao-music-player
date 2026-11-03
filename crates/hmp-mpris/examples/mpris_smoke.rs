@@ -115,6 +115,7 @@ async fn main() {
         track,
         quality: AudioQuality::Mp3_128,
         load_gen: 0,
+        stream: None,
     });
     core.play();
 
@@ -124,9 +125,7 @@ async fn main() {
     // ---- zbus 自检（对比 playerctl）----
     let props = zbus::fdo::PropertiesProxy::builder(mpris.connection())
         .destination("org.mpris.MediaPlayer2.hmp")
-        .expect("dest")
         .path("/org/mpris/MediaPlayer2")
-        .expect("path")
         .build()
         .await
         .expect("props proxy");

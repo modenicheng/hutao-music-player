@@ -119,7 +119,7 @@ pub struct RadarRecommendResponse {
 
 /// 推荐歌单条目（上游 `RecommendSonglistItem`）。
 ///
-/// 由 [`extract_songlists`] 从 `$.List[*].Playlist.basic` 解析；`cover`/
+/// 由 `extract_songlists` 从 `$.List[*].Playlist.basic` 解析；`cover`/
 /// `creator` 也位于 `basic` 下（2026-09-29 实测）。
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RecommendSonglistItem {
@@ -457,8 +457,14 @@ mod tests {
         assert!(!sl.title.is_empty());
         // 回归锚点（2026-09-29 修复）：cover/creator 位于 Playlist.basic 下，
         // 此前提取 Playlist.cover 层级导致 picurl/creator_nick 恒为空。
-        assert!(!sl.picurl.is_empty(), "basic.cover.default_url 应解析出封面");
-        assert!(!sl.creator_nick.is_empty(), "basic.creator.nick 应解析出昵称");
+        assert!(
+            !sl.picurl.is_empty(),
+            "basic.cover.default_url 应解析出封面"
+        );
+        assert!(
+            !sl.creator_nick.is_empty(),
+            "basic.creator.nick 应解析出昵称"
+        );
     }
 
     #[test]

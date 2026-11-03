@@ -8,8 +8,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime};
 
 use hmp_core::ipc::{DaemonState, Event, MAX_FRAME, Request, Response, decode_frame, encode_frame};
 use hmp_core::{QueueEntry, TrackProvider};
@@ -19,6 +19,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// spawn 后等待 daemon 就绪：~10 次 × 300ms（CLI `wait_for_socket` 同量级）。
 const SPAWN_RETRIES: u32 = 10;
 const RETRY_INTERVAL: Duration = Duration::from_millis(300);
+/// 优雅退出等待：Quit 后轮询端点消失，~40 次 × 300ms（引擎要处理完 Quit、
+/// 落盘播放态才退；卡住则由 obtain_stream 重试与单实例裁决兜底）。
+const DAEMON_EXIT_RETRIES: u32 = 40;
 /// 订阅断线（daemon 退出/重启）后的重连间隔。
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 /// 队列分页单页大小（帧上限 1MB，远未触及；大队列自动翻页）。
@@ -33,8 +36,15 @@ pub enum BackendError {
     NoBackendBinary,
     /// daemon 拉起后在退避窗口内未就绪。
     SpawnTimeout,
+    /// daemon 构建指纹与本进程不一致，且重启后仍不一致（磁盘上的 hmp 后端
+    /// 二进制本身是旧构建——重启解决不了，须重建/重装）。
+    StaleBackend,
     /// 协议错误（畸形帧/连接中断）。
     Protocol(String),
+    /// daemon 连上但 `REQUEST_TIMEOUT` 预算内未应答（挂死）。瞬时/可自愈态
+    /// （用户 `hmp quit` 或 daemon 恢复后订阅循环 2s 重连自愈），恢复指引
+    /// 在 Display 文案里，不进离线原因三元组（见 `offline_reason_text`）。
+    Timeout(Duration),
 }
 
 impl std::fmt::Display for BackendError {
@@ -46,7 +56,16 @@ impl std::fmt::Display for BackendError {
                 "找不到可拉起的 hmp 后端二进制（current_exe 同目录与 PATH 均无）"
             ),
             Self::SpawnTimeout => write!(f, "daemon 启动超时"),
+            Self::StaleBackend => write!(
+                f,
+                "daemon 为陈旧构建且重启后仍不一致：请重新构建/安装 hmp 后端二进制\
+                 （开发环境 `cargo build --release --workspace` 后重启应用）"
+            ),
             Self::Protocol(m) => write!(f, "protocol error: {m}"),
+            Self::Timeout(d) => write!(
+                f,
+                "daemon {d:?} 内未应答（可能已挂死）：请 `hmp quit` 终止后重试"
+            ),
         }
     }
 }
@@ -68,18 +87,31 @@ impl From<std::io::Error> for BackendError {
 
 /// 桌面进程内 tokio 多线程 runtime：UI 线程只跑 Slint 事件循环，
 /// 全部 IPC（短连接请求 + 订阅长连接）在本 runtime 上执行。
+///
+/// **runtime 与进程同寿（S10 T7）**：内部持 `&'static`（构造时 `Box::leak`），
+/// 任何路径都不执行 `tokio::runtime::Runtime::drop`。真根因（2026-10-24 cdb
+/// 僵尸栈实锤，verify-s10/）：`bridge::schedule_refresh` 的 thread_local
+/// `slint::Timer` 回调闭包捕获 `Arc<BackendRuntime>`，是退出时最后一个引用；
+/// main 返回 → exit() → ExitProcess 先终止其余线程（含 tokio blocking 池）→
+/// `LdrShutdownProcess` 跑 TLS 析构 → Timer drop → 闭包 drop → Arc 归零 →
+/// Runtime::drop → `BlockingPool::shutdown` 在 oneshot 上等一个**已被杀死的**
+/// blocking 线程 → `WaitOnAddress` 永久死锁（不可杀：主线程困在 loader 关停
+/// 期）。runtime 永不 drop 后，TLS 析构只递减引用计数，退出路径确定可完成；
+/// worker/blocking 线程由 ExitProcess 常规回收。
 pub struct BackendRuntime {
-    rt: tokio::runtime::Runtime,
+    rt: &'static tokio::runtime::Runtime,
 }
 
 impl BackendRuntime {
     /// 构建多线程 runtime（enable_all：IO + 时间驱动）。
     pub fn new() -> Result<Self, std::io::Error> {
-        Ok(Self {
-            rt: tokio::runtime::Builder::new_multi_thread()
+        let rt: &'static tokio::runtime::Runtime = Box::leak(
+            tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .build()?,
-        })
+                .build()?
+                .into(),
+        );
+        Ok(Self { rt })
     }
 
     /// 派生后台任务（订阅循环 / 单发命令）。失败即丢弃（命令-查询分离：
@@ -101,7 +133,19 @@ async fn connect() -> Result<IpcStream, BackendError> {
 /// ENOENT / ECONNREFUSED → 解析 `hmp` 二进制（current_exe 同目录 → PATH），
 /// 经 `serve::spawn_detached_exe` 拉起 `hmp serve --background`，退避重试；
 /// 找不到二进制或重试耗尽 → Err（调用方降级离线模式）。
+///
+/// 就绪后核对 daemon 构建指纹（`DaemonState.backend_build` vs 本进程链接的
+/// `hmp_daemon::BUILD_CODE`）：不一致 = 运行中的 daemon 是陈旧构建——daemon
+/// 是长驻进程，重新编译不会替换它（§16 零号发现；§18 再次实锤：桌面端已含
+/// 新报错归因，旧 daemon 仍按旧格式报 `result=104003`）→ 优雅退出后重新拉起
+/// 再核对一次；仍不一致 → `StaleBackend`（磁盘二进制本身过旧，重启无用）。
 pub async fn connect_or_spawn() -> Result<IpcStream, BackendError> {
+    let stream = obtain_stream().await?;
+    verify_backend_generation(stream).await
+}
+
+/// 连接（必要时拉起 + 退避重试）到就绪的 daemon。
+async fn obtain_stream() -> Result<IpcStream, BackendError> {
     match connect().await {
         Ok(stream) => Ok(stream),
         Err(BackendError::Io(e))
@@ -125,6 +169,108 @@ pub async fn connect_or_spawn() -> Result<IpcStream, BackendError> {
             Err(BackendError::SpawnTimeout)
         }
         Err(e) => Err(e),
+    }
+}
+
+/// 构建指纹核对（详见 `connect_or_spawn`）。Status 探测失败保守放行：
+/// 断线由订阅循环既有的重连路径处置，不在此重复。唯一例外是**超时**
+/// （daemon 挂死）：保守放行会让随后的 Subscribe 读永远无声挂起（订阅读
+/// 无超时且不该有），把可检测的挂死变成不可检测的冻结——传 Err 走订阅
+/// 循环既有离线 + 2s 退避重连（与 daemon 死亡同路径），且不触碰
+/// restart_backend（Quit/重启只在 Status 成功应答且指纹不符时触发，
+/// 无 churn）。
+async fn verify_backend_generation(stream: IpcStream) -> Result<IpcStream, BackendError> {
+    let running = match request(Request::Status).await {
+        // 旧 daemon 的应答缺该字段（serde default 空串）→ 同样判定陈旧。
+        Ok(Response::Status(state)) => state.backend_build,
+        Ok(_) => return Err(BackendError::Protocol("Status 应答类型不符".into())),
+        Err(e @ BackendError::Timeout(_)) => return Err(e),
+        Err(_) => return Ok(stream),
+    };
+    if running == hmp_daemon::BUILD_CODE {
+        *stale_backend_seen() = None;
+        return Ok(stream);
+    }
+    // 磁盘二进制与上次「重启后指纹仍不一致」时相同 → 重启注定徒劳：快速
+    // 失败，不 Quit 在跑的 daemon。否则陈旧二进制存活期间，订阅循环每 2s
+    // 重试 connect_or_spawn 会无限杀起 daemon（§21「前端不能播放」实锤：
+    // UI 离线之外 CLI/托盘一起陪葬）。重建二进制（stamp 变化）后经既有
+    // 重试路径自动恢复完整重启核对（自愈，无需重启桌面端）。
+    let disk = resolve_backend_binary().and_then(|exe| binary_stamp(&exe).ok());
+    if !restart_worthwhile(disk, *stale_backend_seen()) {
+        return Err(BackendError::StaleBackend);
+    }
+    restart_backend().await;
+    let stream = obtain_stream().await?;
+    match request(Request::Status).await {
+        Ok(Response::Status(state)) if state.backend_build == hmp_daemon::BUILD_CODE => {
+            *stale_backend_seen() = None;
+            Ok(stream)
+        }
+        // 复核超时同样传 Err 且不写 stale 记账：挂死不是「磁盘二进制陈旧」
+        // 的证据——落 `_` 会把挂死误报成 StaleBackend（toast 指引用户重建
+        // 二进制，错误补救），记账还会错误压制重建后的重启核对。
+        Err(e @ BackendError::Timeout(_)) => Err(e),
+        _ => {
+            *stale_backend_seen() = disk;
+            Err(BackendError::StaleBackend)
+        }
+    }
+}
+
+/// 磁盘二进制形态（修改时刻 + 字节长）：重建至少改变其一。
+type BinaryStamp = (SystemTime, u64);
+
+/// 最近一次「重启后指纹仍不一致」时磁盘后端二进制的形态（进程级记账；
+/// 只有订阅循环触碰，锁内无 await）。
+static STALE_BINARY_SEEN: Mutex<Option<BinaryStamp>> = Mutex::new(None);
+
+fn stale_backend_seen() -> MutexGuard<'static, Option<BinaryStamp>> {
+    STALE_BINARY_SEEN.lock().expect("stale backend stamp")
+}
+
+/// 指纹不一致时是否值得重启后端：仅当磁盘二进制可得且形态与上次失败核对
+/// 不同（重建过）才重启。二进制缺失/stamp 读失败 → 跳过（Quit 了也没有
+/// exe 可拉，纯破坏；daemon 留给 CLI/托盘）。纯逻辑（static 读写由调用方
+/// 负责），回归测试钉此语义。
+fn restart_worthwhile(disk: Option<BinaryStamp>, seen: Option<BinaryStamp>) -> bool {
+    disk.is_some() && disk != seen
+}
+
+/// 磁盘后端二进制形态（修改时刻 + 长度）；读失败按「未知」处理（调用方
+/// 退回无条件重启路径）。
+fn binary_stamp(path: &Path) -> std::io::Result<BinaryStamp> {
+    let meta = std::fs::metadata(path)?;
+    Ok((meta.modified()?, meta.len()))
+}
+
+/// 离线原因的可操作子集：陈旧构建/缺二进制/拉起超时值得让用户看到
+/// （StaleBackend 展示串自带修复指引）；普通 IO 断连沿用笼统提示。
+pub fn offline_reason_text(e: &BackendError) -> Option<String> {
+    match e {
+        BackendError::StaleBackend | BackendError::NoBackendBinary | BackendError::SpawnTimeout => {
+            Some(e.to_string())
+        }
+        // 挂死是瞬时/可自愈态（quit 或恢复后 2s 重连自愈），不是 §22 意义上
+        // 的环境性可操作错误：显式排除在三元组外，避免把「hmp quit 后重试」
+        // 上升为离线 toast 的修复指引；恢复动作留在 Display → 调用方 warn 日志。
+        BackendError::Timeout(_) => None,
+        _ => None,
+    }
+}
+
+/// 优雅退出运行中 daemon（引擎处理完 Quit、播放态落盘后退出）并从磁盘重新
+/// 拉起；端点释放等待有界，超时则由 obtain_stream 重试/单实例裁决兜底。
+async fn restart_backend() {
+    let _ = request(Request::Quit).await;
+    for _ in 0..DAEMON_EXIT_RETRIES {
+        if connect().await.is_err() {
+            break;
+        }
+        tokio::time::sleep(RETRY_INTERVAL).await;
+    }
+    if let Some(exe) = resolve_backend_binary() {
+        let _ = hmp_daemon::serve::spawn_detached_exe(&exe, &["serve", "--background"]);
     }
 }
 
@@ -159,50 +305,78 @@ fn find_hmp_in_dirs<I: Iterator<Item = PathBuf>>(dirs: I) -> Option<PathBuf> {
 
 /// 单发请求-响应（每命令一条短连接，CLI `request()` 同模式）。
 /// 命令-查询分离：`Response::Ok` 仅代表受理，真实结果经订阅事件呈现。
+/// 全程（连接重试+写+读+解码）受 `REQUEST_TIMEOUT` 上界约束：daemon
+/// 连上但挂死（应答前卡住）时报错而非永久挂起（AUDIT §16 #3）。
+/// 订阅长连接不经此路径（推送流无应答语义，勿套请求超时）。
 ///
 /// 冷启动窗口重试：订阅循环首连经 `connect_or_spawn` 拉起 daemon 需
 /// ~0.3-3s，此窗口内的命令短连接会得到 NotFound/Refused——逐次退避重试
 /// （不拉起：daemon 生命周期归订阅循环，命令路径不重复 spawn），耗尽才
 /// 报错（调用方降级提示，不再静默丢弃点击）。
 pub async fn request(req: Request) -> Result<Response, BackendError> {
-    /// NotFound/Refused 的重试次数（×250ms ≈ 1s，覆盖常规冷启动窗口）。
-    const CONNECT_RETRIES: u32 = 4;
-    const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
-    let mut stream = None;
-    for attempt in 0..=CONNECT_RETRIES {
-        match connect().await {
-            Ok(s) => {
-                stream = Some(s);
-                break;
+    request_with_timeout(&hmp_daemon::server::socket_path(), req, REQUEST_TIMEOUT).await
+}
+
+/// 单请求全程硬上限（连接重试 + 写 + 读 + 解码；CLI `REQUEST_TIMEOUT`
+/// 同款同值）。30s 覆盖最慢合法路径 CoverGet：上游为 daemon
+/// ContentService → hmp_media `cdn_client()`（connect 10s + 按次读 30s，
+/// 封面图小、主体传输在单次读窗口内完成）；QQ API 类请求上游另有 15s
+/// 客户端超时（hmp-qqmusic-api config.rs）。桌面超时只是放弃**等待**：
+/// daemon handler 继续跑完并落盘缓存，封面消费方自带 COVER_RETRY 退避
+/// （player_bridge），重试即命中缓存。重试预算 1s 计入内：最坏合法路径
+/// 1s 重试 + CoverGet ≈ 仍余充足余量。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 带端点与预算的请求（单测注入临时端点/短超时；生产路径走 [`request`]，
+/// 端点 = `server::socket_path()`，参数注入而非 env 覆盖——env 是进程
+/// 全局态，与并行测试互扰）。
+async fn request_with_timeout(
+    endpoint: &Path,
+    req: Request,
+    timeout: Duration,
+) -> Result<Response, BackendError> {
+    tokio::time::timeout(timeout, async {
+        /// NotFound/Refused 的重试次数（×250ms ≈ 1s，覆盖常规冷启动窗口）。
+        const CONNECT_RETRIES: u32 = 4;
+        const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+        let mut stream = None;
+        for attempt in 0..=CONNECT_RETRIES {
+            match IpcStream::connect(endpoint).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e)
+                    if (e.kind() == std::io::ErrorKind::NotFound
+                        || e.kind() == std::io::ErrorKind::ConnectionRefused)
+                        && attempt < CONNECT_RETRIES =>
+                {
+                    tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
+                }
+                Err(e) => return Err(BackendError::Io(e)),
             }
-            Err(BackendError::Io(e))
-                if (e.kind() == std::io::ErrorKind::NotFound
-                    || e.kind() == std::io::ErrorKind::ConnectionRefused)
-                    && attempt < CONNECT_RETRIES =>
-            {
-                tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
-            }
-            Err(e) => return Err(e),
         }
-    }
-    let Some(mut stream) = stream else {
-        return Err(BackendError::Io(std::io::Error::new(
-            std::io::ErrorKind::ConnectionRefused,
-            "daemon unreachable after retries",
-        )));
-    };
-    write_frame(&mut stream, &req).await?;
-    let Some(frame) = read_frame(&mut stream).await? else {
-        return Err(BackendError::Protocol("daemon closed connection".into()));
-    };
-    let response =
-        decode_frame::<Response>(&frame).map_err(|e| BackendError::Protocol(e.to_string()));
-    if let Ok(Response::Err { code, message }) = &response {
-        // 拒绝型响应（未登录/越界等）此前被 `let _ =` 静默吞掉——UI「点了
-        // 没反应」的主要来源之一；至少留一条 warn 级日志可查。
-        tracing::warn!(?code, %message, "daemon rejected request");
-    }
-    response
+        let Some(mut stream) = stream else {
+            return Err(BackendError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "daemon unreachable after retries",
+            )));
+        };
+        write_frame(&mut stream, &req).await?;
+        let Some(frame) = read_frame(&mut stream).await? else {
+            return Err(BackendError::Protocol("daemon closed connection".into()));
+        };
+        let response =
+            decode_frame::<Response>(&frame).map_err(|e| BackendError::Protocol(e.to_string()));
+        if let Ok(Response::Err { code, message }) = &response {
+            // 拒绝型响应（未登录/越界等）此前被 `let _ =` 静默吞掉——UI「点了
+            // 没反应」的主要来源之一；至少留一条 warn 级日志可查。
+            tracing::warn!(?code, %message, "daemon rejected request");
+        }
+        response
+    })
+    .await
+    .map_err(|_| BackendError::Timeout(timeout))?
 }
 
 /// 订阅事件（跨线程投递到 UI 线程；全部字段 Send）。
@@ -214,6 +388,9 @@ pub struct UiStateEvent {
     pub queue_rows: Option<Vec<QueueRowMeta>>,
     /// 媒体库内容变更（`Event::LibraryChanged`；UI 重查 sqlite 刷新库页）。
     pub library_changed: bool,
+    /// 离线原因（仅可操作错误：陈旧构建/缺二进制/拉起超时；普通 IO 断连
+    /// 为 `None`，沿用笼统提示）。在线事件恒 `None`。
+    pub offline_reason: Option<String>,
 }
 
 /// 队列行投影（IPC 纯 ID + 媒体库元数据）。`TrackRow` 组装在 UI 线程——
@@ -234,25 +411,38 @@ pub struct QueueRowMeta {
 }
 
 /// 订阅循环：首连走 [`connect_or_spawn`]（拉起 daemon）；后续断线重连只做
-/// 普通连接——用户显式 `hmp quit` 后 UI 不得反复把 daemon 拉活。
+/// 普通连接——用户显式 `hmp quit` 后 UI 不得反复把 daemon 拉活。拉起资格
+/// 以「本进程是否曾成功连上」判定（`ever_connected`）：若按「未观测到
+/// 队列 revision」判定，daemon 在 Subscribe 与首帧之间退出（EOF 竞态）会
+/// 误判为首连，把用户刚退出的 daemon 复活。收到 [`Event::Shutdown`]（daemon
+/// 优雅退出：托盘退出 / `hmp quit` / SIGINT）即退出 Slint 事件循环整个关窗
+/// ——daemon 是被有意停掉的，不会回来，窗口留着只会是离线僵尸（AUDIT §19）；
+/// 非优雅死亡（崩溃/kill）无此事件，仍走既有离线重连路径。
 /// 每条 `Event::StateChanged` 投递一次回调（经 `invoke_from_event_loop` 在
 /// UI 线程执行）；连接失败周期性投递离线事件（状态翻转时一次，不重复刷写）。
+/// 事件帧解码失败：记 error 日志并断线走退避重连（协议版本错配/帧损坏
+/// 均不静默跳过，否则 UI 状态冻结且无从排查）。
 pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHandler) {
     runtime.spawn(async move {
         let handler = on_event;
         // 队列结构版本（QueueSummary.revision：结构变更 +1，position tick 不动）。
         let mut last_revision: Option<u64> = None;
         let mut offline_reported = false;
+        // 本进程曾成功连上 daemon ⇒ 之后断线只重连、不再拉起。
+        let mut ever_connected = false;
         loop {
-            // 首连（last_revision 尚无观测）允许自动拉起 daemon，其余只重连。
-            let connected = if last_revision.is_none() {
-                connect_or_spawn().await
-            } else {
+            // 首连（尚无成功连接）允许自动拉起 daemon，其余只重连。
+            let connected = if ever_connected {
                 connect().await
+            } else {
+                connect_or_spawn().await
             };
             let mut stream = match connected {
-                Ok(stream) => stream,
-                Err(_) => {
+                Ok(stream) => {
+                    ever_connected = true;
+                    stream
+                }
+                Err(e) => {
                     if !offline_reported {
                         offline_reported = true;
                         dispatch_ui(
@@ -261,6 +451,7 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                                 state: None,
                                 queue_rows: Some(Vec::new()),
                                 library_changed: false,
+                                offline_reason: offline_reason_text(&e),
                             },
                         );
                     }
@@ -269,17 +460,31 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                 }
             };
             offline_reported = false;
-            // 订阅：server 先推初始快照；重连后首帧强制重建队列模型
-            // （daemon 重启后 revision 归零，仅靠版本比对会漏重建）。
+            // 订阅：server 先推初始快照。
             if write_frame(&mut stream, &Request::Subscribe).await.is_err() {
                 tokio::time::sleep(RECONNECT_INTERVAL).await;
                 continue;
             }
-            last_revision = None;
             while let Ok(Some(frame)) = read_frame(&mut stream).await {
-                let event = decode_frame::<Event>(&frame).ok();
+                // 解码失败一律断线重连（break 走循环尾的既有退避路径），不
+                // 静默跳过：单帧损坏无法界定损伤范围，而 `missing field` /
+                // `unknown variant` 意味着协议版本错配（升级窗口内旧 daemon
+                // 仍占端点），后续帧同样解不出来——跳过会让 UI 状态永久冻结
+                // 且无从排查。不区分「可恢复单帧损坏」与「版本错配」是取简
+                // 单方案：热循环重连与 daemon 不可达同路径（2s 退避），可接受。
+                let event = match decode_frame::<Event>(&frame) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            frame_len = frame.len(),
+                            "undecodable event frame from daemon; reconnecting"
+                        );
+                        break;
+                    }
+                };
                 match event {
-                    Some(Event::LibraryChanged) => {
+                    Event::LibraryChanged => {
                         // 库内容变更：轻量信号，不触发队列重建（队列结构由
                         // StateChanged.revision 驱动）。
                         dispatch_ui(
@@ -288,10 +493,19 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                                 state: None,
                                 queue_rows: None,
                                 library_changed: true,
+                                offline_reason: None,
                             },
                         );
                     }
-                    Some(Event::StateChanged(state)) => {
+                    Event::Shutdown => {
+                        // daemon 优雅退出广播：整个退出（关事件循环，ui.run()
+                        // 返回、进程收尾），不再重连（见本函数 doc）。quit_event_loop
+                        // 可跨线程调用；运行时随 main 结束销毁，订阅任务一并终止。
+                        tracing::info!("daemon graceful shutdown; exiting UI");
+                        let _ = slint::quit_event_loop();
+                        return;
+                    }
+                    Event::StateChanged(state) => {
                         // 队列结构变化 → 重拉队列并投影（revision 不随 position tick 前进）。
                         let queue_rows = if last_revision != Some(state.queue.revision) {
                             last_revision = Some(state.queue.revision);
@@ -305,13 +519,16 @@ pub fn spawn_state_subscription(runtime: &BackendRuntime, on_event: ArcUiStateHa
                                 state: Some(state),
                                 queue_rows,
                                 library_changed: false,
+                                offline_reason: None,
                             },
                         );
                     }
-                    _ => continue,
                 }
             }
-            // EOF（daemon 退出）/ 读错误：断线，退避重连。
+            // EOF（daemon 退出）/ 读错误：断线，退避重连。重置已观测的
+            // revision：重连后首帧必重建队列模型（daemon 重启后 revision
+            // 归零，仅靠版本比对会漏重建）。
+            last_revision = None;
             tokio::time::sleep(RECONNECT_INTERVAL).await;
         }
     });
@@ -471,6 +688,43 @@ async fn read_frame(stream: &mut IpcStream) -> std::io::Result<Option<Vec<u8>>> 
 mod tests {
     use super::*;
 
+    /// S10 T7 契约钉：BackendRuntime 句柄消亡后**在途任务继续完成**（runtime
+    /// 与进程同寿，任何路径不触发 Runtime::drop 的 shutdown 握手）。旧实现
+    /// （持有 Runtime 值，句柄离开作用域即 shutdown）在本测试下任务被取消、
+    /// recv 超时——真根因修复的行为面就在这里：ExitProcess 期 TLS 析构若
+    /// 触发 drop，shutdown 会死等已被杀死的 blocking 线程（verify-s10 僵尸栈）。
+    #[test]
+    fn runtime_outlives_backend_runtime_drop() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let rt = BackendRuntime::new().expect("runtime");
+            rt.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                tx.send(()).expect("receiver alive");
+            });
+            // 句柄随作用域消亡（新实现无 Drop 行为；旧实现此刻 shutdown）。
+        }
+        assert!(
+            rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "BackendRuntime 句柄消亡后在途任务应继续完成（runtime 进程级存活契约被破坏？）"
+        );
+    }
+
+    #[test]
+    fn stale_backend_error_names_problem_and_remedy() {
+        let msg = BackendError::StaleBackend.to_string();
+        assert!(msg.contains("陈旧构建"), "{msg}");
+        assert!(msg.contains("重新构建"), "{msg}");
+    }
+
+    #[test]
+    fn build_code_present_and_self_consistent() {
+        // build.rs 注入的指纹必须非空且与本进程链接值恒等（否则每轮启动都会
+        // 误触发后端重启）。
+        assert!(!hmp_daemon::BUILD_CODE.is_empty());
+        assert_eq!(hmp_daemon::BUILD_CODE, hmp_daemon::BUILD_CODE);
+    }
+
     #[test]
     fn find_hmp_in_dirs_picks_existing_file() {
         let dir = std::env::temp_dir().join(format!("hmp-desktop-bin-{}", std::process::id()));
@@ -489,6 +743,127 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
         std::fs::create_dir_all(&empty).unwrap();
         assert_eq!(find_hmp_in_dirs([empty].into_iter()), None);
+    }
+
+    #[test]
+    fn restart_worthwhile_skips_only_while_disk_binary_unchanged() {
+        let old: Option<BinaryStamp> = Some((SystemTime::UNIX_EPOCH, 1));
+        let rebuilt: Option<BinaryStamp> = Some((SystemTime::UNIX_EPOCH, 2));
+        // 首次发现陈旧：执行重启核对。
+        assert!(restart_worthwhile(old, None));
+        // 重启后仍不一致（记账 old）→ 磁盘二进制未变，重启徒劳：跳过，
+        // 不 Quit 在跑的 daemon（churn 回归钉）。
+        assert!(!restart_worthwhile(old, old));
+        // 用户重建二进制（stamp 变化）→ 恢复完整重启核对（自愈）。
+        assert!(restart_worthwhile(rebuilt, old));
+        // 磁盘二进制不可得（stamp=None）→ 跳过（Quit 了也无 exe 可拉）。
+        assert!(!restart_worthwhile(None, old));
+    }
+
+    #[test]
+    fn stale_backend_stamp_roundtrips_through_static() {
+        // 记账路径（verify_backend_generation 失败/成功分支的读写语义）；
+        // 写后即擦，不与其他测试产生跨断言依赖。
+        let stamp: Option<BinaryStamp> = Some((SystemTime::UNIX_EPOCH, 7));
+        *stale_backend_seen() = stamp;
+        assert_eq!(*stale_backend_seen(), stamp);
+        *stale_backend_seen() = None;
+        assert_eq!(*stale_backend_seen(), None);
+    }
+
+    #[test]
+    fn offline_reason_only_for_actionable_errors() {
+        // 可操作错误带原因（StaleBackend 展示串自带修复指引）；
+        // IO/协议类沿用笼统提示，避免 OS 文案刷屏。
+        assert!(
+            offline_reason_text(&BackendError::StaleBackend)
+                .expect("stale backend carries reason")
+                .contains("陈旧构建")
+        );
+        assert!(offline_reason_text(&BackendError::NoBackendBinary).is_some());
+        assert!(offline_reason_text(&BackendError::SpawnTimeout).is_some());
+        assert!(offline_reason_text(&BackendError::Protocol("x".into())).is_none());
+        let io = BackendError::Io(std::io::Error::other("boom"));
+        assert!(offline_reason_text(&io).is_none());
+        // 挂死是瞬时/可自愈态（quit/恢复后 2s 重连自愈），不进 §22 可操作
+        // 离线原因三元组——钉此语义，防止后续把它误升格成 toast 指引。
+        assert!(
+            offline_reason_text(&BackendError::Timeout(Duration::from_secs(30))).is_none(),
+            "Timeout 不携带离线原因"
+        );
+    }
+
+    /// 临时端点（仓库既有 pid 命名模式，不新增 tempfile dev-dep；Windows 上
+    /// 经 transport `pipe_name` 确定性映射 `\\.\pipe\hmp-<sanitized>` 管道名）。
+    fn test_endpoint(tag: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("hmp-desktop-{tag}-{}.sock", std::process::id()));
+        // Unix 上残留 socket 文件会让 bind 失败；Windows 管道不落盘、无碍。
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// 超时路径（AUDIT §16 #3，镜像 CLI `request_times_out_when_daemon_silent`）：
+    /// daemon 连上但读走请求后沉默（挂死语义）→ `request_with_timeout` 在
+    /// 预算附近返回 `BackendError::Timeout`，绝不永久挂起。端点用临时路径
+    /// 参数注入——生产 `request()` 走 `socket_path()`，不碰在跑的真 daemon。
+    #[tokio::test]
+    async fn request_times_out_when_daemon_silent() {
+        let endpoint = test_endpoint("timeout");
+        let mut listener = hmp_daemon::transport::IpcListener::bind(&endpoint).unwrap();
+        // 服务端任务：accept → 读走完整请求帧 → 不应答，连接挂起到底。
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut stream = listener.accept().await.unwrap();
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.unwrap();
+            let mut payload = vec![0u8; u32::from_le_bytes(len_buf) as usize];
+            stream.read_exact(&mut payload).await.unwrap();
+            let () = std::future::pending().await;
+        });
+        let start = std::time::Instant::now();
+        let err = request_with_timeout(&endpoint, Request::Status, Duration::from_millis(150))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, BackendError::Timeout(d) if *d == Duration::from_millis(150)),
+            "应返回 Timeout(150ms)，实际: {err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "超时须及时返回: {:?}",
+            start.elapsed()
+        );
+        server.abort();
+        let _ = std::fs::remove_file(&endpoint);
+    }
+
+    /// 预算内完成路径（守护 request→request_with_timeout 重构不破帧协议）：
+    /// 回声服务器读走请求帧后应答 `Response::Ok`，宽预算下正常往返。
+    #[tokio::test]
+    async fn request_completes_within_budget() {
+        let endpoint = test_endpoint("echo");
+        let mut listener = hmp_daemon::transport::IpcListener::bind(&endpoint).unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut stream = listener.accept().await.unwrap();
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.unwrap();
+            let mut payload = vec![0u8; u32::from_le_bytes(len_buf) as usize];
+            stream.read_exact(&mut payload).await.unwrap();
+            stream
+                .write_all(&encode_frame(&Response::Ok).unwrap())
+                .await
+                .unwrap();
+        });
+        let response =
+            request_with_timeout(&endpoint, Request::Status, Duration::from_secs(5)).await;
+        assert!(
+            matches!(response, Ok(Response::Ok)),
+            "回声应答应为 Ok，实际: {response:?}"
+        );
+        let _ = server.await;
+        let _ = std::fs::remove_file(&endpoint);
     }
 
     #[test]

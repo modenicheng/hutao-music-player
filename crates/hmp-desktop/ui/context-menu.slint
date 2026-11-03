@@ -1,0 +1,292 @@
+// 统一右键菜单（曲目录目上下文）：
+// - TrackMenu global：启用开关（Rust 权威写入 + 设置页回调）+ 打开时一次性行
+//   快照 + 动作回调（Rust 闭包读快照字段，回调不带长参数清单）。
+// - TrackMenuPanel：自绘菜单面板（quality-badge 的 PopupWindow 视觉范式：
+//   surface-3 / radius-lg / 12px 阴影；hover 底 ctx-accent-soft 跟上下文），
+//   由宿主（TrackTable / QueueDrawer 行委托）各自声明 PopupWindow 包裹。
+// 右键检测在 HoverItem.item-touch 的 pointer-event（勿加覆盖 TouchArea：
+// 会以最顶层命中截断行 hover 链，primitives.slint HoverGroup 注）。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { AppIcon, Scroll } from "primitives.slint";
+import { TrackRow } from "data.slint";
+import { Player, Data, TrackPalette } from "stores.slint";
+import { Nav, Route } from "nav.slint";
+
+/** 菜单上下文：决定条目集（队列/歌单详情页有专属移除项） */
+export enum MenuContext {
+    /** 通用曲目列表（12 个页面的 TrackTable） */
+    library,
+    /** 播放队列（QueueDrawer 行） */
+    queue,
+    /** 歌单详情页（TrackTable + Nav.param = 歌单 id） */
+    playlist,
+}
+
+export global TrackMenu {
+    /** 总开关（设置→常规；Rust 启动时从 Prefs 写入，切换回调持久化） */
+    in-out property <bool> enabled: true;
+    callback set-enabled(bool);
+    // —— 动作回调（Rust 读下方快照，避免回调参数清单）———
+    callback play-next();
+    callback append-queue();
+    /** 参数 = 歌单 id（十进制串，与侧栏歌单行 mid 同一形式） */
+    callback add-to-playlist(string);
+    callback remove-from-playlist();
+
+    // —— 打开时一次性快照（宿主在 context-requested 里填）———
+    in-out property <MenuContext> context: MenuContext.library;
+    /** 列表内绝对下标（TrackTable 虚拟化 = window-start + offset；歌单页即 position） */
+    in-out property <int> index: 0;
+    in-out property <TrackRow> track;
+    /** 「播放」整表语义的源列表引用（模型句柄零拷贝）；queue 上下文不用 */
+    in-out property <[TrackRow]> source-list;
+    /** 打开位置（相对锚行；宿主写入）。放 global 而非 popup 自有属性：
+        编译器禁止外层组件访问 PopupWindow 属性（lower_popups 校验），
+        popup 内读 global 合法 */
+    in-out property <length> open-x: 0px;
+    in-out property <length> open-y: 0px;
+}
+
+// —— 菜单条目行：图标 + 文本（+ 尾注），hover 底随上下文主题色 ———
+// 禁用项 opacity 0.45（quality-badge 选项行同款）；尾注给"为何禁用"的
+// 短说明（弹层内不做 Tooltip：Tooltip 本身是 popup，嵌套弹层不可靠）
+component MenuActionRow inherits Rectangle {
+    in property <image> icon;
+    in property <string> text;
+    in property <bool> item-enabled: true;
+    in property <string> note: "";
+    callback activated;
+
+    height: 36px;
+    border-radius: Theme.radius-md;
+    background: touch.has-hover && item-enabled ? TrackPalette.ctx-accent-soft : transparent;
+    animate background {
+        duration: Theme.duration-fast;
+        easing: cubic-bezier(0.2, 0, 0, 1);
+    }
+    opacity: item-enabled ? 1 : 0.45;
+
+    touch := TouchArea {
+        enabled: root.item-enabled;
+        mouse-cursor: root.item-enabled ? pointer : default;
+        clicked => {
+            root.activated();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        alignment: LayoutAlignment.start;
+
+        // 定高图标在布局交叉轴默认顶放（引擎行为，Button 注同款坑）：
+        // 包一层撑满交叉轴的容器再手动居中
+        Rectangle {
+            width: 16px;
+
+            AppIcon {
+                source: root.icon;
+                icon-color: touch.has-hover && root.item-enabled ? Theme.foreground : Theme.muted-foreground;
+                width: 16px;
+                height: 16px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                animate icon-color {
+                    duration: Theme.duration-fast;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
+                }
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: Theme.foreground;
+            font-size: 13.6px;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+        if root.note != "": Text {
+            text: root.note;
+            color: Theme.muted-foreground;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component MenuSeparator inherits Rectangle {
+    height: 1px;
+    background: Theme.hairline;
+}
+
+/** 统一右键菜单面板：宿主 PopupWindow 的唯一内容（宽 216 定宽）。
+    主模式 = 动作列表；picker 模式 = 加入播放列表选择（二级，仅面板内切换，
+    popup 内容每次 show 重新实例化 → 打开即回主模式，无需复位）。 */
+export component TrackMenuPanel inherits Rectangle {
+    /** 每个动作执行完触发，宿主接 popup.close() */
+    callback dismissed;
+
+    // 二级面板态：加入播放列表选择
+    property <bool> picker-mode: false;
+    /** 歌单选择列表可见行数上限（超出滚动） */
+    property <int> picker-visible: min(Data.sidebar-created.length, 6);
+    property <length> picker-list-h: Data.sidebar-created.length == 0 ? 64px : root.picker-visible * 36px;
+    /** 主模式动作行数：播放组 3 + 收纳组（歌单页 2，其余 1）+ 导航组 2 */
+    property <int> menu-rows: 3 + (TrackMenu.context == MenuContext.playlist ? 2 : 1) + 2;
+
+    width: 216px;
+    height: root.picker-mode
+        ? 16px + 36px + 1px + 4px + root.picker-list-h
+        : 16px + root.menu-rows * 36px + 2 * 1px + (root.menu-rows + 1) * 2px;
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-3;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: #241F1B.transparentize(0.82);
+    drop-shadow-offset-y: 4px;
+
+    /** 加入播放列表兼容性（daemon 校验前置到 UI，server.rs：subscribed 只读、
+        owned 拒本地曲；本面板只列自建歌单 local/owned）：
+        QQ 曲全可入；本地曲仅纯本地歌单可入 */
+    public pure function playlist-allows(relation: string) -> bool {
+        return TrackMenu.track.source == 0 || relation == "local";
+    }
+
+    /** 「播放」：通用列表 = 整表替换队列从该行播；队列 = 跳该位置播 */
+    public function play-now() {
+        if (TrackMenu.context == MenuContext.queue) {
+            Player.play-at(TrackMenu.index);
+        } else {
+            Player.play-tracks(TrackMenu.source-list, TrackMenu.index);
+        }
+    }
+
+    if !root.picker-mode: VerticalLayout {
+        padding: 8px;
+        spacing: 2px;
+
+        MenuActionRow {
+            icon: Icons.play_arrow;
+            text: "播放";
+            activated => {
+                root.play-now();
+                root.dismissed();
+            }
+        }
+        MenuActionRow {
+            icon: Icons.playlist_play;
+            text: "下一首播放";
+            activated => {
+                TrackMenu.play-next();
+                root.dismissed();
+            }
+        }
+        MenuActionRow {
+            icon: Icons.queue_music;
+            text: "加入队列";
+            activated => {
+                TrackMenu.append-queue();
+                root.dismissed();
+            }
+        }
+
+        MenuSeparator { }
+
+        // 收纳组：通用/歌单页 = 加入播放列表（+歌单页专属移除）；队列 = 移除出队列
+        if TrackMenu.context != MenuContext.queue: MenuActionRow {
+            icon: Icons.add;
+            text: "加入播放列表…";
+            activated => {
+                root.picker-mode = true;
+            }
+        }
+        if TrackMenu.context == MenuContext.queue: MenuActionRow {
+            icon: Icons.close;
+            text: "从队列移除";
+            activated => {
+                Player.remove-at(TrackMenu.index);
+                root.dismissed();
+            }
+        }
+        if TrackMenu.context == MenuContext.playlist: MenuActionRow {
+            icon: Icons.close;
+            text: "从歌单移除";
+            activated => {
+                TrackMenu.remove-from-playlist();
+                root.dismissed();
+            }
+        }
+
+        MenuSeparator { }
+
+        // 导航组：QQ 行远端 mid 缺失 → 诚实禁用（track-table 歌手链接同判据）
+        MenuActionRow {
+            icon: Icons.person;
+            text: "查看歌手";
+            item-enabled: TrackMenu.track.artist-mid != "";
+            activated => {
+                Nav.navigate(Route.artist, TrackMenu.track.artist-mid);
+                root.dismissed();
+            }
+        }
+        MenuActionRow {
+            icon: Icons.album;
+            text: "查看专辑";
+            item-enabled: TrackMenu.track.album-mid != "";
+            activated => {
+                Nav.navigate(Route.album, TrackMenu.track.album-mid);
+                root.dismissed();
+            }
+        }
+    }
+
+    if root.picker-mode: VerticalLayout {
+        padding: 8px;
+        spacing: 2px;
+
+        MenuActionRow {
+            icon: Icons.arrow_back;
+            text: "加入播放列表";
+            activated => {
+                root.picker-mode = false;
+            }
+        }
+
+        MenuSeparator { }
+
+        Rectangle {
+            height: root.picker-list-h;
+            clip: true;
+
+            Scroll {
+                for p in Data.sidebar-created: MenuActionRow {
+                    icon: Icons.library_music;
+                    text: p.name;
+                    item-enabled: root.playlist-allows(p.relation);
+                    note: self.item-enabled ? "" : "不支持本地曲";
+                    activated => {
+                        TrackMenu.add-to-playlist(p.id);
+                        root.dismissed();
+                    }
+                }
+
+                if Data.sidebar-created.length == 0: Rectangle {
+                    height: 64px;
+
+                    Text {
+                        text: "还没有自建歌单";
+                        color: Theme.muted-foreground;
+                        font-size: 12.5px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: parent.width;
+                        height: parent.height;
+                    }
+                }
+            }
+        }
+    }
+}

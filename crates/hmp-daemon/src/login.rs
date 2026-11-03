@@ -22,7 +22,6 @@ use hmp_storage::credential::Store;
 /// 总墙钟上限：二维码无限过期也不死循环（CLI `hmp login` 同值）。
 const OVERALL_LIMIT: Duration = Duration::from_secs(600);
 
-
 /// 进行中的登录会话。
 struct Session {
     qr: QR,
@@ -74,11 +73,15 @@ impl LoginService {
             .await
             .map_err(|e| e.to_string())?;
         let path = self.write_qr_png(&qr)?;
-        let old = self.session.lock().expect("login session").replace(Session {
-            qr,
-            qr_path: path.clone(),
-            deadline: Instant::now() + OVERALL_LIMIT,
-        });
+        let old = self
+            .session
+            .lock()
+            .expect("login session")
+            .replace(Session {
+                qr,
+                qr_path: path.clone(),
+                deadline: Instant::now() + OVERALL_LIMIT,
+            });
         if let Some(old) = old {
             let _ = std::fs::remove_file(&old.qr_path);
         }
@@ -168,11 +171,11 @@ impl LoginService {
             .load()
             .map_err(|e| format!("failed to read credentials: {e}"))?
             .filter(|c| c.is_logged_in());
-        if let Some(credential) = credential {
-            if let Err(e) = LoginApi::new(&self.client).logout(&credential).await {
-                // 远端登出失败不影响本地删除（凭证已失效亦可接受）。
-                tracing::warn!(%e, "remote logout failed; removing local credential anyway");
-            }
+        if let Some(credential) = credential
+            && let Err(e) = LoginApi::new(&self.client).logout(&credential).await
+        {
+            // 远端登出失败不影响本地删除（凭证已失效亦可接受）。
+            tracing::warn!(%e, "remote logout failed; removing local credential anyway");
         }
         self.store
             .delete()
@@ -191,10 +194,8 @@ impl LoginService {
         let same = guard
             .as_ref()
             .is_some_and(|s| s.qr_path == snapshot.qr_path && s.deadline == snapshot.deadline);
-        if same {
-            if let Some(session) = guard.take() {
-                let _ = std::fs::remove_file(&session.qr_path);
-            }
+        if same && let Some(session) = guard.take() {
+            let _ = std::fs::remove_file(&session.qr_path);
         }
     }
 
@@ -209,12 +210,10 @@ impl LoginService {
         let same = guard
             .as_ref()
             .is_some_and(|s| s.qr_path == snapshot.qr_path && s.deadline == snapshot.deadline);
-        if same {
-            if let Some(session) = guard.as_mut() {
-                let old = std::mem::replace(&mut session.qr_path, path.clone());
-                session.qr = qr;
-                let _ = std::fs::remove_file(&old);
-            }
+        if same && let Some(session) = guard.as_mut() {
+            let old = std::mem::replace(&mut session.qr_path, path.clone());
+            session.qr = qr;
+            let _ = std::fs::remove_file(&old);
         }
         Ok(path)
     }

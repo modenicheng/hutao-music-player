@@ -19,11 +19,13 @@ use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmp_qqmusic_api::client::QqMusicClient;
-use hmp_qqmusic_api::pagination::Page;
 use hmp_qqmusic_api::credential::Credential;
+use hmp_qqmusic_api::pagination::Page;
 use hmp_qqmusic_api::protocol::cgi::CgiRequest;
 use hmp_qqmusic_api::songlist::{GetSonglistDetailResponse, SonglistApi};
-use hmp_qqmusic_api::user::{UserApi, UserCreatedSonglistResponse, UserFavAlbumResponse, UserFavSonglistResponse};
+use hmp_qqmusic_api::user::{
+    UserApi, UserCreatedSonglistResponse, UserFavAlbumResponse, UserFavSonglistResponse,
+};
 use serde_json::json;
 
 /// 测试歌曲：孙燕姿《开始懂了》（songType 0=普通歌曲，与上游 `Song.type` 一致）。
@@ -80,17 +82,24 @@ async fn run_fav_verify() {
             println!("PASS create(temp3): tid={tid} dirid={dirid}");
             gap().await;
             match user.fav_songlist(tid, &cred).await {
-                Ok(v) => println!("NOTE fav_songlist(temp3): {v}（自建歌单预期 false，服务端 result=80184）"),
+                Ok(v) => println!(
+                    "NOTE fav_songlist(temp3): {v}（自建歌单预期 false，服务端 result=80184）"
+                ),
                 Err(e) => println!("FAIL fav_songlist(temp3): {e}"),
             }
             gap().await;
             match user.unfav_songlist(tid, &cred).await {
-                Ok(v) => println!("NOTE unfav_songlist(temp3): {v}（未收藏歌单预期 true，服务端 result=0）"),
+                Ok(v) => println!(
+                    "NOTE unfav_songlist(temp3): {v}（未收藏歌单预期 true，服务端 result=0）"
+                ),
                 Err(e) => println!("FAIL unfav_songlist(temp3): {e}"),
             }
             gap().await;
             match songlist.delete(dirid, &cred).await {
-                Ok(r) => println!("CLEANUP delete(temp3): ret_code={} dirid={}", r.ret_code, r.dirid),
+                Ok(r) => println!(
+                    "CLEANUP delete(temp3): ret_code={} dirid={}",
+                    r.ret_code, r.dirid
+                ),
                 Err(e) => println!("CLEANUP delete(temp3) FAIL: {e}（请人工检查 dirid={dirid}）"),
             }
         }
@@ -119,7 +128,10 @@ async fn run_diag() {
     let mut reached_end = false;
     for page in 5..=9i64 {
         gap().await;
-        match user.get_fav_song(&euin, Page::new(page as u32, 100), Some(&cred)).await {
+        match user
+            .get_fav_song(&euin, Page::new(page as u32, 100), Some(&cred))
+            .await
+        {
             Ok(r) => {
                 covered += r.songs.len() as i64;
                 liked.extend(r.songs.iter().map(|s| s.id));
@@ -193,13 +205,19 @@ async fn run_diag() {
     if let Some(dirid) = created_dirid {
         gap().await;
         match songlist.delete(dirid, &cred).await {
-            Ok(r) => println!("CLEANUP delete(temp2): ret_code={} dirid={}", r.ret_code, r.dirid),
+            Ok(r) => println!(
+                "CLEANUP delete(temp2): ret_code={} dirid={}",
+                r.ret_code, r.dirid
+            ),
             Err(e) => println!("CLEANUP delete(temp2) FAIL: {e}（请人工检查 dirid={dirid}）"),
         }
         gap().await;
         match user.get_created_songlist(&uin, Some(&cred)).await {
             Ok(r) => {
-                println!("CLEANUP check: 自建歌单 total={}（确认 temp2 已不在列表）", r.total);
+                println!(
+                    "CLEANUP check: 自建歌单 total={}（确认 temp2 已不在列表）",
+                    r.total
+                );
             }
             Err(e) => println!("CLEANUP check FAIL: {e}"),
         }
@@ -215,15 +233,26 @@ async fn run_full() {
         println!("credential: none（需登录接口全部 SKIP）");
         // 仍验证免登录的 get_detail
         gap().await;
-        match songlist.get_detail(7843129912, 0, Page::new(1, 5), false, true, true).await {
-            Ok(r) => println!("PASS get_detail(免登录): total={} songs={}", r.total, r.songs.len()),
+        match songlist
+            .get_detail(7843129912, 0, Page::new(1, 5), false, true, true)
+            .await
+        {
+            Ok(r) => println!(
+                "PASS get_detail(免登录): total={} songs={}",
+                r.total,
+                r.songs.len()
+            ),
             Err(e) => println!("FAIL get_detail(免登录): {e}"),
         }
         return;
     };
     let uin = cred.uin.clone();
     let euin = cred.encrypt_uin.clone();
-    println!("credential: uin={uin} euin_len={} expired={}", euin.len(), cred.is_expired());
+    println!(
+        "credential: uin={uin} euin_len={} expired={}",
+        euin.len(),
+        cred.is_expired()
+    );
 
     // ---------- Phase A：user 读接口 ----------
     gap().await;
@@ -247,7 +276,10 @@ async fn run_full() {
     gap().await;
     let mut liked: HashSet<i64> = HashSet::new();
     let mut liked_total: i64 = 0;
-    match user.get_fav_song(&euin, Page::new(1, 100), Some(&cred)).await {
+    match user
+        .get_fav_song(&euin, Page::new(1, 100), Some(&cred))
+        .await
+    {
         Ok(r) => {
             liked_total = r.total;
             liked.extend(r.songs.iter().map(|s| s.id));
@@ -261,7 +293,10 @@ async fn run_full() {
     }
 
     gap().await;
-    match user.get_fav_songlist(&euin, Page::new(1, 10), Some(&cred)).await {
+    match user
+        .get_fav_songlist(&euin, Page::new(1, 10), Some(&cred))
+        .await
+    {
         Ok(r) => println!(
             "PASS get_fav_songlist(加密uin): total={} parsed={} hasmore={}",
             r.total,
@@ -303,7 +338,10 @@ async fn run_full() {
     }
 
     gap().await;
-    match user.get_fav_album(&euin, Page::new(1, 10), Some(&cred)).await {
+    match user
+        .get_fav_album(&euin, Page::new(1, 10), Some(&cred))
+        .await
+    {
         Ok(r) => println!(
             "PASS get_fav_album(加密uin): total={} parsed={} hasmore={}",
             r.total,
@@ -386,10 +424,16 @@ async fn run_full() {
 
     if let (Some(dirid), Some(tid)) = (created_dirid, created_tid) {
         gap().await;
-        match songlist.get_detail(tid, 0, Page::new(1, 10), false, true, true).await {
+        match songlist
+            .get_detail(tid, 0, Page::new(1, 10), false, true, true)
+            .await
+        {
             Ok(r) => println!(
                 "PASS get_detail(新建空歌单): code={} title={:?} total={} songs={}",
-                r.code, r.info.list.title, r.total, r.songs.len()
+                r.code,
+                r.info.list.title,
+                r.total,
+                r.songs.len()
             ),
             Err(e) => println!("FAIL get_detail(新建空歌单 tid={tid}): {e}"),
         }
@@ -402,13 +446,13 @@ async fn run_full() {
         }
 
         gap().await;
-        match songlist.get_detail(tid, 0, Page::new(1, 10), false, true, true).await {
+        match songlist
+            .get_detail(tid, 0, Page::new(1, 10), false, true, true)
+            .await
+        {
             Ok(r) => {
                 let has = r.songs.iter().any(|s| s.id == TEST_SONG.0);
-                println!(
-                    "PASS get_detail(加歌后): total={} 含测试歌={has}",
-                    r.total
-                );
+                println!("PASS get_detail(加歌后): total={} 含测试歌={has}", r.total);
             }
             Err(e) => println!("FAIL get_detail(加歌后): {e}"),
         }
@@ -421,7 +465,10 @@ async fn run_full() {
         }
 
         gap().await;
-        match songlist.get_detail(tid, 0, Page::new(1, 10), false, true, true).await {
+        match songlist
+            .get_detail(tid, 0, Page::new(1, 10), false, true, true)
+            .await
+        {
             Ok(r) => println!(
                 "PASS get_detail(删歌后): total={} songs={}",
                 r.total,
@@ -437,7 +484,10 @@ async fn run_full() {
         let mut covered = liked.len() as i64;
         while covered < liked_total && pages < 5 {
             gap().await;
-            match user.get_fav_song(&euin, Page::new(pages as u32 + 1, 100), Some(&cred)).await {
+            match user
+                .get_fav_song(&euin, Page::new(pages as u32 + 1, 100), Some(&cred))
+                .await
+            {
                 Ok(r) => {
                     covered += r.songs.len() as i64;
                     known.extend(r.songs.iter().map(|s| s.id));
@@ -496,7 +546,10 @@ async fn run_full() {
         // 确认已删：get_detail 应报错（歌单不存在）
         if deleted {
             gap().await;
-            match songlist.get_detail(tid, 0, Page::new(1, 10), false, true, true).await {
+            match songlist
+                .get_detail(tid, 0, Page::new(1, 10), false, true, true)
+                .await
+            {
                 Ok(r) => println!(
                     "NOTE get_detail(删除后): 仍可访问 code={} total={} title={:?}",
                     r.code, r.total, r.info.list.title
