@@ -9,6 +9,10 @@
 //!     [--move X,Y]        // 400ms 后合成 PointerMoved（真实 hover 链路）
 //!     [--bus-hover X,Y,W,H[,suppress]]  // 直写 HoverBus（只验滑块几何）
 //!     [--flight MS]       // 移动后再推进 MS 毫秒即截图（抓形变中帧；缺省推进到动画收敛）
+//!     [--size WxH]        // 窗口尺寸（缺省 1280x800；窄窗断点核对用 683x800）
+//!     [--tab N]           // 截图前连按 N 次 Tab（键盘焦点环视觉验收）
+//!     [--keys A,B,...]    // 再依次敲键：ShiftTab/Return/Space/UpArrow/DownArrow/
+//!                        // LeftArrow/RightArrow/Delete/Escape，其余按字面文本
 //!
 //! 注意：testing backend 是进程级单例，本示例进程内只有这一个窗口。
 
@@ -119,6 +123,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut loop_mode = 0i32;
     let mut shuffle = false;
     let mut theme_dark = false;
+    let mut size = (1280u32, 800u32);
+    let mut tabs = 0usize;
+    let mut keys: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -177,6 +184,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     parts[3].parse().unwrap(),
                 ));
             }
+            // 窗口尺寸 WxH（窄窗断点核对）
+            "--size" => {
+                let v = args.next().unwrap_or_default();
+                let (w, h) = v.split_once('x').expect("size WxH");
+                size = (w.parse().expect("width"), h.parse().expect("height"));
+            }
+            // 键盘态验收：--tab N 连按 Tab，--keys 依次敲键
+            "--tab" => tabs = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--keys" => {
+                keys = args
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+            }
             "--param" => param = args.next().unwrap_or_default(),
             "--discover-live" => discover_live = true,
             other => route_str = other.to_owned(),
@@ -194,7 +218,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prefs = std::sync::Arc::new(std::sync::Mutex::new(hmp_desktop::prefs::load()));
     let runtime = Arc::new(hmp_desktop::backend::BackendRuntime::new().expect("tokio runtime"));
     let ui = hmp_desktop::AppWindow::new()?;
-    ui.window().set_size(slint::PhysicalSize::new(1280, 800));
+    ui.window()
+        .set_size(slint::PhysicalSize::new(size.0, size.1));
 
     hmp_desktop::bridge::load_data(&ui, &runtime);
     hmp_desktop::bridge::bind(&ui, Arc::clone(&prefs), Arc::clone(&runtime));
@@ -414,6 +439,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // account_demo == 3：未登录（state=1 + logged_in=false），扫码入口可见
     }
 
+    // 键盘态：Tab ×N 后依次敲键（每键之间推进 48ms 让焦点环/光标高亮落定）
+    let key_events: Vec<(slint::SharedString, bool)> = {
+        let mut events = Vec::new();
+        for _ in 0..tabs {
+            events.push(key_tap("Tab"));
+        }
+        for name in &keys {
+            events.push(key_tap(name));
+        }
+        events.into_iter().flatten().collect()
+    };
+    for (text, pressed) in key_events {
+        ui.window().dispatch_event(if pressed {
+            slint::platform::WindowEvent::KeyPressed { text }
+        } else {
+            slint::platform::WindowEvent::KeyReleased { text }
+        });
+        if !pressed {
+            step_to(48);
+        }
+    }
+
     match flight {
         // 抓动画中帧：只推进到指定时刻
         Some(ms) => step_to(ms),
@@ -431,6 +478,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     img.save(&out)?;
     println!("saved {out} ({}x{})", w, h);
     Ok(())
+}
+
+/// 一次按键 = (文本, 按下) 事件序列（修饰键作为独立按键事件送入，同 winit）。
+fn key_tap(name: &str) -> Vec<(slint::SharedString, bool)> {
+    use slint::platform::Key;
+    let (modifier, key): (Option<Key>, slint::SharedString) = match name {
+        "ShiftTab" => (Some(Key::Shift), Key::Tab.into()),
+        "Tab" => (None, Key::Tab.into()),
+        "Return" => (None, Key::Return.into()),
+        "Space" => (None, Key::Space.into()),
+        "UpArrow" => (None, Key::UpArrow.into()),
+        "DownArrow" => (None, Key::DownArrow.into()),
+        "LeftArrow" => (None, Key::LeftArrow.into()),
+        "RightArrow" => (None, Key::RightArrow.into()),
+        "Delete" => (None, Key::Delete.into()),
+        "Escape" => (None, Key::Escape.into()),
+        literal => (None, literal.into()),
+    };
+    let mut events = Vec::new();
+    if let Some(modifier) = modifier {
+        let text: slint::SharedString = modifier.into();
+        events.push((text, true));
+    }
+    events.push((key.clone(), true));
+    events.push((key, false));
+    if let Some(modifier) = modifier {
+        let text: slint::SharedString = modifier.into();
+        events.push((text, false));
+    }
+    events
 }
 
 /// DiscoverNewSong → TrackRow（--discover-live 专用；与 bridge 同投影）。

@@ -8,6 +8,7 @@ pub mod cover_cache;
 pub mod covers;
 pub mod exit_guard;
 pub mod format;
+pub mod keynav;
 pub mod library_view;
 pub mod lyrics;
 pub mod menu_bridge;

@@ -1,12 +1,17 @@
 // 竖向音量（VolumeControl.vue，DESIGN.md v0.2/v0.11）：
 // 静息只有图标；hover 弹出上方细长窄条（宽 44px，数值 + 4px 细轨），
 // 离开图标与面板 180ms 后自动收起（宽限跨过与图标的 10px 缝隙）。
-// 图标点击 = 静音切换（volume_up / volume_off 资产切换）；拖拽为直接指针跟随。
+// 图标点击 = 静音切换（volume_up / volume_off 资产切换）并**钉住**弹层
+// 便于继续细调（Vue pinned）；指针在控件外按下或 ESC 解除钉住。
+// 键盘（M7 焦点可达）：触发钮是 Tab 停靠点，↑/→ +5%、↓/← −5%，聚焦期间
+// 弹层保持展开；Enter/空格 = 静音切换。滚轮微调不变。
+// 拖拽为直接指针跟随。
 // 悬浮层用组件内 overlay 而非 PopupWindow：hover 状态需同组件直读，
 // 且 PlayerBar 无裁剪，负 y 覆盖内容区绘制正常。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon, EqClock } from "primitives.slint";
+import { AppIcon, KeyTouch } from "primitives.slint";
+import { KeyNav } from "keynav.slint";
 import { Player, TrackPalette } from "stores.slint";
 
 export component VolumeControl inherits Rectangle {
@@ -26,26 +31,92 @@ export component VolumeControl inherits Rectangle {
         last-volume = Player.volume > 0.01 ? Player.volume : 1.0;
     }
 
-    // —— hover 悬浮层：图标/面板任一 hover 即开；全离开后宽限 180ms 再收
-    // （跨过图标与面板间 10px 缝隙；事件分帧派发时的瞬时双 false 也被宽限吸收）。
-    // 收起用 EqClock 截止时刻而非 Timer：时钟常跑（33ms 粒度），声明式绑定
-    // 不依赖定时器重启，testing backend 与真机行为一致。———
+    // —— 展开态（四个来源任一成立即开）———
+    // hover：图标/面板/滑轨任一 hover 即开；全离开后 180ms 宽限再收（跨过
+    // 图标与面板间 10px 缝隙；事件分帧派发时的瞬时双 false 也被宽限吸收）。
+    // 宽限必须用真正的 Timer：旧实现借 EqClock 当时钟，而 EqClock 自 S9 R3
+    // 起只在播放期走表——暂停/未播放时悬停后移开，弹层永远不收。
     property <bool> pop-hover:
         icon-touch.has-hover || pop-cover.has-hover || vol-touch.has-hover;
-    property <duration> leave-at: 0ms;
-    property <bool> pop-open:
-        self.pop-hover || (self.leave-at != 0ms && EqClock.t - self.leave-at < 180ms);
+    /** hover 撤销后的宽限态：离开 180ms 内保持展开 */
+    property <bool> latched: false;
+    /** 点击图标后的钉住态（点外 / ESC 解除） */
+    property <bool> pinned: false;
+    /** 弹层当前展开（只读出口，供宿主/测试观察） */
+    out property <bool> pop-open: pop-hover || latched || pinned || icon-touch.has-focus;
+
     changed pop-hover => {
-        self.leave-at = self.pop-hover ? 0ms : EqClock.t;
+        if (self.pop-hover) {
+            root.latched = true;
+            leave-timer.stop();
+        } else {
+            // 单发（重）启动：Timer 从未启动过时 restart() 是空操作（PORTING
+            // 「Timer restart 陷阱」），必须显式置 running
+            if (leave-timer.running) {
+                leave-timer.restart();
+            } else {
+                leave-timer.running = true;
+            }
+        }
+    }
+    leave-timer := Timer {
+        interval: 180ms;
+        running: false;
+        triggered => {
+            self.stop();
+            root.latched = false;
+        }
     }
 
-    // —— 滚轮调音量：上滚 +0.05 / 下滚 −0.05（clamp 0..1），accept 防止冒泡
-    // 滚动页面。set-volume 在 Rust 侧立即本地回显 + 500ms daemon 回写抑制窗
-    // （player_bridge.rs on_set_volume），手感即时且不与推送打架；弹层打开时
-    // 在面板/滑轨上滚动同样生效。———
+    // —— 钉住的管理 ———
+    // 解除 = 指针在控件外按下 / ESC。全局指针活动经 KeyNav.pointer-seq
+    // （winit 按下钩子登记）。裁决用 **hover 态**而不是 pointer-event(down)：
+    // changed 回调在 Pressed 派发**之前**执行（process_mouse_input 先跑
+    // change handlers），此时控件的 down 回调还没到；而按下前必有 Moved，
+    // hover 态已就绪。触屏无 hover 的直接按下按「控件外」处理。
+    // 钉住态是组件私有的（播放条/播放页控制台两个实例互不干扰），ESC 经
+    // Player.volume-unpin-seq 广播；volume-pin-count 汇总让全局 ESC 处理
+    // 知道有没有钉住的弹层要收（有 = 最内层浮层，ESC 优先给它）。
+    property <int> pointer-seq: KeyNav.pointer-seq;
+    changed pointer-seq => {
+        if (!root.pop-hover) {
+            root.pinned = false;
+        }
+    }
+    property <int> unpin-seq: Player.volume-unpin-seq;
+    changed unpin-seq => {
+        root.pinned = false;
+    }
+    changed pinned => {
+        Player.volume-pin-count += self.pinned ? 1 : -1;
+    }
+
+    // —— 音量动作 ———
+    function set-volume(value: float) {
+        Player.set-volume(clamp(value, 0.0, 1.0));
+    }
+
+    /** 滚轮：上滚 +0.05 / 下滚 −0.05（负 delta = 向下滚）。set-volume 在
+        Rust 侧立即本地回显 + 500ms daemon 回写抑制窗（player_bridge.rs
+        on_set_volume），手感即时且不与推送打架；弹层打开时在面板/滑轨上
+        滚动同样生效。accept 防止冒泡滚动页面。 */
     function wheel-volume(delta-y: length) -> EventResult {
-        Player.set-volume(clamp(Player.volume + (delta-y > 0 ? 0.05 : -0.05), 0.0, 1.0));
+        root.set-volume(Player.volume + (delta-y > 0 ? 0.05 : -0.05));
         return accept;
+    }
+
+    /** 方向键/滚轮的单步微调：dir = +1 变响 / −1 变轻 */
+    function nudge(dir: int) {
+        root.set-volume(Player.volume + dir * 0.05);
+    }
+
+    function toggle-mute() {
+        if (muted) {
+            Player.set-volume(last-volume > 0.01 ? last-volume : 1.0);
+        } else {
+            last-volume = Player.volume;
+            Player.set-volume(0.0);
+        }
     }
 
     // 触发钮：36px 命中 + 图标 + tool-tip（对齐 Vue title）。Tooltip 挂在
@@ -56,31 +127,32 @@ export component VolumeControl inherits Rectangle {
         width: parent.width;
         height: parent.height;
 
-        icon-touch := TouchArea {
-            mouse-cursor: pointer;
-            clicked => {
-                if (muted) {
-                    Player.set-volume(last-volume > 0.01 ? last-volume : 1.0);
-                } else {
-                    last-volume = Player.volume;
-                    Player.set-volume(0.0);
-                }
-            }
+        icon-touch := KeyTouch {
+            ring-radius: Theme.pill(self.height);
+            activate-on-click: true;
+            Tooltip { text: @markdown("\{root.muted ? "取消静音" : "静音"}"); }
             scroll-event(event) => {
                 return root.wheel-volume(event.delta-y);
             }
-        }
+            // 上/右 +5%、下/左 −5%（Vue 轨道方向键同款）
+            stepped(axis, dir) => {
+                root.nudge(dir);
+            }
+            activated => {
+                root.toggle-mute();
+                // 点击图标 = 静音切换，同时钉住弹层便于继续细调
+                root.pinned = true;
+            }
 
-        AppIcon {
-            source: muted ? Icons.volume_off : Icons.volume_up;
-            icon-color: Theme.foreground;
-            width: 21px;
-            height: 21px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            AppIcon {
+                source: muted ? Icons.volume_off : Icons.volume_up;
+                icon-color: Theme.foreground;
+                width: 21px;
+                height: 21px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
         }
-
-        Tooltip { text: @markdown("音量"); }
     }
 
     // —— 悬浮面板（图标上方 10px，宽 44 高 160；Vue POPOP_FULL_PX=160：
@@ -107,8 +179,10 @@ export component VolumeControl inherits Rectangle {
             drop-shadow-color: #241F1B.transparentize(0.82);
             drop-shadow-offset-y: 4px;
 
-            // 垫底 hover 传感：接住面板空白区（滑块 TouchArea 在上层优先命中）
-            pop-cover := TouchArea {
+            // 垫底 hover 传感：接住面板空白区（滑块命中区在上层优先命中）。
+            // 不进 Tab 链：键盘经触发钮到达，方向键在触发钮上生效
+            pop-cover := KeyTouch {
+                tab-stop: false;
                 scroll-event(event) => {
                     return root.wheel-volume(event.delta-y);
                 }
@@ -163,14 +237,16 @@ export component VolumeControl inherits Rectangle {
                         y: clamp((1 - Player.volume) * parent.height - self.height / 2, 0px, parent.height - self.height);
                     }
 
-                    vol-touch := TouchArea {
+                    vol-touch := KeyTouch {
+                        tab-stop: false;
+                        activatable: false;
                         pointer-event(event) => {
                             if (event.kind == PointerEventKind.down) {
-                                Player.set-volume(1.0 - clamp(self.mouse-y / self.height, 0.0, 1.0));
+                                root.set-volume(1.0 - clamp(self.mouse-y / self.height, 0.0, 1.0));
                             }
                         }
                         moved => {
-                            Player.set-volume(1.0 - clamp(self.mouse-y / self.height, 0.0, 1.0));
+                            root.set-volume(1.0 - clamp(self.mouse-y / self.height, 0.0, 1.0));
                         }
                         scroll-event(event) => {
                             return root.wheel-volume(event.delta-y);

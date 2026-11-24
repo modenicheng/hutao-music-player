@@ -8,7 +8,7 @@
 // 避免 stretch 拉扯。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon } from "primitives.slint";
+import { AppIcon, KeyTouch } from "primitives.slint";
 import { QualityBadge } from "quality-badge.slint";
 import { VolumeControl } from "volume-control.slint";
 import { Player } from "stores.slint";
@@ -65,10 +65,18 @@ export component PlayerBar inherits Rectangle {
                 }
             }
 
-            progress-touch := TouchArea {
+            progress-touch := KeyTouch {
                 y: -4px;
                 height: parent.height + 8px;
+                // 无曲时不可点、不进 Tab 链（此前无门控，空态点击也发 seek）
+                enabled: Player.has-track;
                 mouse-cursor: pointer;
+                ring-radius: 6px;
+                activatable: false;
+                // 方向键微调（对齐 Vue RulerProgress：±2%）；空格冒泡给播放/暂停
+                stepped(axis, dir) => {
+                    Player.seek-percent(clamp(Player.progress + dir * 0.02, 0.0, 1.0));
+                }
                 pointer-event(event) => {
                     if (event.kind == PointerEventKind.down) {
                         Player.seeking = true;
@@ -165,12 +173,15 @@ export component PlayerBar inherits Rectangle {
                     }
                 }
 
-                now-touch := TouchArea {
+                now-touch := KeyTouch {
                     // 只盖封面+曲名（徽章在右侧自管命中，声明序压在本区之上）
                     width: root.cover-size + Theme.space-3 + root.np-text-w;
                     enabled: Player.has-track;
                     mouse-cursor: pointer;
-                    clicked => {
+                    ring-radius: Theme.radius-md;
+                    activate-on-click: true;
+                    Tooltip { text: @markdown("打开播放页"); }
+                    activated => {
                         Player.show-overlay();
                     }
                 }
@@ -204,10 +215,12 @@ export component PlayerBar inherits Rectangle {
                         easing: cubic-bezier(0.2, 0, 0, 1);
                     }
 
-                    prev-touch := TouchArea {
+                    prev-touch := KeyTouch {
                         enabled: Player.can-previous;
                         mouse-cursor: pointer;
-                        clicked => {
+                        ring-radius: Theme.pill(self.height);
+                        activate-on-click: true;
+                        activated => {
                             Player.previous();
                         }
                     }
@@ -236,13 +249,15 @@ export component PlayerBar inherits Rectangle {
                         easing: cubic-bezier(0.2, 0, 0, 1);
                     }
 
-                    play-touch := TouchArea {
+                    play-touch := KeyTouch {
                         mouse-cursor: pointer;
-                        clicked => {
+                        ring-radius: Theme.pill(self.height);
+                        activate-on-click: true;
+                        activated => {
                             Player.toggle-play();
                         }
                     }
-                    Tooltip { text: @markdown("\{Player.playing ? "暂停" : "播放"}"); }
+                    Tooltip { text: @markdown("\{Player.playing ? "暂停" : "播放"}（空格）"); }
                     AppIcon {
                         source: Player.playing ? Icons.pause : Icons.play_arrow;
                         icon-color: Theme.primary-foreground;
@@ -267,10 +282,12 @@ export component PlayerBar inherits Rectangle {
                         easing: cubic-bezier(0.2, 0, 0, 1);
                     }
 
-                    next-touch := TouchArea {
+                    next-touch := KeyTouch {
                         enabled: Player.can-next;
                         mouse-cursor: pointer;
-                        clicked => {
+                        ring-radius: Theme.pill(self.height);
+                        activate-on-click: true;
+                        activated => {
                             Player.next();
                         }
                     }
@@ -313,9 +330,11 @@ export component PlayerBar inherits Rectangle {
                         easing: cubic-bezier(0.2, 0, 0, 1);
                     }
 
-                    queue-touch := TouchArea {
+                    queue-touch := KeyTouch {
                         mouse-cursor: pointer;
-                        clicked => {
+                        ring-radius: Theme.pill(self.height);
+                        activate-on-click: true;
+                        activated => {
                             Player.toggle-queue();
                         }
                     }

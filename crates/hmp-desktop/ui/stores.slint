@@ -43,6 +43,13 @@ export global Player {
     in-out property <bool> overlay-visible: false;
     in-out property <bool> queue-visible: false;
 
+    // —— 音量弹层钉住（VolumeControl；播放条/播放页控制台两个实例共用）———
+    /** ESC 解除钉住的广播序号：全局 ESC 处理 +1，钉住中的实例监听后收起 */
+    in-out property <int> volume-unpin-seq: 0;
+    /** 当前钉住的弹层实例数（实例 changed pinned 时 ±1）：> 0 时 ESC 优先
+        收音量弹层（最内层浮层） */
+    in-out property <int> volume-pin-count: 0;
+
     // —— 队列 ———
     /** 队列行走 QueueRow（带 cover：抽屉 36×36 是行封面唯一消费方；
         表格 TrackRow 不背图） */
@@ -190,6 +197,10 @@ export global Data {
     in-out property <[CoverCardData]> search-albums;
     in-out property <[ArtistCardData]> search-artists;
     callback search(string);
+    
+    // —— 新建歌单（侧栏「+」/ 我喜欢页「新建歌单」命名弹层 → menu_bridge）———
+    /** 参数 = 用户输入的原样名称（去空白、空名拒绝、请求与回包在 Rust） */
+    callback create-playlist(string);
     // —— 账号（设置页；daemon AccountStatus IPC）———
     /** 0=读取中 1=已读 2=离线失败（daemon 不可达，区别于未登录） */
     in-out property <int> account-state: 0;
@@ -263,6 +274,30 @@ export global NowPlaying {
     in-out property <bool> liked: false;
     /** 心形点击：意图上报（Rust 侧乐观翻转 + IPC 写 + 失败回读库回滚） */
     callback toggle-liked();
+
+    // —— 滚动请求（全局翻页键在播放页打开时滚本页内容列；app.slint
+    // scroll-page 发起，NowPlayingOverlay 监听序号后回写 page.scroll-offset）———
+    in-out property <length> scroll-delta: 0px;
+    in-out property <int> scroll-seq: 0;
+
+    /** 请求播放页内容列滚动 delta（正 = 向下看） */
+    public function scroll-by(delta: length) {
+        root.scroll-delta = delta;
+        root.scroll-seq += 1;
+    }
+
+    // —— 播放页观察/请求口（集成测试与外部触发用；NowPlayingOverlay 维护）———
+    /** 评论跳转请求序号（等价于点控制台的评论键：歌词 ⇄ 评论区双向） */
+    in-out property <int> jump-seq: 0;
+    /** 播放页内容列当前滚动偏移（overlay 镜像，只读消费） */
+    in-out property <length> overlay-scroll-y: 0px;
+    /** 歌词是否处于自动跟随（用户滚动后暂停 3s，见 now-playing.slint） */
+    in-out property <bool> lyrics-following: true;
+
+    /** 请求评论跳转（歌词首屏 → 评论区顶；已在评论区 → 回歌词首屏） */
+    public function jump-comments() {
+        root.jump-seq += 1;
+    }
 }
 
 // —— 曲目层动态调色（Vue trackTheme.ts + lib/color 取色管线的对应物，M6）——

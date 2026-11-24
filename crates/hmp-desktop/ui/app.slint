@@ -27,6 +27,7 @@ import { TopPage } from "top-page.slint";
 import { TopDetailPage } from "top-detail-page.slint";
 import { Nav, Route } from "nav.slint";
 import { Viewport, QueueWindow } from "viewport.slint";
+import { KeyNav } from "keynav.slint";
 import { TrackMenu, MenuContext } from "context-menu.slint";
 // 再导出：窗口化虚拟化的滚动状态单点出口 + 队列抽屉行窗（Rust 侧按窗回填
 // 队列封面），Rust 侧测试/探针需读回
@@ -36,7 +37,7 @@ import { Theme } from "theme.slint";
 import { TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData } from "data.slint";
 
 // 供生成代码（Rust 侧）访问的 global 与数据结构（HoverBus/EqClock 供集成测试探针）
-export { Theme, Nav, Player, Quality, Data, NowPlaying, TrackPalette, Route, TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData, HoverBus, EqClock, WinChrome, TrackMenu, MenuContext }
+export { Theme, Nav, Player, Quality, Data, NowPlaying, TrackPalette, Route, TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData, HoverBus, EqClock, WinChrome, TrackMenu, MenuContext, KeyNav }
 
 export component AppWindow inherits Window {
     title: "胡桃音乐";
@@ -73,6 +74,54 @@ export component AppWindow inherits Window {
     property <length> vp-view-h <=> Viewport.view-h;
     property <length> vp-origin-y <=> Viewport.origin-y;
 
+    // —— 页面滚动的读写面（M7：键盘滚动 / 导航滚动位置）———
+    /** 页面滚动偏移的权威读口（绑定取值即最新；Rust 导航离开时读它存进
+        历史栈——Viewport.y 镜像经 changed 回写，晚一拍） */
+    out property <length> page-scroll-y: page-scroll.scroll-offset;
+
+    // —— 软卸载状态观察口（只读；集成测试守护「关闭后真的卸载」——面板/
+    // 播放页常驻挂载会拦走内容区点击或后台空转，见 PORTING「Timer restart
+    // 陷阱」）———
+    out property <bool> queue-mounted: queue-drawer.panel-mounted;
+    out property <bool> overlay-mounted: space-scope.overlay-ov || space-scope.overlay-hold;
+    property <length> scroll-viewport-h: page-scroll.view-height;
+    property <length> scroll-content-h: page-scroll.content-height;
+
+    /** 页面滚 delta（正 = 向下看）。播放页 overlay 打开时滚 overlay 自己的
+        内容列；按当前内容高钳制（内容不足一屏时恒为 0） */
+    function scroll-page(delta: length) {
+        if (Player.overlay-visible) {
+            NowPlaying.scroll-by(delta);
+            return;
+        }
+        if (root.scroll-viewport-h <= 0px) {
+            return;
+        }
+        page-scroll.scroll-offset = clamp(page-scroll.scroll-offset - delta,
+            root.scroll-viewport-h - root.scroll-content-h, 0px);
+    }
+
+    /** 返回（Alt+Left）：与当前页页头的返回键同一语义——库页子页回「我
+        喜欢」（它们是从侧栏直达的目的地，返回键是固定的上级入口），其余
+        带返回键的页走历史栈；无返回键的顶层页无操作（不做历史回退：
+        否则「我喜欢 → 最近播放 → 返回键回我喜欢」会再退回最近播放） */
+    function page-back() -> EventResult {
+        if (Nav.route == Route.local || Nav.route == Route.recent
+            || Nav.route == Route.downloads || Nav.route == Route.purchased) {
+            Nav.navigate(Route.library, "");
+            return accept;
+        }
+        if (Nav.can-go-back
+            && (Nav.route == Route.playlist || Nav.route == Route.album
+                || Nav.route == Route.artist || Nav.route == Route.top-detail
+                || Nav.route == Route.settings || Nav.route == Route.settings-general
+                || Nav.route == Route.settings-playback || Nav.route == Route.settings-account)) {
+            Nav.back();
+            return accept;
+        }
+        return reject;
+    }
+
     // —— 侧栏收起状态机（MainLayout.vue：手动切换优先，跨断点回自动）———
     property <int> manual-collapsed: -1; // -1=自动 0=展开 1=收起
     property <bool> narrow: Theme.win-width <= 832px;
@@ -86,13 +135,15 @@ export component AppWindow inherits Window {
     animate sidebar-w {
         duration: Theme.duration-slow;
         easing: cubic-bezier(0.2, 0, 0, 1);
+        enabled: !Theme.reduce-motion;
     }
 
-    // —— 全局按键收口：空格 = 播放/暂停 ———
+    // —— 全局按键收口（空格 / ESC / Ctrl+F / Alt+← / 页面滚动键）———
     // 包裹全窗的 FocusScope 自身不持有焦点（不设 forward-focus、禁
     // focus-on-click/focus-on-tab-navigation，不抢任何组件焦点）：按键从聚焦
-    // 元素起沿父链冒泡——esc-scope（窗口默认焦点）reject 的空格在这里收口；
-    // TextInput（搜索框/评论输入框）聚焦时空格被输入框 accept，天然不冲突。
+    // 元素起沿父链冒泡，未被控件消费的键在这里收口——它是全窗所有控件的公共
+    // 祖先，ESC 必须写在这里；TextInput（搜索框/评论输入框）聚焦时空格被
+    // 输入框 accept，天然不冲突。
     space-scope := FocusScope {
         x: 0;
         y: 0;
@@ -100,9 +151,125 @@ export component AppWindow inherits Window {
         height: parent.height;
         focus-on-click: false;
         focus-on-tab-navigation: false;
+        // 键盘焦点让出 → 交还窗口根作用域（keynav.slint 焦点模型；根作用域
+        // = esc-scope，空格/ESC 的收口点，不能让焦点停在「无」）
+        property <int> focus-released: KeyNav.focus-released;
+        changed focus-released => {
+            esc-scope.focus();
+        }
+
+        // —— 页面/浮层切换时焦点交还根作用域 ——
+        // 聚焦中的控件会随页面卸载（在曲目表链接上按 Enter 进详情页）、或被
+        // 全屏层盖住（键盘打开播放页/队列抽屉）。Slint 对被卸载的焦点项直接
+        // 丢弃——此后空格/ESC/Shift+Tab 无人接收，直到再按一次 Tab；被盖住
+        // 时空格会再次激活底下那个看不见的按钮。交还根作用域后全局键立即
+        // 可用，Tab 从头开始到达新页面的控件。
+        property <Route> route-focus-watch: Nav.route;
+        changed route-focus-watch => {
+            esc-scope.focus();
+        }
+        property <bool> overlay-focus-watch: Player.overlay-visible;
+        changed overlay-focus-watch => {
+            esc-scope.focus();
+        }
+        property <bool> queue-focus-watch: Player.queue-visible;
+        changed queue-focus-watch => {
+            esc-scope.focus();
+        }
+
+        // —— 窗口根作用域（forward-focus 目标）———
+        // · focus-on-click 必须关：FocusScope 默认铺满父元素，focus-on-click
+        //   下只要键盘焦点不在它身上（点了搜索框 / Tab 到了别的控件），下一次
+        //   点击的 Pressed 就被它的「点击聚焦」accept 掉——首次点击被吞。
+        //   焦点只经 forward-focus / Tab 环绕 / focus-released 回到它。
+        // · 声明在元素树最前：Tab 遍历按声明序环绕，根作用域是遍历的「原点」
+        //   ——放后面的话第一站会落到标题栏窗口钮；放最前则第一站 = 侧栏
+        //   首页、Shift+Tab 第一站 = 最后一个控件。
+        // · 不进 Tab 链：自身无可见焦点，不做空停靠点。
+        // ESC 的处理不在这里：本作用域是各控件的**兄弟**而非祖先，键盘焦点落在
+        // 任何控件上时按键沿祖先链冒泡，到不了它——ESC 收口在 space-scope
+        // （全窗控件的公共祖先）的 key-pressed 里。
+        esc-scope := FocusScope {
+            focus-on-click: false;
+            focus-on-tab-navigation: false;
+        }
+
+
         key-pressed(event) => {
+            // —— ESC：从最内层浮层起逐层收；双层同开时一次全关 ———
+            // 必须在这个作用域：它是全窗所有控件的公共祖先，键盘焦点落在
+            // 任何控件上时 ESC 都能冒泡到这里（PopupWindow 类弹层——右键菜单/
+            // 音质选择——由框架自行 ESC 关闭，先于这里）
+            if (event.text == Key.Escape) {
+                // 钉住的音量弹层是最内层
+                if (Player.volume-pin-count > 0) {
+                    Player.volume-unpin-seq += 1;
+                    return accept;
+                }
+                if (Player.overlay_visible && Player.queue_visible) {
+                    Player.hide-overlay();
+                    Player.hide-queue();
+                    return accept;
+                }
+                if (Player.overlay_visible) {
+                    Player.hide-overlay();
+                    return accept;
+                }
+                if (Player.queue_visible) {
+                    Player.hide-queue();
+                    return accept;
+                }
+                return reject;
+            }
+
+            // —— 全局快捷键（控件激活一律不碰修饰键组合，故到这里的一定
+            //    是未被焦点控件消费的组合键）———
+            // Ctrl+F：到搜索页并聚焦搜索框（已停在搜索页时组件不重挂载，
+            // init 不触发，经 focus-search-seq 显式请求聚焦）
+            if (event.modifiers.control && !event.modifiers.alt
+                && (event.text == "f" || event.text == "F")) {
+                if (Nav.route != Route.search) {
+                    Nav.navigate(Route.search, "");
+                }
+                KeyNav.focus-search-seq += 1;
+                return accept;
+            }
+            // Alt+Left：返回（与当前页页头的返回键同一语义，见 page-back）
+            if (event.modifiers.alt && !event.modifiers.control
+                && event.text == Key.LeftArrow) {
+                return root.page-back();
+            }
+
             if (event.text == " ") {
                 Player.toggle-play();
+                return accept;
+            }
+
+            // —— 页面滚动键（焦点在列表/滑杆上时 ↑/↓ 已被其消费，到不了这里）———
+            // ↑/↓ 40px；翻页一屏留 60px 上下文；Home/End 到顶/到底。播放页
+            // overlay 打开时改滚 overlay 自己的内容列
+            if (event.text == Key.DownArrow) {
+                root.scroll-page(40px);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.scroll-page(-40px);
+                return accept;
+            }
+            if (event.text == Key.PageDown) {
+                root.scroll-page(root.scroll-viewport-h - 60px);
+                return accept;
+            }
+            if (event.text == Key.PageUp) {
+                root.scroll-page(60px - root.scroll-viewport-h);
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.scroll-page(root.scroll-content-h);
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.scroll-page(-root.scroll-content-h);
                 return accept;
             }
             return reject;
@@ -154,6 +321,16 @@ export component AppWindow inherits Window {
                     // 真实 view-height 仍由 changed 跟进）
                     root.vp-y = self.scroll-offset;
                     root.vp-view-h = self.view-height;
+                }
+
+                // 滚动请求落账（Viewport.scroll-to：Rust 导航归顶/返回恢复、
+                // 列表键盘光标滚动跟随）。按**当时**的视口/内容高钳制：
+                // Flickable 对程序写入的越界偏移不钳制，异步页内容未落地时
+                // 不钳会整页滚空；内容长出来后由 Rust 的延后重发落到目标位
+                property <int> request-seq: Viewport.request-seq;
+                changed request-seq => {
+                    self.scroll-offset = clamp(Viewport.request-y,
+                        self.view-height - self.content-height, 0px);
                 }
 
                 if Nav.route == Route.library: LibraryPage {
@@ -242,7 +419,10 @@ export component AppWindow inherits Window {
             if (self.overlay-ov) {
                 overlay-unmount-timer.stop();
             } else {
-                overlay-unmount-timer.restart();
+                // 单发启动（restart() 对从未启动的 Timer 是空操作，PORTING
+                // 「Timer restart 陷阱」——1.18 升级后本处曾失效，播放页关了
+                // 也永不卸载）
+                overlay-unmount-timer.running = true;
             }
             self.overlay-hold = true;
         }
@@ -250,6 +430,7 @@ export component AppWindow inherits Window {
             interval: Theme.duration-slow + 60ms;
             running: false;
             triggered => {
+                self.stop();
                 space-scope.overlay-hold = false;
             }
         }
@@ -264,7 +445,7 @@ export component AppWindow inherits Window {
 
         // —— 播放列表抽屉（全窗遮罩 + 右上浮板；TitleBar 仍在其上，窗口钮可点）———
         // 面板窗口锚定在组件内 +title-bar-height 补偿，视觉位置不变
-        QueueDrawer {
+        queue-drawer := QueueDrawer {
             x: 0;
             y: 0;
             width: parent.width;
@@ -293,28 +474,6 @@ export component AppWindow inherits Window {
                 font-size: 13px;
                 vertical-alignment: center;
                 overflow: elide;
-            }
-        }
-
-        // —— ESC：双层同开时一次全关，单开只关对应层 ———
-        esc-scope := FocusScope {
-            key-pressed(event) => {
-                if (event.text == Key.Escape) {
-                    if (Player.overlay_visible && Player.queue_visible) {
-                        Player.hide-overlay();
-                        Player.hide-queue();
-                        return accept;
-                    }
-                    if (Player.overlay_visible) {
-                        Player.hide-overlay();
-                        return accept;
-                    }
-                    if (Player.queue_visible) {
-                        Player.hide-queue();
-                        return accept;
-                    }
-                }
-                return reject;
             }
         }
 

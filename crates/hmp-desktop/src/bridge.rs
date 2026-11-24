@@ -15,10 +15,33 @@ use crate::library_view::{self, PlaylistEntry, SongRow, local_cover_image};
 use crate::prefs::Prefs;
 use crate::{
     AppWindow, CoverCardData, Data, FolderRow, Nav, PlaylistCover, Quality, Theme, TopCardData,
-    TopGroupData, TrackRow,
+    TopGroupData, TrackRow, Viewport,
 };
 
 const NAV_HISTORY_CAP: usize = 50;
+
+/// 导航滚动位置的延后重发时刻（M7）：返回时把页面滚回离开时的位置。首帧
+/// 内容高不足的页（远端详情、换路由当拍还没布局完）第一次请求被 Flickable
+/// 钳在底部——内容长出来后再发几次才落到目标位。窗口很短（≤250ms）：
+/// 返回后立刻手动滚动被拽回的风险可忽略。
+const SCROLL_RESTORE_RETRY: [Duration; 2] = [Duration::from_millis(60), Duration::from_millis(250)];
+
+/// 请求页面滚到内容坐标 `y`（视口顶，≤ 0）：立即一次 + [`SCROLL_RESTORE_RETRY`]
+/// 延后重发。app.slint 的 page-scroll 监听 Viewport.request-seq 后按**当时**
+/// 的内容高钳制回写（Flickable 对程序写入的越界偏移不钳制）。
+pub(crate) fn request_page_scroll(ui_weak: &Weak<AppWindow>, y: f32) {
+    if let Some(ui) = ui_weak.upgrade() {
+        Viewport::get(&ui).invoke_scroll_to(y);
+    }
+    for delay in SCROLL_RESTORE_RETRY {
+        let ui_weak = ui_weak.clone();
+        slint::Timer::single_shot(delay, move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                Viewport::get(&ui).invoke_scroll_to(y);
+            }
+        });
+    }
+}
 /// 库变更刷新防抖：watcher 批处理每 ~1s bump 一次，扫描期连发——
 /// 静默 500ms 才触发一次重查，避免 UI 随扫描进度反复重载。
 const REFRESH_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -932,8 +955,12 @@ pub fn bind(
     runtime: Arc<crate::backend::BackendRuntime>,
 ) {
     // ——— 导航历史栈 ———
+    // 条目 = 离开时的 (路由, 参数, 页面滚动偏移)。前进到新页归顶；返回时
+    // 恢复到离开时的位置（此前路由切换从不碰滚动偏移：从长列表中部点进
+    // 详情页落在新页中部，返回又落在详情页遗留的偏移——离开位置丢失）。
+    type NavEntry = (crate::Route, SharedString, f32);
     let nav = Nav::get(ui);
-    let history: Arc<Mutex<Vec<(crate::Route, SharedString)>>> = Arc::new(Mutex::new(Vec::new()));
+    let history: Arc<Mutex<Vec<NavEntry>>> = Arc::new(Mutex::new(Vec::new()));
     // 导航时在线内容页懒加载所需 runtime（克隆进闭包）。
     let nav_rt = Arc::clone(&runtime);
     // 猜你喜欢触发器（在 on_refresh_guess 绑定后填充，避免闭包循环依赖）。
@@ -949,11 +976,14 @@ pub fn bind(
                 return;
             };
             let nav = Nav::get(&ui);
-            let current = (nav.get_route(), nav.get_param());
+            // 离开位置：读 page-scroll 的权威读口（Viewport.y 镜像晚一拍）
+            let scroll_y = ui.get_page_scroll_y();
+            let current = (nav.get_route(), nav.get_param(), scroll_y);
             {
                 let mut stack = history.lock().expect("nav history");
-                // 同页重复导航不入栈；栈满丢最旧
-                if stack.last() != Some(&current) && Some(&current) != stack.first() {
+                // 同页重复导航不入栈；栈满丢最旧（只比路由与参数）
+                let same_page = |entry: &NavEntry| entry.0 == current.0 && entry.1 == current.1;
+                if !stack.last().is_some_and(same_page) && !stack.first().is_some_and(same_page) {
                     if stack.len() >= NAV_HISTORY_CAP {
                         stack.remove(0);
                     }
@@ -964,6 +994,8 @@ pub fn bind(
             nav.set_param(param.clone());
             nav.set_can_go_back(!history.lock().expect("nav history").is_empty());
             apply_route(&ui, &rt, nav.get_route(), nav.get_param());
+            // 前进到新页（含同页重复导航，如再点侧栏当前项）：归顶
+            request_page_scroll(&ui_weak, 0.0);
             // M4 在线内容页进入时懒加载（免登录页自动拉，猜你喜欢需登录）
             match route {
                 crate::Route::Home => {
@@ -997,9 +1029,11 @@ pub fn bind(
             };
             let nav = Nav::get(&ui);
             let previous = history.lock().expect("nav history").pop();
-            if let Some((route, param)) = previous {
+            if let Some((route, param, scroll_y)) = previous {
                 nav.set_route(route);
                 nav.set_param(param);
+                // 回到离开时的位置（延后重发覆盖内容异步落地的页面）
+                request_page_scroll(&ui_weak, scroll_y);
             }
             nav.set_can_go_back(!history.lock().expect("nav history").is_empty());
             apply_route(&ui, &rt, nav.get_route(), nav.get_param());
@@ -1035,6 +1069,21 @@ pub fn bind(
             Theme::get(&ui).set_mode(mode);
             crate::track_theme::reapply_for_theme(&ui);
             prefs.lock().expect("prefs").theme_mode = mode;
+            crate::prefs::store(&prefs.lock().expect("prefs").clone());
+        });
+    }
+
+    // ——— 减少动效（设置→常规 开关；Theme.reduce-motion 门控各处位移类动画）———
+    // Slint 1.18 不读取系统的「减少动态效果」偏好，只能显式设置并持久化。
+    {
+        let prefs = Arc::clone(&prefs);
+        let ui_weak: Weak<AppWindow> = ui.as_weak();
+        Theme::get(ui).on_set_reduce_motion(move |enabled| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            Theme::get(&ui).set_reduce_motion(enabled);
+            prefs.lock().expect("prefs").reduce_motion = enabled;
             crate::prefs::store(&prefs.lock().expect("prefs").clone());
         });
     }

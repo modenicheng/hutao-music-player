@@ -1,4 +1,5 @@
-// 常规设置（GeneralSettingsView.vue）：主题三选真实生效；启动页/语言未接线档位禁用展示。
+// 常规设置（GeneralSettingsView.vue）：主题三选真实生效；启动页/语言未接线档位禁用展示；
+// 右键菜单开关；减少动效（关闭位移类动画，DESIGN §5）。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { PageHeader } from "page-parts.slint";
@@ -121,6 +122,31 @@ export component SettingsGeneralPage inherits Rectangle {
                         TrackMenu.set-enabled(value);
                     }
                 }
+            }
+        }
+
+        // —— 动效 ——
+        SettingGroup {
+            title: "动效";
+
+            SettingRow {
+                label: "减少动效";
+                desc: "关闭位移类动画：侧栏与面板滑动、列表高亮滑动、封面悬浮、歌词与评论跳转改为直达";
+
+                Switch {
+                    checked: Theme.reduce-motion;
+                    toggled(value) => {
+                        Theme.set-reduce-motion(value);
+                    }
+                }
+            }
+
+            SettingCaption {
+                text: Theme.reduce-motion
+                    ? "当前生效：减少动效（颜色与透明度过渡保留）" : "当前生效：完整动效";
+            }
+            SettingCaption {
+                text: "Slint 暂不读取系统的「减少动态效果」偏好，需要在此手动设置";
             }
         }
     }

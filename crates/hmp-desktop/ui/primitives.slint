@@ -2,6 +2,7 @@
 // HoverGroup / Scroll 等，DESIGN.md §3.0 通用件）。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
+import { KeyNav } from "keynav.slint";
 
 // ——— AppIcon：SVG 资产 + colorize 着色（currentColor 对应物）———
 export component AppIcon inherits Rectangle {
@@ -24,6 +25,196 @@ export component AppIcon inherits Rectangle {
             duration: Theme.duration-normal;
             easing: cubic-bezier(0.2, 0, 0, 1);
         }
+    }
+}
+
+// ——— KeyTouch：可键盘到达的指针命中区（M7 焦点可达）———
+// FocusScope 包住 TouchArea（祖先关系，焦点模型见 keynav.slint）：指针面与
+// TouchArea 同名透传，调用点把 `x := TouchArea` 换成 `x := KeyTouch` 即接通
+// 键盘——Tab 停靠、Enter/空格激活（activated）、方向键步进（stepped）。
+// enabled 直接用 FocusScope 的：禁用控件自动退出 Tab 链。
+// 必须保持 TouchArea 是 FocusScope 的**子**：做成覆盖兄弟的话，FocusScope
+// 点击聚焦时会 accept Pressed（input_items.rs FocusScope::input_event），
+// 首次点击被吞。
+export component KeyTouch inherits FocusScope {
+    // —— 指针面（TouchArea 同名透传）———
+    in property <MouseCursor> mouse-cursor: MouseCursor.default;
+    out property <bool> has-hover: ta.has-hover;
+    out property <bool> pressed: ta.pressed;
+    out property <length> mouse-x: ta.mouse-x;
+    out property <length> mouse-y: ta.mouse-y;
+    out property <length> pressed-x: ta.pressed-x;
+    out property <length> pressed-y: ta.pressed-y;
+    callback clicked;
+    callback double-clicked;
+    callback moved;
+    callback pointer-event(PointerEvent);
+    callback scroll-event(PointerScrollEvent) -> EventResult;
+
+    // —— 键盘面 ——
+    /** Enter / 空格激活 */
+    callback activated;
+    /** 方向键：axis 0=水平 1=垂直，dir -1/+1 */
+    callback stepped(int, int);
+    /** false = 滑杆类：不消费 Enter/空格，空格冒泡给播放/暂停 */
+    in property <bool> activatable: true;
+    /** true = 鼠标点击等同键盘激活（调用点只接 activated 一处，动作不写两遍） */
+    in property <bool> activate-on-click: false;
+    /** false = 不进 Tab 链（roving 光标的列表行由列表级 ListKeys 统一停靠） */
+    in property <bool> tab-stop: true;
+    /** 焦点环圆角（默认直角；圆键传 Theme.pill(size)） */
+    in property <length> ring-radius: 0px;
+    /** 外部强制显示焦点环：roving 光标列表的行内单元格（链接不是 Tab 停靠点，
+        由列表的 ←/→ 子光标指定谁被聚焦） */
+    in property <bool> ring-forced: false;
+
+    focus-on-click: false;
+    focus-on-tab-navigation: root.tab-stop;
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.mouse-cursor;
+        clicked => {
+            if (root.activate-on-click) {
+                root.activated();
+            }
+            root.clicked();
+        }
+        double-clicked => {
+            root.double-clicked();
+        }
+        moved => {
+            root.moved();
+        }
+        pointer-event(event) => {
+            root.pointer-event(event);
+        }
+        scroll-event(event) => {
+            return root.scroll-event(event);
+        }
+
+        // 调用点的子元素挂在 TouchArea **之内**（祖先关系）：Slint 按声明逆序
+        // 访问子元素，更深层的内容一旦接受 Moved（内层按钮的 TouchArea），
+        // 同层更早声明的兄弟就访问不到——hover 传感层必须是内容的祖先，
+        // 不能是垫底兄弟（HoverGroup 注；hover_slider 测试守护此结构）
+        @children
+    }
+
+    // 指针活动即退出键盘模式（keynav.slint 焦点模型）：只有确实持有焦点时
+    // 才让出并登记——app.slint 监听登记把焦点交还窗口根作用域（空格/ESC
+    // 的收口点是根的子孙，焦点清成「无」后按键无人接收）。焦点在 TextInput
+    // 上时本控件无焦点、不登记，搜索框不会被误抢焦点。
+    property <int> pointer-seq: KeyNav.pointer-seq;
+    changed pointer-seq => {
+        if (self.has-focus) {
+            root.clear-focus();
+            KeyNav.focus-released += 1;
+        }
+    }
+
+    key-pressed(event) => {
+        // 带修饰键的组合键不属于控件激活：放行给全局快捷键（Ctrl+F 等）
+        if (event.modifiers.control || event.modifiers.meta || event.modifiers.alt) {
+            return reject;
+        }
+        if (root.activatable
+            && (event.text == Key.Return || event.text == " ")) {
+            root.activated();
+            return accept;
+        }
+        if (event.text == Key.LeftArrow) {
+            root.stepped(0, -1);
+            return accept;
+        }
+        if (event.text == Key.RightArrow) {
+            root.stepped(0, 1);
+            return accept;
+        }
+        if (event.text == Key.UpArrow) {
+            root.stepped(1, 1);
+            return accept;
+        }
+        if (event.text == Key.DownArrow) {
+            root.stepped(1, -1);
+            return accept;
+        }
+        return reject;
+    }
+
+    // 键盘焦点环（DESIGN §5：:focus-visible → --ring）：外扩 2px、留 1px 缝，
+    // 不压控件内容。has-focus 即键盘模式（鼠标点击不聚焦）
+    if root.has-focus || root.ring-forced: Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-width: 2px;
+        border-color: Theme.ring;
+        border-radius: root.ring-radius + 3px;
+        background: transparent;
+    }
+}
+
+// ——— ListKeys：列表级键盘焦点（roving 光标，M7 焦点可达）———
+// 长列表不让每行进 Tab 链（窗口化虚拟化只实例化一窗行，Tab 走不到窗外的
+// 行）：整张表是一个 Tab 停靠点，↑/↓ 移动光标行（宿主自绘光标高亮 +
+// 滚动跟随），Enter/空格激活光标行，Delete/Backspace 移除（队列用）。
+// 纯 FocusScope、无 TouchArea：不参与指针命中，声明在列表内容之前即可。
+export component ListKeys inherits FocusScope {
+    /** -1 = 上移，+1 = 下移 */
+    callback step(int);
+    /** 激活光标行 */
+    callback activate;
+    /** 移除光标行（宿主不接 = 无此语义，按键照常消费） */
+    callback remove;
+    /** ←/→ 在光标行内移动子光标（宿主不接 = 无此语义，按键照常消费，不冒泡）。
+        行内链接不是 Tab 停靠点，键盘经此到达 */
+    callback step-horizontal(int);
+    /** false = 空列表/不可用时退出 Tab 链 */
+    in property <bool> available: true;
+
+    focus-on-click: false;
+    focus-on-tab-navigation: root.available;
+    enabled: root.available;
+
+    // 指针活动退出键盘模式（KeyTouch 同款两段式：让出 + 登记）
+    property <int> pointer-seq: KeyNav.pointer-seq;
+    changed pointer-seq => {
+        if (self.has-focus) {
+            root.clear-focus();
+            KeyNav.focus-released += 1;
+        }
+    }
+
+    key-pressed(event) => {
+        if (event.modifiers.control || event.modifiers.meta || event.modifiers.alt) {
+            return reject;
+        }
+        if (event.text == Key.DownArrow) {
+            root.step(1);
+            return accept;
+        }
+        if (event.text == Key.UpArrow) {
+            root.step(-1);
+            return accept;
+        }
+        if (event.text == Key.RightArrow) {
+            root.step-horizontal(1);
+            return accept;
+        }
+        if (event.text == Key.LeftArrow) {
+            root.step-horizontal(-1);
+            return accept;
+        }
+        if (event.text == Key.Return || event.text == " ") {
+            root.activate();
+            return accept;
+        }
+        if (event.text == Key.Delete || event.text == Key.Backspace) {
+            root.remove();
+            return accept;
+        }
+        return reject;
     }
 }
 
@@ -76,9 +267,16 @@ export component Button inherits Rectangle {
         : transparent;
     opacity: enabled ? 1 : 0.5;
 
-    touch := TouchArea {
+    // 键盘可达（KeyTouch）：Tab 停靠 + Enter/空格 = 点击；鼠标不改变键盘焦点
+    touch := KeyTouch {
         enabled: root.enabled;
         mouse-cursor: pointer;
+        ring-radius: Theme.radius-md;
+        activated => {
+            if (root.enabled) {
+                root.clicked();
+            }
+        }
         clicked => {
             root.clicked();
         }
@@ -145,16 +343,30 @@ export component TextLink inherits Rectangle {
     in property <TextHorizontalAlignment> alignment: TextHorizontalAlignment.left;
     /** 右键转发开关（行宿主右键菜单的行内链接路径，默认关） */
     in property <bool> context-enabled: false;
+    /** 是否进 Tab 链（roving 光标列表的行内链接置 false，行由列表统一停靠） */
+    in property <bool> tab-stop: true;
+    /** 外部强制焦点环（列表子光标落在本链接上时） */
+    in property <bool> ring-forced: false;
     /** 右键释放：参数 = 相对本链接的 x/y（宿主负责换算回行内坐标） */
     callback context-requested(length, length);
     callback clicked;
 
     height: font-size * 1.5;
+    // 布局内宽度：内部文本的 width 绑的是 parent.width，不贡献 preferred 宽——
+    // 不补这一条，TextLink 放进任何布局都拿到 0 宽、文字溢出错位（首页登录
+    // 引导卡实测）。高度同理已有固定值。
+    preferred-width: link-text.preferred-width;
     accessible-role: button;
     accessible-label: text;
 
-    ta := TouchArea {
+    ta := KeyTouch {
+        tab-stop: root.tab-stop;
+        ring-forced: root.ring-forced;
+        ring-radius: Theme.radius-sm;
         mouse-cursor: pointer;
+        activated => {
+            root.clicked();
+        }
         clicked => {
             root.clicked();
         }
@@ -168,7 +380,7 @@ export component TextLink inherits Rectangle {
         }
     }
 
-    Text {
+    link-text := Text {
         width: parent.width;
         text: root.text;
         color: ta.has-hover ? Theme.foreground : Theme.muted-foreground;
@@ -236,7 +448,8 @@ export component Equalizer inherits Rectangle {
     // 重新可见时回到活分支 = 全局绝对相位（与当前行切换语义一致）。
     property <duration> offset: 0ms;
     property <duration> frozen: 0ms;
-    property <duration> t: (root.paused || !self.visible) ? root.frozen : EqClock.t - root.offset;
+    property <duration> t: (root.paused || !self.visible || Theme.reduce-motion)
+        ? root.frozen : EqClock.t - root.offset;
 
     changed paused => {
         if (self.paused) {
@@ -469,8 +682,8 @@ export component HoverGroup inherits Rectangle {
         }
         let nx = HoverBus.item-pos.x - root.absolute-position.x;
         let ny = HoverBus.item-pos.y - root.absolute-position.y;
-        if (root.placed) {
-            // 换行触发黏滞形变（首次定位只跳位淡入，不形变）
+        if (root.placed && !Theme.reduce-motion) {
+            // 换行触发黏滞形变（首次定位只跳位淡入，不形变；减少动效时不形变）
             HoverBus.trigger-stretch({x: root.geo-x, y: root.geo-y}, {x: nx, y: ny}, root.viscosity);
         }
         root.geo-x = nx;
@@ -496,22 +709,22 @@ export component HoverGroup inherits Rectangle {
         animate x {
             duration: 140ms;
             easing: cubic-bezier(0.22, 1, 0.36, 1);
-            enabled: root.placed;
+            enabled: root.placed && !Theme.reduce-motion;
         }
         animate y {
             duration: 140ms;
             easing: cubic-bezier(0.22, 1, 0.36, 1);
-            enabled: root.placed;
+            enabled: root.placed && !Theme.reduce-motion;
         }
         animate width {
             duration: 180ms;
             easing: cubic-bezier(0.22, 1, 0.36, 1);
-            enabled: root.placed;
+            enabled: root.placed && !Theme.reduce-motion;
         }
         animate height {
             duration: 180ms;
             easing: cubic-bezier(0.22, 1, 0.36, 1);
-            enabled: root.placed;
+            enabled: root.placed && !Theme.reduce-motion;
         }
         animate opacity {
             duration: Theme.duration-normal;
@@ -567,6 +780,13 @@ export component HoverItem inherits Rectangle {
         命中截断行 hover 链，见 HoverGroup 注） */
     callback context-requested(length, length);
     out property <bool> hovered: item-touch.has-hover;
+    /** 是否进 Tab 链（默认否：侧栏导航行的焦点在行内 Button；roving 光标
+        列表的行由列表级 ListKeys 统一停靠；独立行——歌单项/文件夹行——置 true） */
+    in property <bool> tab-stop: false;
+    /** 焦点环圆角（与行圆角一致） */
+    in property <length> ring-radius: Theme.radius-md;
+    /** 外部强制焦点环 */
+    in property <bool> ring-forced: false;
     background: transparent;
 
     // 退出自校验的坐标快照：只有总线里仍是自己上次上报的几何时才收起，
@@ -575,11 +795,17 @@ export component HoverItem inherits Rectangle {
     property <length> reported-w: 0px;
     property <length> reported-h: 0px;
 
-    // TouchArea 不在布局中时默认 100% 填满父元素（builtins.slint）；
-    // 内容必须挂在 TouchArea **之内**（祖先关系），否则行内按钮会以
+    // KeyTouch 不在布局中时默认 100% 填满父元素（TouchArea 同款）；
+    // 内容必须挂在它的 TouchArea **之内**（祖先关系），否则行内按钮会以
     // 最顶层命中截断遍历，行级 hover 收不到
-    item-touch := TouchArea {
+    item-touch := KeyTouch {
+        tab-stop: root.tab-stop;
+        ring-forced: root.ring-forced;
+        ring-radius: root.ring-radius;
         mouse-cursor: pointer;
+        activated => {
+            root.clicked();
+        }
         clicked => {
             root.clicked();
         }
@@ -659,13 +885,20 @@ export component Scroll inherits Rectangle {
 
     function wake() {
         thumb-active = true;
-        hide-timer.restart();
+        // 单发（重）启动：Timer 从未启动过时 restart() 是空操作（PORTING
+        // 「Timer restart 陷阱」），必须显式置 running
+        if (hide-timer.running) {
+            hide-timer.restart();
+        } else {
+            hide-timer.running = true;
+        }
     }
 
     hide-timer := Timer {
         interval: 900ms;
         running: false;
         triggered => {
+            self.stop();
             thumb-active = false;
         }
     }

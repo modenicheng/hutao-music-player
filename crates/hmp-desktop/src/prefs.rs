@@ -1,4 +1,5 @@
-//! UI 偏好持久化（localStorage 对应物）：主题模式 / 音质偏好 / 音量。
+//! UI 偏好持久化（localStorage 对应物）：主题模式 / 音质偏好 / 音量 / 右键菜单 /
+//! 减少动效。
 //! 存 `config_dir()/desktop-ui.json`（与 storage 同一 XDG/Known-Folder 解析，
 //! 勿重复实现；Windows 上 = `%APPDATA%\hmp`——此前读 HOME 的版本在 GUI
 //! 拉起（无 HOME）时静默不持久化）。损坏文件按缺省处理。
@@ -17,6 +18,8 @@ pub struct Prefs {
     pub volume: f32,
     /// 右键菜单总开关（TrackMenu.enabled）
     pub context_menu: bool,
+    /// 减少动效（Theme.reduce-motion；关闭位移类动画）
+    pub reduce_motion: bool,
 }
 
 impl Default for Prefs {
@@ -26,6 +29,7 @@ impl Default for Prefs {
             quality: 2,
             volume: 1.0,
             context_menu: true,
+            reduce_motion: false,
         }
     }
 }
@@ -62,6 +66,8 @@ pub fn load() -> Prefs {
         quality: value["quality"].as_i64().unwrap_or(2) as i32,
         volume: value["volume"].as_f64().unwrap_or(1.0) as f32,
         context_menu: value["context_menu"].as_bool().unwrap_or(true),
+        // 旧版偏好文件没有这一项：按缺省（完整动效）
+        reduce_motion: value["reduce_motion"].as_bool().unwrap_or(false),
     }
     .clamp()
 }
@@ -75,6 +81,7 @@ pub fn store(prefs: &Prefs) {
         "quality": prefs.quality,
         "volume": prefs.volume,
         "context_menu": prefs.context_menu,
+        "reduce_motion": prefs.reduce_motion,
     });
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -95,6 +102,7 @@ mod tests {
             quality: -3,
             volume: f32::NAN,
             context_menu: true,
+            reduce_motion: false,
         }
         .clamp();
         assert_eq!(prefs.theme_mode, 2);

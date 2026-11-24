@@ -4,6 +4,7 @@ import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, Button, ButtonVariant } from "primitives.slint";
 import { CoverCard, PageHeader, SectionHeader } from "page-parts.slint";
+import { NewPlaylistForm } from "new-playlist.slint";
 import { TrackTable } from "track-table.slint";
 import { Nav, Route } from "nav.slint";
 import { Data, Player } from "stores.slint";
@@ -107,15 +108,46 @@ export component LibraryPage inherits Rectangle {
         }
 
         // —— 创建的歌单 ——
+        // 节头常驻并承载「新建歌单」（此前这里是 mock 期遗留的无入口动作；侧栏
+        // 收起成图标栏时本页是唯一入口）；没有歌单时不渲染空的卡片区
         VerticalLayout {
             spacing: Theme.space-4;
-
+        
             SectionHeader {
                 title: "创建的歌单";
+        
+                Button {
+                    icon: Icons.add;
+                    text: "新建歌单";
+                    small: true;
+                    variant: ButtonVariant.ghost;
+                    height: 28px;
+                    clicked => {
+                        new-list-pop.show();
+                    }
+        
+                    new-list-pop := PopupWindow {
+                        x: parent.width - self.width;
+                        y: parent.height + 6px;
+                        width: 264px;
+                        height: 156px;
+                        close-policy: close-on-click-outside;
+        
+                        NewPlaylistForm {
+                            create(name) => {
+                                Data.create-playlist(name);
+                                new-list-pop.close();
+                            }
+                            cancel => {
+                                new-list-pop.close();
+                            }
+                        }
+                    }
+                }
             }
-            playlist-grid := HorizontalLayout {
+            if Data.created-playlists.length > 0: playlist-grid := HorizontalLayout {
                 spacing: Theme.space-4;
-
+        
                 for card in Data.created-playlists: CoverCard {
                     width: Theme.grid-card-width(playlist-grid.width);
                     cover: card.cover;
@@ -129,9 +161,9 @@ export component LibraryPage inherits Rectangle {
         }
 
         // —— 收藏的歌单 ——
-        VerticalLayout {
+        if Data.favorited-playlists.length > 0: VerticalLayout {
             spacing: Theme.space-4;
-
+        
             SectionHeader {
                 title: "收藏的歌单";
             }

@@ -2,7 +2,7 @@
 // 显示实际生效档位 = min(用户偏好 Quality.selected, 曲目最高 Player.track-max-tier)；
 // 点击弹出四档选择（PopupWindow，向上展开），超出曲目提供的档位禁用。
 import { Theme } from "theme.slint";
-import { AppIcon } from "primitives.slint";
+import { AppIcon, KeyTouch } from "primitives.slint";
 import { Icons } from "icons.slint";
 import { Player, Quality, TrackPalette } from "stores.slint";
 
@@ -16,9 +16,12 @@ export component QualityBadge inherits Rectangle {
         easing: cubic-bezier(0.2, 0, 0, 1);
     }
 
-    touch := TouchArea {
+    touch := KeyTouch {
         mouse-cursor: pointer;
-        clicked => {
+        ring-radius: Theme.pill(self.height);
+        activate-on-click: true;
+        Tooltip { text: @markdown("音质偏好"); }
+        activated => {
             quality-pop.show();
         }
     }

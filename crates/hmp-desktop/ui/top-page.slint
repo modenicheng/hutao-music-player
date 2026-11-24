@@ -2,7 +2,7 @@
 // TopCategoryGet IPC（免登录）。点击榜单卡片进入 top-detail 详情。
 // 内容自撑高度（Scroll 约定，禁 parent.height）。
 import { Theme } from "theme.slint";
-import { Button, ButtonVariant } from "primitives.slint";
+import { Button, ButtonVariant, KeyTouch } from "primitives.slint";
 import { PageHeader, SectionHeader } from "page-parts.slint";
 import { Nav, Route } from "nav.slint";
 import { Data } from "stores.slint";
@@ -39,8 +39,10 @@ component TopCard inherits Rectangle {
     }
     background: Theme.surface-3;
 
-    touch := TouchArea {
-        clicked => {
+    touch := KeyTouch {
+        ring-radius: Theme.radius-lg;
+        activate-on-click: true;
+        activated => {
             root.clicked();
         }
     }
@@ -201,7 +203,9 @@ export component TopPage inherits Rectangle {
                     // 卡高随列宽动态（封面 4:3 + 文本区，D-8）
                     height: rows > 0 ? rows * card-h + (rows - 1) * 16px : 0px;
 
-                    property <int> cols: Math.max(1, Math.ceil((self.width + 16px) / 296px));
+                    // auto-fill 语义：装得下才加列（向下取整，与 CoverCardGrid 同式）。此前用
+                    // ceil，容器宽刚过一列阈值（如 281px）列数就从 1 跳到 2，卡宽从 280 塌到 132
+                    property <int> cols: Math.max(1, Math.floor((self.width + 16px) / 296px));
                     property <int> rows: Math.ceil(group.tops.length / cols);
                     property <length> card-h: card-w * 0.75 + 118px;
                     // 280px 为最大卡宽，窄窗按比例缩

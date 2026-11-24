@@ -12,6 +12,15 @@ export global Theme {
     callback set-mode(int);
     /** 深浅判定变化（含跟随系统时系统偏好漂移）→ Rust 重取曲目层调色 */
     callback retheme();
+    
+    /** 减少动效（DESIGN §5「prefers-reduced-motion 关闭位移类动效」）：true 时
+        关闭位移类动画——侧栏/面板/抽屉滑动、列表高亮滑块滑动与黏滞形变、
+        封面悬浮上移、播放页滑入滑出、歌词弹簧跟随与评论跳转改为直达、跳动条
+        静止；颜色与透明度过渡保留。Slint 1.18 不读取系统偏好，由设置→常规
+        的开关显式控制（Rust 持久化）。各处 `animate { enabled: !reduce-motion } */
+    in-out property <bool> reduce-motion: false;
+    /** 直接设置（设置页开关；Rust 侧持久化到 desktop-ui.json） */
+    callback set-reduce-motion(bool);
     changed dark => {
         retheme();
     }

@@ -5,7 +5,8 @@
 // 状态机：0=初始 1=搜索中 2=有结果 3=无结果（三组全空） 4=失败（离线）。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon, Button, ButtonVariant } from "primitives.slint";
+import { AppIcon, Button, ButtonVariant, KeyTouch } from "primitives.slint";
+import { KeyNav } from "keynav.slint";
 import { PageHeader, CoverCardGrid } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
 import { Nav, Route } from "nav.slint";
@@ -27,12 +28,14 @@ component SearchTab inherits Rectangle {
         ? Theme.accent.transparentize(0.88)
         : (touch.has-hover ? Theme.muted : transparent);
 
-    touch := TouchArea {
-        clicked => {
+    touch := KeyTouch {
+        ring-radius: Theme.pill(self.height);
+        activate-on-click: true;
+        activated => {
             root.clicked();
         }
     }
-
+    
     HorizontalLayout {
         padding-left: 12px;
         padding-right: 8px;
@@ -77,12 +80,14 @@ component ArtistCard inherits Rectangle {
     height: 130px;
     background: transparent;
 
-    touch := TouchArea {
-        clicked => {
+    touch := KeyTouch {
+        ring-radius: Theme.radius-lg;
+        activate-on-click: true;
+        activated => {
             root.clicked();
         }
     }
-
+    
     Rectangle {
         x: (parent.width - self.width) / 2;
         width: 96px;
@@ -119,6 +124,23 @@ export component SearchPage inherits Rectangle {
     init => {
         // 进入页面自动聚焦搜索框（DESIGN §3.2；Vue onMounted focus）
         input.focus();
+    }
+    
+    // Ctrl+F 的聚焦请求（已停在本页时组件不重挂载，init 不再触发）
+    property <int> focus-seq: KeyNav.focus-search-seq;
+    changed focus-seq => {
+        input.focus();
+    }
+    
+    /** 提交搜索。新查询回到「歌曲」tab：否则停在上次选的「歌手」tab 上，
+        新结果没有歌手时一进来就是「该分类下没有相关结果」 */
+    function submit() {
+        if (input.text == "") {
+            Data.search-state = 0;
+        } else {
+            Data.search-tab = 0;
+            Data.search(input.text);
+        }
     }
 
     VerticalLayout {
@@ -176,13 +198,9 @@ export component SearchPage inherits Rectangle {
                         color: Theme.foreground;
                         vertical-alignment: center;
                         horizontal-stretch: 1;
+                        // 空关键词：Rust 侧早退不重置状态，前端直接回初始态清掉旧结果
                         accepted => {
-                            // 空关键词：Rust 侧早退不重置状态，前端直接回初始态清掉旧结果
-                            if (self.text == "") {
-                                Data.search-state = 0;
-                            } else {
-                                Data.search(self.text);
-                            }
+                            root.submit();
                         }
                         edited => {
                             // 输入同步到全局（切页回来保留关键词）
@@ -190,13 +208,31 @@ export component SearchPage inherits Rectangle {
                         }
                     }
 
+                    // 清空键：有输入时出现——一键清掉关键词与旧结果、回到输入框
+                    if input.text != "": Button {
+                        icon: Icons.close;
+                        icon-only: true;
+                        icon-size: 16px;
+                        small: true;
+                        tool-tip: "清空";
+                        width: 32px;
+                        height: 32px;
+                        clicked => {
+                            // 程序化清空不触发 edited：全局关键词在此显式同步
+                            input.text = "";
+                            Data.search-query = "";
+                            Data.search-state = 0;
+                            input.focus();
+                        }
+                    }
+                    
                     Button {
                         variant: ButtonVariant.default;
                         text: "搜索";
                         small: true;
                         enabled: Data.search-state != 1 && input.text != "";
                         clicked => {
-                            Data.search(input.text);
+                            root.submit();
                         }
                     }
                 }

@@ -834,3 +834,29 @@ daemon 侧实测见上（探针法：起 HEAD daemon + 直发 CoverGet，观察�
 **修复（键控幂等同步，废弃每帧重设）**：元数据层（标题/歌手/专辑/封面）按 `PREV_MID` 换曲门控，10Hz 推送只逐帧更新真正逐帧变化的传输/进度态；音质徽章按 `(mid, tier)` 门控（同曲重装载降档可翻新）。封面经 `now_playing_cover`（纯函数）产出 `(封面键, 真图?)` 四形态键：`file:{path}` 本地直读 / `real:{mid}|{url}` 会话已取回（新 `RESOLVED_COVERS` 备忘 url→盘路径——换曲重进/重装载时 REQUESTED 在账不会重发，靠此直读盘出真图）/ `pending:{mid}|{url}` 待取回 / `prog:{mid}` 占位；`sync_now_playing_cover` 键不变不动 `Player.cover`（异步真图不再被覆盖）。取色键随封面键走：`pending:` → `real:` 必然异键，回包重算自然触发（顺修②）。`spawn_cover_fetch` 调用点保持逐推送（即退避重试引擎，退避窗口内纯记账查询）。
 
 **验证**：clippy -D warnings 零警告；hmp-desktop 103 lib 测试全绿（新增 `now_playing_cover_key_semantics` 钉四形态键 + 桶填充尺寸契约）；daemon 侧实探（命名管道直发 CoverGet）确认盘缓存毫秒回，问题全在桌面端覆盖互踩。附带发现：image 0.25 `thumbnail` 为**桶填充语义（可放大）**，`decode_512_bucket_serves_derived_directly` 既有测试已钉死（400×100 → 512×128），非回归，测试按此口径断言。
+
+## §29 桌面端 Slint 1.18 升级回归 + M7 收口（2026-11-25，用户报「继续完善 UI/交互逻辑」）
+
+**零号发现（依赖轮遗留，静默三周）**：S11（2026-11-04）把 Slint 从 1.17 升到 1.18.1 后，`.slint` 里 `timer.restart()` 对**从未启动过**的 `Timer { running: false }` 变成空操作（编译为 `slint::Timer::restart()`，要求此前 `start()` 过；1.17 行为不同）。本仓六处「running: false + restart()」全部失效，且无头截图与既有测试都看不出来：
+
+| 位置 | 失效行为 |
+|---|---|
+| now-playing `page-anim` | 评论跳转键无效（插值定时器从不启动） |
+| now-playing `take-over-timer` | 歌词手动滚动后再也不恢复自动跟随 |
+| queue-drawer `unmount-timer` | 抽屉关闭后永不卸载（常驻挂载，队列可滚时拦走内容区右缘点击/拖拽） |
+| app `overlay-unmount-timer` | 播放页关闭后永不卸载（整棵树常驻，歌词跟随 16ms 定时器被 10Hz 状态推送反复拉起——抵消 S9 的静置零唤醒） |
+| Scroll `hide-timer` | 滚动条拇指不再自动隐藏 |
+| VolumeControl（借 EqClock 当时钟，S9 R3 起 EqClock 仅播放期走表） | 暂停/未播放时悬停后移开，弹层永远不收 |
+
+**修法**：统一改成版本无关写法 `if (t.running) { t.restart(); } else { t.running = true; }` + `triggered` 内 `self.stop()`；音量宽限改真正的 Timer。回归测试 `crates/hmp-desktop/tests/soft_timers.rs`（队列/播放页软卸载两轮、评论跳转双向、歌词跟随恢复）、`volume_control.rs`。**纪律**：依赖轮升级 Slint 后必须真机过一遍定时器驱动的行为（软卸载、自动隐藏、插值滚动），这类失效不产生编译错误也不掉测试。
+
+**M7（PORTING 清单里唯一未勾项）收口**：键盘语义、焦点可达、减少动效、窄窗断点——设计入册 DESIGN.md v0.14，实现与机制事实入册 PORTING.md「M7 键盘 / 焦点 / 减动效」与「Slint 机制坑位（1.18 增补）」。同轮修掉的既有缺陷：根作用域未关 `focus-on-click` 致键盘焦点离开后首次点击被吞；ESC 收口写在控件的兄弟作用域上；`TextLink` 无首选宽度；歌手链接命中区越界；节头链接文案与动作不符；路由切换不动滚动位置；「新建歌单」无动作；音量弹层缺 Vue 的钉住语义。
+
+**验证**：`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets --all-features -- -D warnings` 零警告；`cargo test -p hmp-desktop` 105 单测 + 19 集成二进制全绿（新增 9 个）；全仓逐 crate 见本轮提交说明；窄窗 683×800 十一页 + 播放页 + 抽屉无头截图核对。
+
+**开放项（新）**：
+- 播放页 overlay 打开时无模态焦点陷阱：Tab 仍会经过被遮盖的主界面控件。
+- 弹层内部（右键菜单 / 音质选择）方向键导航未做。
+- 侧栏歌单行只有行窗内的才是 Tab 停靠点。
+- 歌单重命名/删除仍只有 CLI（`hmp playlist rename/delete`）；UI 的右键菜单是曲目语义，歌单级菜单需新面板。
+- 窄窗设置行描述文字截断（T8，既有）。

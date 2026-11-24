@@ -2,7 +2,7 @@
 // 横向音量条 / 分类卡）。禁用档位 = 诚实"未接线"展示（DESIGN.md 纪律）。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon } from "primitives.slint";
+import { AppIcon, KeyTouch } from "primitives.slint";
 import { Nav, Route } from "nav.slint";
 
 // —— 设置组卡片：中性表面 + 组标题 + 行集合（@children）———
@@ -132,10 +132,14 @@ export component PillOption inherits Rectangle {
     accessible-label: text;
     accessible-enabled: root.enabled;
 
-    touch := TouchArea {
+    // 键盘可达（KeyTouch）：enabled 同时是 FocusScope 的 enabled → 禁用档位
+    // 自动退出 Tab 链；Enter/空格 = 点击
+    touch := KeyTouch {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
-        clicked => {
+        ring-radius: Theme.pill(self.height);
+        activate-on-click: true;
+        activated => {
             root.clicked();
         }
     }
@@ -225,9 +229,11 @@ export component Switch inherits Rectangle {
         easing: cubic-bezier(0.2, 0, 0, 1);
     }
 
-    touch := TouchArea {
+    touch := KeyTouch {
         mouse-cursor: pointer;
-        clicked => {
+        ring-radius: Theme.pill(self.height);
+        activate-on-click: true;
+        activated => {
             root.checked = !root.checked;
             root.toggled(root.checked);
         }
@@ -286,7 +292,13 @@ export component HSlider inherits Rectangle {
         y: (parent.height - self.height) / 2;
     }
 
-    TouchArea {
+    KeyTouch {
+        ring-radius: Theme.pill(self.height);
+        // 滑杆不消费 Enter/空格（空格冒泡给播放/暂停）；←/→ 每步 5%
+        activatable: false;
+        stepped(axis, dir) => {
+            root.changed(clamp(root.value + dir * 0.05, 0.0, 1.0));
+        }
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
                 root.changed(clamp(self.mouse-x / self.width, 0.0, 1.0));
@@ -321,6 +333,7 @@ export component CategoryCard inherits Rectangle {
         animate y {
             duration: Theme.duration-normal;
             easing: cubic-bezier(0.2, 0, 0, 1);
+            enabled: !Theme.reduce-motion;
         }
         animate drop-shadow-blur {
             duration: Theme.duration-normal;
@@ -393,9 +406,11 @@ export component CategoryCard inherits Rectangle {
         }
     }
 
-    touch := TouchArea {
+    touch := KeyTouch {
         mouse-cursor: pointer;
-        clicked => {
+        ring-radius: Theme.radius-lg;
+        activate-on-click: true;
+        activated => {
             root.clicked();
         }
     }

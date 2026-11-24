@@ -5,10 +5,28 @@
 // - origin-y：Scroll 自身窗口系顶（不含滚动偏移，绝对定位链稳定）
 // - view-h：视口高（flick.height）；TestingBackend/无头环境未绑定时为 0，
 //   消费方据此退化为全量渲染
+//
+// 另有**滚动请求**通道（request-y / request-seq）：Rust（导航归顶 / 返回
+// 恢复）与 .slint（列表键盘光标滚动跟随）想动页面时只写这两个量，由
+// app.slint 的 page-scroll 监听 request-seq 后回写 scroll-offset。直接写
+// Viewport.y 不会动 Flickable——y 是 scroll-offset 的单向镜像。
 export global Viewport {
     in-out property <length> y;
     in-out property <length> origin-y;
     in-out property <length> view-h;
+
+    /** 请求滚动到的内容坐标（视口顶；≤ 0）。app.slint 按当时的视口/内容高
+        钳制——Flickable 对程序写入的越界偏移不钳制（钳制只在交互滚动
+        路径），异步页内容未落地时不钳会整页滚空 */
+    in-out property <length> request-y: 0px;
+    /** 滚动请求序号：每次请求 +1（值不变 changed 不触发，故用序号） */
+    in-out property <int> request-seq: 0;
+
+    /** 请求把页面滚到内容坐标 y */
+    public function scroll-to(y: length) {
+        root.request-y = y;
+        root.request-seq += 1;
+    }
 }
 
 // 队列抽屉行窗（队列封面按窗回填，200MB 内存预算轮）：queue-drawer 的行

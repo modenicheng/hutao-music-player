@@ -6,9 +6,12 @@
 //   （np-console-clearance），右侧直角；hover 底与当前行高亮用
 //   TrackPalette（ctx-* / accent-soft），暗色下底为 track-deep→surface-1
 //   渐变、面板前景换 deep-fg（对齐 Vue .queue-drawer.themed）。
+// 键盘（M7 焦点可达）：行列表是 roving 光标（↑/↓ 移动、Enter 播放该位置、
+// Delete/Backspace 从队列移除，滚动跟随），随面板挂载/卸载；「清空」是两步
+// 确认——上千首队列误触一次就没了且无从恢复。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon, Button, Equalizer, HoverGroup, HoverItem, Scroll } from "primitives.slint";
+import { AppIcon, Button, ButtonVariant, Equalizer, HoverGroup, HoverItem, ListKeys, Scroll } from "primitives.slint";
 import { QueueRow } from "data.slint";
 import { Player, TrackPalette } from "stores.slint";
 import { TrackMenu, MenuContext, TrackMenuPanel } from "context-menu.slint";
@@ -33,19 +36,77 @@ export component QueueDrawer inherits Rectangle {
     // 表现为"无法拖动"）；visible=false 才真正退出命中测试。
     property <bool> qv <=> Player.queue-visible;
     property <bool> fade-hold: false;
-    property <bool> panel-mounted: qv || fade-hold;
+    out property <bool> panel-mounted: qv || fade-hold;
+
+    // —— 清空两步确认 ——
+    /** 确认态：首次点「清空」进入（文案变「确认清空」），3s 内再点才真清；
+        超时、关闭抽屉即撤回 */
+    property <bool> confirm-clear: false;
+    confirm-timer := Timer {
+        interval: 3s;
+        running: false;
+        triggered => {
+            self.stop();
+            root.confirm-clear = false;
+        }
+    }
+
+    // —— 键盘光标（roving；模式同 track-table）———
+    /** 光标行绝对下标；-1 = 尚未进入（首次 ↑/↓ 或获得焦点时落到首个可见行） */
+    in-out property <int> cursor: -1;
+    /** 当前有效光标行（队列缩短后钳住；空队列/无光标 = -1） */
+    out property <int> cursor-row: Player.queue.length == 0 || cursor < 0 ? -1 : min(cursor, Player.queue.length - 1);
+
+    function move-cursor(delta: int) {
+        if (Player.queue.length == 0) {
+            return;
+        }
+        cursor = cursor < 0
+            ? (delta > 0 ? root.first-visible-row() : Player.queue.length - 1)
+            : clamp(cursor + delta, 0, Player.queue.length - 1);
+        root.reveal-row(cursor);
+    }
+
+    /** 列表视口顶部第一个可见行（视口高未知的无头环境退化为首行） */
+    function first-visible-row() -> int {
+        return qscroll.view-height <= 0px ? 0
+            : clamp(Math.ceil((-qscroll.scroll-offset - rows.list-top) / rows.pitch),
+                0, max(Player.queue.length - 1, 0));
+    }
+
+    /** 把第 index 行滚进列表视口（已完整可见则不动） */
+    function reveal-row(index: int) {
+        if (qscroll.view-height <= 0px) {
+            return;
+        }
+        let top = rows.list-top + index * rows.pitch;
+        let bottom = top + rows.pitch;
+        let view-top = -qscroll.scroll-offset;
+        let target = top < view-top ? top
+            : bottom > view-top + qscroll.view-height ? bottom - qscroll.view-height
+            : -1px;
+        if (target >= 0px) {
+            qscroll.scroll-offset = -target;
+        }
+    }
     changed qv => {
         if (self.qv) {
             self.fade-hold = false;
         } else {
+            // 关抽屉撤回清空确认
+            root.confirm-clear = false;
+            confirm-timer.stop();
             self.fade-hold = true;
-            unmount-timer.restart();
+            // 单发启动（restart() 对从未启动的 Timer 是空操作，PORTING
+            // 「Timer restart 陷阱」——1.18 升级后本处曾失效，面板关着也常驻）
+            unmount-timer.running = true;
         }
     }
     unmount-timer := Timer {
         interval: Theme.duration-normal + 50ms;
         running: false;
         triggered => {
+            self.stop();
             root.fade-hold = false;
         }
     }
@@ -105,17 +166,21 @@ export component QueueDrawer inherits Rectangle {
         drop-shadow-blur: 32px;
         drop-shadow-color: #241F1B.transparentize(0.78);
         drop-shadow-offset-y: 8px;
+        // 几何过渡是位移类：减少动效时直接到位（淡入淡出保留）
         animate x {
             duration: Theme.duration-normal;
             easing: cubic-bezier(0.2, 0, 0, 1);
+            enabled: !Theme.reduce-motion;
         }
         animate y {
             duration: Theme.duration-normal;
             easing: cubic-bezier(0.2, 0, 0, 1);
+            enabled: !Theme.reduce-motion;
         }
         animate height {
             duration: Theme.duration-normal;
             easing: cubic-bezier(0.2, 0, 0, 1);
+            enabled: !Theme.reduce-motion;
         }
 
         // themed 态底：整只跟随专辑色（亮=accent-soft→surface-2 60%，
@@ -135,6 +200,34 @@ export component QueueDrawer inherits Rectangle {
         animate opacity {
             duration: Theme.duration-normal;
             easing: cubic-bezier(0.2, 0, 0, 1);
+        }
+
+        // 列表级键盘焦点：纯 FocusScope、无 TouchArea，不参与指针命中。面板
+        // visible=false 时随之退出 Tab 链
+        drawer-keys := ListKeys {
+            width: parent.width;
+            height: parent.height;
+            available: Player.queue.length > 0;
+            step(delta) => {
+                root.move-cursor(delta);
+            }
+            activate => {
+                if (root.cursor-row >= 0) {
+                    Player.play-at(root.cursor-row);
+                }
+            }
+            // Delete / Backspace = 从队列移除光标行（后一行顶上来，光标不动）
+            remove => {
+                if (root.cursor-row >= 0) {
+                    Player.remove-at(root.cursor-row);
+                }
+            }
+            focus-gained(reason) => {
+                // 进入即有可见光标
+                if (root.cursor < 0 && Player.queue.length > 0) {
+                    root.cursor = root.first-visible-row();
+                }
+            }
         }
         // 隐藏态延迟一个动画周期后 visible=false 软卸载（见组件头部说明）：
         // opacity 0 不参与命中剔除，常驻挂载时面板内部的 TouchArea/滚动条
@@ -173,14 +266,28 @@ export component QueueDrawer inherits Rectangle {
                     }
                 }
 
+                // 两步确认：首次点击只进入确认态，3s 内再点才真清
                 Button {
-                    text: "清空";
+                    text: root.confirm-clear ? "确认清空" : "清空";
+                    variant: root.confirm-clear ? ButtonVariant.default : ButtonVariant.ghost;
                     small: true;
-                    tool-tip: "清空播放列表";
+                    tool-tip: root.confirm-clear ? "再点一次清空整个播放列表" : "清空播放列表";
                     visible: Player.queue.length > 0;
                     height: 32px;
                     clicked => {
-                        Player.clear-queue();
+                        if (root.confirm-clear) {
+                            root.confirm-clear = false;
+                            confirm-timer.stop();
+                            Player.clear-queue();
+                        } else {
+                            root.confirm-clear = true;
+                            // 单发（重）启动：restart() 对从未启动的 Timer 是空操作
+                            if (confirm-timer.running) {
+                                confirm-timer.restart();
+                            } else {
+                                confirm-timer.running = true;
+                            }
+                        }
                     }
                 }
                 Button {
@@ -220,7 +327,7 @@ export component QueueDrawer inherits Rectangle {
                         // 掺入窗口变量会与滚动偏移绑定成环）。本组件深埋抽屉面板，
                         // 滚动源是本文件自有 Scroll（命名引用即可，无需 Viewport
                         // 全局——那只服务顶层页面滚动）。
-                        Rectangle {
+                        rows := Rectangle {
                             x: 0;
                             // 布局子元素：宽度交给布局分配（勿写 width: parent.width，
                             // 布局子元素引用父宽首选宽会成环，PORTING.md 坑位）；显式
@@ -282,6 +389,10 @@ export component QueueDrawer inherits Rectangle {
                                 // `row` 名在 for 体内不可作属性名，改 rowd）
                                 property <int> abs-index: parent.window-start + offset;
                                 property <QueueRow> rowd: Player.queue[abs-index];
+                                // 键盘光标行高亮（仅列表持有键盘焦点时）：底色与
+                                // hover 滑块同一套（主界面中性 / themed 专辑色）
+                                background: drawer-keys.has-focus && root.cursor-row == abs-index
+                                    ? (root.themed ? TrackPalette.accent-soft : Theme.muted) : transparent;
                                 x: 0;
                                 y: abs-index * pitch;
                                 width: parent.width;

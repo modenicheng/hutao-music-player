@@ -32,8 +32,119 @@
 - [x] **M4 内容页（本地投影轮，2026-09-07）**：歌单详情（playlist_tracks + 本地/QQ 元数据补全，头部 N 首+总时长）/ 专辑详情（library_albums 组行 + local_tracks_by_album，show-album=false）/ 歌手详情（track_artists 命中 + 展示串最长包含归一 + 曲目专辑聚合网格）；CoverCardGrid 换行网格；TrackTable 歌手/专辑链接接通（本地投影参数=展示名，空参禁用）。首页/发现/榜单/搜索仍为诚实占位（等 daemon 内容读接口，AUDIT §8.2）
 - [x] **M5 设置**：总览三分类卡 + 常规（主题三选真实生效，Theme.set-mode）/ 播放（音质四档 Quality.select + 默认音量 HSlider→Player.set-volume 双写）/ 账号（账号读接口未接入 AUDIT §8.6：资料卡诚实占位 + 退出登录禁用 + FactRow "—"）
 - [x] **M6 播放页（2026-09-09 收口，余一项后端阻塞）**：全屏 overlay（slide-bottom 入/退场 + 软卸载）、RulerProgress 刻度条、控制台、OKLab 取色（TrackPalette global 覆写，见下方 M6 收口记录）、歌词（弹簧跟随+景深+无滚动条）、评论区（编辑部式重排 + 112px 固定过渡带）、队列抽屉 themed 态；**未做**：逐字扫色（QRC 词级时间轴未投影，AUDIT §14）
-- [ ] **M7 收尾**：ESC/键盘语义、焦点可达、reduced-motion 免动画、窄窗（⅓ 宽 683px）断点核对
+- [x] **M7 收尾（2026-11-25）**：键盘语义（空格/Esc/Ctrl+F/Alt+←/方向键与翻页键，ESC 收口在全窗公共祖先）、焦点可达（KeyTouch/ListKeys 基元：全控件 Tab 停靠 + Enter/空格激活 + 焦点环，曲目表/队列 roving 光标）、减少动效开关（设置→常规，关闭位移类动画）、窄窗 683px 断点核对；详见下方「M7 键盘 / 焦点 / 减动效」。已知局限（模态焦点陷阱、弹层内方向键、窄窗设置行截断）同节
 - [~] **M8 数据接线**：mock → daemon IPC（2026-09-07 完成首轮：播放/队列/收藏歌单/最近/本地库/侧栏歌单真数据，详见下方 M8 接线记录）；内容页/歌词已接入（ff8050e 内容域 + M6 歌词页）；播放页喜欢键真接线（2026-10-23：换曲后台直读库 `relation_desired` 回填收藏态 + 点击发 `Request::Favorite` IPC 乐观翻转，失败/受理均回读库收敛、反馈条人话，「我喜欢」页经 LibraryChanged→schedule_refresh 自动同步）；**下载/已购两页后端无对应域，诚实空态**（2026-09-29 删除 mock.rs，AUDIT §8.5）
+
+## M7 键盘 / 焦点 / 减动效（2026-11-25）
+
+**键盘模型（`ui/keynav.slint`）**
+
+- 鼠标点击不改变键盘焦点；Tab / Shift+Tab 进入「键盘模式」，控件显示
+  `--ring` 焦点环；任意指针按下即退出（Rust `keynav::pointer_activity`，
+  生产路径 = main.rs 的 `on_winit_window_event` 钩子，先于 Slint 派发执行；
+  测试后端无 winit 钩子，测试显式调用）。
+- 焦点让出是**两段式**：持焦控件 `clear-focus()` 并给 `KeyNav.focus-released`
+  +1，app.slint 监听后把焦点交还根作用域 `esc-scope`。不能只 clear：空格/ESC
+  的收口点是根的子孙，焦点清成「无」后按键无人接收。焦点在 TextInput 上时
+  无控件登记，搜索框不会被误抢焦点。
+- 根作用域声明在元素树**最前**（Tab 遍历按声明序环绕：第一站 = 侧栏首页，
+  Shift+Tab 第一站 = 标题栏关闭钮）、不进 Tab 链、`focus-on-click: false`。
+- 路由切换 / 播放页 / 队列抽屉开关时焦点一律交还根作用域：聚焦控件会随
+  页面卸载（Slint 直接丢弃焦点项，此后空格/ESC/Shift+Tab 无人接收，直到再
+  按一次 Tab），或被全屏层盖住（空格会再激活底下那个看不见的按钮）。
+
+**基元（primitives.slint）**
+
+- `KeyTouch`：FocusScope 包住 TouchArea 的可键盘命中区。指针面与 TouchArea
+  同名透传（`x := TouchArea` 换成 `x := KeyTouch` 即接通）；Enter/空格激活
+  （`activated`；`activate-on-click` 让点击走同一处，动作不写两遍）、方向键
+  步进（`stepped(axis, dir)`）。开关：`activatable: false`（滑杆类，空格冒泡
+  给播放/暂停）、`tab-stop: false`（roving 列表的行内单元格）、`ring-forced`
+  （列表子光标落在行内链接上时显示焦点环）。**调用点的子元素必须经
+  `@children` 挂在它的 TouchArea 之内**（HoverItem/行内链接即此）：Slint 按声明
+  逆序访问子元素，更深处的内容（内层按钮）一旦接受 Moved，同层更早声明的
+  兄弟就访问不到——hover 传感层必须是内容的祖先（hover_slider 测试守护）。
+- `ListKeys`：列表级 roving 焦点（纯 FocusScope、无 TouchArea，不参与指针
+  命中）：↑/↓ `step`、←/→ `step-horizontal`、Enter/空格 `activate`、
+  Delete/Backspace `remove`。长列表不让每行进 Tab 链——窗口化虚拟化只实例化
+  一窗行，Tab 走不到窗外的行。
+- 曲目表：整表一个停靠点。光标行中性底高亮（仅列表持焦时显示，鼠标点击
+  不留「选中」残影）、滚动跟随（`Viewport.scroll-to`；光标按**绝对下标**记，
+  不受行窗影响）、←/→ 行内子光标在「行 / 歌手链接 / 专辑链接」间移动，格位
+  按该行实际可用的链接排（无歌手链接的行第 1 格就是专辑）。队列抽屉同款
+  （Enter = 跳播该位置，Delete = 从队列移除，后一行顶上来光标不动）。
+
+**全局快捷键**（app.slint `space-scope`——全窗所有控件的公共祖先）
+
+| 键 | 作用 |
+|---|---|
+| 空格 | 播放/暂停（焦点在可激活控件上时 = 按下该控件） |
+| Esc | 从最内层浮层起收：钉住的音量弹层 → 播放页 + 抽屉 → 播放页 → 抽屉（PopupWindow 类弹层由框架先关） |
+| Ctrl+F | 到搜索页并聚焦搜索框（已在本页时经 `KeyNav.focus-search-seq` 请求聚焦） |
+| Alt+← | 与当前页页头的返回键同一语义：库页子页（最近播放/音乐库/下载/已购）回「我喜欢」，其余带返回键的页走历史栈；顶层页无操作（否则「我喜欢 → 最近播放 → 返回」会再退回最近播放） |
+| ↑/↓ PageUp/PageDown Home/End | 页面滚动（播放页打开时滚播放页内容列；焦点在列表/滑杆上时方向键已被其消费） |
+
+ESC **必须收口在公共祖先上**：此前写在根作用域（各控件的兄弟）里，键盘
+焦点一旦落在任何控件上（如刚按过「清空」），ESC 沿祖先链冒泡到不了它。
+
+**其余交互收口**
+
+- 音量弹层（Vue pinned 语义）：点击图标 = 静音切换并**钉住**；指针在控件外
+  按下或 Esc 解除；触发钮是停靠点，↑/→ +5%、↓/← −5%，聚焦期间保持展开。
+  「点在控件外」的判定用 **hover 态**——changed 回调在 Pressed 派发之前执行，
+  此时控件的 pointer-event(down) 还没到。收起宽限改用真正的 Timer（见下
+  Timer 陷阱；旧实现借 EqClock 当时钟，而 EqClock 自 S9 R3 起只在播放期走表：
+  暂停/未播放时悬停后移开，弹层永远不收）。
+- 导航滚动位置：前进到新页归顶；返回恢复到离开时的位置（历史栈条目带
+  滚动偏移；`Viewport.scroll-to` 请求通道——`request-y`/`request-seq`，app.slint
+  按当时内容高钳制后回写——加 60/250ms 延后重发，覆盖内容异步落地的页面）。
+  此前路由切换从不碰滚动偏移：从长列表中部点进详情页落在新页中部，返回又
+  落在详情页遗留的偏移。
+- 「清空」播放列表两步确认：首次点击只进入确认态（文案变「确认清空」），
+  3s 内再点才真清；超时、关闭抽屉撤回。
+- 评论跳转键双向：歌词首屏 → 评论区顶；已在评论区（滚过半屏）→ 回歌词。
+- 「新建歌单」接线（`ui/new-playlist.slint`）：侧栏「+」与「我喜欢」页节头的
+  命名弹层 → `Data.create-playlist` → menu_bridge 发 `PlaylistWriteOp::Create`
+  → `Response::Created(id)` → 刷新库 + 直达新歌单页；空名/全空白给反馈。
+  此前「+」是 mock 期遗留的无动作按钮。
+- 搜索页：新查询回到「歌曲」tab（否则停在上次的「歌手」tab 上，一进来就是
+  「该分类下没有相关结果」）；清空键；tab 胶囊与歌手卡可键盘到达。
+- 减少动效（设置→常规，`Theme.reduce-motion`，持久化 `reduce_motion`）：
+  关闭**位移类**动画——侧栏宽度/窄栏两级滑动/分组折叠、HoverGroup 滑块滑动
+  与黏滞形变、封面卡与分类卡悬浮、抽屉几何过渡、播放页滑入滑出、歌词弹簧
+  跟随与评论跳转改为直达、跳动条静止；颜色与透明度过渡保留。Slint 1.18 不
+  读取系统的「减少动态效果」偏好，只能显式开关。
+
+**同轮缺陷修复**
+
+- 根作用域未关 `focus-on-click`：键盘焦点一离开它（点过搜索框 / Tab 到别处），
+  下一次点击的 Pressed 就被它的「点击聚焦」accept 掉——首次点击被吞（既有
+  隐患，接入 Tab 导航后必现）。
+- `TextLink` 无首选宽度（内部文本 width 绑的是 parent.width）：放进任何布局
+  都拿到 0 宽、文字溢出错位。
+- 曲目表歌手链接命中区铺到标题列末尾：点歌名右侧的空白会跳歌手页（想播
+  这一行却被带走）。现收在歌手名文本宽内。
+- 「新歌速递」节头链接写着「更多」，点了是替换整队播放 → 文案/图标如实
+  （`SectionHeader` 新增 `more-label` / `more-icon` / `more-icon-rotation`）。
+- 我喜欢页空歌单分节不留死标题；首页登录引导卡可点（「去登录」→ 账号设置）；
+  榜单卡列数 ceil→floor（容器宽刚过一列阈值时卡宽从 280 塌到 132）；侧栏
+  正在浏览的歌单常亮；控制台/标题栏钮补 tool-tip；播放条进度条无曲时不可点。
+
+**已知局限**
+
+- Tab 遍历是整窗一条链：播放页 overlay 打开时 Tab 仍会经过被遮盖的主界面
+  控件（无模态焦点陷阱）。
+- 侧栏歌单行只有行窗内的才是停靠点（窗外行需先滚动）。
+- 弹层内部（右键菜单 / 音质选择）的方向键导航未做。
+- 窄窗（683px）下设置行的描述文字被截断（T8：SettingRow 不换行降级）；
+  播放条曲名簇按「不与居中控制排重叠」收紧到约 1 个字。
+
+**验证**：`cargo test -p hmp-desktop` 105 单测 + 19 集成二进制全绿。新增
+`tests/keyboard.rs`（Tab 遍历/激活/指针退出/首次点击不被吞）、
+`volume_control.rs`、`navigation_scroll.rs`、`list_keys.rs`（曲目表光标），
+`queue_keys.rs`、`search_page.rs`、`new_playlist.rs`、`soft_timers.rs`、
+`reduce_motion.rs`。视觉验收：`shot-headless` 新增 `--size WxH` / `--tab N` /
+`--keys A,B`，窄窗 683×800 十一页 + 播放页 + 抽屉、亮暗焦点环与光标行截图。
 
 ## 已定工程决策
 
@@ -157,7 +268,17 @@ Rust 预烘焙：封面等比降采样（≤480）+ 3 趟盒滤波（半径随�
 - 窗口标题栏 CJK 方框是 niri 装饰条字体问题，与应用无关；
 - ~~**无窗口关闭按钮**~~：已由自绘标题栏补齐（`title-bar.slint` minimized/maximized/close 三钮 + winit drag 桥 + 8px resize 边，2026-09-09）。
 
-## Slint 机制坑位（源码确证，2026-09-06）
+## Slint 机制坑位（源码确证，2026-09-06；1.18 增补见末尾）
+
+- **Slint 版本已是 1.18.1**（S11 依赖轮 2026-11-04 自 1.17 升上来，`Cargo.toml` 下限 `1.18`）。以上各条是 1.17 口径；下面是 1.18.1 源码 + 测试后端实测的事实（2026-11-25）：
+- **`Timer { running: false }` 首次调 `restart()` 是空操作**（「Timer restart 陷阱」）。`.slint` 的 `timer.restart()` 编译成 `slint::Timer::restart()`，要求此前 `start()` 过；真正驱动启停的是 `running`。单发（重）启动的版本无关写法：`if (t.running) { t.restart(); } else { t.running = true; }`，并在 `triggered` 里 `self.stop()`。初始 `running: true` 的计时器 `restart()` 正常。升级后本仓六处静默失效且无头截图看不出来：评论跳转键、歌词手动滚动后恢复跟随、队列抽屉/播放页软卸载（关着仍常驻挂载）、滚动条拇指自动隐藏——回归测试 `tests/soft_timers.rs`。
+- **鼠标事件不冒泡到祖先**：自顶向下派发、兄弟按声明**逆序**访问，子元素 accept 即中止，祖先的 `input_event` 不会被调；hover 是 TouchArea 在 filter 阶段自己置位的。hover 传感层必须是内容的祖先，不能是声明在前的兄弟。
+- **FocusScope 默认铺满父元素且 `focus-on-click` 为真**，无焦点时收到 Pressed 会聚焦并 accept（吞掉这次点击）。全窗范围的根作用域必须关掉它。
+- **`changed` 回调相对赋值是延迟的，相对事件派发是超前的**：`process_mouse_input` 开头就跑一轮 change handlers，控件此时还没收到该事件。要在指针回调里裁决「这次按下点在哪」，用按下前已就绪的信号（hover 态），不能靠 `pointer-event(down)` 置标记。
+- **`animate { enabled: cond }`** 可按状态关掉某条动画（减少动效开关的落点）；关闭后属性直接取绑定值。
+- 小事实：无修饰符的 `property` 是 private，跨组件读要 `out`；`@markdown()` 只吃字面量/模板串 `"\{expr}"`（花括号内可嵌双引号字符串，单引号是字符字面量）；`Key` 没有 `Enter`（只有 `Return`）；滚轮回调参数类型名是 `PointerScrollEvent`；函数局部量是 `let`（`var` 解析错）；`length` getter 在 Rust 侧就是 `f32`；`slint::Timer::single_shot` 返回单元类型（`let _ =` 触发 clippy `let_unit_value`）。
+
+以下各条为 1.17 口径：
 
 - **has-hover 由命中的最顶层 TouchArea 独占**（i-slint-core input.rs：TouchArea 对 Moved 返回 EventAccepted，中止向更低兄弟的遍历；只沿祖先链传播）。行级 hover 传感必须把 TouchArea 做成内容的**祖先**（包住 @children），垫底兄弟永远收不到。行内更深的按钮仍各自拿 grab，不抢行 hover。
 - **animate 只在绑定值变化时触发**（properties_animations.rs 的 ShouldStart 状态由原绑定脏标记驱动），恒定绑定永不动画；**负 delay 被当 `<=0` 即无延迟**，无 CSS 式错相。持续循环动画要用 Timer 驱动公式求值（Equalizer 的 EqClock 方案：33ms 共享时钟 + 余弦高度 + `paused ? frozen : t-offset` 三元暂停冻结——惰性分支不注册依赖，暂停零重绘）。
@@ -193,7 +314,7 @@ Rust 预烘焙：封面等比降采样（≤480）+ 3 趟盒滤波（半径随�
 ## 构建与启动（M8 起）
 
 - 构建：`cargo build --release`（桌面启动会自动拉起 daemon，需要 `hmp` 二进制在 PATH 或与桌面二进制同目录）。
-- 测试：`cargo test -p hmp-desktop`（mock/nav/format 纯逻辑单测 + backend/library_view 投影单测）。
+- 测试：`cargo test -p hmp-desktop`——单测 + testing backend 集成测试。集成测试每个二进制一个 `#[test]`（`init_no_event_loop` 进程级单例）：指针链路（drag / hover_slider / hover_stretch / context_menu / context_menu_picker / like_key / svg_icon / eq_clock）、键盘与导航（keyboard / list_keys / queue_keys / navigation_scroll / search_page / volume_control / new_playlist / reduce_motion / soft_timers）；`live_daemon` 需真实 daemon，缺省忽略。
 - 启动：`cargo run --release -p hmp-desktop --bin hmp-desktop`（niri 下逻辑目标 1024×1152 半宽 / 2048×1152 全宽）。
   - 启动即连接 daemon IPC 端点（Windows 命名管道 / Unix socket，同 `server::socket_path()`），连不上自动 `hmp serve --background`（CLI 同款）；失败降级离线（全空态、命令无效）。
   - 库页数据 = 启动时直读 `$XDG_DATA_HOME/hmp/library.sqlite3` 的静态快照：先 `hmp scan ~/Music` 入库本地曲目，QQ 侧 `hmp login` + `hmp library sync`。

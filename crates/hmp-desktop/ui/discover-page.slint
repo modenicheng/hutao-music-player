@@ -3,6 +3,7 @@
 // 布局遵循上游内容自撑约定：Scroll 的 content VerticalLayout 会给子项
 // preferred-height，页面禁止绑定 parent.height（会塌缩为 0）。
 import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
 import { Button, ButtonVariant } from "primitives.slint";
 import { PageHeader, SectionHeader, CoverCardGrid } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
@@ -97,9 +98,13 @@ export component DiscoverPage inherits Rectangle {
         if Data.discover-state == 2 && Data.discover-new-songs.length > 0: VerticalLayout {
             spacing: Theme.space-4;
 
+            // 链接动作 = 替换整队播放：文案与图标如实，不写「更多」
             SectionHeader {
                 title: "新歌速递";
                 more-to: "播放全部";
+                more-label: "播放全部";
+                more-icon: Icons.play_arrow;
+                more-icon-rotation: 0deg;
                 more-clicked => {
                     Player.play-tracks(Data.discover-new-songs, 0);
                 }

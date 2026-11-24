@@ -21,6 +21,7 @@ fn main() -> Result<(), slint::PlatformError> {
         hmp_desktop::Theme::get(&ui).set_mode(loaded.theme_mode);
         hmp_desktop::Quality::get(&ui).set_selected(loaded.quality);
         hmp_desktop::TrackMenu::get(&ui).set_enabled(loaded.context_menu);
+        hmp_desktop::Theme::get(&ui).set_reduce_motion(loaded.reduce_motion);
     }
 
     bridge::load_data(&ui, &runtime);
@@ -48,6 +49,33 @@ fn main() -> Result<(), slint::PlatformError> {
                         button: slint::platform::PointerEventButton::Left,
                     });
             }
+        });
+    }
+
+    // 键盘导航（M7 焦点可达）：任意指针按下即退出键盘模式——聚焦中的控件
+    // 让出焦点，空格/ESC 回到全局收口（ui/keynav.slint 焦点模型）。Slint
+    // 语言层没有全局指针监听原语（事件被命中的 TouchArea accept 后不再
+    // 冒泡到祖先），经 winit 事件钩子登记：钩子先于 Slint 派发执行、在 UI
+    // 线程上，直接写全局属性。testing/非 winit 后端无此钩子（集成测试显式
+    // 调用 keynav::pointer_activity）。
+    {
+        use slint::winit_030::WinitWindowAccessor;
+        use slint::winit_030::winit::event::{ElementState, WindowEvent};
+        let ui_weak = ui.as_weak();
+        ui.window().on_winit_window_event(move |_window, event| {
+            match event {
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    ..
+                }
+                | WindowEvent::Touch(..) => {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        hmp_desktop::keynav::pointer_activity(&ui);
+                    }
+                }
+                _ => {}
+            }
+            slint::winit_030::EventResult::Propagate
         });
     }
 

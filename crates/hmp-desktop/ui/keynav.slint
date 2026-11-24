@@ -1,0 +1,33 @@
+// 键盘导航枢纽（M7 焦点可达）。无依赖的独立 global——primitives（KeyTouch）、
+// app.slint（全局快捷键）与 Rust 侧（winit 指针活动钩子）三方共用，避免
+// primitives ↔ stores 互相导入。
+//
+// 焦点模型（「键盘模式」）：
+// - 鼠标点击不改变键盘焦点（KeyTouch 的 focus-on-click 关闭）：Slint 的鼠标
+//   事件自顶向下派发，子 TouchArea accept 后祖先 FocusScope 收不到 Pressed
+//   （i-slint-core input.rs send_mouse_event_to_item），点击既不聚焦也不被吞；
+// - Tab / Shift+Tab 才进入键盘模式，控件显示 --ring 焦点环；
+// - 任意指针按下即退出键盘模式：Rust 侧（main.rs 的 on_winit_window_event
+//   钩子）把 pointer-seq +1，聚焦中的 KeyTouch 收到后 clear-focus——否则
+//   「Tab 到清空键 → 改用鼠标 → 按空格想暂停」会误触残留焦点的控件。
+//   让出是两段式：持有焦点的控件 clear-focus 并给 focus-released +1，
+//   app.slint 监听后把焦点交还窗口根作用域——焦点不能停在「无」（空格/
+//   ESC 的收口点是根的子孙，无焦点项时按键无人接收）。焦点在 TextInput
+//   上时无控件登记，搜索框不会被误抢焦点。
+export global KeyNav {
+    /** 指针活动序号：每次指针按下 +1（Rust 写入；无头/测试后端无 winit 钩子，
+        由测试显式调用 hmp_desktop::keynav::pointer_activity） */
+    in-out property <int> pointer-seq: 0;
+
+    /** 键盘焦点让出登记（见头注两段式） */
+    in-out property <int> focus-released: 0;
+
+    /** 搜索框聚焦请求序号：Ctrl+F 时 +1，SearchPage 监听后聚焦输入框
+        （已停在搜索页时组件不重挂载，init 不再触发，需要显式信号） */
+    in-out property <int> focus-search-seq: 0;
+
+    /** 登记一次指针活动（供 .slint 侧调用，如自绘滚动条拖拽的测试入口） */
+    public function pointer-activity() {
+        root.pointer-seq += 1;
+    }
+}

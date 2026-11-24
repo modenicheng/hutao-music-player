@@ -80,6 +80,8 @@ export component MusicLibraryPage inherits Rectangle {
                     for folder[index] in Data.folders: folder-item := HoverItem {
                         group-id: hg.group-id;
                         height: 40px;
+                        // 独立行：进 Tab 链，Enter/空格 = 切换文件夹过滤
+                        tab-stop: true;
                         clicked => {
                             Data.filter-folder(index);
                         }

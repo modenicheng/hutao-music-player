@@ -65,18 +65,32 @@ export component HomePage inherits Rectangle {
                 font-size: 13px;
             }
 
+            // 引导卡：文案指向「设置 → 账号」就得能点过去（此前只是一行死文字）
             if !Data.account-logged-in && Data.guess-state != 2: Rectangle {
                 height: 88px;
                 border-radius: Theme.radius-lg;
-                background: Theme.surface-2;
-
-                Text {
-                    y: (parent.height - self.height) / 2;
-                    width: parent.width;
-                    text: "登录后可获取个性化推荐（设置 → 账号，或 CLI：hmp login）";
-                    color: Theme.muted-foreground;
-                    font-size: 13.5px;
-                    horizontal-alignment: center;
+                // surface-3：与页底（surface-2）同色时看不出是张卡
+                background: Theme.surface-3;
+            
+                HorizontalLayout {
+                    alignment: center;
+                    // TextLink 是定高元素：交叉轴默认顶对齐，会贴到卡的上沿
+                    cross-axis-alignment: center;
+                    spacing: Theme.space-2;
+            
+                    Text {
+                        text: "登录后可获取个性化推荐";
+                        color: Theme.muted-foreground;
+                        font-size: 13.5px;
+                        vertical-alignment: center;
+                    }
+                    TextLink {
+                        text: "去登录";
+                        font-size: 13.5px;
+                        clicked => {
+                            Nav.navigate(Route.settings-account, "");
+                        }
+                    }
                 }
             }
 

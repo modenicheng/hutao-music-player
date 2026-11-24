@@ -8,7 +8,7 @@
 // 的贴靠/半屏分列也由系统原生处理；testing/非 winit 后端未接线时空操作。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon } from "primitives.slint";
+import { AppIcon, KeyTouch } from "primitives.slint";
 // 曲目层前景色（收起键随专辑环境对比度取色；stores 无反向依赖，无循环导入）
 import { TrackPalette } from "stores.slint";
 
@@ -25,6 +25,8 @@ component CaptionButton inherits Rectangle {
     in property <bool> danger;
     /** glyph 路径（viewbox 10×10，坐标带 0.5 偏移让 1px 线落在像素网格上） */
     in property <string> glyph;
+    /** 悬停提示（Windows 标题栏钮惯例；也是键盘可达控件的语义标签） */
+    in property <string> tip;
     callback clicked;
 
     width: danger ? 48px : 46px;
@@ -32,11 +34,14 @@ component CaptionButton inherits Rectangle {
         ? (danger ? #C42B1C : Theme.foreground.transparentize(0.93))
         : transparent;
 
-    btn := TouchArea {
-        clicked => {
+    btn := KeyTouch {
+        activate-on-click: true;
+        activated => {
             root.clicked();
         }
     }
+
+    Tooltip { text: @markdown("\{root.tip}"); }
 
     Path {
         width: 10px;
@@ -112,13 +117,16 @@ export component TitleBar inherits Rectangle {
     // 20px 居中，glyph 中心 y=16px 与窗口钮精确同线。历史上这枚键长在
     // now-playing 里、整体让开标题栏带而"偏下"——TitleBar 本就压在 overlay
     // 与队列抽屉最顶，层级问题层级解法，键并入标题栏带。
-    if root.show-collapse: TouchArea {
+    if root.show-collapse: KeyTouch {
         x: 0;
         y: 0;
         width: 40px;
         height: parent.height;
         mouse-cursor: pointer;
-        clicked => {
+        ring-radius: 0px;
+        activate-on-click: true;
+        Tooltip { text: @markdown("收起播放页（ESC）"); }
+        activated => {
             root.collapse-request();
         }
         AppIcon {
@@ -147,6 +155,7 @@ export component TitleBar inherits Rectangle {
             x: 0px;
             height: parent.height;
             glyph: "M 0 5 L 10 5";
+            tip: "最小化";
             clicked => {
                 root.minimize-request();
             }
@@ -158,6 +167,7 @@ export component TitleBar inherits Rectangle {
             glyph: root.maximized
                 ? "M 0.5 2.5 L 7.5 2.5 L 7.5 9.5 L 0.5 9.5 Z M 2.5 2.5 L 2.5 0.5 L 9.5 0.5 L 9.5 7.5 L 7.5 7.5"
                 : "M 0.5 0.5 L 9.5 0.5 L 9.5 9.5 L 0.5 9.5 Z";
+            tip: root.maximized ? "还原" : "最大化";
             clicked => {
                 root.toggle-maximize-request();
             }
@@ -168,6 +178,7 @@ export component TitleBar inherits Rectangle {
             height: parent.height;
             danger: true;
             glyph: "M 0.5 0.5 L 9.5 9.5 M 9.5 0.5 L 0.5 9.5";
+            tip: "关闭";
             clicked => {
                 root.close-request();
             }

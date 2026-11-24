@@ -2,9 +2,12 @@
 // 整行点击 → 替换队列并从该行播放；当前行 equalizer + 标题 accent；
 // 行 hover 用 HoverGroup 滑动高亮（中性底）；播放图标经 indicator 槽随块
 // 纵向滑入序号位（不逐行 fade），EQ 优先级最高。
+// 键盘（M7 焦点可达，roving 光标）：整张表一个 Tab 停靠点——↑/↓ 移动光标行
+// （滚动跟随）、←/→ 在行内切换「行 / 歌手链接 / 专辑链接」子光标、Enter/空格
+// 激活。不让每行进 Tab 链：窗口化虚拟化只实例化一窗行，Tab 走不到窗外的行。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon, Equalizer, HoverGroup, HoverItem, TextLink } from "primitives.slint";
+import { AppIcon, Equalizer, HoverGroup, HoverItem, KeyTouch, ListKeys, TextLink } from "primitives.slint";
 import { TrackRow } from "data.slint";
 import { Viewport } from "viewport.slint";
 import { Nav, Route } from "nav.slint";
@@ -68,6 +71,102 @@ export component TrackTable inherits Rectangle {
         return Math.mod(Math.round(ms / 1000), 60) < 10
             ? "\{Math.floor(Math.round(ms / 1000) / 60)}:0\{Math.mod(Math.round(ms / 1000), 60)}"
             : "\{Math.floor(Math.round(ms / 1000) / 60)}:\{Math.mod(Math.round(ms / 1000), 60)}";
+    }
+
+    // —— 键盘光标（roving）———
+    /** 光标行绝对下标；-1 = 尚未进入（首次 ↑/↓/←/→ 或获得焦点时落到首个可见行） */
+    in-out property <int> cursor: -1;
+    /** 行内子光标：0=行本身 1=歌手链接 2=专辑链接（按该行实际可用的链接数钳制） */
+    in-out property <int> cursor-col: 0;
+    /** 当前有效光标行（模型缩短后钳住；空表/无光标 = -1） */
+    out property <int> cursor-row: tracks.length == 0 || cursor < 0 ? -1 : min(cursor, tracks.length - 1);
+
+    /** 该行可停靠的单元格数：行本身 +（有参数的）歌手链接 + 专辑链接 */
+    function cells-of(index: int) -> int {
+        if (index < 0 || index >= tracks.length) {
+            return 1;
+        }
+        let r = tracks[index];
+        return 1 + (r.artist-mid != "" ? 1 : 0) + (show-album && r.album-mid != "" ? 1 : 0);
+    }
+
+    function move-cursor(delta: int) {
+        if (tracks.length == 0) {
+            return;
+        }
+        // 首次进入：下移落首个可见行，上移落末行；换行回到行本身
+        cursor = cursor < 0
+            ? (delta > 0 ? first-visible-row : tracks.length - 1)
+            : clamp(cursor + delta, 0, tracks.length - 1);
+        cursor-col = 0;
+        reveal-row(cursor);
+    }
+
+    /** 视口顶部第一个可见行（页面未回写视口高的无头环境退化为首行） */
+    property <int> first-visible-row: Viewport.view-h <= 0px ? 0
+        : clamp(Math.ceil((-Viewport.y - table-top) / row-pitch), 0, max(tracks.length - 1, 0));
+
+    /** 把第 index 行滚进页面视口（已完整可见则不动）。Flickable 对程序写入的
+        越界偏移不钳制，这里算出的 target 必在内容范围内 */
+    function reveal-row(index: int) {
+        if (Viewport.view-h <= 0px) {
+            return;
+        }
+        let top = table-top + index * row-pitch;
+        let bottom = top + row-height;
+        let view-top = -Viewport.y;
+        let target = top < view-top ? top
+            : bottom > view-top + Viewport.view-h ? bottom - Viewport.view-h
+            : -1px;
+        if (target >= 0px) {
+            // 请求通道收的是滚动偏移（≤ 0），target 是内容坐标
+            Viewport.scroll-to(-target);
+        }
+    }
+
+    // 列表级键盘焦点：纯 FocusScope、无 TouchArea，不参与指针命中。按键只投递
+    // 给持有焦点的它自己，与行是否是它的子孙无关；未被消费的键照常沿祖先链
+    // 冒泡给全局
+    list-key := ListKeys {
+        width: parent.width;
+        height: parent.height;
+        available: tracks.length > 0;
+        step(delta) => {
+            root.move-cursor(delta);
+        }
+        step-horizontal(dir) => {
+            if (root.cursor < 0) {
+                root.move-cursor(1);
+            }
+            cursor-col = clamp(cursor-col + dir, 0, root.cells-of(root.cursor-row) - 1);
+        }
+        activate => {
+            let row = root.cursor-row;
+            if (row < 0) {
+                return;
+            }
+            // 子光标格位按该行实际可用的链接排：无歌手链接的行第 1 格就是专辑
+            if (root.cursor-col == 1) {
+                if (root.tracks[row].artist-mid != "") {
+                    Nav.navigate(Route.artist, root.tracks[row].artist-mid);
+                } else if (root.show-album && root.tracks[row].album-mid != "") {
+                    Nav.navigate(Route.album, root.tracks[row].album-mid);
+                } else {
+                    Player.play-tracks(root.tracks, row);
+                }
+            } else if (root.cursor-col == 2 && root.show-album && root.tracks[row].album-mid != "") {
+                Nav.navigate(Route.album, root.tracks[row].album-mid);
+            } else {
+                Player.play-tracks(root.tracks, row);
+            }
+        }
+        focus-gained(reason) => {
+            // 进入即有可见光标
+            if (root.cursor < 0 && root.tracks.length > 0) {
+                root.cursor = root.first-visible-row;
+                root.cursor-col = 0;
+            }
+        }
     }
 
     VerticalLayout {
@@ -145,9 +244,21 @@ export component TrackTable inherits Rectangle {
                     width: parent.width;
                     height: root.row-height;
                     y: (root.window-start + offset) * root.row-pitch;
+                    /** 绝对下标（虚拟化：offset 只是窗内序号，不可作下标用） */
+                    property <int> abs-index: root.window-start + offset;
                     // 行数据经命名属性取模型绝对行（loop 变量 offset 只是窗口内
                     // 序号；`row` 名在 for 体内不可作属性名，改 rowd）
-                    property <TrackRow> rowd: root.tracks[root.window-start + offset];
+                    property <TrackRow> rowd: root.tracks[hover-item.abs-index];
+                    /** 行内子光标格位（仅光标行可能非 0）；歌手/专辑链接各占哪一格按本行
+                        实际可用的链接排（无歌手链接时专辑占第 1 格） */
+                    property <int> cell: root.cursor-row == hover-item.abs-index ? root.cursor-col : 0;
+                    property <int> artist-col: rowd.artist-mid != "" ? 1 : -1;
+                    property <int> album-col: root.show-album && rowd.album-mid != ""
+                        ? (rowd.artist-mid != "" ? 2 : 1) : -1;
+                    // 键盘光标行高亮：与 hover 滑块同族中性底（仅列表持有键盘焦点时显示，
+                    // 鼠标点击不留下「选中」残影）
+                    background: list-key.has-focus && root.cursor-row == hover-item.abs-index
+                        ? Theme.neutral-200.transparentize(0.45) : transparent;
                     suppress-indicator: Player.queue-current-mid == rowd.mid;
                     clicked => {
                         Player.play-tracks(root.tracks, root.window-start + offset);
@@ -215,9 +326,15 @@ export component TrackTable inherits Rectangle {
                                     vertical-alignment: center;
                                     overflow: elide;
                                 }
-                                Text {
+                                artist-text := Text {
                                     text: rowd.artists;
-                                    color: Theme.muted-foreground;
+                                    // hover / 键盘子光标落上时提亮（.text-link 同款）
+                                    color: artist-touch.has-hover || hover-item.cell == hover-item.artist-col
+                                        ? Theme.foreground : Theme.muted-foreground;
+                                    animate color {
+                                        duration: Theme.duration-fast;
+                                        easing: cubic-bezier(0.2, 0, 0, 1);
+                                    }
                                     font-size: 12.8px;
                                     vertical-alignment: center;
                                     overflow: elide;
@@ -225,14 +342,21 @@ export component TrackTable inherits Rectangle {
                                 }
                             }
 
-                            // 歌手名 hover 提亮 + 跳转（覆盖在文本上）；
-                            // 无参数（QQ 行远端 mid 缺失/无歌手数据）→ 链接禁用
-                            TouchArea {
+                            // 歌手名跳转（覆盖在文本上）；无参数（QQ 行远端 mid 缺失/无歌手数据）→
+                            // 链接禁用。命中区收在歌手名文本宽内：此前铺到标题列末尾，点歌名右侧的
+                            // 空白也会跳歌手页（想播这一行却被带走），且那片空白根本不像链接。
+                            // 键盘：不是 Tab 停靠点，由列表的 ←/→ 子光标到达
+                            artist-touch := KeyTouch {
                                 x: title-text.width + 6px;
-                                width: parent.width - self.x;
+                                width: max(0px, min(parent.width - self.x, artist-text.preferred-width));
+                                height: parent.height;
+                                tab-stop: false;
+                                ring-forced: hover-item.cell == hover-item.artist-col;
+                                ring-radius: Theme.radius-sm;
                                 enabled: rowd.artist-mid != "";
                                 mouse-cursor: rowd.artist-mid != "" ? pointer : default;
-                                clicked => {
+                                activate-on-click: true;
+                                activated => {
                                     Nav.navigate(Route.artist, rowd.artist-mid);
                                 }
                                 // 启用的 TouchArea 对所有按键 grab（会吞右键）：
@@ -254,6 +378,9 @@ export component TrackTable inherits Rectangle {
                         // 无参数 → 退化纯文本，不渲染死链接）
                         if root.show-album && rowd.album-mid != "": TextLink {
                             width: root.album-w;
+                            // 键盘：不是 Tab 停靠点，由列表的 ←/→ 子光标到达
+                            tab-stop: false;
+                            ring-forced: hover-item.cell == hover-item.album-col;
                             // 撑满行高：TextLink 组件内固定高 20px 会被行布局
                             // 顶对齐（交叉轴默认顶对齐），专辑文字随之上浮。
                             // 不能写 parent.height（布局子元素引用父高成环）

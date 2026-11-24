@@ -15,7 +15,7 @@
 // 评论为扁平投影（无楼中楼/吸顶头）；头像用首字占位（UI 禁网）。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon, Scroll, TextLink } from "primitives.slint";
+import { AppIcon, KeyTouch, Scroll, TextLink } from "primitives.slint";
 import { QualityBadge } from "quality-badge.slint";
 import { VolumeControl } from "volume-control.slint";
 import { Player, NowPlaying, TrackPalette } from "stores.slint";
@@ -211,6 +211,7 @@ export component NowPlayingOverlay inherits Rectangle {
         animate y {
             duration: Theme.duration-slow;
             easing: cubic-bezier(0.2, 0, 0, 1);
+            enabled: !Theme.reduce-motion;
         }
 
 
@@ -324,7 +325,13 @@ export component NowPlayingOverlay inherits Rectangle {
 
                 function user-took-over() {
                     following = false;
-                    take-over-timer.restart();
+                    // 3s 恢复跟随：单发（重）启动（restart() 对从未启动的
+                    // Timer 是空操作——1.18 升级后手动滚动歌词再也不恢复跟随）
+                    if (take-over-timer.running) {
+                        take-over-timer.restart();
+                    } else {
+                        take-over-timer.running = true;
+                    }
                     follow-tick.restart();
                 }
 
@@ -365,6 +372,12 @@ export component NowPlayingOverlay inherits Rectangle {
                                 stage-rect.follow-v = 0;
                                 lyrics-scroll.scroll-offset = -stage-rect.follow-x * 1px;
                             }
+                        } else if (Theme.reduce-motion) {
+                            // 减少动效：弹簧跟随改为直达当前行
+                            stage-rect.follow-x = stage-rect.lyr-target();
+                            stage-rect.follow-v = 0;
+                            lyrics-scroll.scroll-offset = -stage-rect.follow-x * 1px;
+                            follow-tick.stop();
                         } else {
                             stage-rect.follow-v = stage-rect.follow-v
                                 + (144 * (stage-rect.lyr-target() - stage-rect.follow-x)
@@ -386,6 +399,7 @@ export component NowPlayingOverlay inherits Rectangle {
                     interval: 3s;
                     running: false;
                     triggered => {
+                        self.stop();
                         stage-rect.resume-following();
                     }
                 }
@@ -401,6 +415,8 @@ export component NowPlayingOverlay inherits Rectangle {
                 changed lyrics-generation-watch => { follow-tick.restart(); }
                 changed lyr-view-h => { follow-tick.restart(); }
                 changed lyr-content-h => { follow-tick.restart(); }
+                // 跟随状态镜像（NowPlaying.lyrics-following，只读观察口）
+                changed following => { NowPlaying.lyrics-following = self.following; }
                 property <length> offset-watch: lyrics-scroll.scroll-offset;
                 changed offset-watch => { follow-tick.restart(); }
 
@@ -471,13 +487,16 @@ export component NowPlayingOverlay inherits Rectangle {
                                             // 行高 >1.25em，2.9 倍字号才容得下完整两行
                                             max-height: title-size * 2.9;
                                         }
-                                        like-touch := TouchArea {
+                                        like-touch := KeyTouch {
                                             // 命中区外扩到 40px，icon 居中不变
                                             width: 40px;
                                             height: 40px;
                                             y: (parent.height - self.height) / 2;
                                             mouse-cursor: pointer;
-                                            clicked => {
+                                            ring-radius: Theme.pill(self.height);
+                                            activate-on-click: true;
+                                            Tooltip { text: @markdown("\{NowPlaying.liked ? "取消喜欢" : "喜欢"}"); }
+                                            activated => {
                                                 // 意图上报 Rust（不本地翻转；
                                                 // Rust 乐观翻转 + daemon 写 + 失败回滚）
                                                 NowPlaying.toggle-liked();
@@ -636,12 +655,14 @@ export component NowPlayingOverlay inherits Rectangle {
                                     spacing: Theme.space-5;
                                     cross-axis-alignment: center;
 
-                                    for tab[si] in root.sort-tabs: TouchArea {
+                                    for tab[si] in root.sort-tabs: KeyTouch {
                                         property <bool> is-active: NowPlaying.comment-sort == si;
                                         width: tab-text.preferred-width;
                                         height: 30px;
                                         mouse-cursor: pointer;
-                                        clicked => {
+                                        ring-radius: Theme.pill(self.height);
+                                        activate-on-click: true;
+                                        activated => {
                                             if (!is-active) {
                                                 NowPlaying.comment-sort = si;
                                                 NowPlaying.request-comments();
@@ -934,10 +955,17 @@ export component NowPlayingOverlay inherits Rectangle {
                             }
                         }
 
-                        ruler-touch := TouchArea {
+                        ruler-touch := KeyTouch {
                             width: parent.width;
                             height: parent.height;
                             mouse-cursor: pointer;
+                            ring-radius: Theme.radius-md;
+                            activatable: false;
+                            // 方向键微调（对齐 Vue RulerProgress：±2%）；空格不在此
+                            // 消费，冒泡给播放/暂停
+                            stepped(axis, dir) => {
+                                Player.seek-percent(clamp(ruler.shown + dir * 0.02, 0.0, 1.0));
+                            }
                             pointer-event(event) => {
                                 if (event.kind == PointerEventKind.down) {
                                     Player.seeking = true;
@@ -991,12 +1019,15 @@ export component NowPlayingOverlay inherits Rectangle {
                         alignment: center;
 
                         // 随机：高亮绑 Player.shuffle 真实状态（daemon playback.shuffle）
-                        shuffle-touch := TouchArea {
+                        shuffle-touch := KeyTouch {
                             width: 36px;
                             height: 36px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
-                            clicked => {
+                            ring-radius: Theme.pill(self.height);
+                            activate-on-click: true;
+                            Tooltip { text: @markdown("\{Player.shuffle ? "随机播放：开" : "随机播放：关"}"); }
+                            activated => {
                                 Player.toggle-shuffle();
                             }
                             Rectangle {
@@ -1026,13 +1057,16 @@ export component NowPlayingOverlay inherits Rectangle {
                         }
                         // 门控对齐 PlayerBar：空队列/队首禁用（0.35 透明 + 不可点），
                         // 否则点了 no-op 无反馈读作「失效按钮」
-                        prev-touch := TouchArea {
+                        prev-touch := KeyTouch {
                             width: 40px;
                             height: 40px;
                             y: (parent.height - self.height) / 2;
                             enabled: Player.can-previous;
                             mouse-cursor: pointer;
-                            clicked => {
+                            ring-radius: Theme.pill(self.height);
+                            activate-on-click: true;
+                            Tooltip { text: @markdown("上一曲"); }
+                            activated => {
                                 Player.previous();
                             }
                             Rectangle {
@@ -1057,12 +1091,15 @@ export component NowPlayingOverlay inherits Rectangle {
                             }
                         }
                         // 主播放键：48px 圆，曲目层强调色——最大但不过分高出邻键
-                        play-touch := TouchArea {
+                        play-touch := KeyTouch {
                             width: 48px;
                             height: 48px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
-                            clicked => {
+                            ring-radius: Theme.pill(self.height);
+                            activate-on-click: true;
+                            Tooltip { text: @markdown("\{Player.playing ? "暂停" : "播放"}（空格）"); }
+                            activated => {
                                 Player.toggle-play();
                             }
                             Rectangle {
@@ -1085,13 +1122,16 @@ export component NowPlayingOverlay inherits Rectangle {
                                 }
                             }
                         }
-                        next-touch := TouchArea {
+                        next-touch := KeyTouch {
                             width: 40px;
                             height: 40px;
                             y: (parent.height - self.height) / 2;
                             enabled: Player.can-next;
                             mouse-cursor: pointer;
-                            clicked => {
+                            ring-radius: Theme.pill(self.height);
+                            activate-on-click: true;
+                            Tooltip { text: @markdown("下一曲"); }
+                            activated => {
                                 Player.next();
                             }
                             Rectangle {
@@ -1117,12 +1157,18 @@ export component NowPlayingOverlay inherits Rectangle {
                         }
                         // 循环：点击循环切换三态（0=顺序 1=单曲 2=列表），
                         // 图标/高亮按 Player.loop-mode 真实状态
-                        repeat-touch := TouchArea {
+                        repeat-touch := KeyTouch {
                             width: 36px;
                             height: 36px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
-                            clicked => {
+                            ring-radius: Theme.pill(self.height);
+                            activate-on-click: true;
+                            Tooltip {
+                                text: @markdown("\{Player.loop-mode == 0 ? "循环：顺序播放"
+                                    : Player.loop-mode == 1 ? "循环：单曲循环" : "循环：列表循环"}");
+                            }
+                            activated => {
                                 Player.cycle-loop-mode();
                             }
                             Rectangle {
@@ -1158,20 +1204,16 @@ export component NowPlayingOverlay inherits Rectangle {
                         spacing: Theme.space-2;
                         alignment: end;
 
-                        jump-comments := TouchArea {
+                        jump-comments := KeyTouch {
                             width: 36px;
                             height: 36px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
-                            clicked => {
-                                // 平滑滚往评论区：本处只登记起止并起表，插值在
-                                // slide 尾部 page-anim（16ms Timer）
-                                page-anim-from = page.scroll-offset;
-                                page-anim-to = -min(page.view-height,
-                                    Math.max(0px, page.content-height - page.view-height));
-                                page-anim-last = page-anim-from;
-                                page-anim-t = 0ms;
-                                page-anim.restart();
+                            ring-radius: Theme.pill(self.height);
+                            activate-on-click: true;
+                            Tooltip { text: @markdown("\{slide.in-comments ? "返回歌词" : "查看评论"}"); }
+                            activated => {
+                                slide.jump-comments();
                             }
                             Rectangle {
                                 width: parent.width;
@@ -1184,7 +1226,7 @@ export component NowPlayingOverlay inherits Rectangle {
                                 }
 
                                 AppIcon {
-                                    source: Icons.comment_outline;
+                                    source: slide.in-comments ? Icons.expand_less : Icons.comment_outline;
                                     icon-color: jump-comments.has-hover
                                         ? Theme.foreground : Theme.muted-foreground;
                                     width: 20px;
@@ -1194,12 +1236,15 @@ export component NowPlayingOverlay inherits Rectangle {
                                 }
                             }
                         }
-                        jump-queue := TouchArea {
+                        jump-queue := KeyTouch {
                             width: 36px;
                             height: 36px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
-                            clicked => {
+                            ring-radius: Theme.pill(self.height);
+                            activate-on-click: true;
+                            Tooltip { text: @markdown("播放列表"); }
+                            activated => {
                                 Player.toggle-queue();
                             }
                             Rectangle {
@@ -1227,6 +1272,55 @@ export component NowPlayingOverlay inherits Rectangle {
                 }
                 }
             }
+        }
+    }
+
+    /** 已滚过半屏：处于评论区（评论键此时变为「返回歌词」） */
+    property <bool> in-comments: page.view-height > 0px && page.scroll-offset < -page.view-height * 0.5;
+
+    /** 评论跳转键：首屏（歌词）→ 滚到评论区顶（舞台定高一屏，评论区紧随
+        其后）；已在评论区 → 滚回歌词首屏。此前是单向跳转，回歌词只能手动
+        上滑整整一屏（Vue 基准同样单向；UX 收口为双向） */
+    function jump-comments() {
+        if (page.view-height <= 0px) {
+            return;
+        }
+        // 平滑滚动：本处只登记起止并起表，插值在 page-anim（16ms Timer）
+        page-anim-from = page.scroll-offset;
+        page-anim-to = self.in-comments ? 0px
+            : -min(page.view-height, Math.max(0px, page.content-height - page.view-height));
+        // 减少动效：直接到位（DESIGN §5：位移类动效关闭）
+        if (Theme.reduce-motion) {
+            page.scroll-offset = page-anim-to;
+            return;
+        }
+        page-anim-last = page-anim-from;
+        page-anim-t = 0ms;
+        // 单发启动（restart() 对从未启动的 Timer 是空操作——1.18 升级后评论
+        // 跳转键因此失效）
+        page-anim.running = true;
+    }
+
+    // —— 评论跳转请求（NowPlaying.jump-comments：全局请求口 → 控制台同一函数）———
+    property <int> jump-seq: NowPlaying.jump-seq;
+    changed jump-seq => {
+        slide.jump-comments();
+    }
+
+    // —— 内容列滚动偏移镜像（NowPlaying.overlay-scroll-y，只读观察口）———
+    property <length> overlay-scroll-y: page.scroll-offset;
+    changed overlay-scroll-y => {
+        NowPlaying.overlay-scroll-y = self.overlay-scroll-y;
+    }
+
+    // —— 全局翻页键滚动请求（app.slint scroll-page → NowPlaying.scroll-by）———
+    // 让位给手动滚动：先停跳评论插值，再按当前内容高钳制回写
+    property <int> scroll-seq: NowPlaying.scroll-seq;
+    changed scroll-seq => {
+        page-anim.stop();
+        if (page.view-height > 0px) {
+            page.scroll-offset = clamp(page.scroll-offset - NowPlaying.scroll-delta,
+                page.view-height - page.content-height, 0px);
         }
     }
 

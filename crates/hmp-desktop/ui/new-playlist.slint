@@ -1,0 +1,100 @@
+// 新建歌单命名表单（宿主包一层 PopupWindow）：标题 + 名称输入框 + 取消/创建。
+// 弹层内容每次 show 重新实例化（PORTING PopupWindow 四事实）——名称天然清空，
+// 输入框在 init 聚焦，打开即可打字；Enter 等同「创建」，ESC 由框架关弹层。
+// 动作只发意图（create(name)），请求/校验在 Rust（menu_bridge）。
+import { Theme } from "theme.slint";
+import { Button, ButtonVariant } from "primitives.slint";
+
+export component NewPlaylistForm inherits Rectangle {
+    /** 提交：参数 = 输入的原样名称（去空白与空名拒绝在 Rust 侧统一处理） */
+    callback create(string);
+    callback cancel;
+
+    width: 264px;
+    height: 156px;
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-3;
+    border-width: 1px;
+    border-color: Theme.border;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: #241F1B.transparentize(0.82);
+    drop-shadow-offset-y: 4px;
+
+    function submit() {
+        if (name-input.text != "") {
+            root.create(name-input.text);
+        }
+    }
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        Text {
+            text: "新建歌单";
+            color: Theme.foreground;
+            font-size: 15px;
+            font-weight: 650;
+        }
+
+        // 输入框（--input 底 + 聚焦描边 --ring，search-page 同款）
+        Rectangle {
+            height: 36px;
+            border-radius: Theme.radius-md;
+            background: Theme.input-bg;
+            border-width: 1px;
+            border-color: name-input.has-focus ? Theme.ring : Theme.border;
+            animate border-color {
+                duration: Theme.duration-fast;
+                easing: cubic-bezier(0.2, 0, 0, 1);
+            }
+
+            name-input := TextInput {
+                x: 10px;
+                y: (parent.height - self.height) / 2;
+                width: parent.width - 20px;
+                color: Theme.foreground;
+                font-size: 13.6px;
+                init => {
+                    name-input.focus();
+                }
+                accepted => {
+                    root.submit();
+                }
+            }
+            // 占位文案（基座 TextInput 无 placeholder 属性）
+            if name-input.text == "": Text {
+                x: 10px;
+                y: (parent.height - self.height) / 2;
+                width: parent.width - 20px;
+                text: "歌单名称";
+                color: Theme.muted-foreground;
+                font-size: 13.6px;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+
+            Button {
+                text: "取消";
+                small: true;
+                height: 32px;
+                clicked => {
+                    root.cancel();
+                }
+            }
+            Button {
+                variant: ButtonVariant.default;
+                text: "创建";
+                small: true;
+                height: 32px;
+                enabled: name-input.text != "";
+                clicked => {
+                    root.submit();
+                }
+            }
+        }
+    }
+}

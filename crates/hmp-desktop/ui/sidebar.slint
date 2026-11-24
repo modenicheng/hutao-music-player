@@ -4,6 +4,7 @@
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppIcon, Button, HoverGroup, HoverItem, Scroll } from "primitives.slint";
+import { NewPlaylistForm } from "new-playlist.slint";
 import { Nav, Route } from "nav.slint";
 import { PlaylistCover } from "data.slint";
 import { Data } from "stores.slint";
@@ -197,8 +198,9 @@ export component Sidebar inherits Rectangle {
                                         }
                                     }
 
-                                    // 新建（仅自建组有，mock 期无动作）：行 hover 底归
-                                    // HoverGroup 滑块，本钮 hover 走本体提色
+                                    // 新建（仅自建组有）：命名弹层 → Data.create-playlist（menu_bridge 发
+                                    // PlaylistWrite Create，受理后刷新库并直达新歌单）。此前是 mock 期遗留的
+                                    // 无动作按钮。行 hover 底归 HoverGroup 滑块，本钮 hover 走本体提色。
                                     if group.group == 0: Button {
                                         icon: Icons.add;
                                         icon-only: true;
@@ -208,6 +210,29 @@ export component Sidebar inherits Rectangle {
                                         hover-tint: true;
                                         width: 34px;
                                         height: 40px;
+                                        clicked => {
+                                            new-list-pop.show();
+                                        }
+                                    
+                                        // 弹层锚定本钮、向下展开；点外/ESC 关闭（close-policy 显式声明：默认
+                                        // close-on-click 会连弹层内的完整点击一起关掉）
+                                        new-list-pop := PopupWindow {
+                                            x: 0px;
+                                            y: parent.height + 6px;
+                                            width: 264px;
+                                            height: 156px;
+                                            close-policy: close-on-click-outside;
+                                    
+                                            NewPlaylistForm {
+                                                create(name) => {
+                                                    Data.create-playlist(name);
+                                                    new-list-pop.close();
+                                                }
+                                                cancel => {
+                                                    new-list-pop.close();
+                                                }
+                                            }
+                                        }
                                     }
 
                                     // 展开/收起：chevron 随态旋转 -90°；hover 本体提色（同 + 钮）
@@ -245,6 +270,7 @@ export component Sidebar inherits Rectangle {
                                 animate height {
                                     duration: Theme.duration-normal;
                                     easing: cubic-bezier(0.2, 0, 0, 1);
+                                    enabled: !Theme.reduce-motion;
                                 }
 
                                 items-col := VerticalLayout {
@@ -292,6 +318,12 @@ export component Sidebar inherits Rectangle {
                                             y: abs-index * 36px;
                                             width: parent.width;
                                             height: 36px;
+                                            // 独立行：进 Tab 链（行内没有别的可聚焦控件），Enter/空格 = 打开歌单
+                                            tab-stop: true;
+                                            // 正在浏览的歌单常亮：与音乐库「激活文件夹行」、导航当前项同语言
+                                            // （此前打开歌单后侧栏毫无指示）
+                                            property <bool> active: Nav.route == Route.playlist && Nav.param == rowd.id;
+                                            background: active ? Theme.muted : transparent;
                                             // 行点击进歌单详情（参数与库页歌单卡同一 id 串）
                                             clicked => {
                                                 Nav.navigate(Route.playlist, rowd.id);
@@ -321,8 +353,13 @@ export component Sidebar inherits Rectangle {
                                                 }
                                                 Text {
                                                     text: rowd.name;
-                                                    color: Theme.muted-foreground;
+                                                    color: active ? Theme.foreground : Theme.muted-foreground;
+                                                    animate color {
+                                                        duration: Theme.duration-fast;
+                                                        easing: cubic-bezier(0.2, 0, 0, 1);
+                                                    }
                                                     font-size: 12.8px;
+                                                    font-weight: active ? 600 : 400;
                                                     vertical-alignment: center;
                                                     overflow: elide;
                                                     horizontal-stretch: 1;
@@ -347,6 +384,7 @@ export component Sidebar inherits Rectangle {
                             animate x {
                                 duration: Theme.duration-normal;
                                 easing: cubic-bezier(0.2, 0, 0, 1);
+                                enabled: !Theme.reduce-motion;
                             }
 
                             for entry in [
@@ -379,6 +417,7 @@ export component Sidebar inherits Rectangle {
                             animate x {
                                 duration: Theme.duration-normal;
                                 easing: cubic-bezier(0.2, 0, 0, 1);
+                                enabled: !Theme.reduce-motion;
                             }
 
                             HoverItem {
@@ -433,6 +472,7 @@ export component Sidebar inherits Rectangle {
                                         width: parent.width;
                                         height: 40px;
                                         tool-tip: rowd.name;
+                                        current: Nav.route == Route.playlist && Nav.param == rowd.id;
                                         // 按钮铺满行、接管点击：跳转挂按钮（hover 归 HoverItem 不变）
                                         clicked => {
                                             Nav.navigate(Route.playlist, rowd.id);

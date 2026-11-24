@@ -2,7 +2,7 @@
 // @children 分别承载页头动作区（播放全部/扫描）与节头动作区（添加文件夹等）。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon, TextLink } from "primitives.slint";
+import { AppIcon, KeyTouch, TextLink } from "primitives.slint";
 import { CoverCardData } from "data.slint";
 import { Viewport } from "viewport.slint";
 
@@ -39,9 +39,12 @@ export component PageHeader inherits Rectangle {
                 easing: cubic-bezier(0.2, 0, 0, 1);
             }
 
-            back-touch := TouchArea {
+            back-touch := KeyTouch {
                 mouse-cursor: pointer;
-                clicked => {
+                ring-radius: Theme.pill(self.height);
+                activate-on-click: true;
+                Tooltip { text: @markdown("返回（Alt+←）"); }
+                activated => {
                     root.back();
                 }
             }
@@ -117,8 +120,16 @@ export component PageHeader inherits Rectangle {
 // —— 区块标题：标题撑满把动作/更多推到右缘（Vue space-between）——
 export component SectionHeader inherits Rectangle {
     in property <string> title;
-    /** 非空则渲染"更多"链接（值仅作语义标记，跳转由 more-clicked 发出） */
+    /** 非空则渲染右端动作链接（值仅作语义标记，动作由 more-clicked 发出）。
+        显示文案与图标见 more-label / more-icon——动作不是"去看更多"时必须
+        如实（「新歌速递」的链接点了是替换整队播放，曾写成「更多」） */
     in property <string> more-to: "";
+    /** 右端链接文案（默认「更多」） */
+    in property <string> more-label: "更多";
+    /** 右端链接图标（默认右向 chevron；播放类动作传 Icons.play_arrow） */
+    in property <image> more-icon: Icons.expand_more;
+    /** 图标旋转角（chevron 右指 −90°；play_arrow 不转） */
+    in property <angle> more-icon-rotation: -90deg;
     callback more-clicked();
 
     height: 28px;
@@ -144,9 +155,11 @@ export component SectionHeader inherits Rectangle {
             width: more-row.preferred-width;
             height: 20px;
 
-            more-touch := TouchArea {
+            more-touch := KeyTouch {
                 mouse-cursor: pointer;
-                clicked => {
+                ring-radius: Theme.radius-sm;
+                activate-on-click: true;
+                activated => {
                     root.more-clicked();
                 }
             }
@@ -158,7 +171,7 @@ export component SectionHeader inherits Rectangle {
                 cross-axis-alignment: center;
 
                 Text {
-                    text: "更多";
+                    text: root.more-label;
                     color: more-touch.has-hover ? Theme.foreground : Theme.muted-foreground;
                     font-size: 13.6px;
                     vertical-alignment: center;
@@ -169,11 +182,11 @@ export component SectionHeader inherits Rectangle {
                 }
                 // expand-more 旋转 -90° 指向右（同 Vue .more-arrow）
                 AppIcon {
-                    source: Icons.expand_more;
+                    source: root.more-icon;
                     icon-color: more-touch.has-hover ? Theme.foreground : Theme.muted-foreground;
                     width: 12px;
                     height: 12px;
-                    rotation-angle: -90deg;
+                    rotation-angle: root.more-icon-rotation;
                     animate icon-color {
                         duration: Theme.duration-fast;
                         easing: cubic-bezier(0.2, 0, 0, 1);
@@ -197,9 +210,11 @@ export component CoverCard inherits Rectangle {
     border-radius: Theme.radius-lg;
     background: transparent;
 
-    card-touch := TouchArea {
+    card-touch := KeyTouch {
         mouse-cursor: pointer;
-        clicked => {
+        ring-radius: Theme.radius-lg;
+        activate-on-click: true;
+        activated => {
             root.clicked();
         }
     }
@@ -226,6 +241,7 @@ export component CoverCard inherits Rectangle {
                 animate y {
                     duration: Theme.duration-normal;
                     easing: cubic-bezier(0.2, 0, 0, 1);
+                    enabled: !Theme.reduce-motion;
                 }
                 animate drop-shadow-blur {
                     duration: Theme.duration-normal;

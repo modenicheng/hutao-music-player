@@ -140,6 +140,27 @@ pub(crate) fn dispatch_command_on_ok(
     });
 }
 
+/// [`dispatch_command`] 的回包回调变体：daemon 的应答**原样**交给钩子在 UI
+/// 线程处理——用于应答本身携带结果的写操作（如新建歌单的 `Response::Created`）。
+/// 传输失败同样交给钩子，由调用方给出反馈。
+pub(crate) fn dispatch_with_reply(
+    runtime: &Arc<BackendRuntime>,
+    ui_weak: &Weak<AppWindow>,
+    req: Request,
+    on_reply: impl FnOnce(&AppWindow, Result<Response, crate::backend::BackendError>) + Send + 'static,
+) {
+    let runtime = Arc::clone(runtime);
+    let ui_weak = ui_weak.clone();
+    runtime.spawn(async move {
+        let result = crate::backend::request(req).await;
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                on_reply(&ui, result);
+            }
+        });
+    });
+}
+
 /// 命令响应 → 反馈条（受理静默；被拒/未连接给人话）。
 fn report_command_result(
     ui_weak: &Weak<AppWindow>,
@@ -171,7 +192,7 @@ fn friendly_error(code: hmp_core::IpcErrorCode, message: &str) -> String {
 
 /// 设置反馈条文本并（重）启动 4s 消退定时器。任意线程可调（经
 /// invoke_from_event_loop 落到 UI 线程；反馈条属性/Timer 均只属于 UI 线程）。
-fn show_feedback(ui_weak: &Weak<AppWindow>, message: String) {
+pub(crate) fn show_feedback(ui_weak: &Weak<AppWindow>, message: String) {
     let ui_weak = ui_weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         // 消退定时器闭包稍后经 FEEDBACK_UI 取窗口（此刻须先存好）。
