@@ -328,7 +328,6 @@ export component QueueDrawer inherits Rectangle {
                         // 滚动源是本文件自有 Scroll（命名引用即可，无需 Viewport
                         // 全局——那只服务顶层页面滚动）。
                         rows := Rectangle {
-                            x: 0;
                             // 布局子元素：宽度交给布局分配（勿写 width: parent.width，
                             // 布局子元素引用父宽首选宽会成环，PORTING.md 坑位）；显式
                             // height 进 preferred 链（表头 Rectangle 同布局先例）

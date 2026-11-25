@@ -470,6 +470,11 @@ export component NowPlayingOverlay inherits Rectangle {
                                     height: parent.width;
                                     border-radius: Theme.radius-lg;
                                     clip: true;
+                                    // 投影只跟填充/边框的透明度走（Slint 1.19 起明示，此前
+                                    // 渲染器也按元素矩形画）：不设背景这层就是透明的，
+                                    // 下面的 drop-shadow 一行都不生效。封面未就绪时
+                                    // 这块底色兼作占位
+                                    background: Theme.muted;
                                     drop-shadow-blur: 32px;
                                     drop-shadow-color: #241F1B.transparentize(0.82);
                                     drop-shadow-offset-y: 10px;
