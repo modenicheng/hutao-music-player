@@ -39,7 +39,8 @@ pub struct LocalMeta {
     pub disc_number: Option<u16>,
     pub year: Option<i64>,
     pub genre: Option<String>,
-    /// 内嵌封面原图（超过 32MB 丢弃；无封面 None）。
+    /// 封面原图（内嵌图优先，超过 32MB 丢弃；无内嵌图时退同目录的封面文件
+    /// `folder_cover`；都无 → None）。
     pub cover: Option<Vec<u8>>,
     /// ReplayGain 曲目增益（dB；无标签 None）。
     pub replaygain_track_db: Option<f64>,
@@ -69,6 +70,42 @@ pub fn parse_rg_db(s: &str) -> Option<f64> {
 /// 内嵌封面字节上限：3000-4000px JPEG 封面 3-15MB 常见，旧 2MB 上限把高清
 /// 封面整张静默滤成「无封面」（§18）；仍保留上限防病态文件撑爆扫描内存/落盘。
 const MAX_COVER_BYTES: usize = 32 * 1024 * 1024;
+
+/// 目录封面探测（无内嵌图时的兜底）：音频所在目录的 `cover` / `folder` /
+/// `front` / `album` / `albumart`（各含首字母大写变体）× `jpg` / `jpeg` / `png`，
+/// 按「主名 → 大小写变体 → 扩展名」取第一个存在的常规文件并返回其字节。
+/// 命中即停，不遍历目录；超过 `MAX_COVER_BYTES` 视为没有（只 stat 不读盘，
+/// 病态大文件不进内存）。
+fn folder_cover(dir: &Path) -> Option<Vec<u8>> {
+    const NAMES: [(&str, &str); 5] = [
+        ("cover", "Cover"),
+        ("folder", "Folder"),
+        ("front", "Front"),
+        ("album", "Album"),
+        ("albumart", "Albumart"),
+    ];
+    const EXTS: [&str; 3] = ["jpg", "jpeg", "png"];
+    for (lower, capitalized) in NAMES {
+        for stem in [lower, capitalized] {
+            for ext in EXTS {
+                let candidate = dir.join(format!("{stem}.{ext}"));
+                let Ok(md) = std::fs::metadata(&candidate) else {
+                    continue;
+                };
+                if !md.is_file() {
+                    continue;
+                }
+                if md.len() > MAX_COVER_BYTES as u64 {
+                    return None;
+                }
+                return std::fs::read(&candidate)
+                    .ok()
+                    .filter(|b| !b.is_empty() && b.len() <= MAX_COVER_BYTES);
+            }
+        }
+    }
+    None
+}
 
 /// 解析年份标签文本：取第一段连续 4 位数字（标准日期 `2020-05-01`、
 /// `©day` 的 `2020-05-01T07:00:00Z`、紧凑 `20200501` 都落到 2020）；
@@ -104,7 +141,7 @@ pub fn read_meta(path: &Path) -> Option<LocalMeta> {
         })
         .unwrap_or_default();
     // 封面：primary tag 优先（CoverFront → 首图），primary 无图再扫其余 tag
-    // （歌词提取同款 primary → 全 tag 兜底语义）。
+    // （歌词提取同款 primary → 全 tag 兜底语义）；全无内嵌图再退同目录封面文件。
     let cover = tagged
         .primary_tag()
         .map(|t| {
@@ -120,7 +157,8 @@ pub fn read_meta(path: &Path) -> Option<LocalMeta> {
         .flatten()
         .map(|p| p.data())
         .filter(|d| !d.is_empty() && d.len() <= MAX_COVER_BYTES)
-        .map(|d| d.to_vec());
+        .map(|d| d.to_vec())
+        .or_else(|| folder_cover(path.parent().unwrap_or_else(|| Path::new("."))));
     Some(LocalMeta {
         title: tag
             .and_then(|t| t.title())
@@ -338,6 +376,86 @@ mod tests {
         assert_eq!(tag_year(&tag), Some(2019));
     }
 
+    /// 最小合法 PNG（2×2 不透明）；`image` 已是本 crate 依赖。
+    fn png_bytes() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([12, 34, 56, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
+    /// AUDIT §30.7：无内嵌图时退同目录封面文件——固定候选名 × 扩展名按序
+    /// 探测，命中即停；首字母大写变体同样认；超限视为没有；非常规文件跳过。
+    #[test]
+    fn folder_cover_probes_fixed_names() {
+        let png = png_bytes();
+        // 命中：内容按字节原样返回（不按扩展名解码）。
+        let hit = tempfile::tempdir().unwrap();
+        std::fs::write(hit.path().join("cover.jpg"), &png).unwrap();
+        assert_eq!(folder_cover(hit.path()), Some(png.clone()));
+        // 无封面目录 → None。
+        let bare = tempfile::tempdir().unwrap();
+        std::fs::write(bare.path().join("song.flac"), b"x").unwrap();
+        assert_eq!(folder_cover(bare.path()), None);
+        // 首字母大写变体 + 靠后的主名/扩展名。
+        let cap = tempfile::tempdir().unwrap();
+        std::fs::write(cap.path().join("Front.jpeg"), &png).unwrap();
+        assert_eq!(folder_cover(cap.path()), Some(png.clone()));
+        // 优先序：主名 → 大小写变体 → 扩展名。
+        let order = tempfile::tempdir().unwrap();
+        std::fs::write(order.path().join("front.jpg"), b"front").unwrap();
+        std::fs::write(order.path().join("folder.jpg"), b"folder").unwrap();
+        assert_eq!(
+            folder_cover(order.path()),
+            Some(b"folder".to_vec()),
+            "主名 folder 先于 front"
+        );
+        std::fs::write(order.path().join("cover.png"), b"png").unwrap();
+        assert_eq!(
+            folder_cover(order.path()),
+            Some(b"png".to_vec()),
+            "主名 cover 先于 folder"
+        );
+        std::fs::write(order.path().join("cover.jpg"), b"jpg").unwrap();
+        assert_eq!(
+            folder_cover(order.path()),
+            Some(b"jpg".to_vec()),
+            "同主名 jpg 先于 png"
+        );
+        std::fs::write(order.path().join("Cover.jpg"), b"cap").unwrap();
+        assert_eq!(
+            folder_cover(order.path()),
+            Some(b"jpg".to_vec()),
+            "小写主名先于大写变体"
+        );
+        std::fs::remove_file(order.path().join("cover.jpg")).unwrap();
+        assert_eq!(
+            folder_cover(order.path()),
+            Some(b"png".to_vec()),
+            "小写主名的全部扩展名先于大写变体"
+        );
+        // 非常规文件（同名目录）不算命中，跳到下一个候选。
+        let odd = tempfile::tempdir().unwrap();
+        std::fs::create_dir(odd.path().join("cover.jpg")).unwrap();
+        assert_eq!(folder_cover(odd.path()), None, "目录不算封面");
+        std::fs::write(odd.path().join("albumart.jpg"), b"albumart").unwrap();
+        assert_eq!(
+            folder_cover(odd.path()),
+            Some(b"albumart".to_vec()),
+            "跳过目录继续找"
+        );
+        // 超限视为没有（稀疏文件，不实占磁盘）：首个命中即停，不退而取后面的候选。
+        let big = tempfile::tempdir().unwrap();
+        let f = std::fs::File::create(big.path().join("cover.jpg")).unwrap();
+        f.set_len(MAX_COVER_BYTES as u64 + 1).unwrap();
+        std::fs::write(big.path().join("front.jpg"), b"front").unwrap();
+        assert_eq!(
+            folder_cover(big.path()),
+            None,
+            "超限 → 没有，不退而取 front.jpg"
+        );
+    }
+
     /// RIFF 块：FourCC + LE 长度 + 内容；奇数长度补 1 字节对齐（不计入长度）。
     fn push_chunk(out: &mut Vec<u8>, fourcc: &[u8; 4], body: &[u8]) {
         out.extend_from_slice(fourcc);
@@ -427,6 +545,35 @@ mod tests {
         let plain = dir.path().join("b.wav");
         std::fs::write(&plain, minimal_wav(&[], None)).unwrap();
         assert_eq!(read_meta(&plain).unwrap().year, None);
+    }
+
+    /// AUDIT §30.7 端到端：无内嵌图的音频走同目录封面文件（与内嵌图同一
+    /// 返回通道 `LocalMeta.cover`）；目录无封面 → None；有内嵌图则内嵌优先。
+    #[test]
+    fn read_meta_falls_back_to_folder_cover() {
+        let png = png_bytes();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cover.jpg"), &png).unwrap();
+        let wav = dir.path().join("song.wav");
+        std::fs::write(&wav, minimal_wav(&[], None)).unwrap();
+        assert_eq!(read_meta(&wav).unwrap().cover, Some(png.clone()));
+
+        let bare = tempfile::tempdir().unwrap();
+        let wav = bare.path().join("song.wav");
+        std::fs::write(&wav, minimal_wav(&[], None)).unwrap();
+        assert_eq!(read_meta(&wav).unwrap().cover, None);
+
+        // 同目录仍有 cover.jpg：内嵌图（APIC）优先。
+        let embedded = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        embedded
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        let inner = buf.into_inner();
+        assert_ne!(inner, png, "两张图字节不同，才能区分来源");
+        let wav = dir.path().join("embedded.wav");
+        std::fs::write(&wav, minimal_wav(&[], Some(&inner))).unwrap();
+        assert_eq!(read_meta(&wav).unwrap().cover, Some(inner), "内嵌图优先");
     }
 
     /// sidecar 候选序：`<stem>.lrc` 优先，其次 `<完整文件名>.lrc`；去重。
