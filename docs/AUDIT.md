@@ -1173,7 +1173,14 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
   - 测试里要取像素得用带软件渲染器的 testing backend（`set_platform(TestingBackend::new(TestingBackendOptions { renderer_name: Some("software") … }))`）；`init_no_event_loop()` 的缺省后端不实现 `take_snapshot`。
   - 无曲目时播放页是空态、不渲染歌词列，歌词相关测试要先 `Player.has-track = true`。
   - 升级前的「对照」用旧 worktree 留着旧锁文件构建，两份截图逐像素比；只看编译和测试发现不了这类回归。
-- **验证**：fmt、clippy（all-targets, all-features；`clippy.toml` 的 msrv 同步 1.95 后没有激活新 lint）、全仓测试 888 条（+1 歌词回归）、`cargo doc -D warnings`、`cargo deny` 四项 ok。
+- **验证**：fmt、clippy（all-targets, all-features；`clippy.toml` 的 msrv 同步 1.95 后没有激活新 lint）、全仓测试 888 条（+1 歌词回归）、`cargo doc -D warnings`、`cargo deny` 四项 ok。推送前另按 CI `test` job 的原命令（单线程 + nocapture）彩排了一遍。
+- **CI 结果**：`e24e843..f495997` 共 21 个提交推送后，六个 job 全绿（[run 45633681415](https://github.com/modenicheng/hutao-music-player/actions/runs/45633681415)）——`main` 自 10 月底以来首次整轮通过，`deny` job 不再红。
+
+**真机实测（待补）**：新的发布版二进制已按文档命令重建（`cargo build --release --locked -p hmp-desktop -p hmp-cli`；`target/release/hmp` 里 `org.mpris.MediaPlayer2.hmp` 从 0 处变为 3 处，两个二进制都带 SQLite 3.54.1）。重建时用户正在播放，没有重启 daemon，下面三条都还没验：
+
+1. 重启桌面端（新桌面会自动把旧 daemon 换掉）后 `playerctl -l` 应出现 `hmp`，`playerctl -p hmp status` / `metadata` 能读到播放态。注意反过来不成立：旧桌面连上新 daemon 会判「后端是陈旧构建」，重启一次后端后停在 `StaleBackend`；新 `hmp` 命令连旧 daemon 也会把它退出重启。
+2. 被清掉的喜欢状态是否自愈：重启后 `hmp library sync` 触发一轮 reconcile，拷库副本确认 `relations` 里 `entity_type='track' AND provider='qq' AND relation='liked' AND desired_state=1` 的行回到约 866，且之后不再被清。
+3. Slint 1.19 在真机 GL 渲染器下的样子（封面投影、标题两行、圆角与文字抗锯齿）与歌词进页直达、最近播放进页重读、文件夹过滤保持、播放页歌手/专辑跳转——离屏 A/B 只覆盖软件渲染器，这几条要人眼看。
 
 ### 30.8 未核实 / 存疑
 
