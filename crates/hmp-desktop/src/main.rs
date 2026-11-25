@@ -2,13 +2,20 @@
 //! UI 是 daemon 的又一个适配器（docs/PROJECT.md §8.6）：IPC 传输在 backend.rs，
 //! 状态映射在 player_bridge.rs；库页数据经 library_view 直读媒体库（离线降级空态）。
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use slint::{ComponentHandle, Global};
 
 use hmp_desktop::{backend, bridge, exit_guard, menu_bridge, player_bridge, prefs};
 
+/// 日志轮转阈值：启动时 `desktop.log` 超过此大小 → 改名 `desktop.log.1`
+/// （只留一份历史，覆盖上一份）。
+const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
 fn main() -> Result<(), slint::PlatformError> {
+    init_logging();
+
     let prefs = Arc::new(Mutex::new(prefs::load()));
 
     // IPC runtime（bootstrap 第一步）：订阅任务挂上后随 main 存活到 run() 退出。
@@ -97,4 +104,100 @@ fn main() -> Result<(), slint::PlatformError> {
     drop(runtime);
     guard.disarm();
     Ok(())
+}
+
+/// 日志初始化（U3）：此前桌面端不装 subscriber，全仓的 `tracing::warn!` /
+/// `error!` 运行时是空操作（封面、歌词、连接失败不留痕迹）。级别取
+/// `RUST_LOG`，取不到用 warn；追加写 `<cache_dir>/logs/desktop.log`，文件
+/// 打不开退回 stderr；`try_init` 避免重复初始化 panic。
+fn init_logging() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false);
+    match open_log_file() {
+        // `Arc<File>` 即 MakeWriter（`&File` 实现 io::Write）
+        Some(file) => {
+            let _ = builder.with_writer(Arc::new(file)).try_init();
+        }
+        None => {
+            let _ = builder.try_init();
+        }
+    }
+}
+
+/// 打开追加写的日志文件：建 `logs/` 目录 → 启动期轮转 → 以 append 打开；
+/// 任一步失败 → None（调用方退回 stderr）。
+fn open_log_file() -> Option<std::fs::File> {
+    let dir = hmp_storage::cache_dir().join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("desktop.log");
+    rotate_oversized_log(&path);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+}
+
+/// 启动期轮转：日志已超过 [`LOG_MAX_BYTES`] → 改名 `desktop.log.1`（覆盖
+/// 上一份）并返回 true；文件不存在 / 读不到大小 / 改名失败 → false（轮转
+/// 只是保洁，失败则照常追加）。
+fn rotate_oversized_log(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > LOG_MAX_BYTES => {}
+        _ => return false,
+    }
+    let previous = path.with_extension("log.1");
+    // Windows 上 rename 不覆盖已存在的目标：先移除上一份
+    let _ = std::fs::remove_file(&previous);
+    std::fs::rename(path, previous).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// 临时日志路径（temp_dir + 进程号，不碰真实缓存目录）。
+    fn temp_log(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("hmp-desktop-log-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("desktop.log")
+    }
+
+    /// U3 轮转判断：未超限原样保留；超过 5 MiB 改名 desktop.log.1（覆盖
+    /// 上一份）；文件不存在不轮转。
+    #[test]
+    fn log_rotates_only_when_over_limit() {
+        let path = temp_log("rotate");
+        let rotated = path.with_extension("log.1");
+
+        // 文件不存在 → 不轮转
+        assert!(!rotate_oversized_log(&path));
+
+        // 恰好 5 MiB：不算「超过」，不轮转
+        std::fs::write(&path, vec![b'x'; LOG_MAX_BYTES as usize]).unwrap();
+        assert!(!rotate_oversized_log(&path));
+        assert!(path.exists() && !rotated.exists());
+
+        // 超过 1 字节 → 轮转：原文件移走，.1 承接内容
+        std::fs::write(&path, vec![b'x'; LOG_MAX_BYTES as usize + 1]).unwrap();
+        assert!(rotate_oversized_log(&path));
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::metadata(&rotated).unwrap().len(),
+            LOG_MAX_BYTES + 1
+        );
+
+        // 旧 .1 被新一份覆盖
+        std::fs::write(&path, vec![b'y'; LOG_MAX_BYTES as usize + 1]).unwrap();
+        assert!(rotate_oversized_log(&path));
+        assert_eq!(std::fs::read(&rotated).unwrap()[0], b'y');
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }
