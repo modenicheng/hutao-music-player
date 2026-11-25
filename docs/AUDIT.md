@@ -87,6 +87,9 @@
    占位标题，或 reconcile 时补建 tracks 行。
    **2026-10-02 大幅缓解**：`reconcile_playlist_tracks`（§17）为歌单曲目建了 tracks 行，
    收藏曲目随之获得真实元数据；彻底关闭仍需 LEFT JOIN 决策。
+   **2026-11-25 复核（§30.1 / §30.4）**：「我喜欢」不全、红心全灭的现行主因是
+   `reconcile_remove_absent` 的分片 `NOT IN`（远端快照 >500 条即全清），不是 INNER JOIN——
+   真库当前没有「有关系无曲目」的孤儿行；INNER JOIN 议题独立，仍未决策。
 3. **播放路径创建的 local_files 行是二等行**（无 scan_root/generation）：daemon 关机期间
    删除的文件永不标记 missing，直到下次扫描。
 4. ~~**`delete_playlists_absent` FK 地雷**：subscribed 歌单一旦有曲目缓存就会 FK 失败~~
@@ -181,6 +184,8 @@
    建议：维持直读契约并写进 PORTING 文档，不为读路径新增 IPC。
 
 2. **IPC 无搜索与内容详情接口——已关闭（内容域里程碑落地）**。Search/Discover/Top/歌手/推荐等内容读面已全部经 daemon content.rs 统一出网（ff8050e 接 IPC+CLI+桌面 UI、9b90e81 内容页升级），`hmp search`/`hmp account` 直连旁路同步收编。以下为当时的分析存档：
+   **2026-11-25 更正（§30.4）**：并未收编——`hmp search`/`hmp account`/`hmp login` 仍直接创建
+   `QqMusicClient` 出网并直读凭证（`crates/hmp-cli/src/search.rs:10`、`account.rs`、`login.rs`）。
    桌面导航已含 home/discover/top/top-detail/search/playlist/album/artist 页
    （crates/hmp-desktop/ui/nav.slint:4-22），全部只有 mock 数据。daemon 只消费
    SongApi/SonglistApi/AlbumApi/CommentApi 与 reconcile 用的 UserApi
@@ -469,11 +474,15 @@ aeb2437（明文无 Range 回退）提交于其后 22:36、**从未进入任何�
 - ~~IPC：accept 循环一错即停摆无自愈（server.rs break）~~ **已修**（server.rs accept
   退避自愈，代码注明「自愈（AUDIT §16 #1）」，25ms×2ⁿ 封顶 1s）；单实例管道 + 1s BUSY
   重试预算在连接风暴下可能耗尽（实测裸连 97% BUSY）——**仍开放**（Windows 面）；
+  **2026-11-25 更正（§30.4）**：已落地——`PIPE_STANDBY = 4` 待命实例池 + `CONNECT_BUDGET = 5s`
+  （`crates/hmp-daemon/src/transport.rs:65,92`）；
   ~~客户端读响应无超时~~ **已修**（cli/client.rs 读响应 30s 硬超时）。
 - 播放：~~中途读错误被 rodio 视为 EOS → 静默跳歌无 Error 态~~ **已修**（core.rs 读错误
   Error 态上抛）；~~`try_seek` 阻塞命令循环最长 30s~~ **已修**（后台化 + 10s ACK
   deadline）；~~音质回退链不覆盖解码期失败~~（**2026-10-02 关闭**，见 §17：engine 降档
   循环覆盖装载与解码期失败，Timeout 不降档为有意边界）；预解析期无总超时——**仍开放**。
+  **2026-11-25 更正（§30.4）**：已落地——`PRELOAD_RESOLVE_TIMEOUT = 15s`
+  （`crates/hmp-daemon/src/engine.rs:30,1510`）。
 - ~~引擎命令循环内联 await 解析（歌单/专辑秒级）→ 播放控制命令排队，UI 感知「点了
   没反应几秒」~~ **已修**（resolve 走通道投递，播放控制不再被解析排队）。
 - 其余见 §4（V1 footer 误报待立项、local_files 二等行、桌面端 UI 文案；INNER JOIN
@@ -860,3 +869,320 @@ daemon 侧实测见上（探针法：起 HEAD daemon + 直发 CoverGet，观察�
 - 侧栏歌单行只有行窗内的才是 Tab 停靠点。
 - 歌单重命名/删除仍只有 CLI（`hmp playlist rename/delete`）；UI 的右键菜单是曲目语义，歌单级菜单需新面板。
 - 窄窗设置行描述文字截断（T8，既有）。
+
+## §30 架构与曲库两问审计（2026-11-25，用户问「前后端分离是否合理、以后扩展性如何」+「本地库与 QQ 库的结合、音频整理与艺人/专辑逻辑很奇怪」；八路只读子代理专项 + 主代理真库取证）
+
+**范围与方法**：基线 `e24e843`（main，工作树干净），审计阶段全程只读、未运行 cargo、未改代码。拆成八路只读分工并行：IPC 契约与边界矩阵 / crate 分层与进程拓扑 / 桌面前端职责 / 曲库存储模型 / 曲库入库同步与播放 / QQ 侧实体建模 / 曲库 UI 呈现 / 文档与演进史。其中五路返回（桌面、存储、入库同步、UI、文档史），三路（IPC、分层、QQ 实体）触发模型用量上限中断、未产出，其影响结论的事实由主代理补读核实。**凡标了位置且未注明「未复核」的结论，均由主代理回代码或回真实数据核对过**；子代理独有且主代理未复核的条目标「未复核」。真库取证：把 `library.sqlite3` 连同 `-wal` 拷到 `/tmp` 查副本（daemon 常驻、WAL 未落盘；不拷 `-shm`；不读账号表），用完删除，运行中的库未被触碰。
+
+**结论速览**
+
+| 问 | 判定 | 评分 |
+|---|---|---|
+| 前后端分离 | 进程划分合理且应保留（关窗续播、系统媒体控制、CLI 遥控都需要常驻 daemon）；不合理在接缝：曲库数据不走 IPC 而由前端直连 SQLite、协议无版本号、QQ 是隐含的默认命名空间 | 3 / 5 |
+| 本地库 × QQ 库 | 地基正确（两种曲目同表、歌单可混排），但模型只到「曲目行」为止：艺人/专辑是曲目上的字符串，QQ 的歌手 mid、专辑 mid 入库即丢，两库之间没有任何关联 | 2 / 5 |
+
+**决策口径**（沿用本报告开篇原则）：明确 bug（§30.1、§30.2.4、§30.3.3）归修复轮（§30.7）；需要产品语义决策的（§30.6）只记录不动手。
+
+### 30.1 P0：reconcile 分片 `NOT IN` 清空全部喜欢状态
+
+- **现象**（真库）：「我喜欢」866 首，每轮 reconcile 结束后 `relations` 里 865 行 `track/liked` 被置 `desired=0`，仅 1 行因处于 `error` 态未被触碰。
+- **根因**：`crates/hmp-storage/src/db.rs:1472-1485` `reconcile_remove_absent` 为绕开「SQLite 变量上限」把 `present_keys` 按 500 分片，每片执行 `UPDATE … WHERE … AND entity_key NOT IN (本片)`——片 1 清掉片 2 的行、片 2 再清掉片 1 的行，远端快照超过 500 条即该 provider 全清。`delete_playlists_absent`（`db.rs:1504-1514`）同形，收藏歌单超过 500 个时整类删除。调用点：`crates/hmp-daemon/src/reconcile.rs:203`（track liked）、`:253` 与 `:258`（playlist subscribed）、`:604`（album liked）。既有单测只覆盖 0 或 1 个 key（`db_tests.rs:29-103`）。
+- **复现**：真库副本上按原样跑两条 UPDATE——866 →（片 1，500 key）500 →（片 2，366 key）**0**；正确语义（整体 `NOT EXISTS`）保持 866。据入库同步分工的 git 考，该写法自 `1cfc622`（2026-08-09）起存在（未复核）。
+- **用户可见**（按代码推断，未截图）：桌面红心取 `relation_desired`（`crates/hmp-desktop/src/player_bridge.rs:262-279`）全灭；「我喜欢」页取 `list_favorites`（`library_view.rs:207-243` → `db.rs:1278-1296` → `ui/library-page.slint:105-108`）只剩 error 态 1 行；侧栏「我喜欢」歌单走 `playlist_tracks` 仍 866 首——同一个「我喜欢」两处数量不同。对已收藏曲目点红心会向 QQ 多发一次 `like_song`；真库中《追风之翼 The Wind Chaser》（`002tqi6Z1Lszqc`）正卡在 `desired=1 / remote=0 / error`、`retry_count=27`、`QQ Music API error 1101` 的退避重试里（每 10 分钟一次、无终态）——是否由此引起未证实。
+- **修法**：整体 `NOT EXISTS`（临时表或 `json_each`），或改成「先取本地 synced 行、在 Rust 侧按 present 集合求差、只对缺席 key 正向更新」；两处同改，补 501+ key 回归测试。注释「SQLite 变量上限 999」已过时：内置 3.53.2（libsqlite3-sys 0.38.2）的默认上限是 32766。
+- **同一函数的相邻脆弱点**：`present_keys` 为空即全量清理（`db.rs:1461-1470`、`1497-1502`），而 `UserApi::get_fav_song`（`crates/hmp-qqmusic-api/src/user.rs:229`）在响应缺 `data` 时 `unwrap_or(json!({}))` 解析成空列表而不是报错，响应结构体字段又全是 `#[serde(default)]`、`data.code` 不检查——QQ 风控或截断造成的「成功但空」会清空本地 QQ 收藏并删掉订阅歌单行（下次成功可恢复）。
+- **自愈**：代码修复后不需要手工修数据——下一轮 reconcile 的第一阶段（`reconcile_relation(..., true)`）会把在场曲目重新置 `desired=1`。
+
+### 30.2 问题 2：本地库 × QQ 库
+
+#### 30.2.1 根因三层
+
+| 层 | 现状 | 证据 |
+|---|---|---|
+| 身份 | QQ 的 `Song` 模型带 `singer[].mid` 与 `album.mid`（`crates/hmp-qqmusic-api/src/models.rs:227-309`），三条入库路径却只留名字：歌手拼成一个字符串、专辑只存名；艺人/专辑没有任何表（`hmp_core::Album`/`Playlist` 是生产零引用的空壳） | `reconcile.rs:540-558` `qq_track_row`；`crates/hmp-daemon/src/engine.rs:1662-1682` `track_row`；`engine.rs:1685-1702` `stub_row`；`crates/hmp-core/src/media.rs:205-216` `TrackStub { artists: Vec<String>, album: Option<String> }` |
+| 视图 | 曲库浏览的五个查询全部 `JOIN local_files … source='local'`，只覆盖本地文件；专辑按名分组、专辑歌手取 `MAX(artist)`；`album_artist`、`disc_number` 落库但零读取 | `db.rs:1025-1087` `library_tracks`；`:1090-1116` `library_albums`；`:1119-1135` `library_artists`；`:1138-1159` `local_tracks_by_album`（`:1143` 排序不含碟号）；`:1162-1188` `local_tracks_by_artist`；桌面详情页同口径 `crates/hmp-desktop/src/library_view.rs:489-602` |
+| 关联 | 本地文件与 QQ 曲目之间没有任何关联表或匹配落库；唯一交集是歌词兜底，匹配结果用完即弃 | `crates/hmp-daemon/src/content.rs:237-288` `local_lyric_with_fallback` / `search_lyric_mid`；全仓无 link 表 |
+
+#### 30.2.2 真库取证（4121 首曲目 = QQ 4109 + 本地 12；23 个歌单；`user_version = 8`）
+
+| 事实 | 数据 |
+|---|---|
+| 曲目身份 | QQ = 裸 songmid；本地 = `local:<canonical 绝对路径>`（移动即换身份）；`playback_state.json` 里的队列是 866 个裸字符串 |
+| 扫描根 | `/mnt/d/QQMusicDownloads`（QQ 音乐下载目录）——12 个本地文件里有 9 个在 QQ 侧有同名曲目（如本地 #32《希望有羽毛和翅膀》↔ QQ #54），两边各一条、喜欢与播放次数各记各的 |
+| 艺人 | QQ 曲目 758/4109 的 `artist` 含逗号（`", "` 拼串）；`track_artists` 仅 12 行且全是本地行（每首一行未拆分的标签原文）；本地 #31 艺人 = `张韶涵/HOYO-MiX`、#32 = `知更鸟/HOYO-MiX/Chevy`；同一首歌 QQ 侧写作 `知更鸟, HOYO-MiX, Chevy` |
+| 专辑 | 1569 个专辑名对应 1650 个（专辑, 艺人串）组合——如「原神-闪耀的群星6 The Stellar Moments Vol. 6」对应 5 个艺人串；专辑 mid 全库未存 |
+| `album_artist` / `year` | `album_artist` 4121 行零填充；本地 `year` 12 行全空（这批文件本身没有 `DATE` 标签） |
+| 曲库页实际呈现（按查询回放） | 专辑视图 10 张（8 张只有一首）；「China Philharmonic Orchestra (K2HD)」显示歌手「鲍元恺」（实为吕其明、鲍元恺各一首）。歌手视图 8 个，含两个合成串与一个乱码串；HOYO-MiX 计 4 首（实际 6 首） |
+| 喜欢 | `relations` 866 行（865 行 `desired=0`，见 §30.1）；「我喜欢」歌单行 `remote_id=201`（owned）866 首 |
+| 歌单 | QQ 22 个（owned 10 + subscribed 12）+ 本地 1 个「测试歌单」 |
+| 测试残留 | `tracks` id 20/36/38 为合成行（key 为空串、`1`、`so001`，标题同 key） |
+| 源文件损坏 | 本地 #33 的标签本身就是坏的（title/artist/album 为「`U+FF00` + 字节」形态，`metaflac` 原始字节 `ef bf a7 …`），下载器写入所致，不是 HMP 解码问题；HMP 无修正手段（无标签编辑、无手动关联 QQ 曲目） |
+| 缓存 | 歌词盘缓存只按 QQ mid（`<mid>.lrc`）；封面内容寻址落 `<data_dir>/covers`（598 文件 21M），`cover_cache` 表只覆盖 QQ URL |
+
+#### 30.2.3 具体表现
+
+1. **多艺人三种写法**：播放路径 `track_row` 用 `" / "`（`crates/hmp-core/src/media.rs:256-262` `artist_names`），列表缓存 `stub_row` 与 reconcile 的 `qq_track_row` 用 `", "`，本地行是标签原文（`crates/hmp-storage/src/local.rs:78-84,108`：逐帧写入 `track_artists`，不做字符串拆分；lofty 0.25.4 的 ID3v2.4 只按 `\0` 切多值，`A/B`、`A; B`、`feat.` 整体算一个艺人）。同一行谁后写谁赢（`db.rs:337` 的 `COALESCE`）。
+2. **专辑按名字分、歌手取字典序最大者**（`db.rs:1092-1101`）；多碟曲序交错（`db.rs:1143`）；无「未知专辑/未知艺人」桶（`db.rs:1094`）；同名专辑共用封面映射（`library_view.rs:197-205`，未复核）。
+3. **点艺人/专辑是死路或错路**：播放条桥接只写展示名、丢掉 `ArtistRef.id`/`AlbumRef.id`（`player_bridge.rs:1101-1112`），`ui/now-playing.slint:525,533` 以展示名导航；艺人页先拿整串精确匹配 `track_artists`，必空后退「最长包含匹配」（`library_view.rs:524-546`）——点「知更鸟 / HOYO-MiX / Chevy」落到 HOYO-MiX 的本地页，QQ 曲目的歌手直接「未找到」；库内 QQ 行的 `artist_mid`/`album_mid` 填的也是展示名（`library_view.rs:748-750`，两路分工一致，未复核）；`Nav.param` 一个字符串挤了四个命名空间（数字 DB id、展示名、`qq:`+mid、榜单 id；`ui/nav.slint:24-36`）。
+4. **「我喜欢」有两份表示**：`relations(track, qq, liked)` 与 owned 歌单行（`reconcile.rs:36` `FAV_SONG_DIRID = "201"`）；侧栏「自建歌单」不过滤该行（`library_view.rs:369-387`，未复核）。
+5. **本地曲目进不了 QQ 自建歌单**：`crates/hmp-daemon/src/server.rs:385-387` 拒绝，但 `InvalidQuery` 被统一映射成「remote QQ playlists are read-only…」（`server.rs:456-459`）；UI 侧预判禁用并注「不支持本地曲」（`ui/context-menu.slint:154-156`）。HMP 自建歌单（`relation='local'`）永不上云（`playlists_pending` 过滤、`sync_playlist` 的 create 分支不可达，未复核）。
+6. **喜欢/取消喜欢只有播放页一个入口**：右键菜单只有「播放 / 下一首播放 / 加入队列 / 加入播放列表… / 从队列移除 / 从歌单移除 / 查看歌手 / 查看专辑」（`ui/context-menu.slint:167-244`）。
+7. **列表看不出本地还是 QQ、搜索不搜本地**：`TrackRow.source` 有值但 UI 不渲染；搜索只发 `Request::Search`（未复核）。
+8. **桌面端没有专辑/歌手/流派浏览入口**，「音乐库」是一张按标题码点序的平表；排序全是 SQLite BINARY 序（`db.rs:1068,1126,1172`；`ui/nav.slint:4-22`，未复核）。
+9. **歌单三套互斥语义**：本地歌单可混排但不上云；owned 拒本地曲；subscribed 只读。远端已删的自建歌单本地不删（`reconcile.rs:258` 只清 subscribed）。
+
+#### 30.2.4 确定性缺陷
+
+修复轮范围内的条目：
+
+| # | 缺陷 | 位置 |
+|---|---|---|
+| D1 | 分片 `NOT IN` 全清（§30.1） | `db.rs:1472-1485`、`1504-1514` |
+| D2 | 空快照被当成权威空；软失败被解析成空列表 | `db.rs:1461-1470`；`user.rs:229` |
+| D3 | 移动或改名本地文件后「喜欢」失联：指纹命中时只改 `tracks.source_key`，`relations.entity_key` 仍是旧路径，而 `list_favorites` 按 `source_key = entity_key` 内连接 | `db.rs:767-779` 对 `:1278-1284` |
+| D4 | 带标准日期标签的本地文件年份恒空：读的是 `ItemKey::Year`，而 lofty 0.25 把 `DATE`/`TDRC`/`©day`/`ICRD` 映射为 `RecordingDate`（`f6c073c` 依赖轮引入）；即使读对键，`"2020-05-01".parse::<i64>()` 也会失败 | `local.rs:123-125`；lofty `src/tag/item.rs:206,307,368,420-421` |
+| D5 | 歌单曲目补抓没有游标：预算 24、每轮从第 0 行开始，注释里的「下一轮续跑」并未实现；QQ 歌单超过 24 个后排在后面的永远补不到曲目（真库 22 个） | `reconcile.rs:30`、`:384-396` |
+| D6 | 批量 upsert 无条件 `title = excluded.title`（单条版有「标题等于 key 时不覆盖」的保护），而 stub 的标题就是 mid → 入队未播的库内 QQ 曲目标题被打回 mid，靠 `repair_stub_metadata` 自愈 | `db.rs:499-506` 对 `:331-335` |
+| D7 | 「最近播放」不随播放更新：引擎写 `play_events` 后不发 `LibraryChanged`（bump 点只有 `server.rs:319,441,449` 与 `sync.rs:90,97,113`），导航到该页也不重读。上限 12 条与 `format_stamp` 的 UTC 口径是有意取舍（与 `hmp history` 输出一致、不引入时区依赖，`library_view.rs:709-718`），不算缺陷 | `engine.rs:1239-1254`；`library_view.rs:28`；`bridge.rs:796-837` |
+| D8 | 任何库刷新都重置音乐库的文件夹过滤：`apply_snapshot` 无条件 `set_local_tracks(全部)`，不重放当前选中的文件夹 | `bridge.rs:660-668` 对 `:698-727` |
+| D9 | 本地封面只认内嵌图，不探测目录封面（全仓没有 `folder.jpg`/`cover.jpg` 探测） | `local.rs:87-102` |
+| D10 | 本地专辑曲序忽略碟号；专辑歌手不使用 `album_artist` | `db.rs:1143`、`:1092` |
+
+只记录、不在修复轮的条目：
+
+- **身份就是路径**：播放过但未扫描的文件会永久入库且没有 `scan_root_id`/generation（即 §4.3 的二等行）；非 UTF-8 文件名经 `Path::display()` 有损转写（未复核）；生产代码没有任何 `DELETE FROM tracks/local_files`，也没有「移除扫描根」。
+- **reconcile 没有定时**：只在 daemon 启动、`LibrarySync`、扫码登录成功时触发；手机上的收藏变化要等重启或手动 sync。
+- **「我喜欢」只写关系不建曲目行**（`reconcile.rs:186-195`，未复核）——即 §4.2 的 INNER JOIN 议题；真库当前 0 行孤儿。
+- **`playlists.remote_id` 一列两义**：owned 存 dirid、subscribed 存 disstid，tid 不落库（`db.rs:149-150`）；`resolve_source_ids_impl` 把 `PlayRequest::Playlist(id)` 的 id 原样当远端歌单号去取详情（`crates/hmp-daemon/src/player.rs:524-536`）。这是 §27 另案「`hmp play playlist:<本地主键>` 恒报 empty」的模型侧线索，根因仍未证实（见 §30.8）。
+- **缺失文件治理**：`lf.missing` 读出后未消费，`SongRow` 没有 missing 字段（未复核）；`PlayList` 快路径不看 missing。
+- **阻塞 I/O 持库锁**：watcher 持库锁期间读指纹、标签、封面；`resolve_local`/`local_stub` 在 async 里同步读盘（未复核）。
+- **元数据要客户端回传**：`LyricGet`/`Favorite`/`AddTrack` 都要求前端提供 title，CLI 传的是 `title: id`（未复核）。
+- **SyncWorker 空转**：每 30 秒先读密钥环再查 pending（`sync.rs:85,119-121`）。
+- **指纹**：`DefaultHasher` 不保证跨 std 版本稳定，只取前 1MB（未复核）；没有「标签解析版本号」，修了 D4 这类解析规则后存量行不会自动刷新。
+- **`sync_relation` 不检查 provider**：本地行若意外 pending 会永久 error 重试——生产路径不可达（daemon 对本地来源立即 `mark_relation_synced`，`server.rs:306-312`；`LibraryDb::add_favorite` 仅测试使用）。
+- **约束与清理**：`playlist_tracks` 没有 UNIQUE；`play_events` 不裁剪；封面/歌词盘缓存不淘汰；内嵌 PNG 也存成 `.jpg`（未复核）。
+
+#### 30.2.5 目标模型（建议，待 §30.6 决策）
+
+缺的是「一首歌」与「它的一个音源」之间的中间层：
+
+```text
+tracks(id)                                    一首歌（保留现有整数主键）
+track_sources(track_id, provider, key, …)     QQ: mid + song_id    本地: 路径 / 指纹
+artists(id, name, sort_key)   + artist_keys(artist_id, provider, provider_key)
+albums(id, title, year, album_artist_id) + album_keys(album_id, provider, provider_key)
+track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 artist_id
+```
+
+- 本地文件与 QQ 曲目挂在同一首歌下即「关联」，不需要独立的 link 表（自动匹配的来源与置信度记在 `track_sources` 行上）。
+- 喜欢、歌单、播放历史都挂在 `tracks.id` 上，两源自动共享；同时根治 D3 与「我喜欢两份」。
+- 播放时选一个可用音源（本地优先、失败回退 QQ）；歌词、封面、评论经关联取 mid。
+- 艺人页、专辑页可以同时列出本地与 QQ 的内容。
+- 匹配器不必从零做：`search_lyric_mid` + `pick_best_song` 已有「标题 + 歌手检索 → 评分 → mid」，补时长与专辑即可；结果落库，另加手动「关联到 QQ 曲目」。
+
+#### 30.2.6 分阶段迁移（每步只加列、可回滚；人日为粗估）
+
+| 阶段 | 内容 | 粗估 |
+|---|---|---|
+| 0 止血 | §30.2.4 的 D1–D10 与 §30.3.3 的桌面缺陷，各补回归测试 | 2–3 人日 |
+| 1 停止丢信息 | 入库保存专辑 mid 与歌手列表（含 mid），统一分隔符，专辑按（专辑名, 专辑歌手）分组，`tag_version` 触发存量重扫 | 3–5 人日 |
+| 2 实体化 | `artists`/`albums` 表与 key 表，`track_artists.artist_id`；桌面改用 mid 导航 | 5–8 人日 |
+| 3 曲目与音源拆分 | `track_sources`，自动关联 + 手动关联，本地优先，集合化的「我喜欢」 | 5–8 人日 |
+| 4 读路径收编 | 见 §30.3.5 | 随问题 1 |
+
+每一步都动 schema：按 AGENTS.md 重建全部链接 daemon 的二进制并 `hmp quit` 实测。
+
+### 30.3 问题 1：前后端分离
+
+#### 30.3.1 判定与保留项
+
+保留：常驻 daemon 独占播放引擎、SQLite、MPRIS/SMTC、托盘（MPRIS 是进程内适配器，直接复用 `Request`/`DaemonState`：`crates/hmp-daemon/src/mpris.rs:6-17`）；播放状态单一来源；UI 只发意图（桌面端 0 个文件引用 `hmp_qqmusic_api`，不碰凭证）；`relations` 表兼作 durable outbox（本地先提交、pending 胜、先推后拉、指数退避 `min(2^n·10s, 10min)`）；迁移逐级事务 + `user_version`；扫描的 mtime+size 增量、指纹移动复用、`missing` 标记不删行；封面内容寻址 + 派生缩略图。
+
+#### 30.3.2 接缝问题
+
+| # | 问题 | 证据 |
+|---|---|---|
+| A1 | **曲库数据面不走 IPC**：`Request` 的 37 个变体里没有任何曲库读请求，只有 `LibrarySync` 触发与无载荷的 `LibraryChanged`；前端直连 SQLite。这是成文决定（库内核 spec §3.3「写走 daemon，读直读本地 DB」+ 本报告 §8.1「契约已成立，不为读路径新增 IPC」），但与 PROJECT §10.3「UI 不直接执行 SQLite」冲突 | `crates/hmp-core/src/ipc.rs:114-285`、`:344-355`；桌面 3 处开库（`library_view.rs:132,152`、`backend.rs:621` 队列投影、`player_bridge.rs:267` 心形回读）；CLI 10 个文件引用 `hmp_storage` |
+| A2 | **「只读直库」并不只读**：`LibraryDb::open` 会建目录、设 WAL、跑迁移；桌面 `load_data` 早于 daemon 指纹核对。`library_view.rs:5`「daemon 是唯一写方」不成立 | `db.rs:285-297`；`crates/hmp-desktop/src/main.rs:27`；`backend.rs:182-219`（未复核） |
+| A3 | **写方不止 daemon**：`hmp scan` 由 CLI 直写；引擎播放路径的 `upsert_track`/`record_play_start` 与 `resolve_local` 也写库 | `crates/hmp-cli/src/scan.rs:107-110`（未复核）；`engine.rs:1239-1254` |
+| A4 | **没有协议版本号**：兼容只靠「新字段一律 `serde(default)`」加构建指纹；新增枚举变体对旧 daemon 仍是破坏性变更；单帧上限 1 MiB，`PlayList` 把整表 id 塞进一帧（约万首本地曲目时临界的估算未实测） | `ipc.rs:1-6`、`:15`；`player_bridge.rs:522-565`（未复核）。变体数 10（08-08）→ 37（10-23），`ipc.rs` 204 → 1346 行（文档史分工） |
+| A5 | **状态推送没有增量**：每次 `state_rx.changed()` 都克隆整包 `DaemonState`；队列的 `revision` 在换曲、切循环、切随机时也自增，桌面每换一曲整包重拉并重建队列 | `crates/hmp-daemon/src/server.rs:202-205`；`crates/hmp-core/src/queue.rs:349,381,389,458`；`backend.rs:508-515`（注释称仅结构变化才重拉） |
+| A6 | **QQ 是隐含的默认命名空间**：`TrackProvider::from_id` 非空 `local:` 前缀才判本地，否则一律 QQ；`source` 是自由字符串；`PlayRequest::Track` 与 `::Local` 语义重叠；`TrackRef` 生产零引用 | `ipc.rs:19-30`、`:49-110`、`:150-159`、`:408-417` |
+| A7 | **`hmp-core` 混装**：领域模型、播放命令、队列逻辑（984 行）、带 QQ 形态的内容 DTO（`SearchSong`/`TopSongDto`/`CommentPage`/`LoginQr*`/`RemoteArtistDetail`…）同处一个「不得依赖具体 QQ 接口字段」的 crate | `crates/hmp-core/src/lib.rs`、`ipc.rs:439-760`；与 PROJECT §5.2 不符 |
+| A8 | **前端为几个符号链接整个 daemon crate**：桌面只用 `BUILD_CODE`、`server::socket_path`、`serve::spawn_detached_exe`、`transport::IpcStream`、`IpcListener`；另有 `reqwest`、`hmp-qqmusic-api`、`tokio-util`、`tracing-subscriber` 四个依赖在 src 里零引用 | `backend.rs:16,129,138,158,161,190,206,273,724,813,846`；`crates/hmp-desktop/Cargo.toml`。CLI 用 6 个符号（含 `run_foreground`/`run_background`）——`hmp serve` 就跑在 CLI 进程里，属固有依赖 |
+| A9 | **CLI 自己出网**：`hmp search`/`account`/`login` 直接创建 `QqMusicClient`（并直读凭证），绕过 daemon | `crates/hmp-cli/src/search.rs:10`、`account.rs`、`login.rs` |
+| A10 | **依赖倒置**：`hmp-storage` 依赖整个 `hmp-qqmusic-api` 只为再导出 `Credential` 类型；`hmp-media` 依赖 `hmp-storage` 只为 `cache_dir`；`hmp-qqmusic-api` 又 dev-depend `hmp-storage` | `crates/hmp-storage/src/credential.rs:4`；`crates/hmp-media/src`（2 处 `hmp_storage::cache_dir`） |
+| A11 | **构建指纹范围过宽**：哈希集合含 daemon 并不链接的 `hmp-cli`、`hmp-desktop` | `crates/hmp-daemon/build.rs:34-44` |
+
+#### 30.3.3 桌面端缺陷
+
+| # | 缺陷 | 位置 |
+|---|---|---|
+| U1 | 歌词一次失败后本会话永不重试：`REQUESTED` 只 insert 不 remove；文档注释「换曲再回来时自然重试」与实现相反 | `player_bridge.rs:1152-1157` |
+| U2 | 封面「失败出账 + 指数退避」有两处从未生效：`REQUESTED`/`COVER_RETRY` 是 `thread_local`，入账在 UI 线程、出账与退避记账在 tokio 工作线程（操作的是另一个线程的空集合）。`online_covers.rs:16-19` 已改全局 Mutex；§23 称修了三处，实收一处（据桌面分工的 git 考：`ba07870` 引入、`97e3d8f` 只修一处，未复核） | `player_bridge.rs:1321-1325`、`:1418-1425`、`:1472-1478`；`track_covers.rs:31-34,105` |
+| U3 | 桌面端不初始化 tracing subscriber，`warn`/`error` 运行时全是空操作 | `crates/hmp-desktop/src/main.rs`（全工作区只有 `crates/hmp-cli/src/main.rs:365-370` 初始化） |
+| U4 | 音质徽章显示的是前端推算值：文案取 `Quality.tier-label(Quality.effective(Player.track-max-tier))`，而 `track-max-tier` 就是本次实际档；daemon 给的 `track-quality` 无人读，`Track.available_qualities` 未使用；降档后弹层把更高档位标成「本曲未提供」 | `ui/quality-badge.slint:30,79,103,122`；`ui/stores.slint:32,34`；`player_bridge.rs:1115-1129` |
+| U5 | 删除歌单曲目按界面下标、没有 key 校验（快照过期即删错行，owned 歌单还会同步到远端） | `menu_bridge.rs:192-203` → `server.rs:408-433` → `db.rs:2016-2022` |
+| U6 | QQ 曲的歌手/专辑链接用展示名导航（见 §30.2.3 第 3 条） | `player_bridge.rs:1101-1112`；`ui/now-playing.slint:525,533` |
+| U7 | 库页数据层全量、无分页：每次快照对每个本地文件 `fs::metadata`、重建 7 个模型；首帧与导航在 UI 线程同步读库 | `library_view.rs:158-189,334`；`bridge.rs:565,608-742,753`（未复核） |
+| U8 | 图片解码在 UI 线程（PROJECT §10.4 明文禁止）；SQLite 与 stat 在 async 任务里同步执行 | `cover_cache.rs:139-167`；`bridge.rs:72-95,591-602`；`backend.rs:574`（未复核） |
+| U9 | 离线/陈旧构建的修复指引只显示 4 秒，没有持久横幅与重连入口 | `backend.rs:249-260`；`player_bridge.rs:60,798-801`（未复核） |
+| U10 | 没有无头 view-model：编排长在 Slint Global 上，约 29 个模块级可变全局；更换 GUI 框架时约 7500 行非测试代码里约 2800 行可复用 | `player_bridge.rs:73-1419`、`bridge.rs:53-575` 等（计数未复核） |
+| U11 | 状态流核心没有自动化测试；15 个集成测试经 `bridge::load_data` 直读真实用户库、无 XDG 隔离；唯一 E2E `tests/live_daemon.rs` 为 `#[ignore]` | `crates/hmp-desktop/tests/`（未复核） |
+| U12 | stringly-typed：`Favorite`/`AddTrack` 的 `source`、`sort`（`"hot"`/`"new"`）、`QualitySet.mode` 别名串、`Response::Cover` 两种 `file://` 形态、未找到态靠 `message.contains("not found")` 判定 | `ipc.rs:150-179,408-417`；`remote_details.rs:85-87`（未复核） |
+| U13 | 在线内容全是首窗：`TopDetailGet { num: 100, page: 1 }`，`discover_has_more`/`search_count` 置位后无人读；`GuessGet` 处理有两份 | `bridge.rs:298-333,1326-1443`（未复核） |
+| U14 | 重复实现：队列元数据投影（`backend.rs:619` 对 `crates/hmp-cli/src/commands.rs:365`）、`provider_of`、时间格式化、帧读写与超时——CLI 与桌面各一份，没有共享客户端（请求超时补了两次） | 未复核 |
+| U15 | 界面层：右键菜单不按上下文裁剪（远端歌单页也显示「从歌单移除」，点击静默返回）；「我喜欢」页歌单网格不换行；扫描/添加文件夹按钮永久禁用（IPC 无扫描请求）；下载/已购是永久空页 | `ui/track-table.slint:272-273`、`menu_bridge.rs:189-191`、`ui/library-page.slint:148-160`、`bridge.rs:732-741`（未复核） |
+
+#### 30.3.4 扩展性
+
+| 场景 | 现状 | 主要阻力 |
+|---|---|---|
+| 再接一个前端（脚本、移动端、网页遥控） | 勉强可行 | 协议只有代码没有 spec；没有版本号；读不到曲库数据（必须直连 SQLite）；`MAX_FRAME` 1 MiB |
+| 再接一个在线音源 | 很难 | QQ 是默认命名空间；QQ 调用散在 daemon 多个模块（content/server/player/engine/sync/reconcile/login/comment）；没有 provider trait |
+| 纯本地离线 | 基本能用 | 本地源已免登录；曲库浏览很弱 |
+| 加一个新领域功能 | 散弹式修改 | 请求与响应各加变体 + daemon 处理 + CLI/桌面各一份桥接；仅桌面消费的端点约 14 个（计数未复核） |
+| 更换 GUI 框架（PROJECT §3.2 声称保留） | 成本高 | 见 U10 |
+
+#### 30.3.5 目标形态与建议（按性价比排序）
+
+1. **协议加版本握手**：连接时交换 `Hello { proto, build, caps }`，不兼容就明确报错；`serde(default)` 只用于加字段，弃用走版本。
+2. **前端连接改真只读**：单独的 `open_read_only()`（不迁移、不建目录），迁移只由 daemon 执行。
+3. **扫描收进 daemon**：`Request::LibraryScan` + 进度事件，CLI 变薄客户端，daemon 成为唯一写方；`LibraryChanged { scope, generation }`。
+4. **抽 `hmp-client` 小 crate**（传输、socket 路径、拉起、指纹），桌面不再链接 daemon crate；清掉零引用依赖。
+5. **拆 `hmp-core`**：线协议与版本 / 领域模型 / 队列逻辑分离。
+6. **音源显式化**：`{ provider, key }` 取代前缀判断；daemon 内用 `MusicProvider` trait 收拢 QQ 与本地的解析、歌词、封面、实体页。
+7. **曲库读路径分两步**：先保持直读（只读化即可），出现第三个前端或全量重查成为性能问题后，再加带分页的读请求。
+
+需要改的决定只有一条：「读直连 SQLite」从「契约」降级为「临时方案」。其余都是在现有骨架上补接缝，不需要推倒重来。
+
+### 30.4 对既有登记的纠错
+
+- **§4.2 `list_favorites` INNER JOIN**：「我喜欢」不全、红心全灭的现行主因是 §30.1，不是 INNER JOIN——真库当前没有「有关系无曲目」的孤儿行。两个议题相互独立，INNER JOIN 仍未决策。
+- **§8.2**「`hmp search`/`hmp account` 直连旁路同步收编」不实（见 A9）。
+- **§16 开放项**里两条「仍开放」实际早已落地：BUSY 预算 → `PIPE_STANDBY = 4` + `CONNECT_BUDGET = 5s`（`crates/hmp-daemon/src/transport.rs:65,92`）；预解析总超时 → `PRELOAD_RESOLVE_TIMEOUT = 15s`（`engine.rs:30,1510`）。真正剩余的只有 §4 残余。
+- **§5 歌手/专辑两行**「无任何前端入口」已过时：桌面远端歌手/专辑页已随 S1 落地；CLI 仍没有 `hmp artist`/`hmp album`（未复核）。
+- **§27 另案**（owned 歌单远端播放恒 empty）根因仍未证实，文档内存在互斥归因（§27「疑似 QQ 侧接口/风控变化」对 USAGE §4.1「dirid≠disstid」）；模型侧线索见 §30.2.4。
+- **PROJECT.md 漂移**（文档史分工，未逐条复核）：§4.1 架构图仍是单体（Slint UI → AppCore）；§5.2 称桌面端是「主程序」并负责单实例与通知；§9.4 的 MPRIS 注册方与「CLI 无队列语义」不符；§11 写 `hmp.db` 并列出从未创建的 `artists`/`albums`/`schema_migrations`/`lyric_cache` 表（实际是 `library.sqlite3` 加 `user_version`）；§2.3「多音源聚合」非目标与 08-08 加入的本地 provider 没有调和；§2.1「不希望依赖额外守护进程」与 §8.6 自相矛盾。
+- **DESIGN.md** 仍是 Web 时代的契约（「Web 前端的唯一设计基准」、进程内 HTTP 服务）；**AUDIT.md 没有 §9–§13**，「§4.4」一词两义。
+- **`library_view.rs:5-14` 模块文档**（「daemon 是唯一写方」「启动时静态快照」）与 **PORTING.md:182,320** 已过时。
+
+### 30.5 演进史要点（为什么长成这样；文档史分工）
+
+- 08-06 PROJECT.md 定稿时是单体（进程内 AppCore），本地库不在项目章程里；08-08 为 CLI 遥控设计并当天落地 daemon（`Request` 10 个变体），同日 SQLite 媒体库 v1 带 provider 模型与 `hmp scan`——本地库是当时审计清单的副产物。
+- 08-09 单日 76 个提交定下绝大多数基础决定（`album TEXT`/`artist TEXT`、按名聚合、owned 存 dirid、「写走 daemon、读直读本地 DB」），全部出自计划文档的「决策定案」，而不是产品需求。
+- 09-07 起桌面端作为「又一个适配器」接入，spec 明写的「后端不感知具体前端」「删掉任何一个不碰后端一行」随后失效：封面下载、扫码登录、音质写入、远端详情都是桌面专属请求。
+- 已不成立的前提：daemon 独占 QQ API 与凭证（A9）、写走 daemon（A3）、「SQLite 主要是缓存」（它现在是本地意图与本地歌单的事实源）。
+
+### 30.6 待决策（产品语义，只记录不动手）
+
+1. 「我喜欢」是否只保留 `relations` 一份（倾向是），不再展示 `remote_id = 201` 的 owned 歌单行。
+2. 同一首歌两边都有时的播放偏好：本地优先（倾向）还是 QQ 优先。
+3. QQ 自建歌单是否允许加入本地曲目（仅本地附加、不上云）。
+4. 「读直连 SQLite」是否降级为临时方案（§30.3.5 第 7 条）。
+5. 本地艺人的拆分规则（`/`、`;`、`，`、`feat.`、`&`）与是否保留原串。
+6. 空快照的清理策略（连续两轮一致才清，还是首轮为空即跳过）。
+7. 同步错误是否设终态（`error` 行当前每 10 分钟无限重试）。
+8. 最近播放的上限（现为 12）与是否分页。
+9. 既有遗留（从未决策）：§4.1 V1 footer、§4.8 桌面端文案语言、§4.9 登录超时按文案判定、下载/已购域、HTTP 遥控与「非目标」的矛盾。
+
+### 30.7 修复轮（2026-11-25 晚起）
+
+范围限于明确 bug，不含架构重构（§30.3.5）与产品决策（§30.6）。三路子代理按 crate 所有权切分，各自使用独立 worktree 与 target（AGENTS.md「多 worktree 各自持有 target/」），不提交、不触碰运行中的 daemon；完成后由主代理合入主工作树，跑全仓逐 crate 验证，重建全部二进制并真机实测。
+
+| 分工 | 文件所有权 | 条目 |
+|---|---|---|
+| 存储 | `crates/hmp-storage/src/`（`db.rs`、`local.rs`、`db_tests.rs`） | D1、D3、D4、D6、D9、D10 |
+| daemon | `crates/hmp-daemon/src/`、`crates/hmp-core/src/ipc.rs`、`crates/hmp-qqmusic-api/src/user.rs`、`crates/hmp-desktop/src/menu_bridge.rs` | D2、D5、U5、歌单写错误文案 |
+| 桌面 | `crates/hmp-desktop/`（`player_bridge.rs`、`track_covers.rs`、`bridge.rs`、`library_view.rs`、`main.rs`、`ui/`） | U1、U2、U3、U6、D7、D8 |
+
+**任务书**：`docs/plans/2026-11-25-F1-fix-storage.md`、`2026-11-25-F2-fix-daemon.md`、`2026-11-25-F3-fix-desktop.md`（含逐项的修法要求、回归测试要求与各自的验证命令）。
+
+**基线**（HEAD `e24e843`，三个全新 worktree 各自独立 `target/`，未合入任何修复）：clippy 零警告；测试全绿——hmp-storage 73、hmp-core 72、hmp-daemon 253、hmp-qqmusic-api 251、hmp-desktop 123。明细与原始输出见 `docs/verify/2026-11-25-fix-round/`。
+
+**顺带发现（修复轮期间，主代理直接修）——Linux MPRIS 不在任何按文档命令构建的二进制里**：`hmp-daemon/mpris` 是可选 feature（`crates/hmp-daemon/src/serve.rs:195-201,230` 的 `#[cfg(feature = "mpris")]`）。它本是默认 feature（58a0964 引入 daemon 时 `default = ["tray", "mpris"]`），94c2c95（08-24）改成 `default = []`，此后没有任何依赖方打开它（60718b3 又清掉了 desktop 对 hmp-mpris 的直依赖）：`hmp-cli` 只开 `tray`、`hmp-desktop` 不开任何 feature——`cargo tree -p hmp-cli -p hmp-desktop -e features -i hmp-daemon` 只解析出 `default` 与 `tray`。实测旧发布二进制 `target/release/hmp` 与 `hmp-desktop` 里 `org.mpris.MediaPlayer2.hmp` 的字符串均为 0 个（托盘 ksni 相关 389 个），`playerctl -l` 里没有 hmp。AGENTS.md 的 clippy 用 `--all-features`，每次都过，掩盖了「检查的不是发布的那份」。
+
+修法：`crates/hmp-cli/Cargo.toml` 增加 `[target.'cfg(not(windows))'.dependencies] hmp-daemon = { path = "../hmp-daemon", features = ["mpris"] }`——daemon 跑在 `hmp serve`（本 crate）进程里，系统媒体控制必须在这里打开；Windows 走 SMTC（`cfg(windows)` 模块，不受 feature 门控），零影响。`cargo tree` 确认 `hmp` 现带 `tray` + `mpris`，`cargo check -p hmp-cli --locked --offline` 通过，`Cargo.lock` 未变。真机验证（重启 daemon 后 `playerctl -l` 应出现 hmp）待补。
+
+**结果（2026-11-25 夜）**：三路全部交回并合入，按缺陷拆成原子提交（每个单独过 clippy 与该 crate 的测试）；主代理在审阅时另补 4 处。合入态（`4842a1f`）全仓验证全过：`cargo fmt --check`、clippy（all-targets, all-features）、`cargo test --workspace`、`cargo doc --no-deps`（`RUSTDOCFLAGS=-D warnings`，与 CI `test` job 末步同款）。真机实测见本节末。
+
+| 提交 | 内容 | 测试增量 |
+|---|---|---|
+| `d68e37b` | `hmp-cli` 打开 `hmp-daemon/mpris`（上文顺带发现） | — |
+| `b986a40` | D1（P0）缺席清理整体排除 | hmp-storage +3 |
+| `714b301` | D6 批量 upsert 标题保护 | +1 |
+| `562304a` | D3 移动/改名后「喜欢」搬到新键 | +2 |
+| `fdd7ed7` | D10 专辑曲序按碟号、专辑歌手优先 album_artist | +1 |
+| `3b7ce68` | D4 年份读 RecordingDate | +3 |
+| `18c8ccd` | D9 无内嵌图时取目录封面 | +2 |
+| `76fd813` | 上项的测试适配不区分大小写的文件系统（主代理） | — |
+| `1c56c34` | D2 接口软失败报错 / 空快照闸门 / 收口卡死的 error 行；D5 补抓游标 | hmp-qqmusic-api +4，hmp-daemon +10 |
+| `1fecaf7` | 半份快照不定缺席（主代理，见下） | hmp-daemon +2 |
+| `4687686` | 歌单写拒绝按因区分；U5 移除曲目带 `expect_key` 校验 | hmp-core +1，hmp-daemon +2 |
+| `ee1c8ff` | U1 歌词重试、U2 封面账本进程级 | hmp-desktop +3 |
+| `0d5c813` | 封面按内容识别格式（主代理，见下） | +1 |
+| `5816981` | U6 播放页歌手/专辑按 mid 导航 | +1 |
+| `542caed` | D7 进「最近播放」页时后台重读 | +2 |
+| `6da7c8c` | D8 文件夹过滤在库刷新后保持 | +1 |
+| `4842a1f` | U3 启动日志落盘 | +1 |
+
+合计：hmp-storage 73 → 85，hmp-core 72 → 73，hmp-daemon 253 → 267（lib 166 → 180；逐包编译时不带托盘 feature，全仓一起编译时另有 1 条门控测试），hmp-qqmusic-api 251 → 255，hmp-desktop 123 → 132（lib 105 → 113、`main.rs` 单测 +1、18 个集成二进制不变）。
+
+**主代理补的四处**：
+
+- **半份快照不定缺席**（`1fecaf7`）：代理为「收口 error 行」引入了「快照是否取全」的判定，却只用在了收口上。分页拉到一半某页软失败返回空页（`hasmore=1` 但列表为空）时 `present` 只剩前几页，缺席清理照样执行——与 §30.1 同一类症状，订阅歌单那处还会连带删本地歌单行与曲目缓存。现在三个快照源都要求取全才定缺席。
+- **封面按内容识别格式**（`0d5c813`）：存储代理报告 `persist_cover` 一律落 `<hash>.jpg`，而 `image::ImageReader::open` 只按扩展名选解码器；PNG 原图最长边 ≤512 时没有派生缩略件可走，直解必败。内嵌 PNG 早就受影响，D9 修完后 `cover.png` / `Folder.png` 也会踩到。读侧加 `with_guessed_format()`，已缓存的错标旧封面无需重扫。去掉嗅探那一行时回归测试即红。
+- **目录封面测试在 Windows 上必败**（`76fd813`）：同一目录里先后写 `cover.jpg` 与 `Cover.jpg` 并断言前者优先，NTFS 上这是同一个文件。改为先探测文件系统是否区分大小写。
+- **`cargo doc -D warnings` 报错**：`resume_playlist_tracks` 的文档链接到私有项，并入 `1fecaf7`。CI 的 `test` job 末步就是这条命令，本地四项检查里加上它才提前发现。
+
+**任务书与代理报告的更正、偏差**（续做时以下文为准）：
+
+- 内置 SQLite 是 3.53.2（libsqlite3-sys 0.38.2），任务书里写的 3.54.1 有误；上限 32766 属实。
+- **U1 的前提有误**：`spawn_lyric_fetch` 原本只在换曲时调用，只加闸门的话「5 秒后重试」永远不会触发。代理把入口挪到了每次状态推送（词表未就绪或账本有失败记录时才调）。后果两条：无词曲目每 60 秒左右重拉一次直到换曲，没有终态（daemon 对空词页有 300 秒负缓存，只是本机 IPC，不出网——保留）；换曲重进会重新拉词（此前重进显示的是上一曲的词表）。
+- **1a 的业务码没做**：`get_detail` 自己也不查内层 `data.code`，任务书说的「既有口径」在接口层不存在。`data` 在场、`data.code` 非 0、列表为空的响应仍是 `Ok(空)`，只靠 1b 的闸门兜底（见 §30.8）。
+- **1b 的副作用**：reconcile 没有定时，远端真的清空「我喜欢」或全部订阅后，本地要等第二次触发（重启 daemon 或手动 sync）才合拢。闸门只加在三处，`apply_playlist_track_snapshot` 的曲目差集没加。
+- **D5 的语义变化**：预算按「处理过的行数」计，被跳过或抓取失败的行也占位；失败的歌单本遍内不重试；游标是 `list_playlists()` 的行下标，本遍中途歌单增删可能让个别行被跳过或重复一次，下一遍自愈。
+- **歌单写错误码**：四种拒绝从 `Internal` 改为 `BadRequest`；存储层的 `QueryReturnedNoRows` 回 `PlaylistNotFound`。
+- daemon 代理改了所有权清单外的 `crates/hmp-daemon/tests/reconcile_playlist_tracks.rs`：`reconcile_user_library` 签名变了，7 处调用点必须跟着改；其中一条测试断言的正是「空快照当轮删除」的旧行为，改成三轮。
+- 存储代理在任务书没写死处的取法：目录封面按「主名 → 大小写变体 → 扩展名」，首个命中的文件超限就当没有（不退而取后面的候选），同名目录跳过；年份在 `RecordingDate` 读不出 4 位数字时也退 `Year`（比任务书略宽）。
+
+**任务书外发现（本轮未修，建议另开）**：
+
+- `persist_cover` 一律落 `<hash>.jpg`：读侧已按内容解码，盘上文件名仍然错标。
+- `read_meta` 的标题/歌手/年份只读 primary tag：WAV 只有 RIFF INFO 标签时读不到，D4 对这种文件不生效。
+- hmp-desktop 集成测试不隔离数据目录：带 runtime 的用例只要走到库读取就会只读投影真实库（既有问题，`navigation_scroll.rs` 因 D7 多一处）。
+- 目录封面在扫描读标签时生效：之后才放进目录的封面文件要等重新扫描才会被读到。
+- 内嵌 PNG 封面 >512px 走派生缩略件不受影响，≤512px 的此前一直不显示（`0d5c813` 一并修好）。
+
+验证产物在 `docs/verify/2026-11-25-fix-round/`：`baseline.md`（基线小结）、`prewarm.txt` / `baseline-tests.txt`（基线原始输出）、`fixround-verify.txt`（修复轮合入态四项检查；其中 `doc` 一段是修文档链接之前的失败记录，修后重跑通过）、`main-desktop-tests.txt` / `main-daemon-on-storage.txt`（主工作树里桌面补丁、存储补丁各自单独的验证）、`cover-sniff-fixed.txt`（封面嗅探那条回归测试的验证）。三路代理的原样补丁没有归档——内容都在上面的原子提交里。
+
+**依赖整体升级与 CI（同夜；用户要求「依赖尽可能往新了搞，允许改代码适配」）**
+
+- **CI 为什么红**：`main` 上最近三次 push（`a1d47a4`、`20aad3f`、`e24e843`）只有 `deny` job 挂，其余五个 job 都过。三条 RUSTSEC：`libsqlite3-sys 0.38.2`（内置 SQLite 3.53.2，CVE-2026-119375 要 3.54.0 以上）、`url 2.5.8`（要 ≥ 2.5.9）、`cookie 0.18.2`（要 ≥ 0.18.3）。`rusqlite 0.40` 线把 `libsqlite3-sys` 钉在 `^0.38`，升不动，只能跨小版本升。
+- **做了什么**（`7de09b5`）：直接依赖全部升到最新——Slint 1.18.1 → 1.19.1（连带 `i-slint-*`）、rusqlite 0.40.2 → 0.43.0（`libsqlite3-sys 0.40.0`，内置 SQLite 3.54.1）、notify 8.2.2 → 9.0.0、resvg 0.48.1 → 0.50.0、tray-icon 0.26.1 → 0.27.0、serial_test 3.5.0 → 4.0.1；其余兼容范围内的一并 `cargo update`（锁文件 221 个包变动：199 升、8 新增、14 移除，`proc-macro-error`、`winapi` 等老依赖出图）。本来就是最新的没动（rodio 0.23.0、image 0.25.10、windows 0.62.2、windows-sys 0.61.2 等）；symphonia 0.5.5 是 rodio 的传递依赖，最新 0.6.1 升不了。三条通告全部靠真实升级解决，没有新增 ignore；`deny.toml` 里 RUSTSEC-2024-0370（proc-macro-error）的 ignore 随它出图而删。
+- **MSRV**：Slint 1.19 要 Rust 1.95，也是 `cargo metadata` 聚合出来的全图顶点 → `rust-version`、`clippy.toml`、CI 的 msrv job 一起 1.92 → 1.95。
+- **代码适配**：rusqlite / notify / tray-icon / resvg / serial_test 跨大版本零代码改动，全仓编译只挂一处——`build.rs` 的 `SLINT_ENABLE_EXPERIMENTAL_FEATURES` 从 `1` 改成 `interfaces`（1.19 起「全部打开」是错误，必须点名）。
+- **A/B 截图查出的行为变化**（`shot-headless` 离屏，14 个画面升级前后逐像素比；对比图在 `shots/`）：
+  - **真回归，已修**（`4cc4038`）：歌词进页不直达当前行。歌词行靠 `changed y / height / is-active` 向跟随逻辑上报位置；播放页在当前行已定时才挂载的话，行带着最终几何创建，这三个回调一次都不触发，舞台一直等不到上报，页面停在词表顶部，要等下一句开始才跟上。1.18 里行先落 0 再被布局赋值，所以碰巧会触发。修法是舞台在等待上报期间每拍递增 `report-probe`、行上主动上报；回归测试 `tests/lyric_follow.rs` 取像素判断当前句是否居中，换回未修的界面文件即失败。
+  - **投影与多余绑定**（`d461805`）：1.19 的投影跟随填充与边框的透明度，并在编译期提示——封面那层矩形没有背景，`drop-shadow` 一行都不生效，补 `background: Theme.muted`；队列行容器是布局子元素，显式 `x: 0` 多余，删掉。
+  - **核对过不是回归**：曲目表与队列的窗口化虚拟化仍生效（探针实测：视口高 648，200 行队列只渲染 25 行）；其余页面的像素差在 1.5%–3.1%，全在文字边缘与细边框上，位置没变。
+  - **属于修好的**：播放页标题按设计折成两行（1.18 里没折、直接省略）；带翻译的歌词行在 1.18 里有一部分的翻译没渲染出来。
+  - **渲染器层面的差异，不代表真机**：1.19 的软件渲染器才支持投影、圆角裁切跟随 `border-radius`、圆角抗锯齿改进——队列抽屉面板（8.8%）、播放设置页（6.6%）、封面圆角的差别都来自这里。离屏截图用的是软件渲染器，真实应用用的是 GL 渲染器。
+- **方法上的坑**（下次升级照做）：
+  - `shot-headless` 会建真实 runtime 去连 daemon；新构建的客户端连上旧 daemon 会判「后端是陈旧构建」并把它退出重启。离屏截图必须隔离：空的 HOME / XDG 目录、假 `HMP_IPC_ENDPOINT`、PATH 里没有 `hmp`（找不到后端二进制就进离线模式，连不上也拉不起）。
+  - 测试里要取像素得用带软件渲染器的 testing backend（`set_platform(TestingBackend::new(TestingBackendOptions { renderer_name: Some("software") … }))`）；`init_no_event_loop()` 的缺省后端不实现 `take_snapshot`。
+  - 无曲目时播放页是空态、不渲染歌词列，歌词相关测试要先 `Player.has-track = true`。
+  - 升级前的「对照」用旧 worktree 留着旧锁文件构建，两份截图逐像素比；只看编译和测试发现不了这类回归。
+- **验证**：fmt、clippy（all-targets, all-features；`clippy.toml` 的 msrv 同步 1.95 后没有激活新 lint）、全仓测试 888 条（+1 歌词回归）、`cargo doc -D warnings`、`cargo deny` 四项 ok。
+
+### 30.8 未核实 / 存疑
+
+- 所有界面表现都是按代码推断的，没有截图，也没有运行验证。（§30.7 末的 Slint 1.19 升级另有离屏 A/B，见下。）
+- U1/U2 的线程语义依据代码文本与 tokio 多线程 runtime 语义，未运行复现。
+- `hmp play playlist:<本地主键>` 对 owned 歌单报 empty 的根因未证实（QQ 实体分工未返回）；QQ 同曲不同专辑版本是否对应不同 songmid 也未核实。
+- A4 的帧大小、U7/U8 的性能量级都是估算。
+- 真库中 error 行（1101）的成因与 1101 的语义未证实。
+- QQ `CgiGetDiss` 的内层 `data.code` 非 0（歌单不存在时 -100006）目前被解析成「成功但 0 首」，只靠空快照闸门兜底（§30.7）。是否改成直接拒绝，取决于「从没喜欢过任何歌的账号」是否也返回非 0 码——没有实测，也不能拿真实账号去试。
+- 修复与升级的真机表现见 §30.7 末的真机实测记录。
+- Slint 1.19 在真机 GL 渲染器下的样子没有实测：离屏 A/B 用的是软件渲染器，而 1.18 的软件渲染器根本不画投影，所以「升级前」那一半截图里的面板本来就没有投影，不能拿来推断真机前后差异。真机上需要人眼确认的：封面投影、标题两行、圆角与文字抗锯齿。
+- 标「未复核」的条目来自子代理报告，主代理没有逐条回代码核对。

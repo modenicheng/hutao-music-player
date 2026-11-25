@@ -1,0 +1,136 @@
+### clippy (all-targets, all-features)
+    Checking hmp-core v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-core)
+    Checking hmp-qqmusic-api v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-qqmusic-api)
+   Compiling hmp-daemon v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-daemon)
+   Compiling hmp-desktop v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-desktop)
+    Checking hmp-player v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-player)
+    Checking hmp-mpris v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-mpris)
+    Checking hmp-smtc v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-smtc)
+    Checking hmp-storage v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-storage)
+    Checking hmp-media v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-media)
+    Checking hmp-cli v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 43.58s
+clippy exit=0
+### test --workspace
+     Running unittests src/main.rs (target/debug/deps/hmp-ac31aa6e36d24281)
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+     Running tests/daemon_cli.rs (target/debug/deps/daemon_cli-08360dc7e99d3dd0)
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/quit_no_spawn.rs (target/debug/deps/quit_no_spawn-985f00757e84ff2a)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/hmp_core-73bf9850b939bcb5)
+test error::tests::recoverability_classification ... ok
+test error::tests::display_messages_are_actionable ... ok
+test error::tests::io_error_converts_to_network ... ok
+test result: ok. 73 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/hmp_daemon-314033cab33cb41e)
+test engine::tests::failed_next_rolls_back_queue_position ... ok
+test engine::tests::failed_load_rolls_back_to_previous_track ... ok
+test result: ok. 181 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s
+     Running tests/daemon_cli.rs (target/debug/deps/daemon_cli-4a791be08cf92f4f)
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/e2e.rs (target/debug/deps/e2e-84b738987e5c2d69)
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.13s
+     Running tests/reconcile_playlist_tracks.rs (target/debug/deps/reconcile_playlist_tracks-09a35b8e97de7511)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+     Running tests/remote_details.rs (target/debug/deps/remote_details-3066fbeab4a30e7b)
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/hmp_desktop-a7a0c7a81e124c4b)
+test exit_guard::tests::fires_when_not_disarmed ... ok
+test exit_guard::tests::silent_after_disarm ... ok
+test track_covers::tests::failed_request_releases_dedup_key ... ok
+test result: ok. 113 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.98s
+     Running unittests src/main.rs (target/debug/deps/hmp_desktop-d6453641e152111b)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/context_menu.rs (target/debug/deps/context_menu-e5e502a912c9afd6)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.85s
+     Running tests/context_menu_picker.rs (target/debug/deps/context_menu_picker-d2102532f3dc585f)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.88s
+     Running tests/drag.rs (target/debug/deps/drag-498e91b8e87536fa)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.13s
+     Running tests/eq_clock.rs (target/debug/deps/eq_clock-c19797fc372c27cb)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+     Running tests/hover_slider.rs (target/debug/deps/hover_slider-5860ee11eb17f3ab)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.73s
+     Running tests/hover_stretch.rs (target/debug/deps/hover_stretch-46152b33ebcfa1d0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.71s
+     Running tests/keyboard.rs (target/debug/deps/keyboard-8566ccd8c0ef0056)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.63s
+     Running tests/like_key.rs (target/debug/deps/like_key-01564b8c01c52f5c)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+     Running tests/list_keys.rs (target/debug/deps/list_keys-3a1a246a4da44912)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.49s
+     Running tests/live_daemon.rs (target/debug/deps/live_daemon-7eb0a4fbf58268ca)
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/navigation_scroll.rs (target/debug/deps/navigation_scroll-2ae65e2f80492a81)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+     Running tests/new_playlist.rs (target/debug/deps/new_playlist-382d5d0185efe357)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s
+     Running tests/queue_keys.rs (target/debug/deps/queue_keys-b076d580d8c0db4e)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.93s
+     Running tests/reduce_motion.rs (target/debug/deps/reduce_motion-acdc3610b280e62b)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.62s
+     Running tests/remote_navigation.rs (target/debug/deps/remote_navigation-1c05dca75a9f4c74)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+     Running tests/search_page.rs (target/debug/deps/search_page-ee08cb11f9838921)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.53s
+     Running tests/soft_timers.rs (target/debug/deps/soft_timers-101169490744031f)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.70s
+     Running tests/svg_icon.rs (target/debug/deps/svg_icon-614a4436976f7eb4)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/volume_control.rs (target/debug/deps/volume_control-dc1143c660236a6d)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.68s
+     Running unittests src/lib.rs (target/debug/deps/hmp_media-467de559e3fbac0d)
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+     Running unittests src/lib.rs (target/debug/deps/hmp_mpris-523e5c55fdb6628f)
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/lib.rs (target/debug/deps/hmp_player-3a8c703c407fbf3a)
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s
+     Running unittests src/lib.rs (target/debug/deps/hmp_qqmusic_api-e0d65d1123622275)
+test error::tests::error_messages_are_human_readable ... ok
+test result: ok. 136 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+     Running tests/login.rs (target/debug/deps/login-b7817a60e84a0118)
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+     Running tests/musicu.rs (target/debug/deps/musicu-0680373e28c2fd63)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+     Running tests/quick_search.rs (target/debug/deps/quick_search-96ace3d422d8cbb6)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+     Running tests/regression_browse.rs (target/debug/deps/regression_browse-6d3cff0a18f9e0bf)
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+     Running tests/regression_pagination.rs (target/debug/deps/regression_pagination-8561de7760ac0692)
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+     Running tests/regression_song.rs (target/debug/deps/regression_song-642a48de20496025)
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+     Running tests/regression_user_songlist.rs (target/debug/deps/regression_user_songlist-9d0e88045339dd19)
+test fav_songlist_failed_list_contains_target_returns_false ... ok
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/hmp_smtc-7153f9ac4c0965cd)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/lib.rs (target/debug/deps/hmp_storage-08b88936379fa72e)
+test result: ok. 85 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.95s
+   Doc-tests hmp_core
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests hmp_daemon
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests hmp_desktop
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests hmp_media
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests hmp_mpris
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests hmp_player
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests hmp_qqmusic_api
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests hmp_smtc
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests hmp_storage
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test exit=0
+### doc (RUSTDOCFLAGS=-D warnings)
+error: public documentation for `resume_playlist_tracks` links to private item `reconcile_playlist_tracks`
+    = note: `-D rustdoc::private-intra-doc-links` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(rustdoc::private_intra_doc_links)]`
+error: could not document `hmp-daemon`
+warning: build failed, waiting for other jobs to finish...
+doc exit=101

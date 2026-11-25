@@ -1,0 +1,284 @@
+   Compiling mio v1.2.4
+   Compiling crossbeam-utils v0.8.23
+   Compiling tracing v0.1.44
+   Compiling indexmap v2.14.2
+   Compiling symphonia-core v0.5.5
+   Compiling rustix v1.1.5
+   Compiling rustls-platform-verifier v0.6.2
+   Compiling keyring-core v1.0.1
+   Compiling lofty v0.25.4
+   Compiling tokio v1.54.1
+   Compiling notify v8.2.0
+   Compiling concurrent-queue v2.5.0
+   Compiling serde_json v1.0.154
+   Compiling toml_edit v0.25.17+spec-1.1.0
+   Compiling symphonia-metadata v0.5.5
+   Compiling symphonia-codec-pcm v0.5.5
+   Compiling symphonia-codec-aac v0.5.5
+   Compiling async-channel v2.5.0
+   Compiling async-executor v1.14.0
+   Compiling symphonia-utils-xiph v0.5.5
+   Compiling symphonia-format-riff v0.5.5
+   Compiling symphonia-bundle-mp3 v0.5.5
+   Compiling proc-macro-crate v3.5.0
+   Compiling cookie_store v0.22.1
+   Compiling hmp-core v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-core)
+   Compiling assert-json-diff v2.0.2
+   Compiling symphonia-bundle-flac v0.5.5
+   Compiling symphonia-codec-vorbis v0.5.5
+   Compiling symphonia-format-isomp4 v0.5.5
+   Compiling symphonia-format-ogg v0.5.5
+   Compiling blocking v1.7.0
+   Compiling zvariant_derive v5.15.1
+   Compiling polling v3.11.0
+   Compiling tempfile v3.27.0
+   Compiling zvariant v5.15.1
+   Compiling symphonia v0.5.5
+   Compiling tokio-util v0.7.20
+   Compiling tower v0.5.3
+   Compiling async-compression v0.4.51
+   Compiling tokio-rustls v0.26.6
+   Compiling deadpool v0.12.3
+   Compiling rodio v0.23.0
+   Compiling async-io v2.6.0
+   Compiling h2 v0.4.20
+   Compiling tower-http v0.6.11
+   Compiling async-signal v0.2.14
+   Compiling async-process v2.5.0
+   Compiling hmp-player v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-player)
+   Compiling zbus_names v4.3.5
+   Compiling zbus_macros v5.19.0
+   Compiling hyper v1.12.0
+   Compiling zbus v5.19.0
+   Compiling hyper-util v0.1.21
+   Compiling hyper-rustls v0.27.10
+   Compiling wiremock v0.6.5
+   Compiling reqwest v0.13.1
+   Compiling hmp-qqmusic-api v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-qqmusic-api)
+   Compiling secret-service v5.2.0
+   Compiling zbus-secret-service-keyring-store v1.0.1
+   Compiling keyring v4.2.0
+   Compiling hmp-storage v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-storage)
+   Compiling hmp-media v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-media)
+   Compiling hmp-daemon v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-daemon)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.94s
+     Running unittests src/lib.rs (target/debug/deps/hmp_daemon-a787b86dbf175b12)
+
+running 166 tests
+test comment::tests::cache_fresh_respects_ttl ... ok
+test content::tests::freshness_respects_ttl ... ok
+test content::tests::find_flag_matches_bool_and_number_forms ... ok
+test content::tests::find_str_searches_nested ... ok
+test content::tests::patch_encrypt_uin_only_on_change ... ok
+test content::tests::project_songlist_detail_maps_fields ... ok
+test content::tests::project_album_detail_maps_fields_and_cover_template ... ok
+test content::tests::pick_best_song_scores_and_thresholds ... ok
+test content::tests::project_artist_detail_photo_and_album_briefs ... ok
+test content::tests::cover_url_from_pmid_template ... ok
+test content::tests::find_any_str_skips_empty_and_respects_order ... ok
+test content::tests::pick_best_song_artist_tokens_and_ties ... ok
+test content::tests::singer_photo_url_prefers_pic_then_pmid_template ... ok
+test content::tests::normalize_cover_url_allowlist_and_upgrade ... ok
+test engine::tests::ended_with_no_next_stays_idle ... ok
+test engine::tests::ended_event_auto_advances ... ok
+test engine::tests::failed_next_rolls_back_queue_position ... ok
+test engine::tests::idle_transitions_clear_replaygain ... ok
+test engine::tests::caps_allow_next_at_tail_when_shuffled ... ok
+test engine::tests::list_loop_wraps_on_ended ... ok
+test engine::tests::large_queue_publish_stays_small ... ok
+test engine::tests::manual_change_closes_old_session_with_old_position ... ok
+test engine::tests::next_command_navigates_queue ... ok
+test engine::tests::empty_source_sets_error_and_advances_seq ... ok
+test engine::tests::midplay_error_sets_last_error_closes_session_holds ... ok
+test engine::tests::open_uri_unsupported_scheme_sets_error ... ok
+test engine::tests::open_uri_file_plays_via_play_source ... ok
+test engine::tests::phase_transitions_on_load_failure ... ok
+test engine::tests::next_without_target_keeps_session_open ... ok
+test engine::tests::play_and_navigation_bump_seq ... ok
+test engine::tests::play_list_load_failure_keeps_old_queue ... ok
+test engine::tests::play_list_replaces_queue_and_starts_at_index ... ok
+test engine::tests::play_load_failure_keeps_old_queue_and_track ... ok
+test engine::tests::play_replaces_queue_and_loads_first ... ok
+test engine::tests::play_list_library_fast_path_skips_resolver ... ok
+test engine::tests::play_sessions_persist_to_library ... ok
+test engine::tests::playnext_inserts_after_current_mid_queue ... ok
+test engine::tests::playnext_inserts_full_playlist_after_current ... ok
+test engine::tests::play_source_caches_stub_metadata ... ok
+test engine::tests::load_decode_failure_degrades_to_next_quality ... ok
+test engine::tests::load_decode_failure_without_resolvable_alternative_terminates ... ok
+test content::tests::track_lyric_empty_title_skips_search ... ok
+test content::tests::track_lyric_local_sidecar_wins ... ok
+test comment::tests::cache_caps_at_128 ... ok
+test content::tests::lyric_disk_cache_hits_before_network ... ok
+test content::tests::cover_rejects_non_gtimg_urls ... ok
+test engine::tests::prev_always_goes_previous_track ... ok
+test engine::tests::degrade_rollback_does_not_poison_error_collection ... ok
+test engine::tests::list_resolve_timeout ... ok
+test engine::tests::queue_clear_all_stops_playback ... ok
+test engine::tests::queue_clear_keeps_current_playing ... ok
+test engine::tests::queue_play_at_jumps_without_replacing_queue ... ok
+test engine::tests::queue_play_at_out_of_range_and_current_semantics ... ok
+test engine::tests::queue_play_at_rolls_back_on_load_failure ... ok
+test engine::tests::quit_shuts_down_engine ... ok
+test engine::tests::remove_current_plays_replacement_immediately ... ok
+test engine::tests::remove_current_rolls_back_on_replacement_load_failure ... ok
+test engine::tests::remove_current_to_empty_stops_playback ... ok
+test engine::tests::repeat_one_closes_and_reopens_session ... ok
+test engine::tests::replay_same_track_creates_two_sessions ... ok
+test engine::tests::replaygain_applied_on_load ... ok
+test engine::tests::replaygain_clamps_extreme_values ... ok
+test engine::tests::replaygain_disabled_by_config ... ok
+test engine::tests::resolution_failure_publishes_last_error ... ok
+test engine::tests::resolve_exhaustion_after_load_failure_rolls_back_previous_track ... ok
+test engine::tests::preload_failure_is_silent_and_falls_back ... ok
+test engine::tests::resolver_job_panic_does_not_kill_worker ... ok
+test engine::tests::preload_skipped_in_repeat_one ... ok
+test engine::tests::resolver_queue_full_fails_fast ... ok
+test engine::tests::previous_restarts_track_when_past_three_seconds ... ok
+test engine::tests::previous_switches_track_when_within_three_seconds ... ok
+test engine::tests::same_gen_eos_advances_immediately ... ok
+test engine::tests::rollback_after_async_load_failure_confirms_previous_gen ... ok
+test engine::tests::eos_during_pending_resolve_then_list_applies ... ok
+test engine::tests::seek_failure_error_not_treated ... ok
+test engine::tests::preload_consumed_on_eos ... ok
+test engine::tests::preloads_next_track_and_consumes_cache ... ok
+test engine::tests::session_file_corrupt_is_none ... ok
+test engine::tests::session_file_missing_is_none ... ok
+test engine::tests::session_file_roundtrips ... ok
+test engine::tests::same_track_reload_acks_only_after_load_gen_applied ... ok
+test engine::tests::queue_append_resolve_is_offloop ... ok
+test engine::tests::same_track_reload_failure_rolls_back_not_fake_ack ... ok
+test engine::tests::stale_gen_eos_is_ignored ... ok
+test engine::tests::stale_gen_error_is_ignored ... ok
+test engine::tests::state_exposes_replaygain_db ... ok
+test engine::tests::session_persist_failure_is_swallowed ... ok
+test engine::tests::successful_play_clears_last_error ... ok
+test engine::tests::track_row_uses_provider_source ... ok
+test engine::tests::unrelated_resolve_error_does_not_lock_error_treatment ... ok
+test local::tests::directory_and_missing_paths_resolve_to_no_tracks ... ok
+test local::tests::embedded_cover_projects_as_a_persisted_file_uri ... ok
+test local::tests::generic_track_with_local_id_resolves_as_local_source ... ok
+test local::tests::local_flac_reports_lossless_quality ... ok
+test local::tests::path_of_parses_local_id ... ok
+test local::tests::resolve_library_playlist_missing_is_not_found ... ok
+test engine::tests::seq_advance_implies_new_track_applied ... ok
+test engine::tests::preload_cache_invalidated_by_queue_change ... ok
+test local::tests::resolve_library_playlist_source ... ok
+test local::tests::resolve_local_album_source ... ok
+test engine::tests::resolve_replies_apply_in_dispatch_order ... ok
+test local::tests::resolve_local_file_falls_back_to_stem_and_ingests ... ok
+test login::tests::cleanup_removes_only_login_qr_files ... ok
+test local::tests::resolve_missing_local_file_is_not_found ... ok
+test local::tests::resolve_uri_with_special_chars_roundtrips ... ok
+test login::tests::write_png_creates_parent_dirs ... ok
+test player::tests::auth_failure_classification ... ok
+test player::tests::available_from_sizes_maps_definite_qualities ... ok
+test player::tests::collect_paged_fetches_beyond_three_pages ... ok
+test player::tests::collect_paged_stops_at_total ... ok
+test player::tests::collect_paged_stops_on_hasmore_false ... ok
+test player::tests::explicit_fallback_chain_has_atmos_no_aac ... ok
+test player::tests::hires_maps_to_master_file_type ... ok
+test player::tests::quality_maps_roundtrip_consistently ... ok
+test player::tests::quality_to_file_type_maps_atmos_and_aac ... ok
+test player::tests::song_stub_extracts_metadata ... ok
+test reconcile::tests::absent_subscribed_playlist_tracks_purged_before_delete ... ok
+test reconcile::tests::fav_album_response_parses_loosely ... ok
+test reconcile::tests::playlist_track_snapshot_diffs_and_keeps_local ... ok
+test reconcile::tests::playlist_track_snapshot_fills_empty_playlist ... ok
+test login::tests::cancel_removes_qr_file ... ok
+test login::tests::logout_without_credential_is_idempotent ... ok
+test login::tests::poll_without_session_is_idle ... ok
+test serve::tests::background_args_are_backend_neutral ... ok
+test serve::tests::spawn_detached_exe_spawns_external_binary ... ok
+test server::credential_policy_tests::every_local_play_source_bypasses_qq_credentials ... ok
+test server::tests::accept_backoff_progression_and_cap ... ok
+test server::tests::accept_failure_is_fatal_never_on_unix ... ok
+test server::tests::content_reads_report_unavailable_without_service ... ok
+test reconcile::tests::playlist_track_snapshot_is_idempotent ... ok
+test server::tests::library_sync_requires_login ... ok
+test server::tests::local_play_without_credentials_is_allowed ... ok
+test server::tests::malformed_frame_gets_bad_request ... ok
+test reconcile::tests::playlist_track_snapshot_skips_unplayable_entries ... ok
+test server::tests::play_without_credentials_returns_not_logged_in ... ok
+test server::tests::quality_alias_guard ... ok
+test reconcile::tests::reconcile_keeps_pending_local_intent ... ok
+test server::tests::queue_query_returns_snapshot ... ok
+test engine::tests::phase_restore_uses_driver_status_not_current ... ok
+test server::tests::socket_path_honors_hmp_ipc_endpoint_override ... ok
+test server::tests::status_returns_daemon_state ... ok
+test server::tests::quit_broadcasts_shutdown_to_subscribers ... ok
+test server::tests::favorite_write_pushes_library_changed ... ok
+test server::tests::subscribed_request_answered_without_poll_delay ... ok
+test sync::tests::retry_delay_backs_off_exponentially ... ok
+test transport::tests::listener_accepts_multiple_connections ... ok
+test transport::tests::roundtrip_between_listener_and_stream ... ok
+test transport::tests::standby_pool_absorbs_concurrent_connects_without_accept ... ok
+test transport::tests::unix_paths_pass_through ... ok
+test server::tests::owned_playlist_rejects_local_tracks ... ok
+test engine::tests::session_restores_after_restart ... ok
+test engine::tests::failed_load_rolls_back_to_previous_track ... ok
+test engine::tests::first_load_failure_has_no_rollback ... ok
+test engine::tests::load_passes_stream_source_and_rollback_reuses_it ... ok
+test server::tests::subscribe_receives_change_without_further_requests ... ok
+test engine::tests::slow_list_resolve_does_not_block_playback_commands ... ok
+test engine::tests::seq_does_not_advance_while_source_resolving ... ok
+test watcher::tests::watcher_ingests_new_and_deleted_files ... ok
+test server::tests::queue_list_pages_with_current_marker ... ok
+test server::tests::subscribe_pushes_initial_and_changes ... ok
+test engine::tests::position_persist_is_throttled ... ok
+test engine::tests::rollback_restores_gen_then_eos_advances ... ok
+test engine::tests::preload_resolve_timeout_gives_up ... ok
+test engine::tests::stop_drops_pending_resolve ... ok
+test watcher::tests::watcher_ignores_non_audio_and_no_roots ... ok
+test engine::tests::rollback_failure_only_warns ... ok
+
+test result: ok. 166 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.21s
+
+     Running tests/daemon_cli.rs (target/debug/deps/daemon_cli-3aff8145c09828e9)
+
+running 1 test
+test serve_boots_answers_status_and_cleans_up_on_sigterm ... ignored, 需要真实音频设备（真机验收项）
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/e2e.rs (target/debug/deps/e2e-70d4f832d8de0a45)
+
+running 6 tests
+test play_then_end_advances_queue_with_rodio ... ignored, 需要真实默认音频设备（真机验收项）
+test resolve_track_aggregates_per_quality_errors_in_message ... ok
+test resolve_track_reports_not_logged_in_when_all_qualities_require_reauth ... ok
+test resolve_track_falls_back_to_plain_via_mock_api ... ok
+test resolve_track_respects_fixed_quality_config ... ok
+test prepared_media_contract_is_cdn_url_plus_stream_source ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/reconcile_playlist_tracks.rs (target/debug/deps/reconcile_playlist_tracks-a324f08584d381af)
+
+running 4 tests
+test reconcile_skips_playlists_with_pending_local_intent ... ok
+test reconcile_diffs_remote_removal_and_purges_unsubscribed_playlists ... ok
+test reconcile_tracks_carry_cover_url_and_rebind_survives_resync ... ok
+test reconcile_caches_playlist_tracks_and_replays_idempotently ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/remote_details.rs (target/debug/deps/remote_details-3a40aae7fdf692cc)
+
+running 6 tests
+test remote_artist_detail_rejects_empty_mid ... ok
+test remote_album_detail_rejects_empty_mid ... ok
+test remote_playlist_detail_maps_missing_playlist_to_err ... ok
+test remote_playlist_detail_projects_window_and_fields ... ok
+test remote_album_detail_projects_header_and_songs ... ok
+test remote_artist_detail_projects_photo_songs_and_albums ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+   Doc-tests hmp_daemon
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+exit=0

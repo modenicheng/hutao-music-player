@@ -1,0 +1,269 @@
+   Compiling hmp-player v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-player)
+   Compiling hmp-daemon v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-daemon)
+   Compiling hmp-desktop v0.1.0 (/mnt/d/code-linux/hutao-music-player/crates/hmp-desktop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 09s
+     Running unittests src/lib.rs (target/debug/deps/hmp_desktop-fb15cc91ce9a1aeb)
+
+running 112 tests
+test backend::tests::build_code_present_and_self_consistent ... ok
+test backend::tests::projected_row_falls_back_to_id_when_meta_missing ... ok
+test backend::tests::offline_reason_only_for_actionable_errors ... ok
+test backend::tests::stale_backend_error_names_problem_and_remedy ... ok
+test bridge::tests::basename ... ok
+test backend::tests::restart_worthwhile_skips_only_while_disk_binary_unchanged ... ok
+test backend::tests::find_hmp_in_dirs_picks_existing_file ... ok
+test backend::tests::find_hmp_in_dirs_misses_when_absent ... ok
+test backend::tests::stale_backend_stamp_roundtrips_through_static ... ok
+test bridge::tests::quality_tier_alias_roundtrip ... ok
+test backend::tests::projected_row_uses_library_meta_when_hit ... ok
+test backend::tests::projected_row_carries_local_duration_and_clamps ... ok
+test bridge::tests::search_track_row_maps_song_fields ... ok
+test backend::tests::request_completes_within_budget ... ok
+test bridge::tests::load_detail_routes_remote_params_to_none ... ok
+test bridge::tests::sidebar_cover_is_deterministic ... ok
+test bridge::tests::top_card_projects_cover_placeholder_and_total_num ... ok
+test bridge::tests::discover_card_mid_prefix_matches_cover_side_table ... ok
+test cover_cache::tests::missing_file_returns_none ... ok
+test cover_cache::tests::public_cap_constant_matches_contract ... ok
+test bridge::tests::search_cards_prefix_links_and_all_empty_verdict ... ok
+test backend::tests::runtime_outlives_backend_runtime_drop ... ok
+test covers::tests::cover_svg_is_deterministic_and_typed ... ok
+test covers::tests::file_uri_to_path_handles_both_forms ... ok
+test covers::tests::hash_matches_ts_reference ... ok
+test covers::tests::icon_kind_follows_seed_prefix ... ok
+test bridge::tests::apply_recent_updates_rows_count_and_stamps ... ok
+test bridge::tests::folder_filter_replays_across_snapshot_refresh ... ok
+test format::tests::bytes_matches_ts ... ok
+test format::tests::cny_matches_ts ... ok
+test format::tests::count_wan ... ok
+test format::tests::duration ... ok
+test format::tests::long_duration_matches_ts ... ok
+test covers::tests::cover_image_renders_opaque ... ok
+test cover_cache::tests::second_call_hits_cache ... ok
+test library_view::tests::album_detail_matches_exact_nocase ... ok
+test covers::tests::cover_image_cache_is_capped_by_icon_kind ... ok
+test library_view::tests::artist_detail_resolves_canonical_name_and_albums ... ok
+test exit_guard::tests::fires_when_not_disarmed ... ok
+test library_view::tests::folders_aggregate_by_scan_root_longest_prefix ... ok
+test exit_guard::tests::silent_after_disarm ... ok
+test library_view::tests::qq_row_splits_cover_into_local_and_remote ... ok
+test library_view::tests::quality_text_mapping ... ok
+test library_view::tests::empty_db_projects_empty_snapshot ... ok
+test library_view::tests::liked_rows_enrich_local_and_qq ... ok
+test library_view::tests::playlist_detail_enriches_rows ... ok
+test library_view::tests::stamp_formatting ... ok
+test lyrics::tests::ignores_lrc_metadata_and_malformed_lines ... ok
+test lyrics::tests::parses_comma_fractions_and_applies_lrc_offset ... ok
+test lyrics::tests::parses_lrc_lines_and_matches_translation_by_timestamp ... ok
+test menu_bridge::tests::create_outcome_maps_every_reply_shape ... ok
+test menu_bridge::tests::playlist_name_trims_and_rejects_blank ... ok
+test online_covers::tests::playlist_card_key_normalizes_both_directions ... ok
+test online_covers::tests::register_and_lookup_cover ... ok
+test cover_cache::tests::evicts_least_recently_used_by_weight ... ok
+test player_bridge::tests::cover_ledgers_are_shared_across_threads ... ok
+test player_bridge::tests::cover_retry_backoff_doubles_and_caps ... ok
+test player_bridge::tests::current_mid_follows_queue_summary_index ... ok
+test player_bridge::tests::detail_link_params_take_first_artist_and_drop_local_sentinel ... ok
+test player_bridge::tests::duration_ms_truncates_to_i32 ... ok
+test library_view::tests::qq_row_carries_cached_duration ... ok
+test bridge::tests::local_remote_alternating_navigation_states ... ok
+test player_bridge::tests::favorite_outcome_decision_table ... ok
+test player_bridge::tests::favorite_provider_split_matches_cli ... ok
+test player_bridge::tests::friendly_error_gives_login_hint_for_not_logged_in ... ok
+test player_bridge::tests::loop_mode_index_matches_ui_cycle_order ... ok
+test player_bridge::tests::lyric_gate_backs_off_after_failure_and_clears_on_success ... ok
+test library_view::tests::playlists_split_by_relation ... ok
+test player_bridge::tests::progress_clamps_and_handles_unknown_duration ... ok
+test player_bridge::tests::quality_labels_are_honest_tier_names ... ok
+test player_bridge::tests::quality_tiers_match_badge_convention ... ok
+test library_view::tests::recent_rows_format_latest_and_earliest ... ok
+test library_view::tests::recent_reload_reflects_plays_after_first_read ... ok
+test library_view::tests::recent_rows_qq_row_keeps_playable_mid ... ok
+test player_bridge::tests::liked_in_db_truth_table ... ok
+test cover_cache::tests::get_if_cached_peeks_without_loading_or_refreshing ... ok
+test prefs::tests::clamps_out_of_range ... ok
+test remote_details::tests::remote_album_meta_year_company_language_and_window ... ok
+test backend::tests::request_times_out_when_daemon_silent ... ok
+test remote_details::tests::remote_param_strips_prefix_only ... ok
+test remote_details::tests::remote_playlist_meta_marks_window_and_optional_fields ... ok
+test remote_details::tests::remote_track_row_prefixes_links_and_disables_empty ... ok
+test track_covers::tests::failed_request_releases_dedup_key ... ok
+test track_covers::tests::release_on_another_thread_clears_account ... ok
+test track_covers::tests::targets_from_rows_keeps_qq_remote_only ... ok
+test track_theme::tests::accent_lightness_per_mode_window ... ok
+test track_theme::tests::ambient_image_blurs_solid_to_same_color ... ok
+test player_bridge::tests::row_from_meta_maps_source_and_fallbacks ... ok
+test track_theme::tests::derived_fields_follow_conventions ... ok
+test track_theme::tests::empty_input_returns_fallback_family ... ok
+test track_theme::tests::fallback_grad_from_matches_ts_anchor ... ok
+test track_theme::tests::gray_image_falls_back_to_brand_walnut ... ok
+test track_theme::tests::half_red_half_blue_winner_is_one_of_them ... ok
+test player_bridge::tests::row_from_meta_overlays_sent_meta_for_out_of_library_tracks ... ok
+test track_theme::tests::near_transparent_pixels_are_skipped ... ok
+test track_theme::tests::sample_pixels_downscales_solid ... ok
+test track_theme::tests::on_accent_contrast_meets_wcag_aa ... ok
+test track_theme::tests::solid_red_keeps_hue_and_hits_lightness_window ... ok
+test remote_details::tests::remote_artist_meta_and_album_card_projection ... ok
+test player_bridge::tests::backfill_mid_missing_from_model_is_noop ... ok
+test player_bridge::tests::empty_queue_rebuild_starts_no_timer ... ok
+test track_theme::tests::decode_cover_bounded_caps_longest_side ... ok
+test cover_cache::tests::decode_prefers_derived_when_present ... ok
+test cover_cache::tests::decode_512_bucket_serves_derived_directly ... ok
+test cover_cache::tests::cache_hit_path_ignores_derived ... ok
+test player_bridge::tests::now_playing_cover_key_semantics ... ok
+test cover_cache::tests::loads_and_downsamples_to_bucket ... ok
+test player_bridge::tests::queue_rebuild_backfills_covers_in_batches ... ok
+test cover_cache::tests::decode_falls_back_when_derived_corrupt ... ok
+test cover_cache::tests::decode_falls_back_when_derived_missing ... ok
+test player_bridge::tests::queue_rebuild_defers_covers_until_drawer_opens ... ok
+test player_bridge::tests::queue_rebuild_swap_drops_inflight_backfill ... ok
+
+test result: ok. 112 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.97s
+
+     Running unittests src/main.rs (target/debug/deps/hmp_desktop-fcd2030f32a688a2)
+
+running 1 test
+test tests::log_rotates_only_when_over_limit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/context_menu.rs (target/debug/deps/context_menu-f64aa66a4a6affb1)
+
+running 1 test
+test context_menu_snapshot_and_gates ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.78s
+
+     Running tests/context_menu_picker.rs (target/debug/deps/context_menu_picker-0a5c29161cc22039)
+
+running 1 test
+test context_menu_picker_reachable_and_closes_on_selection ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.84s
+
+     Running tests/drag.rs (target/debug/deps/drag-1f2a396a400c7f1d)
+
+running 1 test
+test drag_progress_and_scroll_thumb ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.08s
+
+     Running tests/eq_clock.rs (target/debug/deps/eq_clock-6b47e2dc3c013ff8)
+
+running 1 test
+test eq_clock_gated_by_player_playing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/hover_slider.rs (target/debug/deps/hover_slider-a33e1fc35e37f7c5)
+
+running 1 test
+test hover_slider_chain_reports_and_clears ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.67s
+
+     Running tests/hover_stretch.rs (target/debug/deps/hover_stretch-2638a5b807eec1a9)
+
+running 1 test
+test hover_stretch_transient_deformation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.56s
+
+     Running tests/keyboard.rs (target/debug/deps/keyboard-e52b89ce93adfa51)
+
+running 1 test
+test keyboard_focus_activation_and_pointer_reset ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.63s
+
+     Running tests/like_key.rs (target/debug/deps/like_key-63ff4375f13d29e2)
+
+running 1 test
+test like_key_click_fires_callback_without_local_flip ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/list_keys.rs (target/debug/deps/list_keys-9dabeb325132d0c1)
+
+running 1 test
+test track_table_roving_cursor_and_links ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.43s
+
+     Running tests/live_daemon.rs (target/debug/deps/live_daemon-4ffa36a55d30b8d6)
+
+running 1 test
+test live_daemon_playback_operations ... ignored, 需要本机 daemon（hmp serve）与本地媒体库
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/navigation_scroll.rs (target/debug/deps/navigation_scroll-14ac16fb300edd91)
+
+running 1 test
+test navigation_scroll_position_and_shortcuts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/new_playlist.rs (target/debug/deps/new_playlist-ecd3252a9af50616)
+
+running 1 test
+test new_playlist_dialog_opens_from_keyboard_and_submits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.59s
+
+     Running tests/queue_keys.rs (target/debug/deps/queue_keys-3b27e54efcb9f369)
+
+running 1 test
+test queue_drawer_keys_and_clear_confirm ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.84s
+
+     Running tests/reduce_motion.rs (target/debug/deps/reduce_motion-d32fefa13714630a)
+
+running 1 test
+test reduce_motion_makes_displacement_immediate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.62s
+
+     Running tests/remote_navigation.rs (target/debug/deps/remote_navigation-d89fde7a42a2dfb1)
+
+running 1 test
+test remote_playlist_navigation_drops_late_response ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/search_page.rs (target/debug/deps/search_page-5bdcc1abea708b91)
+
+running 1 test
+test search_page_focus_clear_and_tab_reset ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.55s
+
+     Running tests/soft_timers.rs (target/debug/deps/soft_timers-f86a7e8acee6d39c)
+
+running 1 test
+test soft_unmount_and_overlay_timers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.79s
+
+     Running tests/svg_icon.rs (target/debug/deps/svg_icon-44e951038a56026e)
+
+running 1 test
+test dump_icons ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/volume_control.rs (target/debug/deps/volume_control-ab196d7ad8ce9084)
+
+running 1 test
+test volume_popover_grace_close_pin_and_keys ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.71s
+
+   Doc-tests hmp_desktop
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+exit=0
