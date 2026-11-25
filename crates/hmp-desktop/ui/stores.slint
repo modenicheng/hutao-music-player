@@ -25,6 +25,10 @@ export global Player {
     in-out property <string> artists: "";
     /** 专辑名（播放页 meta 展示；无专辑数据为空串） */
     in-out property <string> album: "";
+    /** 播放页歌手/专辑链接的导航参数（`qq:` + QQ mid，与 TrackRow 同名列同
+        约定）；本地曲目 / 无 mid 为空串 → 链接回落展示名导航 */
+    in-out property <string> artist-mid: "";
+    in-out property <string> album-mid: "";
     in-out property <image> cover;
     /** 环境层模糊底图（Rust 预烘焙：降采样+盒滤波+增饱和，等效 CSS blur+saturate；
         空图 = 无环境层；随封面/换曲更新） */

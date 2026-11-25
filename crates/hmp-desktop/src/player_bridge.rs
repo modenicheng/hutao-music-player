@@ -1106,6 +1106,11 @@ fn apply_daemon_state(
                 .unwrap_or_default()
                 .into(),
         );
+        // 播放页歌手/专辑链接的导航参数（U6）：QQ 曲目带真 mid，按 mid 落
+        // 远端详情页——展示名导航对 QQ 曲目必落「未找到」
+        let (artist_link, album_link) = detail_link_params(track);
+        player.set_artist_mid(artist_link.as_str().into());
+        player.set_album_mid(album_link.as_str().into());
         sync_now_playing_cover(player, &mid, track.cover.as_ref(), ui_weak);
     }
     // 音质徽章随装载落地：同曲重装载可能降档（actual_quality 变、mid 不变）
@@ -1633,6 +1638,8 @@ fn clear_now_playing(player: &Player, ui_weak: &Weak<AppWindow>) {
     player.set_title("".into());
     player.set_artists("".into());
     player.set_album("".into());
+    player.set_artist_mid("".into());
+    player.set_album_mid("".into());
     player.set_cover(slint::Image::default());
     player.set_track_quality("".into());
     player.set_track_max_tier(0);
@@ -1656,6 +1663,31 @@ fn clear_now_playing(player: &Player, ui_weak: &Weak<AppWindow>) {
         np.set_comments(ModelRc::new(VecModel::from(Vec::<CommentRow>::new())));
         np.set_comment_state(0);
         np.set_comment_total("".into());
+    }
+}
+
+/// 本地曲目歌手/专辑的 id 哨兵（daemon `local.rs` 的 `ArtistId::new("local")`
+/// / `AlbumId::new("local")`）：不是 QQ mid，不能拿去导航远端详情页。
+const LOCAL_ENTITY_ID: &str = "local";
+
+/// 播放页歌手/专辑链接的导航参数 (歌手, 专辑)：QQ 曲目带真 mid → `qq:` 远端
+/// 参数（落远端歌手/专辑页）；本地曲目的哨兵与空串 → 空串（UI 回落展示名
+/// 导航，行为不变）。歌手取第一位——播放条显示的是拼接串，点进去落到主
+/// 歌手页即可。
+fn detail_link_params(track: &hmp_core::Track) -> (String, String) {
+    (
+        remote_link_param(track.artists.first().map(|a| a.id.as_ref())),
+        remote_link_param(track.album.as_ref().map(|a| a.id.as_ref())),
+    )
+}
+
+/// 实体 id → 远端导航参数：空串或本地哨兵 → 空串；否则 `qq:` + mid。
+fn remote_link_param(id: Option<&str>) -> String {
+    match id {
+        Some(mid) if !mid.is_empty() && mid != LOCAL_ENTITY_ID => {
+            format!("{}{mid}", crate::remote_details::REMOTE_PREFIX)
+        }
+        _ => String::new(),
     }
 }
 
@@ -1911,6 +1943,42 @@ pub(crate) mod tests {
         lyric_fetch_settle(&mut ledger, id, true, now);
         assert_eq!(ledger.get(id), None, "成功后清除");
         assert!(lyric_fetch_admit(&mut ledger, id, now));
+    }
+
+    /// U6：播放条歌手/专辑链接取哪个 mid——QQ 真 mid → `qq:` 远端参数（歌手
+    /// 取第一位）；本地哨兵 / 空串 / 无专辑 → 空串（回落展示名导航）。
+    #[test]
+    fn detail_link_params_take_first_artist_and_drop_local_sentinel() {
+        use hmp_core::{AlbumId, AlbumRef, ArtistId, ArtistRef};
+        let artist = |id: &str, name: &str| ArtistRef {
+            id: ArtistId::new(id),
+            name: name.into(),
+        };
+        let album = |id: &str, name: &str| AlbumRef {
+            id: AlbumId::new(id),
+            name: name.into(),
+        };
+        let mut track = hmp_core::Track::new(TrackId::new("0039MnYb0qxYhV"), "夜曲");
+        track.artists = vec![artist("0025NhlN2yWrP4", "周杰伦"), artist("am-2", "费玉清")];
+        track.album = Some(album("002albUMZTyiKq", "十一月的萧邦"));
+        assert_eq!(
+            detail_link_params(&track),
+            ("qq:0025NhlN2yWrP4".into(), "qq:002albUMZTyiKq".into()),
+            "QQ 曲目按真 mid 落远端详情页，歌手取第一位"
+        );
+
+        // 本地曲目：哨兵 local → 空串
+        track.artists = vec![artist("local", "周杰伦")];
+        track.album = Some(album("local", "十一月的萧邦"));
+        assert_eq!(detail_link_params(&track), (String::new(), String::new()));
+
+        // 空串 / 无歌手 / 无专辑一律视为没有 mid
+        track.artists = vec![artist("", "周杰伦")];
+        track.album = Some(album("", "十一月的萧邦"));
+        assert_eq!(detail_link_params(&track), (String::new(), String::new()));
+        track.artists.clear();
+        track.album = None;
+        assert_eq!(detail_link_params(&track), (String::new(), String::new()));
     }
 
     #[test]

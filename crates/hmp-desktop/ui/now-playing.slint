@@ -514,15 +514,18 @@ export component NowPlayingOverlay inherits Rectangle {
                                             }
                                         }
                                     }
-                                    // 歌手/专辑 → 详情页链接：参数 = 展示名（M4.5 本地投影
-                                    // 约定，与 TrackTable 歌手列一致）；点击同时收起
+                                    // 歌手/专辑 → 详情页链接。QQ 曲目按 mid 落远端详情页
+                                    // （Player.artist-mid / album-mid 带 qq: 前缀——
+                                    // 展示名在本地库必空，此前点了就是「未找到」）；
+                                    // 本地曲目 mid 为空，参数 = 展示名（M4.5 本地投影
+                                    // 约定，与 TrackTable 歌手列一致）。点击同时收起
                                     // overlay——Vue 不收起，但主视口被全屏层遮住，
                                     // 不收起则看不到落点（桌面侧有意收口）
                                     TextLink {
                                         font-size: 16px;
                                         text: Player.artists;
                                         clicked => {
-                                            Nav.go(Route.artist, Player.artists);
+                                            Nav.go(Route.artist, (Player.artist-mid != "" ? Player.artist-mid : Player.artists));
                                             Player.hide-overlay();
                                         }
                                     }
@@ -530,7 +533,7 @@ export component NowPlayingOverlay inherits Rectangle {
                                         font-size: 14px;
                                         text: Player.album;
                                         clicked => {
-                                            Nav.go(Route.album, Player.album);
+                                            Nav.go(Route.album, (Player.album-mid != "" ? Player.album-mid : Player.album));
                                             Player.hide-overlay();
                                         }
                                     }
