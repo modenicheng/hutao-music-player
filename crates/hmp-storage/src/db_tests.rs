@@ -1026,6 +1026,107 @@ fn fingerprint_reuses_row_on_path_change() {
     assert_eq!(p, new.to_str().unwrap(), "path 已更新");
 }
 
+/// AUDIT §30.2.4：修复前移动/改名（指纹命中复用行）只改 `local_files.path` 与
+/// `tracks.source_key`，relations 仍挂在旧键——而 list_favorites /
+/// liked_only / is_favorite 都按 `tracks.source_key = relations.entity_key`
+/// 关联，「喜欢」静默失联。关系行须随身份搬到新键（sync_state 原样保留）。
+#[test]
+fn scan_move_rekeys_local_relations() {
+    let dir = tempfile::tempdir().unwrap();
+    // 扫描器传 canonical 路径：与 set_relation 的键归一同一拼写。
+    let a = crate::canonical_display_path(&dir.path().join("a.mp3"));
+    let b = crate::canonical_display_path(&dir.path().join("b.mp3"));
+    std::fs::write(&a, b"x").unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let (root_id, generation) = db.begin_scan(dir.path()).unwrap();
+    assert!(matches!(
+        db.record_scan_file(root_id, generation, &a, None, "fp-same")
+            .unwrap(),
+        ScanOutcome::Added
+    ));
+    let key_a = format!("local:{}", a.display());
+    let key_b = format!("local:{}", b.display());
+    db.set_relation("track", "local", &key_a, "liked", true)
+        .unwrap();
+    db.mark_relation_synced("track", "local", &key_a, "liked")
+        .unwrap();
+
+    // 「移动」：同指纹 + 同 mtime_ns（rename 不改 mtime）。
+    std::fs::rename(&a, &b).unwrap();
+    let out = db
+        .record_scan_file(root_id, generation, &b, None, "fp-same")
+        .unwrap();
+    assert!(matches!(out, ScanOutcome::Updated), "指纹命中复用行");
+
+    let favs = db.list_favorites(10).unwrap();
+    assert_eq!(favs.len(), 1, "移动后「喜欢」仍在收藏列表");
+    assert_eq!(favs[0].source_key, key_b);
+    assert_eq!(
+        db.relation_desired("track", "local", &key_b, "liked")
+            .unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        db.relation_desired("track", "local", &key_a, "liked")
+            .unwrap(),
+        None,
+        "旧键下没有残留行"
+    );
+    // 同步状态原样保留：搬迁不把已 synced 的意图重新推进 outbox。
+    assert!(db.relations_pending().unwrap().is_empty());
+    // 其余视图同口径。
+    let tid = db.track_id("local", &key_b).unwrap().unwrap();
+    assert!(db.is_favorite(tid).unwrap());
+    let liked = db.library_tracks(None, None, None, true).unwrap();
+    assert_eq!(liked.len(), 1);
+    assert_eq!(liked[0].source_key, key_b);
+}
+
+/// 同上，新键已有同一 relation 的行：弃旧保既有（不撞主键、不丢既有意图）。
+#[test]
+fn scan_move_drops_old_relation_when_new_key_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = crate::canonical_display_path(&dir.path().join("a.mp3"));
+    let b = crate::canonical_display_path(&dir.path().join("b.mp3"));
+    std::fs::write(&a, b"x").unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let (root_id, generation) = db.begin_scan(dir.path()).unwrap();
+    db.record_scan_file(root_id, generation, &a, None, "fp-same")
+        .unwrap();
+    let key_a = format!("local:{}", a.display());
+    let key_b = format!("local:{}", b.display());
+    db.set_relation("track", "local", &key_a, "liked", true)
+        .unwrap();
+    db.mark_relation_synced("track", "local", &key_a, "liked")
+        .unwrap();
+    // 新键上已有一次取消收藏的意图（文件尚未入库也可写关系行）。
+    db.set_relation("track", "local", &key_b, "liked", false)
+        .unwrap();
+
+    std::fs::rename(&a, &b).unwrap();
+    db.record_scan_file(root_id, generation, &b, None, "fp-same")
+        .unwrap();
+
+    assert_eq!(
+        db.relation_desired("track", "local", &key_a, "liked")
+            .unwrap(),
+        None,
+        "旧键行删除"
+    );
+    assert_eq!(
+        db.relation_desired("track", "local", &key_b, "liked")
+            .unwrap(),
+        Some(false),
+        "新键既有行保留"
+    );
+    assert!(db.list_favorites(10).unwrap().is_empty());
+    let n: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM relations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "只剩新键那一行");
+}
+
 /// 里程碑 E2：单文件删除标记（watcher Remove 事件；不删行，missing 语义与扫描一致）。
 #[test]
 fn mark_missing_by_path_flags_row() {

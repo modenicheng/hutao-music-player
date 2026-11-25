@@ -758,12 +758,19 @@ impl LibraryDb {
                     // 插入。否则 UPDATE tracks.source_key 会撞
                     // UNIQUE(source, source_key) 中止整个扫描，且两份文件会
                     // 来回「偷」同一行（各自扫描时互相改写路径）。
+                    let new_key = format!("local:{path_str}");
                     let key_free: bool = self.conn.query_row(
                         "SELECT NOT EXISTS(SELECT 1 FROM tracks WHERE source = 'local' AND source_key = ?1)",
-                        params![format!("local:{path_str}")],
+                        params![new_key],
                         |r| r.get(0),
                     )?;
                     if key_free {
+                        // 旧键先读后改：下方关系行搬迁按移动前的键定位。
+                        let old_key: String = self.conn.query_row(
+                            "SELECT source_key FROM tracks WHERE id = ?1",
+                            params![tid],
+                            |r| r.get(0),
+                        )?;
                         self.conn.execute(
                         "UPDATE local_files SET path = ?1, file_size = ?2, mtime = ?3, mtime_ns = ?4,
                                 fingerprint = ?5, last_seen_generation = ?6, missing = 0, scan_root_id = ?7
@@ -782,7 +789,25 @@ impl LibraryDb {
                         // 同步 tracks 身份：`local:<旧路径>` → `local:<新路径>`（播放/查询用）。
                         self.conn.execute(
                             "UPDATE tracks SET source_key = ?1 WHERE id = ?2",
-                            params![format!("local:{path_str}"), tid],
+                            params![new_key, tid],
+                        )?;
+                        // 本地关系行（当前只有 liked）跟着身份搬到新键：收藏各视图
+                        // （list_favorites / liked_only / is_favorite）都按
+                        // `tracks.source_key = relations.entity_key` 关联，留在旧键
+                        // 上「喜欢」会静默失联。新键已有同一 relation 的行则弃旧保既有
+                        // （先删后改键，不撞主键；同一事务，随移动同生共死）。
+                        self.conn.execute(
+                            "DELETE FROM relations
+                             WHERE entity_type='track' AND provider='local' AND entity_key = ?1
+                               AND EXISTS (SELECT 1 FROM relations n
+                                           WHERE n.entity_type='track' AND n.provider='local'
+                                             AND n.entity_key = ?2 AND n.relation = relations.relation)",
+                            params![old_key, new_key],
+                        )?;
+                        self.conn.execute(
+                            "UPDATE relations SET entity_key = ?2
+                             WHERE entity_type='track' AND provider='local' AND entity_key = ?1",
+                            params![old_key, new_key],
                         )?;
                         if let Some(m) = meta {
                             self.apply_local_meta(tid, m)?;
