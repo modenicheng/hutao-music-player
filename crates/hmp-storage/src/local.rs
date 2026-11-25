@@ -384,6 +384,15 @@ mod tests {
         buf.into_inner()
     }
 
+    /// 文件系统是否区分大小写（Windows / macOS 默认不区分）。
+    fn fs_is_case_sensitive(dir: &Path) -> bool {
+        let probe = dir.join("hmp-case-probe.txt");
+        std::fs::write(&probe, b"").unwrap();
+        let sensitive = !dir.join("HMP-CASE-PROBE.TXT").exists();
+        let _ = std::fs::remove_file(&probe);
+        sensitive
+    }
+
     /// AUDIT §30.7：无内嵌图时退同目录封面文件——固定候选名 × 扩展名按序
     /// 探测，命中即停；首字母大写变体同样认；超限视为没有；非常规文件跳过。
     #[test]
@@ -422,18 +431,28 @@ mod tests {
             Some(b"jpg".to_vec()),
             "同主名 jpg 先于 png"
         );
+        // 大小写变体：Windows NTFS 不区分大小写，`Cover.jpg` 就是 `cover.jpg`
+        // 本身（写入即覆盖），两者之间的先后无从观察——按文件系统实际行为断言。
         std::fs::write(order.path().join("Cover.jpg"), b"cap").unwrap();
-        assert_eq!(
-            folder_cover(order.path()),
-            Some(b"jpg".to_vec()),
-            "小写主名先于大写变体"
-        );
-        std::fs::remove_file(order.path().join("cover.jpg")).unwrap();
-        assert_eq!(
-            folder_cover(order.path()),
-            Some(b"png".to_vec()),
-            "小写主名的全部扩展名先于大写变体"
-        );
+        if fs_is_case_sensitive(order.path()) {
+            assert_eq!(
+                folder_cover(order.path()),
+                Some(b"jpg".to_vec()),
+                "小写主名先于大写变体"
+            );
+            std::fs::remove_file(order.path().join("cover.jpg")).unwrap();
+            assert_eq!(
+                folder_cover(order.path()),
+                Some(b"png".to_vec()),
+                "小写主名的全部扩展名先于大写变体"
+            );
+        } else {
+            assert_eq!(
+                folder_cover(order.path()),
+                Some(b"cap".to_vec()),
+                "不区分大小写的文件系统：Cover.jpg 即 cover.jpg"
+            );
+        }
         // 非常规文件（同名目录）不算命中，跳到下一个候选。
         let odd = tempfile::tempdir().unwrap();
         std::fs::create_dir(odd.path().join("cover.jpg")).unwrap();
