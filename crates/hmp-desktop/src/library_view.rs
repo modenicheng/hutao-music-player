@@ -159,10 +159,7 @@ fn read_snapshot(db: &mut LibraryDb) -> Option<Snapshot> {
     let album_covers = album_cover_map(db)?;
     let roots = db.scan_roots().ok()?;
     let local_rows_vec = db.library_tracks(None, None, None, false).ok()?;
-    let local_by_key: HashMap<String, LibraryTrackRow> = local_rows_vec
-        .iter()
-        .map(|t| (t.source_key.clone(), t.clone()))
-        .collect();
+    let local_by_key = index_by_key(&local_rows_vec);
 
     let liked = liked_rows(db, &album_covers, &local_by_key)?;
     let (recent, recent_latest, recent_earliest) = recent_rows(db, &local_by_key, &album_covers)?;
@@ -186,6 +183,28 @@ fn read_snapshot(db: &mut LibraryDb) -> Option<Snapshot> {
         local_duration_text: format_long_duration(total_ms),
         local_size_text: format_bytes(total_size),
     })
+}
+
+/// 全量本地曲目表按源键索引（我喜欢 / 最近播放的本地行补全数据源）。
+fn index_by_key(rows: &[LibraryTrackRow]) -> HashMap<String, LibraryTrackRow> {
+    rows.iter()
+        .map(|t| (t.source_key.clone(), t.clone()))
+        .collect()
+}
+
+/// 「最近播放」页单独重读（D7）：引擎写播放历史不发 `LibraryChanged`，库页
+/// 刷新到不了这一页——进页导航时由桥在后台调用。库缺失/打开/投影失败 →
+/// None（调用方保持现有模型不动）。
+pub fn load_recent() -> Option<(Vec<SongRow>, String, String)> {
+    with_db(read_recent)
+}
+
+/// 最近播放页投影：与快照同一口径（`recent_rows`），本地行补全所需的
+/// 专辑封面表与曲目表在此单独取一次。
+fn read_recent(db: &mut LibraryDb) -> Option<(Vec<SongRow>, String, String)> {
+    let album_covers = album_cover_map(db)?;
+    let local_by_key = index_by_key(&db.library_tracks(None, None, None, false).ok()?);
+    recent_rows(db, &local_by_key, &album_covers)
 }
 
 // ————————————————————————————————————————————————————————————
@@ -926,6 +945,50 @@ mod tests {
         assert_eq!(row.source, 1);
         assert_eq!(row.duration_ms, 200_000, "本地行经曲目表补全时长");
         assert_eq!(row.quality, "FLAC");
+    }
+
+    /// D7：进页重读与快照同一投影——首次读取之后新产生的播放必须进入最近
+    /// 播放（写播放历史不发 LibraryChanged，此前只在库变更时才重查）。
+    #[test]
+    fn recent_reload_reflects_plays_after_first_read() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let dir = test_dir("recent-reload");
+        let play = |db: &mut LibraryDb, file: &str, title: &str, started_at: i64| {
+            let f = dir.join(file);
+            db.add_local_file(&f, Some(&meta(title, "歌手", "专辑", 200_000, "flac")))
+                .unwrap();
+            let key = format!("local:{}", f.display());
+            let id = db.track_id("local", &key).unwrap().unwrap();
+            let ev = db.record_play_start(id, started_at).unwrap();
+            db.record_play_end(
+                ev,
+                &PlayEnd {
+                    track_id: id,
+                    ended_at: started_at + 600,
+                    listened_ms: 90_000,
+                    reason: "ended",
+                },
+            )
+            .unwrap();
+        };
+        play(&mut db, "old.flac", "旧歌", 1_785_000_000); // 2026-07-25 17:20 UTC
+
+        let (rows, latest, earliest) = read_recent(&mut db).expect("projection ok");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "旧歌");
+        assert_eq!(
+            (latest.as_str(), earliest.as_str()),
+            ("07-25 17:20", "07-25 17:20")
+        );
+
+        // 之后的播放：没有任何库变更事件，重读即见（新播置顶）
+        play(&mut db, "later.flac", "新歌", 1_786_190_400); // 2026-08-08 12:00 UTC
+        let (rows, latest, earliest) = read_recent(&mut db).expect("projection ok");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].title, "新歌", "再播置顶");
+        assert_eq!(rows[1].title, "旧歌");
+        assert_eq!(latest, "08-08 12:00");
+        assert_eq!(earliest, "07-25 17:20");
     }
 
     /// 最近播放 QQ 行：播放键随投影下发（source/source_key → mid），

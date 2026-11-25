@@ -636,15 +636,7 @@ fn apply_snapshot(
     ));
 
     // ——— 最近播放（latest/earliest 已按真实时间戳格式化）———
-    data.set_recent(model(
-        snap.recent
-            .iter()
-            .map(SongRow::to_track_row)
-            .collect::<Vec<_>>(),
-    ));
-    data.set_recent_count(snap.recent.len() as i32);
-    data.set_recent_latest(snap.recent_latest.clone().into());
-    data.set_recent_earliest(snap.recent_earliest.clone().into());
+    apply_recent(ui, &snap.recent, &snap.recent_latest, &snap.recent_earliest);
 
     // 曲目封面预取：QQ 行 remote_cover 批量经 daemon CoverGet 换本地产物
     // （打开列表即取图，命中 daemon 盘缓存零出网；回包广播回填各列表）。
@@ -741,6 +733,42 @@ fn apply_snapshot(
     data.set_purchased_total("—".into());
 }
 
+/// 最近播放模型落地：曲目表 + 页头计数与 latest/earliest 时间戳（快照装载与
+/// 进页重读共用）。
+fn apply_recent(ui: &AppWindow, rows: &[SongRow], latest: &str, earliest: &str) {
+    let data = Data::get(ui);
+    data.set_recent(model(
+        rows.iter().map(SongRow::to_track_row).collect::<Vec<_>>(),
+    ));
+    data.set_recent_count(rows.len() as i32);
+    data.set_recent_latest(latest.into());
+    data.set_recent_earliest(earliest.into());
+}
+
+/// 「最近播放」进页重读（D7）：引擎写播放历史不发 `LibraryChanged`，库页
+/// 刷新到不了这一页——进页时后台重读一次，否则看到的是启动/上次库变更时
+/// 的快照。读库在 runtime 工作线程（同 schedule_refresh 套路），模型落地回
+/// UI 线程；库缺失/投影失败保持现有模型。
+fn spawn_recent_reload(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::BackendRuntime>) {
+    let rt = Arc::clone(runtime);
+    runtime.spawn(async move {
+        let recent = library_view::load_recent();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            if let Some((rows, latest, earliest)) = recent {
+                apply_recent(&ui, &rows, &latest, &earliest);
+                // QQ 行远程封面预取（与快照装载同口径：进列表即取图）
+                crate::track_covers::prefetch_tracks(
+                    &rt,
+                    crate::track_covers::targets_from_rows(&rows),
+                );
+            }
+        });
+    });
+}
+
 /// 路由落地后的详情装载（导航路径：单次同步读，单页查询量小；库变更刷新
 /// 路径走后台预计算 + [`apply_detail`]）。本地 miss 即诚实空态（state=3）。
 /// 远端参数（`qq:` 前缀）在本地 miss 后分流到异步远端装载（D-1）。
@@ -750,6 +778,11 @@ fn apply_route(
     route: crate::Route,
     param: SharedString,
 ) {
+    // 最近播放（D7）：引擎写播放历史不发 LibraryChanged，库变更刷新之外再无
+    // 重读时机——进页（导航与返回两条路径都经此）后台重读一次。
+    if route == crate::Route::Recent {
+        spawn_recent_reload(ui.as_weak(), runtime);
+    }
     let detail = load_detail(route, &param);
     // 远端分流：本地投影 miss 且带 qq: 前缀 → 异步远端装载（本地事实
     // 优先，R3：同形展示名本地命中时不会走到这里）。load_detail 对远端
@@ -1693,6 +1726,44 @@ mod tests {
             }));
             apply_detail(&ui, &runtime, &artist);
             assert_eq!(data.get_artist_state(), 2, "本地歌手命中复位就绪态");
+        });
+    }
+    /// D7：进页重读的落地——曲目表、计数与 latest/earliest 一起更新（后台
+    /// 读库 + invoke 回包那段无头后端不泵，这里直接驱动落地函数）。
+    #[test]
+    fn apply_recent_updates_rows_count_and_stamps() {
+        crate::player_bridge::tests::run_on_platform_thread(|| {
+            use slint::Model;
+
+            let ui = AppWindow::new().unwrap();
+            let data = Data::get(&ui);
+            let row = |title: &str| SongRow {
+                mid: format!("local:{title}"),
+                source: 1,
+                title: title.into(),
+                artists: "歌手".into(),
+                album: "专辑".into(),
+                duration_ms: 0,
+                quality: String::new(),
+                cover_uri: None,
+                remote_cover: None,
+                folder: None,
+            };
+            apply_recent(
+                &ui,
+                &[row("旧歌"), row("新歌")],
+                "08-08 12:00",
+                "07-25 17:20",
+            );
+            let recent = data.get_recent();
+            assert_eq!(recent.row_count(), 2);
+            assert_eq!(
+                recent.row_data(0).map(|r| r.title.to_string()),
+                Some("旧歌".into())
+            );
+            assert_eq!(data.get_recent_count(), 2);
+            assert_eq!(data.get_recent_latest().as_str(), "08-08 12:00");
+            assert_eq!(data.get_recent_earliest().as_str(), "07-25 17:20");
         });
     }
 }
