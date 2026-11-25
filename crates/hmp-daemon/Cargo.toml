@@ -32,12 +32,13 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 # 托盘（feature `tray`）：D-Bus StatusNotifierItem 实现。
-# ksni 0.3 的 compat 层对 tokio/async-io 互斥 compile_error——而 Linux 侧
-# zbus 5 被 keyring（zbus-secret-service）以默认 async-io 拉入、ksni/tokio
-# 又置 zbus/tokio，feature unification 后必然双点亮爆炸（S11 CI 实证）。
-# 解法：改用 blocking feature（纯同步 API，不声明任何 async 运行时
-# feature），ksni_tray.rs 本就是自管线程同步实现，正好对口。
-ksni = { version = "0.3", optional = true, default-features = false, features = ["blocking"] }
+# ksni 0.3（≥0.3.7 实证）compat 层强制 tokio/async-io 二选一：缺一或双亮
+# 均 compile_error，纯 blocking 编不过。而 zbus 5 侧 keyring
+# （zbus-secret-service→secret-service）已默认拉入 async-io，ksni/async-io
+# 与之天然统一；若选 ksni/tokio 则 zbus 5 上双运行时并存，正是当年 S11
+# unification 双亮爆炸的根源。blocking 纯同步 API，ksni_tray.rs 本就是
+# 自管线程同步实现，正好对口。
+ksni = { version = "0.3", optional = true, default-features = false, features = ["blocking", "async-io"] }
 
 [features]
 default = []
