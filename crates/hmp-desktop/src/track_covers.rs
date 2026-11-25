@@ -20,29 +20,33 @@
 //! （低频），失败出账即可自然重试；10Hz 高频触发源（当前曲）另带退避
 //! （player_bridge::spawn_cover_fetch）。
 
-use std::cell::RefCell;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// 并发上限：daemon 命中盘索引时极快，未命中时打满 CDN 的在途请求数也
 /// 不至于触发限流；大歌单（2000 首）分钟级渐进填满，全程不阻塞 UI。
 const MAX_INFLIGHT: usize = 8;
 
-thread_local! {
-    /// 在账的 mid|url（在途或已成功；失败即出账允许重试，进程级）。
-    static REQUESTED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-}
+/// 在账的 mid|url（在途或已成功；失败即出账允许重试）。进程级 Mutex：入账
+/// 在 UI 线程、失败出账在 runtime 工作线程——此前 thread_local + 跨线程
+/// remove 实际删的是另一线程的账（无效操作，U2），与 online_covers /
+/// player_bridge 同款收敛为全局账本。
+static REQUESTED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 /// 记账：key 未在账则入账并返回 true（允许发起）。
 fn account(key: &str) -> bool {
-    REQUESTED.with(|set| set.borrow_mut().insert(key.to_owned()))
+    let mut guard = REQUESTED.lock().expect("track cover requests");
+    guard
+        .get_or_insert_with(HashSet::new)
+        .insert(key.to_owned())
 }
 
 /// 出账：请求失败后调用，下一次触发源（进页面/队列重建）可重试。
 fn release(key: &str) {
-    REQUESTED.with(|set| {
-        set.borrow_mut().remove(key);
-    });
+    let mut guard = REQUESTED.lock().expect("track cover requests");
+    if let Some(set) = guard.as_mut() {
+        set.remove(key);
+    }
 }
 
 /// 每张图回包后的 UI 线程回调（(mid, 降采样图)）。slint::Image 非 Send，
@@ -159,6 +163,20 @@ mod tests {
         assert!(!account(key), "在账应拦截重复请求");
         release(key);
         assert!(account(key), "出账后应允许重试");
+        release(key);
+    }
+
+    /// U2 回归：失败出账跑在 runtime 工作线程——账本必须是进程级。线程 A
+    /// 入账、线程 B 出账后，A 再入账应放行（thread_local 账本下 B 删的是自己
+    /// 线程的空集合，A 的账永不消除，本测试必然失败）。
+    #[test]
+    fn release_on_another_thread_clears_account() {
+        let key = "cross-thread-mid|cross-thread-url";
+        assert!(account(key), "首次入账应放行");
+        std::thread::spawn(move || release(key))
+            .join()
+            .expect("release thread");
+        assert!(account(key), "另一线程出账后应允许重试");
         release(key);
     }
 }

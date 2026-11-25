@@ -958,6 +958,9 @@ thread_local! {
     static LAST_SHOWN_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     /// 歌词时间戳（毫秒升序，与 NowPlaying.lyrics 同源）；active-line 折算用
     static LYRIC_STAMPS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// 歌词请求账本（id → 在途 / 失败待重试）：入账在入口、结算在回包闭包，
+    /// 都在 UI 线程；HashMap::new 非 const（RandomState），不入 const 块。
+    static LYRIC_FETCH: RefCell<HashMap<String, LyricFetch>> = RefCell::new(HashMap::new());
     /// 上一次状态推送的当前曲 mid（换曲检测：曲目元数据层落地 + 重置喜欢
     /// 态/重拉歌词与评论——10Hz 位置推送零触碰，见 apply_daemon_state）
     static PREV_MID: RefCell<String> = const { RefCell::new(String::new()) };
@@ -1053,14 +1056,8 @@ fn apply_daemon_state(
         LYRIC_STAMPS.with(|cell| cell.borrow_mut().clear());
         // 本地/QQ 同一歌词管线：本地曲 daemon 先读同目录 .lrc/内嵌标签，
         // 缺失再按标题+歌手检索 QQ 兜底（本地优先）；QQ 曲按 mid 直取。
+        // 词表置加载态，拉取由函数尾的歌词重试引擎发起。
         np.set_lyrics_loading(true);
-        spawn_lyric_fetch(
-            ui_weak,
-            runtime,
-            mid.clone(),
-            track.title.clone(),
-            track.artist_names(),
-        );
         COMMENT_KEY.with(|cell| *cell.borrow_mut() = None);
         maybe_load_comments(runtime, ui_weak);
     }
@@ -1137,11 +1134,93 @@ fn apply_daemon_state(
     {
         spawn_cover_fetch(ui_weak, runtime, mid.clone(), cover.url.clone());
     }
+    // 歌词重试引擎（U1）：词表未就绪——换曲拉取在途（lyrics_loading）或上次
+    // 失败待重试（账本 Failed）——每次推送过闸门；在途与退避窗口由账本拦截，
+    // 10Hz 推送不成请求风暴（失败后约 5s 自动重试，逐次翻倍封顶 60s）。
+    if let Some(ui) = ui_weak.upgrade()
+        && (NowPlaying::get(&ui).get_lyrics_loading() || lyric_fetch_failed(&mid))
+    {
+        spawn_lyric_fetch(
+            ui_weak,
+            runtime,
+            mid.clone(),
+            track.title.clone(),
+            track.artist_names(),
+        );
+    }
+}
+
+/// 歌词重试退避下限/上限：首次失败 5s 后可重试，逐次翻倍、60s 封顶。
+const LYRIC_RETRY_MIN: Duration = Duration::from_secs(5);
+const LYRIC_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// 歌词请求账本条目。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LyricFetch {
+    /// 在途：请求已发出、回包未到。`backoff` = 上次失败的退避时长（首次
+    /// 请求为零），回包再败时据此翻倍。
+    InFlight { backoff: Duration },
+    /// 上次失败（请求出错或空页）：`retry_at` 前不再发起；下次失败按
+    /// `backoff` 翻倍。
+    Failed {
+        retry_at: Instant,
+        backoff: Duration,
+    },
+}
+
+/// 入口闸门（纯函数）：账本无此 id、或上次失败的退避窗口已过 → 允许发起
+/// 并记为在途；在途 / 退避窗口内 → 拦截。
+fn lyric_fetch_admit(ledger: &mut HashMap<String, LyricFetch>, id: &str, now: Instant) -> bool {
+    match ledger.get(id).copied() {
+        Some(LyricFetch::InFlight { .. }) => false,
+        Some(LyricFetch::Failed { retry_at, .. }) if now < retry_at => false,
+        _ => {
+            let backoff = match ledger.get(id) {
+                Some(LyricFetch::Failed { backoff, .. }) => *backoff,
+                _ => Duration::ZERO,
+            };
+            ledger.insert(id.to_owned(), LyricFetch::InFlight { backoff });
+            true
+        }
+    }
+}
+
+/// 回包落地（纯函数）：成功（拿到非空词表）→ 出账；失败 → 记退避（上次
+/// 退避翻倍、封顶 LYRIC_RETRY_MAX；首次 LYRIC_RETRY_MIN）。
+fn lyric_fetch_settle(ledger: &mut HashMap<String, LyricFetch>, id: &str, ok: bool, now: Instant) {
+    if ok {
+        ledger.remove(id);
+        return;
+    }
+    let backoff = match ledger.remove(id) {
+        Some(LyricFetch::InFlight { backoff }) | Some(LyricFetch::Failed { backoff, .. }) => {
+            if backoff.is_zero() {
+                LYRIC_RETRY_MIN
+            } else {
+                (backoff * 2).min(LYRIC_RETRY_MAX)
+            }
+        }
+        None => LYRIC_RETRY_MIN,
+    };
+    ledger.insert(
+        id.to_owned(),
+        LyricFetch::Failed {
+            retry_at: now + backoff,
+            backoff,
+        },
+    );
+}
+
+/// 该 id 上次歌词请求失败（待重试）→ true；状态推送的触发判据之一。
+fn lyric_fetch_failed(id: &str) -> bool {
+    LYRIC_FETCH.with(|cell| matches!(cell.borrow().get(id), Some(LyricFetch::Failed { .. })))
 }
 
 /// 播放页歌词装载：LyricGet（daemon 本地优先 + QQ 检索兜底）→ LRC 解析 →
-/// 模型落地。每 id 每进程只请求一次（失败不重试，换曲再回来时自然重试）；
-/// 回包时当前曲已换 → 丢弃（串台守卫，同封面取回路径）。
+/// 模型落地。入口闸门见 [`lyric_fetch_admit`]（在途 / 退避窗口内拦截）：
+/// 成功即出账；失败（请求出错或空页）按指数退避后由状态推送自然重试
+/// （U1——此前只入账不出账，一次失败整个会话不再请求）。回包时当前曲已
+/// 换 → 丢弃（串台守卫，同封面取回路径），账本照常结算。
 fn spawn_lyric_fetch(
     ui_weak: &Weak<AppWindow>,
     runtime: &Arc<BackendRuntime>,
@@ -1149,10 +1228,7 @@ fn spawn_lyric_fetch(
     title: String,
     artist: String,
 ) {
-    thread_local! {
-        static REQUESTED: RefCell<std::collections::HashSet<String>> = RefCell::new(HashSet::new());
-    }
-    if !REQUESTED.with(|set| set.borrow_mut().insert(id.clone())) {
+    if !LYRIC_FETCH.with(|cell| lyric_fetch_admit(&mut cell.borrow_mut(), &id, Instant::now())) {
         return;
     }
     let ui_weak = ui_weak.clone();
@@ -1169,6 +1245,16 @@ fn spawn_lyric_fetch(
             _ => Vec::new(),
         };
         let _ = slint::invoke_from_event_loop(move || {
+            // 账本只在 UI 线程读写：结算随回包落地，且先于串台守卫——换曲
+            // 途中到达的回包同样要出账/记退避，否则在账不消、永不重试。
+            LYRIC_FETCH.with(|cell| {
+                lyric_fetch_settle(
+                    &mut cell.borrow_mut(),
+                    &id,
+                    !lines.is_empty(),
+                    Instant::now(),
+                )
+            });
             let Some(ui) = ui_weak.upgrade() else {
                 return;
             };
@@ -1318,32 +1404,61 @@ fn like_count_text(count: i64) -> String {
 const COVER_RETRY_MIN: Duration = Duration::from_secs(2);
 const COVER_RETRY_MAX: Duration = Duration::from_secs(60);
 
-thread_local! {
-    /// mid → (最早可重试时刻, 当前退避时长)。失败翻倍封顶，成功即清除。
-    static COVER_RETRY: RefCell<HashMap<String, (Instant, Duration)>> =
-        RefCell::new(HashMap::new());
-}
+// 当前曲封面的两本账（进程级 Mutex，与 online_covers 同款）：入账与退避查询
+// 在 UI 线程，失败出账与退避记账在 runtime 工作线程（回包分支）——此前是
+// thread_local，工作线程改的是另一线程的空集合：UI 线程的账永不消除（一张
+// 封面失败一次整个会话停在占位图），退避也从未生效（U2）。各函数自取自放
+// 锁，不持锁调用同账本的另一函数。
+/// 在账的 mid（在途或已成功；失败即出账允许重试）。
+static COVER_REQUESTED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+/// mid → (最早可重试时刻, 当前退避时长)。失败翻倍封顶，成功即清除。
+static COVER_RETRY: Mutex<Option<HashMap<String, (Instant, Duration)>>> = Mutex::new(None);
 
 /// 退避窗口未过（该 mid 刚失败过）→ true。
 fn cover_fetch_backed_off(mid: &str) -> bool {
-    COVER_RETRY.with(|map| {
-        map.borrow()
-            .get(mid)
-            .is_some_and(|&(at, _)| Instant::now() < at)
-    })
+    COVER_RETRY
+        .lock()
+        .expect("cover retry ledger")
+        .get_or_insert_with(HashMap::new)
+        .get(mid)
+        .is_some_and(|&(at, _)| Instant::now() < at)
 }
 
 /// 失败记账：退避翻倍（首次 COVER_RETRY_MIN，封顶 COVER_RETRY_MAX）。
 /// 重试总发生在上次时刻过期之后，指数序列取自存储的时长而非时刻差。
 fn cover_fetch_schedule_retry(mid: &str) {
-    COVER_RETRY.with(|map| {
-        let mut map = map.borrow_mut();
-        let backoff = map
-            .get(mid)
-            .map(|&(_, b)| (b * 2).min(COVER_RETRY_MAX))
-            .unwrap_or(COVER_RETRY_MIN);
-        map.insert(mid.to_owned(), (Instant::now() + backoff, backoff));
-    });
+    let mut guard = COVER_RETRY.lock().expect("cover retry ledger");
+    let map = guard.get_or_insert_with(HashMap::new);
+    let backoff = map
+        .get(mid)
+        .map(|&(_, b)| (b * 2).min(COVER_RETRY_MAX))
+        .unwrap_or(COVER_RETRY_MIN);
+    map.insert(mid.to_owned(), (Instant::now() + backoff, backoff));
+}
+
+/// 成功出账：清除该 mid 的退避记录。
+fn cover_fetch_clear_retry(mid: &str) {
+    let mut guard = COVER_RETRY.lock().expect("cover retry ledger");
+    if let Some(map) = guard.as_mut() {
+        map.remove(mid);
+    }
+}
+
+/// 入账：mid 未在账则入账并返回 true（允许发起）。
+fn cover_fetch_account(mid: &str) -> bool {
+    COVER_REQUESTED
+        .lock()
+        .expect("cover request ledger")
+        .get_or_insert_with(HashSet::new)
+        .insert(mid.to_owned())
+}
+
+/// 出账：请求失败后调用，下一次状态推送可重试。
+fn cover_fetch_release(mid: &str) {
+    let mut guard = COVER_REQUESTED.lock().expect("cover request ledger");
+    if let Some(set) = guard.as_mut() {
+        set.remove(mid);
+    }
 }
 
 /// 当前曲封面解析（纯函数，UI 无副作用）：返回 (封面键, 真图)。真图
@@ -1415,15 +1530,10 @@ fn spawn_cover_fetch(
     // 指数退避（2026-10-04 封面审计⑤：冷启动 daemon 未就绪/StaleBackend
     // 恢复窗口内的一次失败不再让该曲整个会话占位——退避窗口过后自动重试，
     // daemon 命中盘缓存毫秒回）。
-    thread_local! {
-        static REQUESTED: RefCell<HashSet<String>> =
-            RefCell::new(HashSet::new());
-    }
     if cover_fetch_backed_off(&mid) {
         return;
     }
-    let first_request = REQUESTED.with(|set| set.borrow_mut().insert(mid.clone()));
-    if !first_request {
+    if !cover_fetch_account(&mid) {
         return;
     }
     let ui_weak = ui_weak.clone();
@@ -1433,9 +1543,7 @@ fn spawn_cover_fetch(
         let cover_key = format!("{mid}|{url}");
         match crate::backend::request(Request::CoverGet { url }).await {
             Ok(Response::Cover(uri)) => {
-                COVER_RETRY.with(|map| {
-                    map.borrow_mut().remove(&mid);
-                });
+                cover_fetch_clear_retry(&mid);
                 let path = crate::covers::file_uri_to_path(&uri).unwrap_or(uri);
                 let ui_weak = ui_weak.clone();
                 let mid = mid.clone();
@@ -1472,9 +1580,7 @@ fn spawn_cover_fetch(
             _ => {
                 // 失败：出账 + 指数退避，下一帧推送到达退避窗口末尾后自动重试
                 cover_fetch_schedule_retry(&mid);
-                REQUESTED.with(|set| {
-                    set.borrow_mut().remove(&mid);
-                });
+                cover_fetch_release(&mid);
             }
         }
     });
@@ -1716,7 +1822,11 @@ pub(crate) mod tests {
                 cover_fetch_backed_off(mid),
                 "第 {round} 次失败后应进退避窗口"
             );
-            let stored = COVER_RETRY.with(|m| m.borrow().get(mid).copied());
+            let stored = COVER_RETRY
+                .lock()
+                .expect("cover retry ledger")
+                .as_ref()
+                .and_then(|m| m.get(mid).copied());
             let Some((at, backoff)) = stored else {
                 panic!("第 {round} 次失败应记账");
             };
@@ -1725,10 +1835,82 @@ pub(crate) mod tests {
             expect = (expect * 2).min(COVER_RETRY_MAX);
         }
         assert_eq!(expect, COVER_RETRY_MAX, "翻倍应在 60s 封顶");
-        COVER_RETRY.with(|m| {
-            m.borrow_mut().remove(mid);
-        });
+        cover_fetch_clear_retry(mid);
         assert!(!cover_fetch_backed_off(mid), "清除后退避解除");
+    }
+
+    /// U2 回归：失败出账与退避记账跑在 runtime 工作线程，账本必须是进程级
+    /// ——另一线程出账/记账后，本线程必须看得见（thread_local 账本下工作线程
+    /// 改的是自己线程的空集合：账永不消除、退避不生效，本测试必然失败）。
+    #[test]
+    fn cover_ledgers_are_shared_across_threads() {
+        let mid = "cross-thread-cover-mid";
+        assert!(cover_fetch_account(mid), "首次入账应放行");
+        assert!(!cover_fetch_account(mid), "在账应拦截重复请求");
+        std::thread::spawn(move || {
+            cover_fetch_release(mid);
+            cover_fetch_schedule_retry(mid);
+        })
+        .join()
+        .expect("ledger thread");
+        assert!(cover_fetch_account(mid), "另一线程出账后应允许重试");
+        assert!(
+            cover_fetch_backed_off(mid),
+            "另一线程记的退避在本线程应可见"
+        );
+        cover_fetch_clear_retry(mid);
+        cover_fetch_release(mid);
+    }
+
+    /// U1 歌词闸门：在途拦截重复；失败后立刻不允许、过了间隔允许；间隔逐次
+    /// 翻倍并 60s 封顶；成功出账。
+    #[test]
+    fn lyric_gate_backs_off_after_failure_and_clears_on_success() {
+        let mut ledger = HashMap::new();
+        let id = "lyric-gate-test-id";
+        let start = Instant::now();
+
+        // 无记录 → 放行并记在途；在途期间拦截
+        assert!(lyric_fetch_admit(&mut ledger, id, start));
+        assert!(
+            !lyric_fetch_admit(&mut ledger, id, start),
+            "在途应拦截重复请求"
+        );
+
+        // 失败 → 立刻不允许；退避序列 5 → 10 → 20 → 40 → 60（封顶）
+        let mut now = start;
+        let mut expect = LYRIC_RETRY_MIN;
+        for round in 1..=6 {
+            lyric_fetch_settle(&mut ledger, id, false, now);
+            assert!(
+                !lyric_fetch_admit(&mut ledger, id, now),
+                "第 {round} 次失败后立刻不允许"
+            );
+            assert!(
+                !lyric_fetch_admit(&mut ledger, id, now + expect - Duration::from_millis(1)),
+                "退避窗口内不允许"
+            );
+            let Some(LyricFetch::Failed { retry_at, backoff }) = ledger.get(id).copied() else {
+                panic!("第 {round} 次失败应记账");
+            };
+            assert_eq!(
+                (retry_at, backoff),
+                (now + expect, expect),
+                "第 {round} 次失败退避"
+            );
+            assert!(
+                lyric_fetch_admit(&mut ledger, id, now + expect),
+                "过了间隔允许重试"
+            );
+            now += expect;
+            expect = (expect * 2).min(LYRIC_RETRY_MAX);
+        }
+        assert_eq!(expect, LYRIC_RETRY_MAX, "翻倍应在 60s 封顶");
+
+        // 成功 → 出账（换曲重进可重新拉取）
+        lyric_fetch_settle(&mut ledger, id, true, now);
+        assert_eq!(ledger.get(id), None, "成功后清除");
+        assert!(lyric_fetch_admit(&mut ledger, id, now));
     }
 
     #[test]
