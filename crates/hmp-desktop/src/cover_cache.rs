@@ -156,7 +156,17 @@ fn derived_cover_path(path: &str) -> Option<String> {
 
 /// 指定路径解码 + 保比降采样（最长边钳到 max_side）→ Slint rgba8 位图。
 fn decode_thumbnail_from(path: &str, max_side: u32) -> Option<Image> {
-    let decoded = image::ImageReader::open(path).ok()?.decode().ok()?;
+    // 按内容嗅探格式：`ImageReader::open` 只按扩展名选解码器，而存储侧
+    // `persist_cover` 不看内容、一律落 `<hash>.jpg`——PNG 原图（目录封面
+    // `cover.png`、内嵌 PNG）最长边 ≤512 时没有派生缩略件可走，只能直解这张
+    // 「名叫 .jpg 的 PNG」，按扩展名必败（整张封面静默丢失）。嗅探不出签名
+    // （非 png/jpeg）时保留扩展名推断，照旧失败回退。
+    let decoded = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
     // max_side 为 0 时 thumbnail 退化为原尺寸钳 1px，防御取 max(1)。
     let thumb = decoded.thumbnail(max_side.max(1), max_side.max(1));
     let rgba = thumb.to_rgba8();
@@ -342,7 +352,7 @@ mod tests {
 
     // —— S9 R2 读侧：派生缩略件优先 + 回退链 ——
 
-    /// 落一张 w×h JPEG（covers 产物即 JPEG；解码器按扩展名认格式，
+    /// 落一张 w×h JPEG（covers 产物多为 JPEG；解码器按内容认格式，
     /// JPEG 编码需 RGB8）。
     fn write_jpeg(dir: &Path, name: &str, w: u32, h: u32) -> PathBuf {
         let img = image::RgbaImage::from_fn(w, h, |x, y| {
@@ -447,6 +457,28 @@ mod tests {
         assert_eq!(image.size().height, 64, "命中返回首次（派生来源）结果");
         let (_, _, hits, misses) = cache_stats();
         assert_eq!((hits, misses), (1, 1), "二次调用零解码");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 扩展名与内容不符：存储侧 `persist_cover` 一律落 `<hash>.jpg`，PNG 原图
+    /// （目录封面 `cover.png`、内嵌 PNG）最长边 ≤512 时无派生缩略件，读侧只能
+    /// 直解这张「名叫 .jpg 的 PNG」——按扩展名选解码器返回 None。嗅探内容后
+    /// 两个方向都按内容解（无派生件 → 直解 500×500 → 256 桶得 256×256）。
+    #[test]
+    fn decode_sniffs_content_over_extension() {
+        let dir = test_dir("mislabeled");
+        // PNG 字节落在 .jpg 名下（复刻 persist_cover 的落盘形态）。
+        let png = write_png(&dir, "cover.png", 500, 500);
+        let as_jpg = dir.join("0123456789abcdef.jpg");
+        std::fs::rename(&png, &as_jpg).unwrap();
+        let image = get_or_load(as_jpg.to_str().unwrap(), 256).expect("PNG 字节按内容可解");
+        assert_eq!(image.size().width, 256, "直解 500×500 → 256 桶");
+
+        // 反向：JPEG 字节落在 .png 名下。
+        let jpg = write_jpeg(&dir, "cover.jpg", 500, 500);
+        let as_png = dir.join("fedcba9876543210.png");
+        std::fs::rename(&jpg, &as_png).unwrap();
+        assert!(get_or_load(as_png.to_str().unwrap(), 256).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
