@@ -40,7 +40,7 @@ const EMPTY_SNAPSHOT_ROUNDS: u32 = 2;
 /// 空快照闸门（AUDIT §30 D2）：存储层对空集合的语义是「全量清理 synced 行」，
 /// 而接口软失败会被解析成空列表——故空快照须**连续** [`EMPTY_SNAPSHOT_ROUNDS`]
 /// 轮一致才视为权威空。非空快照清零并放行；首个空快照只计数、不放行。
-/// 拉取失败的轮次不经过本闸门（无信息量），计数保持。
+/// 拉取失败 / 不完整的轮次不经过本闸门（无信息量），计数保持。
 #[derive(Debug, Default)]
 struct EmptySnapshotGate {
     /// 连续为空的轮数。
@@ -60,7 +60,24 @@ impl EmptySnapshotGate {
 }
 
 /// 闸门判定 + 跳过清理时的告警（三个快照源共用）。
-fn snapshot_allows_cleanup(gate: &mut EmptySnapshotGate, present_len: usize, source: &str) -> bool {
+///
+/// `complete`：快照是否取全（`hasmore=0` 收尾）。半份快照同样不能定缺席——
+/// 翻页中途的空页会让 `present` 只剩前几页，按它清理等于把没拉到的条目全当
+/// 缺席清掉（与 §30.1 的分片清理同一类症状）；只做增量，清理留到取全的那轮。
+fn snapshot_allows_cleanup(
+    gate: &mut EmptySnapshotGate,
+    present_len: usize,
+    complete: bool,
+    source: &str,
+) -> bool {
+    if !complete {
+        tracing::warn!(
+            source,
+            present = present_len,
+            "reconcile: incomplete snapshot; absent cleanup skipped"
+        );
+        return false;
+    }
     if gate.observe(present_len) {
         return true;
     }
@@ -272,8 +289,9 @@ async fn reconcile_fav_songs(
         page += 1;
     }
     // 双向 reconcile：远端已取消收藏的本地行（synced）→ desired=0。
-    // 空快照须连续两轮一致才清理（软失败被解析成空列表时保留本地）。
-    if snapshot_allows_cleanup(gate, present.len(), "liked songs")
+    // 只有取全的快照才定缺席；空快照须连续两轮一致才清理（软失败被解析成
+    // 空列表时保留本地）。
+    if snapshot_allows_cleanup(gate, present.len(), complete, "liked songs")
         && let Ok(mut lib) = library.lock()
     {
         let _ = lib.reconcile_remove_absent("track", "qq", "liked", &present);
@@ -332,6 +350,8 @@ async fn reconcile_fav_songlists(
     let mut page = 1i64;
     let mut present = Vec::new();
     let mut covers: Vec<(String, String)> = Vec::new();
+    // 快照是否取全：`hasmore=0` 收尾才算完整（同 `reconcile_fav_songs`）。
+    let mut complete = false;
     loop {
         let resp = match api
             .get_fav_songlist(euin, Page::new(page as u32, 100), Some(credential))
@@ -361,14 +381,19 @@ async fn reconcile_fav_songlists(
                 }
             }
         }
-        if resp.hasmore == 0 || page >= 100 || resp.playlists.is_empty() {
+        if resp.hasmore == 0 {
+            complete = true;
+            break;
+        }
+        if page >= 100 || resp.playlists.is_empty() {
             break;
         }
         page += 1;
     }
     // 双向：远端已取消收藏的歌单（synced 行）→ desired=0。
+    // 只有取全的快照才定缺席（半份快照会连带删掉本地歌单行与曲目缓存）；
     // 空快照须连续两轮一致才清理（软失败被解析成空列表时保留本地）。
-    if snapshot_allows_cleanup(gate, present.len(), "subscribed playlists")
+    if snapshot_allows_cleanup(gate, present.len(), complete, "subscribed playlists")
         && let Ok(mut lib) = library.lock()
     {
         let _ = lib.reconcile_remove_absent("playlist", "qq", "subscribed", &present);
@@ -740,6 +765,8 @@ async fn reconcile_fav_albums(
 ) {
     let mut page = 1i64;
     let mut present = Vec::new();
+    // 快照是否取全：`hasmore=0` 收尾才算完整（同 `reconcile_fav_songs`）。
+    let mut complete = false;
     loop {
         let resp = match api
             .get_fav_album(euin, Page::new(page as u32, 100), Some(credential))
@@ -761,14 +788,18 @@ async fn reconcile_fav_albums(
                 }
             }
         }
-        if resp.hasmore == 0 || page >= 100 || resp.albums.is_empty() {
+        if resp.hasmore == 0 {
+            complete = true;
+            break;
+        }
+        if page >= 100 || resp.albums.is_empty() {
             break;
         }
         page += 1;
     }
     // 双向：远端已取消收藏的专辑（synced 行）→ desired=0。
-    // 空快照须连续两轮一致才清理（软失败被解析成空列表时保留本地）。
-    if snapshot_allows_cleanup(gate, present.len(), "liked albums")
+    // 只有取全的快照才定缺席；空快照须连续两轮一致才清理。
+    if snapshot_allows_cleanup(gate, present.len(), complete, "liked albums")
         && let Ok(mut lib) = library.lock()
     {
         let _ = lib.reconcile_remove_absent("album", "qq", "liked", &present);
@@ -1292,6 +1323,130 @@ mod tests {
                 .is_some_and(|r| r.sync_state == "error"),
             "快照不完整 → error 行不收口"
         );
+    }
+
+    /// 半份快照不定缺席：第 2 页软失败返回空页（`hasmore=1` 但列表为空）→
+    /// 翻页提前止，`present` 只有第 1 页——此前照样按它清理，第 1 页之外的
+    /// 已同步喜欢全被置 0（与 §30.1 的分片清理同一类症状）。
+    #[tokio::test]
+    async fn incomplete_liked_snapshot_keeps_absent_rows() {
+        let server = wiremock::MockServer::start().await;
+        mount_fav_page(
+            &server,
+            0,
+            wiremock::ResponseTemplate::new(200).set_body_json(envelope(fav_page(&["m-1"], 1))),
+        )
+        .await;
+        mount_fav_page(
+            &server,
+            100,
+            wiremock::ResponseTemplate::new(200).set_body_json(envelope(fav_page(&[], 1))),
+        )
+        .await;
+        let (client, credential) = mock_client(&server);
+        let api = UserApi::new(&client);
+        let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        {
+            let mut db = lib.lock().unwrap();
+            for mid in ["m-1", "m-2", "m-3"] {
+                db.reconcile_relation("track", "qq", mid, "liked", true)
+                    .unwrap();
+            }
+        }
+
+        reconcile_fav_songs(
+            &api,
+            "e-10001",
+            &credential,
+            &lib,
+            &mut EmptySnapshotGate::default(),
+        )
+        .await;
+
+        let mut db = lib.lock().unwrap();
+        for mid in ["m-1", "m-2", "m-3"] {
+            assert_eq!(
+                db.relation_desired("track", "qq", mid, "liked").unwrap(),
+                Some(true),
+                "{mid}: 半份快照不得把没拉到的曲目当缺席清掉"
+            );
+        }
+    }
+
+    /// 收藏歌单一页快照（`CgiGetPlaylistFavInfo`）：列表键 `v_list`，元素键
+    /// `tid`/`name`（线上键名）。
+    fn fav_songlist_page(ids: &[i64], hasmore: i64) -> serde_json::Value {
+        serde_json::json!({
+            "number": ids.len(),
+            "hasmore": hasmore,
+            "total": ids.len(),
+            "v_list": ids
+                .iter()
+                .map(|id| serde_json::json!({"tid": id, "name": "歌单", "songnum": 1}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// 挂收藏歌单指定偏移（100 个/页）的响应。
+    async fn mount_fav_songlist_offset(
+        server: &wiremock::MockServer,
+        offset: i64,
+        body: serde_json::Value,
+    ) {
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/cgi-bin/musicu.fcg"))
+            .and(move |req: &wiremock::Request| {
+                req_param(req)["offset"] == serde_json::json!(offset)
+            })
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(envelope(body)))
+            .mount(server)
+            .await;
+    }
+
+    /// 半份快照不定缺席（订阅歌单）：清理会连带删掉本地歌单行与曲目缓存，
+    /// 比「我喜欢」更具破坏性——第 2 页空页时两份本地订阅歌单都必须还在。
+    #[tokio::test]
+    async fn incomplete_subscribed_snapshot_keeps_playlists() {
+        let server = wiremock::MockServer::start().await;
+        mount_fav_songlist_offset(&server, 0, fav_songlist_page(&[7001], 1)).await;
+        mount_fav_songlist_offset(&server, 100, fav_songlist_page(&[], 1)).await;
+        let (client, credential) = mock_client(&server);
+        let api = UserApi::new(&client);
+        let lib = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
+        {
+            let mut db = lib.lock().unwrap();
+            for id in ["7001", "7002"] {
+                db.reconcile_relation("playlist", "qq", id, "subscribed", true)
+                    .unwrap();
+                db.reconcile_playlist(id, "歌单", "subscribed").unwrap();
+            }
+        }
+
+        reconcile_fav_songlists(
+            &api,
+            "e-10001",
+            &credential,
+            &lib,
+            &mut EmptySnapshotGate::default(),
+        )
+        .await;
+
+        let mut db = lib.lock().unwrap();
+        let remote_ids: Vec<String> = db
+            .list_playlists()
+            .unwrap()
+            .into_iter()
+            .filter_map(|p| p.remote_id)
+            .collect();
+        assert_eq!(remote_ids.len(), 2, "半份快照不得删掉没拉到的订阅歌单");
+        for id in ["7001", "7002"] {
+            assert_eq!(
+                db.relation_desired("playlist", "qq", id, "subscribed")
+                    .unwrap(),
+                Some(true),
+                "{id}: 订阅关系保持"
+            );
+        }
     }
 
     /// 订阅歌单快照（`CgiGetDiss`，disstid > 0）：1 首，mid 随 disstid 派生。
