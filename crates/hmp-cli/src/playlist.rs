@@ -96,13 +96,18 @@ pub async fn add(id: i64, track: &str) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// 按序号移除曲目（owned 歌单同步到 QQ）。
+/// 按序号移除曲目（owned 歌单同步到 QQ）。CLI 只有序号、没有界面快照可核对：
+/// 不带 `expect_key`（不校验）。
 pub async fn remove_track(id: i64, position: i64) -> Result<(), Box<dyn std::error::Error>> {
     let mut c = DaemonClient::connect_or_spawn().await?;
     commands::cmd_simple(
         &mut c,
         Request::PlaylistWrite {
-            op: PlaylistWriteOp::RemoveTrack { id, position },
+            op: PlaylistWriteOp::RemoveTrack {
+                id,
+                position,
+                expect_key: None,
+            },
         },
     )
     .await?;

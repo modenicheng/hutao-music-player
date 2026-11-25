@@ -154,6 +154,65 @@ fn quality_alias_valid(mode: &str) -> bool {
     mode == "auto" || hmp_core::AudioQuality::from_alias(mode).is_some()
 }
 
+/// 歌单写命令（`Request::PlaylistWrite`）处理器的内部错误：逐因映射 IPC 错误码
+/// 与面向用户的文案（AUDIT §30 修复轮·歌单写文案——此前多种互不相干的原因都
+/// 复用 `rusqlite::Error::InvalidQuery`，用户看到同一句与实际原因无关的
+/// 「read-only」）。只区分错误码与文案，各拒绝路径的行为不变。
+enum PlaylistWriteError {
+    /// 远端 QQ 歌单（owned / subscribed）不支持改名。
+    RemoteRenameUnsupported,
+    /// 订阅（他人）歌单对本地只读：不可增删曲目（取消收藏走 Delete）。
+    SubscribedReadOnly,
+    /// QQ 自建歌单只收 QQ 曲目（本地曲目无 QQ song id）。
+    LocalTrackInQqPlaylist,
+    /// 该序号上的曲目已不是调用方看到的那一首（界面快照过期）：不删。
+    TrackKeyMismatch,
+    /// 数据库错误。
+    Db(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for PlaylistWriteError {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
+/// `PlaylistWrite` 处理器的结果（成功载荷：新建歌单的 id；其余成功路径为 None）。
+type PlaylistWriteHandlerResult = Result<Option<i64>, PlaylistWriteError>;
+
+impl PlaylistWriteError {
+    /// → IPC 错误码 + 英文文案。请求对该歌单不成立（只读 / 曲目类型 / 快照过期）
+    /// → `BadRequest`；存储层以 `QueryReturnedNoRows` 表示「歌单不存在」
+    /// （rename / add_track）→ `PlaylistNotFound`；其余 → `Internal`。
+    fn into_response(self) -> Response {
+        let (code, message): (IpcErrorCode, String) = match self {
+            Self::RemoteRenameUnsupported => (
+                IpcErrorCode::BadRequest,
+                "remote QQ playlists cannot be renamed".into(),
+            ),
+            Self::SubscribedReadOnly => (
+                IpcErrorCode::BadRequest,
+                "subscribed playlists are read-only: tracks cannot be added or removed \
+                 (unlike the playlist instead)"
+                    .into(),
+            ),
+            Self::LocalTrackInQqPlaylist => (
+                IpcErrorCode::BadRequest,
+                "QQ playlists only accept QQ tracks; local tracks cannot be added".into(),
+            ),
+            Self::TrackKeyMismatch => (
+                IpcErrorCode::BadRequest,
+                "the playlist has changed since it was loaded; refresh and try again".into(),
+            ),
+            Self::Db(rusqlite::Error::QueryReturnedNoRows) => {
+                (IpcErrorCode::PlaylistNotFound, "playlist not found".into())
+            }
+            Self::Db(e) => (IpcErrorCode::Internal, e.to_string()),
+        };
+        Response::Err { code, message }
+    }
+}
+
 /// 单连接处理：请求/响应循环 + 订阅事件推送（reader 任务 + channel 并发版）。
 ///
 /// 帧读取剥离到独立 reader 任务（阻塞 `read_frame`，逐帧经 channel 投递），
@@ -339,16 +398,21 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
             let result = handle
                 .library
                 .as_ref()
-                .map(|lib| -> rusqlite::Result<Option<i64>> {
+                .map(|lib| -> PlaylistWriteHandlerResult {
                     let mut lib = lib.lock().unwrap();
-                    let r: rusqlite::Result<Option<i64>> = match op {
-                        PlaylistWriteOp::Create { name } => lib.create_playlist(&name).map(Some),
+                    let r: PlaylistWriteHandlerResult = match op {
+                        PlaylistWriteOp::Create { name } => {
+                            lib.create_playlist(&name).map(Some).map_err(Into::into)
+                        }
                         PlaylistWriteOp::Rename { id, name } => match lib.playlist_relation(id) {
                             Ok(Some(r)) if r == "owned" || r == "subscribed" => {
-                                Err(rusqlite::Error::InvalidQuery)
+                                Err(PlaylistWriteError::RemoteRenameUnsupported)
                             }
-                            Ok(_) => lib.rename_playlist(id, &name).map(|_| None),
-                            Err(e) => Err(e),
+                            Ok(_) => lib
+                                .rename_playlist(id, &name)
+                                .map(|_| None)
+                                .map_err(Into::into),
+                            Err(e) => Err(e.into()),
                         },
                         PlaylistWriteOp::Delete { id } => match lib.playlist_relation(id) {
                             Ok(Some(r)) if r == "owned" => {
@@ -367,8 +431,8 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                                 }
                                 Ok(None)
                             }
-                            Ok(_) => lib.delete_playlist(id).map(|_| None),
-                            Err(e) => Err(e),
+                            Ok(_) => lib.delete_playlist(id).map(|_| None).map_err(Into::into),
+                            Err(e) => Err(e.into()),
                         },
                         PlaylistWriteOp::AddTrack {
                             id,
@@ -378,12 +442,12 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                         } => {
                             let rel = lib.playlist_relation(id)?.unwrap_or_default();
                             if rel == "subscribed" {
-                                return Err(rusqlite::Error::InvalidQuery);
+                                return Err(PlaylistWriteError::SubscribedReadOnly);
                             }
                             // QQ owned 歌单只接受 QQ 曲目：local 曲目无 QQ song id，
                             // 写入 outbox 会永久 error/重试（本地行也会成幽灵）。
                             if rel == "owned" && source == "local" {
-                                return Err(rusqlite::Error::InvalidQuery);
+                                return Err(PlaylistWriteError::LocalTrackInQqPlaylist);
                             }
                             let source_static: &'static str = match source.as_str() {
                                 "local" => "local",
@@ -405,12 +469,24 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                             }
                             Ok(None)
                         }
-                        PlaylistWriteOp::RemoveTrack { id, position } => {
+                        PlaylistWriteOp::RemoveTrack {
+                            id,
+                            position,
+                            expect_key,
+                        } => {
                             let rel = lib.playlist_relation(id)?.unwrap_or_default();
                             if rel == "subscribed" {
-                                return Err(rusqlite::Error::InvalidQuery);
+                                return Err(PlaylistWriteError::SubscribedReadOnly);
                             }
                             let song_key = lib.track_key_at(id, position)?;
+                            // key 校验（AUDIT §30 U5）：序号按界面快照下发，快照过期时
+                            // 该序号上已是别的曲目——不删（owned 歌单的删除还会同步到
+                            // 远端）。旧客户端不带 `expect_key`（None）→ 不校验。
+                            if let Some(expect) = expect_key.as_deref()
+                                && song_key.as_deref() != Some(expect)
+                            {
+                                return Err(PlaylistWriteError::TrackKeyMismatch);
+                            }
                             if rel == "owned" {
                                 if let Some(key) = song_key {
                                     // local 曲目在远端无对应物：只删本地行，不入 outbox
@@ -439,28 +515,19 @@ async fn handle_frame<W: AsyncWrite + Unpin>(
                 Some(Ok(Some(id))) => {
                     // 歌单结构落库 → 媒体库内容变更。
                     handle.library_tx.send_modify(|g| *g += 1);
-                    if trigger_sync
-                        && let Some(h) = &handle.sync_handle {
-                            h.trigger();
-                        }
+                    if trigger_sync && let Some(h) = &handle.sync_handle {
+                        h.trigger();
+                    }
                     Response::Created(id)
                 }
                 Some(Ok(None)) => {
                     handle.library_tx.send_modify(|g| *g += 1);
-                    if trigger_sync
-                        && let Some(h) = &handle.sync_handle {
-                            h.trigger();
-                        }
+                    if trigger_sync && let Some(h) = &handle.sync_handle {
+                        h.trigger();
+                    }
                     Response::Ok
                 }
-                Some(Err(rusqlite::Error::InvalidQuery)) => Response::Err {
-                    code: IpcErrorCode::Internal,
-                    message: "remote QQ playlists are read-only (subscribed: unlike only; owned: no rename)".into(),
-                },
-                Some(Err(e)) => Response::Err {
-                    code: IpcErrorCode::Internal,
-                    message: e.to_string(),
-                },
+                Some(Err(e)) => e.into_response(),
                 None => Response::Err {
                     code: IpcErrorCode::Internal,
                     message: "library unavailable".into(),
@@ -1522,7 +1589,7 @@ mod tests {
                 .unwrap()
         };
 
-        // AddTrack local → 拒绝（InvalidQuery 映射为 Err）。
+        // AddTrack local → 拒绝，且文案点明真实原因（此前是「read-only」）。
         let resp = request(
             &sock,
             &Request::PlaylistWrite {
@@ -1536,8 +1603,14 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(resp, Response::Err { .. }),
-            "local 曲目进 owned 歌单应被拒: {resp:?}"
+            matches!(
+                resp,
+                Response::Err {
+                    code: IpcErrorCode::BadRequest,
+                    ref message
+                } if message.contains("local tracks cannot be added")
+            ),
+            "local 曲目进 owned 歌单应被拒并说明原因: {resp:?}"
         );
 
         // 直接落一条 local 曲目（模拟历史数据），RemoveTrack 只删本地行。
@@ -1552,6 +1625,7 @@ mod tests {
                 op: hmp_core::PlaylistWriteOp::RemoveTrack {
                     id: owned_id,
                     position: 0,
+                    expect_key: None,
                 },
             },
         )
@@ -1571,6 +1645,255 @@ mod tests {
             0,
             "本地行应被删除"
         );
+    }
+
+    /// 带内存媒体库的测试服务（接线同 daemon.rs 启动后）；返回 socket 路径与库句柄。
+    async fn library_socket() -> (PathBuf, Arc<Mutex<hmp_storage::LibraryDb>>) {
+        let (sock, listener) = temp_socket().await;
+        let (state_tx, _) = watch::channel(PlaybackState::default());
+        let (events_tx, _) = broadcast::channel(16);
+        let driver = Arc::new(SDriver {
+            state_tx,
+            events_tx,
+        });
+        let library = Arc::new(Mutex::new(
+            hmp_storage::LibraryDb::open_in_memory().unwrap(),
+        ));
+        let handle = PlaybackEngine::start_with_library(
+            driver,
+            Arc::new(SResolver),
+            Arc::new(|| true),
+            Some(library.clone()),
+            None,
+        );
+        let mut handle = handle;
+        handle.library = Some(library.clone());
+        tokio::spawn(async move { serve(listener, handle).await });
+        (sock, library)
+    }
+
+    /// 歌单写命令应答。
+    async fn playlist_write(sock: &std::path::Path, op: hmp_core::PlaylistWriteOp) -> Response {
+        request(sock, &Request::PlaylistWrite { op }).await
+    }
+
+    /// 歌单写拒绝逐因准确（AUDIT §30.2.3 第 5 条）：远端歌单不支持改名、订阅歌单
+    /// 只读、歌单不存在，各回各的错误码与文案（此前一律是「read-only」+ Internal）；
+    /// 本地歌单改名照常生效。
+    #[tokio::test]
+    async fn playlist_write_rejections_report_their_actual_cause() {
+        let (sock, library) = library_socket().await;
+        let (owned_id, sub_id, local_id) = {
+            let mut lib = library.lock().unwrap();
+            (
+                lib.reconcile_playlist("dir-1", "自建", "owned").unwrap(),
+                lib.reconcile_playlist("8888", "收藏单", "subscribed")
+                    .unwrap(),
+                lib.create_playlist("本地").unwrap(),
+            )
+        };
+        let assert_rejected = |resp: &Response, code: IpcErrorCode, needle: &str, what: &str| {
+            assert!(
+                matches!(
+                    resp,
+                    Response::Err { code: c, message }
+                        if *c == code && message.contains(needle)
+                ),
+                "{what}: 应为 {code:?} 且文案含 {needle:?}，实际 {resp:?}"
+            );
+        };
+
+        for id in [owned_id, sub_id] {
+            let resp = playlist_write(
+                &sock,
+                hmp_core::PlaylistWriteOp::Rename {
+                    id,
+                    name: "新名".into(),
+                },
+            )
+            .await;
+            assert_rejected(
+                &resp,
+                IpcErrorCode::BadRequest,
+                "cannot be renamed",
+                "远端歌单改名",
+            );
+        }
+        let resp = playlist_write(
+            &sock,
+            hmp_core::PlaylistWriteOp::AddTrack {
+                id: sub_id,
+                source: "qq".into(),
+                key: "m-1".into(),
+                title: "t".into(),
+            },
+        )
+        .await;
+        assert_rejected(
+            &resp,
+            IpcErrorCode::BadRequest,
+            "subscribed playlists are read-only",
+            "订阅歌单加曲",
+        );
+        let resp = playlist_write(
+            &sock,
+            hmp_core::PlaylistWriteOp::RemoveTrack {
+                id: sub_id,
+                position: 0,
+                expect_key: None,
+            },
+        )
+        .await;
+        assert_rejected(
+            &resp,
+            IpcErrorCode::BadRequest,
+            "subscribed playlists are read-only",
+            "订阅歌单移除",
+        );
+        assert!(
+            library
+                .lock()
+                .unwrap()
+                .playlist_tracks(sub_id)
+                .unwrap()
+                .is_empty(),
+            "被拒的加曲不得落行"
+        );
+
+        // 歌单不存在：改名 / 加曲 → PlaylistNotFound（此前是 Internal + SQL 文案）。
+        let resp = playlist_write(
+            &sock,
+            hmp_core::PlaylistWriteOp::Rename {
+                id: 9999,
+                name: "新名".into(),
+            },
+        )
+        .await;
+        assert_rejected(
+            &resp,
+            IpcErrorCode::PlaylistNotFound,
+            "playlist not found",
+            "不存在的歌单改名",
+        );
+        let resp = playlist_write(
+            &sock,
+            hmp_core::PlaylistWriteOp::AddTrack {
+                id: 9999,
+                source: "qq".into(),
+                key: "m-1".into(),
+                title: "t".into(),
+            },
+        )
+        .await;
+        assert_rejected(
+            &resp,
+            IpcErrorCode::PlaylistNotFound,
+            "playlist not found",
+            "不存在的歌单加曲",
+        );
+
+        // 对照：本地歌单改名照常生效。
+        let resp = playlist_write(
+            &sock,
+            hmp_core::PlaylistWriteOp::Rename {
+                id: local_id,
+                name: "改名后".into(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, Response::Ok), "本地歌单改名: {resp:?}");
+        let name = library
+            .lock()
+            .unwrap()
+            .list_playlists()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == local_id)
+            .map(|p| p.name);
+        assert_eq!(name.as_deref(), Some("改名后"));
+    }
+
+    /// U5 回归：RemoveTrack 带 `expect_key` 时校验该序号上的曲目——不符（界面快照
+    /// 过期 / 序号已空）→ BadRequest、行仍在、不入 outbox；相符 → 删除；不带 key
+    /// （旧客户端）→ 不校验，照旧按序号删除。
+    #[tokio::test]
+    async fn remove_track_verifies_expected_key() {
+        let (sock, library) = library_socket().await;
+        let owned_id = {
+            let mut lib = library.lock().unwrap();
+            let id = lib.reconcile_playlist("dir-1", "自建", "owned").unwrap();
+            lib.add_playlist_track(id, "qq", "m-1", "歌一").unwrap();
+            lib.add_playlist_track(id, "qq", "m-2", "歌二").unwrap();
+            id
+        };
+        let remove =
+            |position: i64, expect_key: Option<&str>| hmp_core::PlaylistWriteOp::RemoveTrack {
+                id: owned_id,
+                position,
+                expect_key: expect_key.map(str::to_string),
+            };
+        let keys = |lib: &mut hmp_storage::LibraryDb| -> Vec<String> {
+            lib.playlist_tracks(owned_id)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.source_key)
+                .collect()
+        };
+
+        // 序号上的曲目已不是调用方看到的那一首 → 不删。
+        let resp = playlist_write(&sock, remove(0, Some("m-2"))).await;
+        assert!(
+            matches!(
+                resp,
+                Response::Err {
+                    code: IpcErrorCode::BadRequest,
+                    ref message
+                } if message.contains("refresh")
+            ),
+            "key 不符应拒绝并提示刷新: {resp:?}"
+        );
+        // 该序号上已没有曲目（行被删过）→ 同样不删。
+        let resp = playlist_write(&sock, remove(5, Some("m-1"))).await;
+        assert!(
+            matches!(
+                resp,
+                Response::Err {
+                    code: IpcErrorCode::BadRequest,
+                    ..
+                }
+            ),
+            "序号已空应拒绝: {resp:?}"
+        );
+        {
+            let mut lib = library.lock().unwrap();
+            assert_eq!(keys(&mut lib), ["m-1", "m-2"], "被拒的移除不得动行");
+            assert!(
+                lib.playlist_ops_pending().unwrap().is_empty(),
+                "被拒的移除不得入 outbox"
+            );
+        }
+
+        // key 相符 → 删除并入 outbox（owned）。
+        let resp = playlist_write(&sock, remove(0, Some("m-1"))).await;
+        assert!(matches!(resp, Response::Ok), "key 相符应删除: {resp:?}");
+        {
+            let mut lib = library.lock().unwrap();
+            assert_eq!(keys(&mut lib), ["m-2"]);
+            let ops = lib.playlist_ops_pending().unwrap();
+            assert_eq!(ops.len(), 1, "owned 移除应入 outbox");
+            assert_eq!(
+                (ops[0].op.as_str(), ops[0].song_key.as_deref()),
+                ("del", Some("m-1"))
+            );
+        }
+
+        // 不带 key（旧客户端）→ 不校验，照旧按序号删除。
+        let resp = playlist_write(&sock, remove(1, None)).await;
+        assert!(
+            matches!(resp, Response::Ok),
+            "不带 expect_key 应照旧删除: {resp:?}"
+        );
+        assert_eq!(keys(&mut library.lock().unwrap()), Vec::<String>::new());
     }
 
     /// `HMP_IPC_ENDPOINT` 显式覆盖（非空生效/空值忽略；回归守护：serve 与

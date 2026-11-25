@@ -193,6 +193,10 @@ pub fn bind(ui: &AppWindow, prefs: Arc<Mutex<prefs::Prefs>>, runtime: Arc<Backen
             if index < 0 {
                 return;
             }
+            // key 校验（AUDIT §30 U5）：行 mid 即库内 source_key，随序号一并下发；
+            // daemon 发现该序号上已不是这一首（快照过期）会拒绝并提示刷新。
+            let track = TrackMenu::get(&ui).get_track();
+            let expect_key = (!track.mid.is_empty()).then(|| track.mid.to_string());
             let refresh_runtime = Arc::clone(&runtime);
             player_bridge::dispatch_command_on_ok(
                 &runtime,
@@ -201,6 +205,7 @@ pub fn bind(ui: &AppWindow, prefs: Arc<Mutex<prefs::Prefs>>, runtime: Arc<Backen
                     op: PlaylistWriteOp::RemoveTrack {
                         id,
                         position: index as i64,
+                        expect_key,
                     },
                 },
                 move |ui| bridge::schedule_refresh(ui, &refresh_runtime),

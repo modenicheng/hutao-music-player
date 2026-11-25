@@ -421,6 +421,11 @@ pub enum PlaylistWriteOp {
         id: i64,
         /// 0 基序号。
         position: i64,
+        /// 调用方看到的该序号曲目 key（`tracks.source_key`）：`Some` 且与库内不符
+        /// → daemon 拒绝（歌单已变化，快照过期），不删。旧客户端不带该字段 →
+        /// `None`，不校验。
+        #[serde(default)]
+        expect_key: Option<String>,
     },
 }
 
@@ -932,6 +937,13 @@ mod tests {
             Request::PlaylistWrite {
                 op: PlaylistWriteOp::Delete { id: 3 },
             },
+            Request::PlaylistWrite {
+                op: PlaylistWriteOp::RemoveTrack {
+                    id: 3,
+                    position: 1,
+                    expect_key: Some("m-1".into()),
+                },
+            },
             Request::LibrarySync,
             Request::CommentList {
                 mid: "m".into(),
@@ -1270,6 +1282,43 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(artist.desc, "");
+    }
+
+    /// wire 兼容（U5）：`RemoveTrack.expect_key` 是后加的 `serde(default)` 字段——
+    /// 旧客户端帧不带它 → `None`（daemon 不校验）；结构体变体默认忽略未知字段，
+    /// 旧 daemon 读新客户端多出来的字段不会解码失败。
+    #[test]
+    fn remove_track_expect_key_tolerates_both_wire_directions() {
+        let legacy: Request = serde_json::from_value(serde_json::json!({
+            "PlaylistWrite": {"op": {"RemoveTrack": {"id": 3, "position": 1}}}
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy,
+            Request::PlaylistWrite {
+                op: PlaylistWriteOp::RemoveTrack {
+                    id: 3,
+                    position: 1,
+                    expect_key: None,
+                },
+            }
+        );
+        let with_extra: Request = serde_json::from_value(serde_json::json!({
+            "PlaylistWrite": {"op": {"RemoveTrack": {
+                "id": 3, "position": 1, "expect_key": "m-1", "some_future_field": 7,
+            }}}
+        }))
+        .unwrap();
+        assert_eq!(
+            with_extra,
+            Request::PlaylistWrite {
+                op: PlaylistWriteOp::RemoveTrack {
+                    id: 3,
+                    position: 1,
+                    expect_key: Some("m-1".into()),
+                },
+            }
+        );
     }
 
     #[test]
