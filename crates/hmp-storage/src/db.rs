@@ -1118,10 +1118,12 @@ impl LibraryDb {
         rows.collect()
     }
 
-    /// 本地专辑聚合（album 非空；search 子串过滤）。
+    /// 本地专辑聚合（album 非空；search 子串过滤；仍按专辑名分组）。
+    /// 专辑歌手：有 `album_artist`（空串视同无）取它，否则沿用 `MAX(artist)`
+    /// ——合辑/群星碟不再把参与曲目的歌手当成专辑歌手。
     pub fn library_albums(&mut self, search: Option<&str>) -> rusqlite::Result<Vec<AlbumGroup>> {
         let mut sql = String::from(
-            "SELECT t.album, MAX(t.artist), COUNT(*), MAX(t.year), MAX(t.cover_uri)
+            "SELECT t.album, COALESCE(MAX(NULLIF(t.album_artist, '')), MAX(t.artist)), COUNT(*), MAX(t.year), MAX(t.cover_uri)
              FROM tracks t JOIN local_files lf ON lf.track_id = t.id
              WHERE t.source = 'local' AND t.album IS NOT NULL AND t.album <> ''",
         );
@@ -1167,12 +1169,13 @@ impl LibraryDb {
     }
 
     /// 按专辑名取本地曲目（播放源；大小写不敏感精确匹配）。
+    /// 曲序：碟号 → 曲号 → 标题（碟号缺省 1、曲号缺省 999，多碟专辑不交错）。
     pub fn local_tracks_by_album(&mut self, album: &str) -> rusqlite::Result<Vec<LibraryTrackRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.source_key, t.title, t.artist, t.album, t.duration_ms, t.year, t.genre, lf.missing
              FROM tracks t JOIN local_files lf ON lf.track_id = t.id
              WHERE t.source = 'local' AND t.album = ?1 COLLATE NOCASE
-             ORDER BY COALESCE(t.track_number, 999), t.title",
+             ORDER BY COALESCE(t.disc_number, 1), COALESCE(t.track_number, 999), t.title",
         )?;
         let rows = stmt.query_map(params![album], |r| {
             Ok(LibraryTrackRow {

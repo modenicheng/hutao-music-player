@@ -1226,6 +1226,68 @@ fn library_browse_aggregations() {
     assert!(db.scan_roots().unwrap().is_empty());
 }
 
+/// AUDIT §30.7：专辑曲序按「碟号 → 曲号 → 标题」（碟号缺省 1、曲号缺省 999），
+/// 多碟专辑不再交错；专辑歌手有 album_artist（空串视同无）取它，否则沿用
+/// MAX(artist)（行为不变）。分组键仍为专辑名。
+#[test]
+fn album_disc_order_and_album_artist() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    // 插入序刻意打乱：结果序必须来自 ORDER BY 而非 rowid。
+    db.conn
+        .execute_batch(
+            r#"
+        INSERT INTO tracks (id, source, source_key, title, album, artist, album_artist, track_number, disc_number) VALUES
+          (1, 'local', 'local:/d1-02', '一-02', '精选集', '歌手甲', '专辑歌手', 2, 1),
+          (2, 'local', 'local:/d1-01', '一-01', '精选集', '歌手甲', '专辑歌手', 1, 1),
+          (3, 'local', 'local:/d2-01', '二-01', '精选集', '歌手乙', '专辑歌手', 1, 2),
+          (4, 'local', 'local:/d2-02', '二-02', '精选集', '歌手乙', '', 2, 2),
+          (5, 'local', 'local:/x-02', 'B 曲', '单曲集', 'B-singer', NULL, NULL, NULL),
+          (6, 'local', 'local:/x-01', 'A 曲', '单曲集', 'A-singer', '', NULL, NULL);
+        INSERT INTO local_files (track_id, path, last_seen_generation, missing, scan_root_id) VALUES
+          (1, '/d1-02', 1, 0, 1),
+          (2, '/d1-01', 1, 0, 1),
+          (3, '/d2-01', 1, 0, 1),
+          (4, '/d2-02', 1, 0, 1),
+          (5, '/x-02', 1, 0, 1),
+          (6, '/x-01', 1, 0, 1);
+    "#,
+        )
+        .unwrap();
+
+    fn album_titles(db: &mut LibraryDb, album: &str) -> Vec<String> {
+        db.local_tracks_by_album(album)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.title)
+            .collect()
+    }
+    assert_eq!(
+        album_titles(&mut db, "精选集"),
+        ["一-01", "一-02", "二-01", "二-02"],
+        "双碟：碟 1 整碟在前，不按曲号交错"
+    );
+    assert_eq!(
+        album_titles(&mut db, "单曲集"),
+        ["A 曲", "B 曲"],
+        "碟号/曲号缺省 → 标题兜底"
+    );
+
+    let albums = db.library_albums(None).unwrap();
+    let group = |name: &str| albums.iter().find(|a| a.album == name).unwrap();
+    assert_eq!(
+        group("精选集").artist.as_deref(),
+        Some("专辑歌手"),
+        "album_artist 优先（空串视同无）"
+    );
+    assert_eq!(group("精选集").track_count, 4, "仍按专辑名分组");
+    assert_eq!(
+        group("单曲集").artist.as_deref(),
+        Some("B-singer"),
+        "无 album_artist → MAX(artist) 行为不变"
+    );
+    assert_eq!(albums.len(), 2);
+}
+
 #[test]
 fn scan_root_for_picks_longest_prefix() {
     let mut db = LibraryDb::open_in_memory().unwrap();
