@@ -13,16 +13,15 @@ yanked = "warn"
 # - RUSTSEC-2024-0436 paste：lofty 0.25.4 仍携带，无修复版。
 # - RUSTSEC-2026-0192 ttf-parser 0.25.1：slint 链（owned_ttf_parser）传入，
 #   替代品需上游换用 skrifa/harfrust。
-# - RUSTSEC-2024-0370 proc-macro-error（unmaintained）：gtk-rs 0.18 线
-#   glib-macros / gtk3-macros 传递依赖，经 tray-icon→libappindicator→gtk 传入；
-#   无兼容修复（gtk3-macros 0.18 仍绑定 syn 1 生态），需上游 gtk-rs 升级才能根除。
+# - RUSTSEC-2024-0370 proc-macro-error（unmaintained）已出图：tray-icon 0.26→0.27
+#   带动 gtk-rs 0.18→0.19 线（glib-macros 0.22 / gtk3-macros 0.19 不再依赖它），
+#   2026-11-25 依赖整体升级时删 ignore。
 # - RUSTSEC-2026-0370/0371/0372 zbus 5 家族（zvariant_derive/zvariant/zbus_names）
 #   标 unmaintained：zbus 6 已并入主 crate，但 slint Linux 无障碍栈
 #   （accesskit_unix ← i-slint-backend-winit）仍拉 zbus 5——升级权在
 #   accesskit 上游，非本仓可修。
 ignore = [
     "RUSTSEC-2024-0436",
-    "RUSTSEC-2024-0370",
     "RUSTSEC-2026-0192",
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",

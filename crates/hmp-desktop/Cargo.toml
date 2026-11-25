@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [build-dependencies]
-slint-build = "1.18"
+slint-build = "1.19"
 
 [dependencies]
 hmp-core = { path = "../hmp-core" }
@@ -21,16 +21,16 @@ serde_json = { workspace = true }
 # SVG 图标经 slint-build 编译期栅格化（无需运行时 svg 特性）；
 # resvg 供 covers.rs 运行时栅格化程序化封面；
 # unstable-winit-030 = winit 句柄访问器（title-bar 拖动走系统级移动循环）
-slint = { version = "1.18", features = ["unstable-winit-030"] }
-resvg = "0.48"
+slint = { version = "1.19", features = ["unstable-winit-030"] }
+resvg = "0.50"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-i-slint-backend-testing = { version = "1.18", features = ["renderer-software"] }
-serial_test = "3"
+i-slint-backend-testing = { version = "1.19", features = ["renderer-software"] }
+serial_test = "4"
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
