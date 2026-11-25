@@ -31,6 +31,15 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# mpris：`hmp-daemon/mpris` 是可选 feature，且自 94c2c95 起不在默认集里，此后
+# 没有任何依赖方打开它——按文档里的命令（`cargo build --release` /
+# `-p hmp-desktop -p hmp-cli`）构建出的二进制不带 MPRIS，而 `--all-features` 的
+# clippy 每次都过，掩盖了这一点（AUDIT §30.7）。daemon 跑在 `hmp serve`
+# （本 crate）进程里，Linux 系统媒体控制必须在这里打开；Windows 走 SMTC
+# （`cfg(windows)` 模块，不受 feature 门控），不启用。
+[target.'cfg(not(windows))'.dependencies]
+hmp-daemon = { path = "../hmp-daemon", features = ["mpris"] }
+
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = "3"
