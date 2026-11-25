@@ -118,6 +118,106 @@ fn reconcile_remove_absent_empty_present_clears_all_synced() {
     );
 }
 
+/// AUDIT §30.1（P0）回归：在场键**整体**排除。旧实现按 500 分片、每片执行
+/// `NOT IN (本片)`——片与片互视为缺席，快照超过一片时该 provider 的 synced
+/// 行被全清（866 首「我喜欢」每轮同步后清零）。
+fn assert_remove_absent_keeps_present(present: usize) {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    // present 条在场（全部 synced）+ 1 条缺席 + 1 条 pending（本地意图）。
+    let keys: Vec<String> = (0..present).map(|i| format!("mid-{i}")).collect();
+    for k in &keys {
+        db.add_favorite("qq", k, k).unwrap();
+        db.mark_relation_synced("track", "qq", k, "liked").unwrap();
+    }
+    db.add_favorite("qq", "gone", "gone").unwrap();
+    db.mark_relation_synced("track", "qq", "gone", "liked")
+        .unwrap();
+    db.add_favorite("qq", "pending-one", "pending-one").unwrap();
+    db.reconcile_remove_absent("track", "qq", "liked", &keys)
+        .unwrap();
+
+    let (kept, cleared): (i64, i64) = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FILTER (WHERE desired_state=1 AND sync_state='synced'), \
+             COUNT(*) FILTER (WHERE desired_state=0) FROM relations \
+             WHERE entity_type='track' AND provider='qq' AND relation='liked'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kept, present as i64, "在场行全部保持 synced + desired=1");
+    assert_eq!(cleared, 1, "仅缺席的那一行被置 0");
+    // 抽查旧分片边界两侧：片首、首片末行、次片首行、末行。
+    for k in [&keys[0], &keys[499], &keys[500], &keys[present - 1]] {
+        assert_eq!(
+            db.relation_desired("track", "qq", k, "liked").unwrap(),
+            Some(true),
+            "在场 {k} 保留"
+        );
+    }
+    assert_eq!(
+        db.relation_desired("track", "qq", "gone", "liked").unwrap(),
+        Some(false),
+        "远端缺席：desired=0"
+    );
+    // pending 保护不回归：本地意图不被远端缺席覆盖，仍留在 outbox。
+    assert_eq!(
+        db.relation_desired("track", "qq", "pending-one", "liked")
+            .unwrap(),
+        Some(true),
+        "pending 本地意图：远端缺席不覆盖"
+    );
+    assert_eq!(
+        db.relations_pending().unwrap().len(),
+        1,
+        "仅 pending 行留在 outbox"
+    );
+    // 用户可见视图：收藏列表原样保留（present 条在场 + 1 条 pending；gone 不再出现）。
+    let favs = db.list_favorites(present as u32 + 10).unwrap();
+    assert_eq!(favs.len(), present + 1, "list_favorites 不丢在场曲");
+    assert!(favs.iter().all(|f| f.source_key != "gone"));
+}
+
+#[test]
+fn reconcile_remove_absent_600_present_keeps_all() {
+    assert_remove_absent_keeps_present(600);
+}
+
+#[test]
+fn reconcile_remove_absent_1200_present_keeps_all() {
+    assert_remove_absent_keeps_present(1200);
+}
+
+/// AUDIT §30.1：`delete_playlists_absent` 同款——600 个在场 + 1 个缺席的
+/// subscribed 歌单，只删缺席的。
+#[test]
+fn delete_playlists_absent_600_present_deletes_only_absent() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let present: Vec<String> = (0..600).map(|i| format!("disstid-{i}")).collect();
+    for id in &present {
+        db.reconcile_playlist(id, "歌单", "subscribed").unwrap();
+    }
+    db.reconcile_playlist("gone", "缺席歌单", "subscribed")
+        .unwrap();
+    // relation 谓词之外（本地歌单）不受影响。
+    db.create_playlist("本地歌单").unwrap();
+    db.delete_playlists_absent("subscribed", &present).unwrap();
+
+    let rows = db.list_playlists().unwrap();
+    assert_eq!(rows.len(), 601, "600 在场 + 1 本地歌单");
+    assert!(
+        rows.iter().all(|p| p.remote_id.as_deref() != Some("gone")),
+        "只删缺席歌单"
+    );
+    for id in ["disstid-0", "disstid-499", "disstid-500", "disstid-599"] {
+        assert!(
+            rows.iter().any(|p| p.remote_id.as_deref() == Some(id)),
+            "在场 {id} 保留"
+        );
+    }
+}
+
 /// 迁移回滚：v2 中途失败 → 整体回滚（user_version 不推进、favorites 表仍在）。
 #[test]
 fn migration_v2_rolls_back_on_failure() {

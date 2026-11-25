@@ -1445,9 +1445,12 @@ impl LibraryDb {
         Ok(())
     }
 
-    /// reconcile：按远端身份 upsert 歌单（owned=dirid / subscribed=disstid）。
     /// reconcile：远端缺席的行（本地 desired=1 已 synced，但远端快照无此实体）
-    /// → 置 desired=0（QQ snapshot 胜；pending 行不受影响）。分片避开 999 变量上限。
+    /// → 置 desired=0（QQ snapshot 胜；pending 行不受影响）。
+    /// 在场键整体作为一个 JSON 数组经 `json_each` 传入：每次调用**只执行一条**
+    /// UPDATE 完成整体排除，不占 SQL 变量位。不得按片重复
+    /// `NOT IN (本片)`——片与片互视为缺席，快照超过一片就把该 provider 的
+    /// synced 行全清（AUDIT §30.1：866 首「我喜欢」每轮同步后被清零）。
     /// `provider` 限定远端源（qq），本地（local）收藏不受 QQ 快照影响。
     /// `present_keys` 为空（远端快照真 0 条）→ 全量清理该 provider 的 synced 行。
     pub fn reconcile_remove_absent(
@@ -1458,36 +1461,29 @@ impl LibraryDb {
         present_keys: &[String],
     ) -> rusqlite::Result<()> {
         let now = now_unix();
+        let mark_absent = "UPDATE relations SET desired_state=0, last_remote_state=0, \
+             sync_state='synced', retry_count=0, last_sync_error=NULL, updated_at=?1 \
+             WHERE entity_type=?2 AND provider=?3 AND relation=?4 AND desired_state=1 \
+             AND sync_state='synced'";
         if present_keys.is_empty() {
             // 远端快照为 0 条：全量清理该 provider 的 synced 行。
             self.conn.execute(
-                "UPDATE relations SET desired_state=0, last_remote_state=0, \
-                 sync_state='synced', retry_count=0, last_sync_error=NULL, updated_at=?1 \
-                 WHERE entity_type=?2 AND provider=?3 AND relation=?4 AND desired_state=1 \
-                 AND sync_state='synced'",
+                mark_absent,
                 rusqlite::params![now, entity_type, provider, relation],
             )?;
             return Ok(());
         }
-        for chunk in present_keys.chunks(500) {
-            let placeholders = vec!["?"; chunk.len()].join(",");
-            let sql = format!(
-                "UPDATE relations SET desired_state=0, last_remote_state=0, \
-                 sync_state='synced', retry_count=0, last_sync_error=NULL, updated_at=?1 \
-                 WHERE entity_type=?2 AND provider=?3 AND relation=?4 AND desired_state=1 \
-                 AND sync_state='synced' AND entity_key NOT IN ({placeholders})"
-            );
-            let mut params: Vec<&dyn rusqlite::ToSql> =
-                vec![&now, &entity_type, &provider, &relation];
-            params.extend(chunk.iter().map(|k| k as &dyn rusqlite::ToSql));
-            self.conn
-                .execute(&sql, rusqlite::params_from_iter(params))?;
-        }
+        let present = json_array(present_keys)?;
+        self.conn.execute(
+            &format!("{mark_absent} AND entity_key NOT IN (SELECT value FROM json_each(?5))"),
+            rusqlite::params![now, entity_type, provider, relation, present],
+        )?;
         Ok(())
     }
 
     /// reconcile：远端缺席的歌单（relation=subscribed 已 synced 但远端快照无此 disstid）
     /// → 删除本地行（与 server 取消收藏行为一致，不留幽灵条目）。
+    /// 在场键整体经 `json_each` 传入，只执行一条 DELETE（同 `reconcile_remove_absent`）。
     /// `present_keys` 为空 → 全量清理。
     pub fn delete_playlists_absent(
         &mut self,
@@ -1501,20 +1497,16 @@ impl LibraryDb {
             )?;
             return Ok(());
         }
-        for chunk in present_keys.chunks(500) {
-            let placeholders = vec!["?"; chunk.len()].join(",");
-            let sql = format!(
-                "DELETE FROM playlists WHERE relation=?1 AND sync_state='synced' \
-                 AND remote_id NOT IN ({placeholders})"
-            );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&relation];
-            params.extend(chunk.iter().map(|k| k as &dyn rusqlite::ToSql));
-            self.conn
-                .execute(&sql, rusqlite::params_from_iter(params))?;
-        }
+        let present = json_array(present_keys)?;
+        self.conn.execute(
+            "DELETE FROM playlists WHERE relation=?1 AND sync_state='synced' \
+             AND remote_id NOT IN (SELECT value FROM json_each(?2))",
+            rusqlite::params![relation, present],
+        )?;
         Ok(())
     }
 
+    /// reconcile：按远端身份 upsert 歌单（owned=dirid / subscribed=disstid）。
     pub fn reconcile_playlist(
         &mut self,
         remote_id: &str,
@@ -2040,6 +2032,12 @@ fn row_of_relation(r: &rusqlite::Row<'_>) -> rusqlite::Result<RelationRow> {
         last_sync_error: r.get(8)?,
         updated_at: r.get(9)?,
     })
+}
+
+/// 键列表 → JSON 数组文本（`json_each` 的入参：整体占一个变量位，
+/// 不受 SQL 变量上限约束）。
+fn json_array(keys: &[String]) -> rusqlite::Result<String> {
+    serde_json::to_string(keys).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
 }
 
 /// 当前 unix 时间戳（秒）。
