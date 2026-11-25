@@ -45,6 +45,8 @@ component LyricLine inherits Rectangle {
     in property <float> view-height: 0.0;
     /** 本代平均行距：景深衰减长度（对齐 Vue 的 pitch = 行中心距） */
     in property <float> avg-row-h: 88.0;
+    /** 舞台的「来要一次几何上报」计数（舞台 follow-tick 的 snap 待定分支递增） */
+    in property <int> report-probe: 0;
     /** 激活行几何上报（行下标 + 行中心内容系 y）；舞台据此算弹簧目标 */
     callback report-center(int, float);
     /** 用户按下（拖拽歌词的前兆）：暂停跟随 3s */
@@ -93,6 +95,11 @@ component LyricLine inherits Rectangle {
     changed height => { maybe-report(); }
     changed y => { maybe-report(); }
     changed is-active => { maybe-report(); }
+    // 首次布局不算「变化」：播放页在当前行已定时才挂载的话，行带着最终几何
+    // 创建，上面三个回调一个都不触发（Slint 1.19 实测；1.18 里行先落 0 再被
+    // 布局赋值，所以碰巧会触发），舞台永远等不到上报。改由舞台在等待上报
+    // 期间每拍递增 report-probe 主动来要，直到上报到位
+    changed report-probe => { maybe-report(); }
 
     row-touch := TouchArea {
         width: parent.width;
@@ -291,6 +298,8 @@ export component NowPlayingOverlay inherits Rectangle {
                 property <int> reported-index: -1;
                 property <int> reported-generation: -1;
                 property <float> reported-center: 0.0;
+                /** 向歌词行「要几何上报」的计数：等待上报期间每拍递增（见 follow-tick） */
+                property <int> report-probe: 0;
                 property <float> lyr-view-h: lyrics-scroll.view-height / 1px;
                 property <float> lyr-content-h: lyrics-scroll.content-height / 1px;
                 /** 首尾留白：首行/末行也能滚到视口中心（Apple Music 式） */
@@ -359,6 +368,13 @@ export component NowPlayingOverlay inherits Rectangle {
                             stage-rect.follow-v = 0;
                         } else if (stage-rect.snap-pending) {
                             stage-rect.snap-wait += 16ms;
+                            // 还没等到当前行的有效上报：每拍向各行要一次几何
+                            // （行带着最终几何创建时几何 changed 不触发，见
+                            // LyricLine 的 report-probe）
+                            if (stage-rect.reported-index != NowPlaying.active-line
+                                    || stage-rect.reported-generation != NowPlaying.lyrics-generation) {
+                                stage-rect.report-probe += 1;
+                            }
                             // snap 直达的两种就绪态：激活行几何已上报（换歌表
                             // 常态，active-line 推送晚 ~100ms 也不怕）；或确认
                             // 无焦点行（前奏/空表）且等待已超时 → 归顶
@@ -567,6 +583,7 @@ export component NowPlayingOverlay inherits Rectangle {
                                         view-center-y: stage-rect.follow-x + stage-rect.lyr-view-h / 2;
                                         view-height: stage-rect.lyr-view-h;
                                         avg-row-h: stage-rect.avg-row-h;
+                                        report-probe: stage-rect.report-probe;
                                         report-center(idx, cy) => {
                                             stage-rect.report-center(idx, cy);
                                         }
