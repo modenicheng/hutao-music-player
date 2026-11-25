@@ -150,7 +150,7 @@ pub fn open_default_output() -> Result<MixerDeviceSink, DeviceSinkError> {
 
     let mut last_error = DeviceSinkError::NoDevice;
     for (_, device) in candidates {
-        let name = device.to_string();
+        let name = device_label(&device);
         let builder = match DeviceSinkBuilder::from_device(device) {
             Ok(builder) => builder,
             Err(error) => {
@@ -173,8 +173,34 @@ pub fn open_default_output() -> Result<MixerDeviceSink, DeviceSinkError> {
     Err(last_error)
 }
 
+/// 日志用设备标签：`DeviceId`（`alsa:default` 形态——host 前缀 + 后端设备
+/// 标识）；取不到时退回显示名。
+fn device_label(device: &rodio::cpal::Device) -> String {
+    use rodio::cpal::traits::DeviceTrait;
+    device
+        .id()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|_| device.to_string())
+}
+
 /// Candidate output devices with preference order (lower = tried first).
 type OutputCandidates = Vec<(usize, rodio::cpal::Device)>;
+
+/// 设备的 ALSA PCM 标识（`default` / `pipewire` / `pulse` / `hw:0` …）。
+///
+/// 只能取自 `DeviceTrait::id`，**不得**用 `Display`：cpal 0.16 的
+/// `Device::to_string()` 是 PCM 名，现依赖的 cpal 0.18（随 rodio 0.23，
+/// f6c073c 跨 major 升级引入）改为 ALSA hint 的描述首行——"PipeWire Sound
+/// Server" / "PulseAudio Sound Server" / "Default ALSA Output (currently
+/// PipeWire Media Server)"，且文案随各发行版 alsa 配置可变。按显示名喂
+/// [`server_routed_preference`] 白名单一个都匹配不上：候选恒空 →
+/// `open_default_output` 报 `NoDevice` → daemon 落静默 sink，「状态正确但永
+/// 不出声」（2026-11-25 实证）。
+#[cfg(unix)]
+fn pcm_id(device: &rodio::cpal::Device) -> Option<String> {
+    use rodio::cpal::traits::DeviceTrait;
+    device.id().ok().map(|id| id.id().to_owned())
+}
 
 /// Unix candidate policy: server-routed PCMs only.
 ///
@@ -197,6 +223,10 @@ type OutputCandidates = Vec<(usize, rodio::cpal::Device)>;
 /// UI offline). `pipewire`/`pulse` PCMs route through the server too, so
 /// they can never grab hardware; direct hardware PCMs stay refused in any
 /// case.
+/// Devices are matched by their ALSA PCM id (`DeviceTrait::id`), never by
+/// display name: with cpal 0.18 (rodio 0.23) `Device::to_string()` is the hint
+/// description ("PipeWire Sound Server" etc.), so a display-name whitelist
+/// silently yields zero candidates and the daemon runs muted (2026-11-25).
 #[cfg(unix)]
 fn collect_output_candidates() -> OutputCandidates {
     use rodio::cpal::traits::HostTrait;
@@ -206,13 +236,13 @@ fn collect_output_candidates() -> OutputCandidates {
     let consider = |device: Option<rodio::cpal::Device>,
                     candidates: &mut Vec<(usize, rodio::cpal::Device)>| {
         let Some(device) = device else { return };
-        let name = device.to_string();
-        let Some(preference) = server_routed_preference(&name) else {
+        let Some(pcm) = pcm_id(&device) else { return };
+        let Some(preference) = server_routed_preference(&pcm) else {
             return;
         };
         if candidates
             .iter()
-            .any(|(_, device)| device.to_string() == name)
+            .any(|(_, device)| pcm_id(device).is_some_and(|seen| seen == pcm))
         {
             return;
         }
@@ -869,6 +899,42 @@ mod tests {
         ];
         prefs.sort_by_key(|p| p.unwrap_or(usize::MAX));
         assert_eq!(prefs, vec![Some(0), Some(1), Some(2)]);
+    }
+
+    /// 回归（2026-11-25 无声事故）：候选裁决必须按 `DeviceTrait::id` 给出的
+    /// PCM 标识匹配。现依赖的 cpal 0.18 里 `Device::to_string()` 是 ALSA hint
+    /// 描述（"PipeWire Sound Server"…）而非 PCM 名——旧实现按显示名喂白名单，
+    /// 候选恒空 → `open_default_output` 报 NoDevice → daemon 落静默 sink：
+    /// 时钟照走、状态全对、就是不出声。只枚举不开流；host 默认设备恒在
+    /// （PCM `default`），无声卡的 CI 上断言同样成立。
+    #[cfg(unix)]
+    #[test]
+    fn candidates_are_classified_by_pcm_id_not_display_name() {
+        let candidates = collect_output_candidates();
+        assert!(
+            !candidates.is_empty(),
+            "host 默认设备（PCM default）必须进候选，否则 daemon 永远静默"
+        );
+        let mut ids = Vec::new();
+        for (preference, device) in &candidates {
+            let pcm = pcm_id(device).expect("候选必须带 PCM 标识");
+            assert_eq!(
+                server_routed_preference(&pcm),
+                Some(*preference),
+                "候选 {pcm} 的偏好序必须与白名单一致"
+            );
+            ids.push(pcm);
+        }
+        assert_eq!(
+            pcm_id(&candidates[0].1).as_deref(),
+            Some("default"),
+            "default 必须是首选候选"
+        );
+        // 同一 PCM 只登记一次（host 默认设备与 hint 列表里的 default 同名）。
+        let total = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "同一 PCM 标识不得重复登记");
     }
 
     // ── §16 开放项 #2：中途读错误显式 Error 态（错误闩） ──────────────

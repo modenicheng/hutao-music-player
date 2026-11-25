@@ -16,3 +16,5 @@ url = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# 仅 examples/probe_output.rs 装 subscriber 用（生产候选循环的 warn 落盘）。
+tracing-subscriber = { workspace = true }

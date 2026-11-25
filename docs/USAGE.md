@@ -201,7 +201,7 @@ cargo run --release -p hmp-desktop --bin hmp-desktop
 | `后端启动超时` | daemon 拉起失败（见下）；可先手动 `hmp serve` 看前台错误 |
 | 报「daemon 为陈旧构建」 | 磁盘上的 hmp 后端二进制比桌面端旧：`cargo build --release --workspace`（或重装）后重启应用；桌面端对旧 daemon 进程会自动重启一次，此报错说明重启后磁盘二进制仍是旧的 |
 | 端口/socket 冲突或残留 | 删除 `$XDG_RUNTIME_DIR/hmp.sock*` 与 `/tmp/hmp-<uid>/` 后重试（flock 锁保证不会双实例） |
-| 无声音 | 确认系统存在默认音频输出设备；Linux 同时检查 ALSA/PipeWire 兼容层 |
+| 无声音 | 进度照走但不出声 = daemon 启动时开不出输出设备，已回退静默 sink（detached 进程日志落黑洞，status 不体现）。先跑 `cargo run -p hmp-player --example probe_output`（逐候选 PCM 打印开流结果），修复后 `hmp quit` 重拉 daemon；确认系统存在默认音频输出设备，Linux 同时检查 ALSA/PipeWire 兼容层 |
 | 托盘不显示 | Linux：桌面需支持 StatusNotifierItem（GNOME 装 AppIndicator 扩展）；Windows：确认 explorer 通知区可见。无碍播放，`hmp quit` 等价退出 |
 | `playerctl` 无响应 | `playerctl -p hmp` 前缀必须带 `-p hmp`；确认 daemon 在运行（`hmp status`） |
 
