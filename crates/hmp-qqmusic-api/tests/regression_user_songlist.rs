@@ -257,6 +257,146 @@ async fn fav_album_sends_euin_key_and_parses_v_list() {
     assert_eq!(resp.albums[0].mid, "004YCGQa3qOG8u");
 }
 
+/// 断言接口对异常 `data` 报 `InvalidResponse`（`what` 只用于失败信息）。
+fn assert_invalid_response<T: std::fmt::Debug>(what: &str, r: Result<T, QqMusicError>) {
+    match r {
+        Err(QqMusicError::InvalidResponse(_)) => {}
+        other => panic!("{what}: 异常 data 应报 InvalidResponse，实际 {other:?}"),
+    }
+}
+
+/// D2 回归（AUDIT §30.1）：用户库四个列表接口响应缺 `data`（风控 / 登录态
+/// 问题 / 截断）必须报错——此前回落 `{}` 解析成「成功但 0 条」，reconcile 把它
+/// 当成权威空去清本地。
+#[tokio::test]
+async fn user_library_lists_reject_response_without_data() {
+    let server = MockServer::start().await;
+    // 子响应 code=0 但不带 data；四个接口各打一次。
+    Mock::given(method("POST"))
+        .and(path("/cgi-bin/musicu.fcg"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "req_0": {"code": 0}
+        })))
+        .expect(4)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server.uri());
+    let api = UserApi::new(&client);
+    let cred = cred();
+    assert_invalid_response(
+        "get_created_songlist",
+        api.get_created_songlist(NUMERIC_UIN, Some(&cred)).await,
+    );
+    assert_invalid_response(
+        "get_fav_song",
+        api.get_fav_song(ENCRYPT_UIN, Page::new(1, 100), Some(&cred))
+            .await,
+    );
+    assert_invalid_response(
+        "get_fav_songlist",
+        api.get_fav_songlist(ENCRYPT_UIN, Page::new(1, 100), Some(&cred))
+            .await,
+    );
+    assert_invalid_response(
+        "get_fav_album",
+        api.get_fav_album(ENCRYPT_UIN, Page::new(1, 100), Some(&cred))
+            .await,
+    );
+}
+
+/// D2 对照：`data` 在场但不是对象（空数组 / null）同样报错。
+#[tokio::test]
+async fn fav_song_rejects_non_object_data() {
+    for data in [json!([]), json!(null)] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code": 0, "req_0": {"code": 0, "data": data}})),
+            )
+            .mount(&server)
+            .await;
+        let client = client_for(&server.uri());
+        let api = UserApi::new(&client);
+        assert_invalid_response(
+            "get_fav_song",
+            api.get_fav_song(ENCRYPT_UIN, Page::new(1, 100), Some(&cred()))
+                .await,
+        );
+    }
+}
+
+/// D2 对照：`data` 在场且列表确为空 → `Ok(空)`（空库不是错误）。
+#[tokio::test]
+async fn user_library_lists_accept_present_empty_data() {
+    let server = MockServer::start().await;
+    // 四个接口各自的空库 wire 形态（沿用线上键名）。
+    for (module, method_name, data) in [
+        (
+            "music.musicasset.PlaylistBaseRead",
+            "GetPlaylistByUin",
+            json!({"total": 0, "v_playlist": [], "bFinish": true}),
+        ),
+        (
+            "music.srfDissInfo.DissInfo",
+            "CgiGetDiss",
+            json!({"code": 0, "songlist": [], "total_song_num": 0, "hasmore": 0}),
+        ),
+        (
+            "music.musicasset.PlaylistFavRead",
+            "CgiGetPlaylistFavInfo",
+            json!({"number": 0, "hasmore": 0, "v_list": [], "total": 0}),
+        ),
+        (
+            "music.musicasset.AlbumFavRead",
+            "CgiGetAlbumFavInfo",
+            json!({"number": 0, "hasmore": 0, "v_list": [], "total": 0}),
+        ),
+    ] {
+        Mock::given(method("POST"))
+            .and(path("/cgi-bin/musicu.fcg"))
+            .and(req_matches(module, method_name, |_| true))
+            .respond_with(ok_sub(data))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let client = client_for(&server.uri());
+    let api = UserApi::new(&client);
+    let cred = cred();
+    assert!(
+        api.get_created_songlist(NUMERIC_UIN, Some(&cred))
+            .await
+            .unwrap()
+            .songlist
+            .is_empty()
+    );
+    assert!(
+        api.get_fav_song(ENCRYPT_UIN, Page::new(1, 100), Some(&cred))
+            .await
+            .unwrap()
+            .songs
+            .is_empty()
+    );
+    assert!(
+        api.get_fav_songlist(ENCRYPT_UIN, Page::new(1, 100), Some(&cred))
+            .await
+            .unwrap()
+            .playlists
+            .is_empty()
+    );
+    assert!(
+        api.get_fav_album(ENCRYPT_UIN, Page::new(1, 100), Some(&cred))
+            .await
+            .unwrap()
+            .albums
+            .is_empty()
+    );
+}
+
 /// GetProfileReport（音乐基因）VisitAccount 传加密 uin，UserInfoCard 可解析。
 #[tokio::test]
 async fn music_gene_sends_visit_account_and_parses_card() {

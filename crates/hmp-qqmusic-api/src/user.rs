@@ -135,6 +135,23 @@ fn node_token() -> String {
 // 统一分页视图（has_more 归一规则见 crate::pagination 模块文档）
 // ---------------------------------------------------------------------------
 
+/// 取子响应的内层 `data` 对象（缺失或非对象 → [`QqMusicError::InvalidResponse`]）。
+///
+/// 用户库列表接口的响应结构体字段全是 `#[serde(default)]`：`data` 缺失（风控、
+/// 登录态问题、响应被截断）时若回落 `{}`，会被解析成「成功但 0 条」，reconcile
+/// 随即把这份空快照当成权威空去清本地（AUDIT §30 D2）。`data` 在场且列表确为
+/// 空仍是 `Ok(空)`。`what` 为接口名，只用于错误文案。
+fn data_object(data: &Value, what: &str) -> Result<Value, QqMusicError> {
+    data.get("data")
+        .filter(|v| v.is_object())
+        .cloned()
+        .ok_or_else(|| {
+            QqMusicError::InvalidResponse(format!(
+                "failed to parse {what}: response data missing or not an object"
+            ))
+        })
+}
+
 /// 显式 hasmore 字段（`hasmore`，0/1），以服务端为准（规则 1）。
 impl Paged for UserFavSonglistResponse {
     type Item = SongList;
@@ -191,7 +208,7 @@ impl<'a> UserApi<'a> {
             json!({ "uin": uin }),
         );
         let data = self.client.musicu_request(&request, credential).await?;
-        let data = data.get("data").cloned().unwrap_or(json!({}));
+        let data = data_object(&data, "created songlist")?;
         serde_json::from_value(data).map_err(|e| {
             QqMusicError::InvalidResponse(format!("failed to parse created songlist: {e}"))
         })
@@ -205,6 +222,10 @@ impl<'a> UserApi<'a> {
     /// 原始数据（复用 [`crate::songlist::GetSonglistDetailResponse`]）。
     ///
     /// 实测（2026-09-29）：可用（total=801，按 num=100 分页正常返回）。
+    ///
+    /// 业务码口径与 [`crate::songlist::SonglistApi::get_detail`] 一致（同一 CGI、
+    /// 同一响应类型）：请求层业务码非 0 已映射为错误；内层 `data.code` 只反序列化
+    /// 进 [`crate::songlist::GetSonglistDetailResponse::code`]，不单独报错。
     pub async fn get_fav_song(
         &self,
         euin: &str,
@@ -226,7 +247,7 @@ impl<'a> UserApi<'a> {
             }),
         );
         let data = self.client.musicu_request(&request, credential).await?;
-        let data = data.get("data").cloned().unwrap_or(json!({}));
+        let data = data_object(&data, "fav song")?;
         serde_json::from_value(data)
             .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse fav song: {e}")))
     }
@@ -251,7 +272,7 @@ impl<'a> UserApi<'a> {
             json!({ "uin": euin, "offset": page.offset(), "size": page.num }),
         );
         let data = self.client.musicu_request(&request, credential).await?;
-        let data = data.get("data").cloned().unwrap_or(json!({}));
+        let data = data_object(&data, "fav songlist")?;
         serde_json::from_value(data).map_err(|e| {
             QqMusicError::InvalidResponse(format!("failed to parse fav songlist: {e}"))
         })
@@ -277,7 +298,7 @@ impl<'a> UserApi<'a> {
             json!({ "euin": euin, "offset": page.offset(), "size": page.num }),
         );
         let data = self.client.musicu_request(&request, credential).await?;
-        let data = data.get("data").cloned().unwrap_or(json!({}));
+        let data = data_object(&data, "fav album")?;
         serde_json::from_value(data)
             .map_err(|e| QqMusicError::InvalidResponse(format!("failed to parse fav album: {e}")))
     }
@@ -463,6 +484,30 @@ mod tests {
             &json!({"code": 0, "data": {"result": 0, "v_failedPlaylistId": [42]}}),
             42
         ));
+    }
+
+    #[test]
+    fn data_object_rejects_missing_or_non_object() {
+        // D2 回归：缺 data / null / 非对象一律报错，不再回落成「成功但 0 条」。
+        for data in [
+            json!({}),
+            json!({"data": null}),
+            json!({"data": []}),
+            json!({"data": "x"}),
+        ] {
+            assert!(
+                matches!(
+                    data_object(&data, "fav song"),
+                    Err(QqMusicError::InvalidResponse(_))
+                ),
+                "缺 data 或非对象应报错: {data}"
+            );
+        }
+        // 在场的空对象原样交给反序列化（列表接口即 Ok(空)）。
+        assert_eq!(
+            data_object(&json!({"code": 0, "data": {}}), "fav song").unwrap(),
+            json!({})
+        );
     }
 
     #[test]

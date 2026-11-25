@@ -304,8 +304,10 @@ async fn reconcile_tracks_carry_cover_url_and_rebind_survives_resync() {
             hmp_storage::credential::store_from_env();
         store.load().unwrap().expect("凭证已落盘")
     };
+    // 跨轮内存状态（空快照闸门计数、曲目补抓游标）：由调用方持有并跨轮传递。
+    let mut state = hmp_daemon::reconcile::ReconcileState::default();
 
-    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib).await;
+    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib, &mut state).await;
 
     let url_m1 = "https://y.gtimg.cn/music/photo_new/T002R300x300M000alPmid1.jpg";
     let local = "file://C:/covers/aa.jpg";
@@ -336,7 +338,7 @@ async fn reconcile_tracks_carry_cover_url_and_rebind_survives_resync() {
     }
 
     // 二轮 reconcile（同快照重放）→ file:// 不得被远程 URL 打回
-    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib).await;
+    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib, &mut state).await;
     let mut db = lib.lock().unwrap();
     let meta = db.track_meta_batch("qq", &["m-1".to_owned()]).unwrap();
     assert_eq!(
@@ -373,8 +375,9 @@ async fn reconcile_caches_playlist_tracks_and_replays_idempotently() {
             hmp_storage::credential::store_from_env();
         store.load().unwrap().expect("凭证已落盘")
     };
+    let mut state = hmp_daemon::reconcile::ReconcileState::default();
 
-    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib).await;
+    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib, &mut state).await;
 
     {
         let mut db = lib.lock().unwrap();
@@ -406,7 +409,7 @@ async fn reconcile_caches_playlist_tracks_and_replays_idempotently() {
     );
 
     // 重放：同快照零重复、零误删。
-    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib).await;
+    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib, &mut state).await;
     let mut db = lib.lock().unwrap();
     let row = owned_row(&mut db);
     assert_eq!(row.track_count, 2, "重放幂等");
@@ -448,9 +451,10 @@ async fn reconcile_diffs_remote_removal_and_purges_unsubscribed_playlists() {
             hmp_storage::credential::store_from_env();
         store.load().unwrap().expect("凭证已落盘")
     };
+    let mut state = hmp_daemon::reconcile::ReconcileState::default();
 
     // 第一轮：owned 2 首；subscribed 8888 入列并缓存 1 首。
-    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib).await;
+    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib, &mut state).await;
     {
         let mut db = lib.lock().unwrap();
         let sub = db
@@ -464,14 +468,16 @@ async fn reconcile_diffs_remote_removal_and_purges_unsubscribed_playlists() {
     }
 
     // 第二轮：listing 不再含 8888（远端取消收藏）+ owned 快照收窄。
-    // FK 地雷：8888 行有曲目缓存，delete_playlists_absent 删父行前必须清子行。
-    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib).await;
+    // 空快照闸门（AUDIT §30 D2）：首个空快照只计数、不清本地。
+    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib, &mut state).await;
     {
         let mut db = lib.lock().unwrap();
-        let rows = db.list_playlists().unwrap();
         assert!(
-            !rows.iter().any(|p| p.relation == "subscribed"),
-            "远端取消收藏的 subscribed 行应被删除（子行已前置清理，不 FK 失败）"
+            db.list_playlists()
+                .unwrap()
+                .iter()
+                .any(|p| p.relation == "subscribed"),
+            "首个空快照不得删除 subscribed 行"
         );
         let row = owned_row(&mut db);
         assert_eq!(row.track_count, 1, "远端已删曲目应移除");
@@ -482,6 +488,23 @@ async fn reconcile_diffs_remote_removal_and_purges_unsubscribed_playlists() {
             .map(|r| r.source_key)
             .collect();
         assert_eq!(keys, ["m-1"]);
+    }
+
+    // 第三轮：listing 仍为空（连续两轮一致）→ 权威空，才删除本地行。
+    // FK 地雷：8888 行有曲目缓存，delete_playlists_absent 删父行前必须清子行。
+    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib, &mut state).await;
+    {
+        let mut db = lib.lock().unwrap();
+        let rows = db.list_playlists().unwrap();
+        assert!(
+            !rows.iter().any(|p| p.relation == "subscribed"),
+            "连续两轮空快照后 subscribed 行应被删除（子行已前置清理，不 FK 失败）"
+        );
+        assert_eq!(
+            owned_row(&mut db).track_count,
+            1,
+            "owned 曲目保持收窄后的状态"
+        );
     }
 }
 
@@ -504,6 +527,7 @@ async fn reconcile_skips_playlists_with_pending_local_intent() {
             hmp_storage::credential::store_from_env();
         store.load().unwrap().expect("凭证已落盘")
     };
+    let mut state = hmp_daemon::reconcile::ReconcileState::default();
     // 本地意图：owned 行（dirid=7）+ 未消费的曲目追加 op。
     let row_id = {
         let mut db = lib.lock().unwrap();
@@ -515,7 +539,7 @@ async fn reconcile_skips_playlists_with_pending_local_intent() {
         row_id
     };
 
-    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib).await;
+    hmp_daemon::reconcile::reconcile_user_library(&client, &credential, &lib, &mut state).await;
 
     assert!(
         !requested_disstids(&server).await.contains(&OWNED_TID),
