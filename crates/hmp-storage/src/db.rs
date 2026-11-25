@@ -492,6 +492,8 @@ impl LibraryDb {
 
     /// 批量 upsert（单事务）：列表解析的元数据缓存（1500 曲歌单避免逐条提交）。
     /// 不返回 id（缓存场景不需要）；失败整体回滚。
+    /// 标题保护与单条 `upsert_track` 同规则：以（原始）键代标题的 stub 行
+    /// 不得踩掉已有真实标题（否则解析好的标题被打回 mid，AUDIT §30.7）。
     pub fn upsert_tracks_batch(&mut self, rows: &[TrackRow]) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         for row in rows {
@@ -499,7 +501,10 @@ impl LibraryDb {
                 r#"INSERT INTO tracks (source, source_key, title, album, artist, duration_ms, cover_uri)
                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                    ON CONFLICT(source, source_key) DO UPDATE SET
-                     title = excluded.title,
+                     title = CASE
+                       -- 意图方不知真实标题时以（原始）键代之，不得踩掉已有元数据
+                       WHEN excluded.title = ?8 THEN tracks.title
+                       ELSE excluded.title END,
                      album = COALESCE(excluded.album, tracks.album),
                      artist = COALESCE(excluded.artist, tracks.artist),
                      duration_ms = COALESCE(excluded.duration_ms, tracks.duration_ms),
@@ -511,7 +516,8 @@ impl LibraryDb {
                     row.album,
                     row.artist,
                     row.duration_ms,
-                    row.cover_uri
+                    row.cover_uri,
+                    row.source_key
                 ],
             )?;
         }
@@ -519,7 +525,8 @@ impl LibraryDb {
     }
 
     /// 批量查询曲目元数据（投影层：queue list 等把 ID 列表一次映射成标题/歌手）。
-    /// 同一 source 的 key 列表；SQLite 变量上限 999 → 按 500 分片。
+    /// 同一 source 的 key 列表；SQL 变量上限（内置 SQLite 默认 32766，
+    /// 并非 999）→ 按 500 分片只为稳妥。
     pub fn track_meta_batch(
         &mut self,
         source: &str,

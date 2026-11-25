@@ -666,9 +666,48 @@ fn batch_upsert_then_meta_batch_roundtrip() {
     assert_eq!(n, 3, "重复批量 upsert 不建重复行");
 }
 
+/// AUDIT §30.7：批量 upsert 的标题保护须与单条 `upsert_track` 同规则——
+/// 以（原始）键代标题的 stub 行不得踩掉已有真实标题（否则解析好的标题被打回
+/// mid）；真实标题照常更新。
+#[test]
+fn batch_upsert_intent_title_does_not_stomp_metadata() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    db.upsert_track(&TrackRow {
+        source: "qq",
+        source_key: "mid-1".into(),
+        title: "夜曲".into(),
+        artist: Some("周杰伦".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let stub = |key: &str, title: &str| TrackRow {
+        source: "qq",
+        source_key: key.into(),
+        title: title.into(),
+        ..Default::default()
+    };
+
+    // 标题 == key 的 stub 行：真实标题保持不变。
+    db.upsert_tracks_batch(&[stub("mid-1", "mid-1")]).unwrap();
+    let metas = db.track_meta_batch("qq", &["mid-1".to_string()]).unwrap();
+    assert_eq!(metas[0].title, "夜曲", "stub 标题不得踩掉真实标题");
+
+    // 另一个真实标题：照常更新。
+    db.upsert_tracks_batch(&[stub("mid-1", "夜曲（Live）")])
+        .unwrap();
+    let metas = db.track_meta_batch("qq", &["mid-1".to_string()]).unwrap();
+    assert_eq!(metas[0].title, "夜曲（Live）");
+
+    // 全新行：标题 == key 照常落库（保护只作用于冲突更新）。
+    db.upsert_tracks_batch(&[stub("mid-2", "mid-2")]).unwrap();
+    let metas = db.track_meta_batch("qq", &["mid-2".to_string()]).unwrap();
+    assert_eq!(metas[0].title, "mid-2");
+}
+
 #[test]
 fn track_meta_batch_slices_beyond_variable_limit() {
-    // SQLite 变量上限 999：>999 keys 应分片查询不报错。
+    // SQL 变量上限（内置 SQLite 默认 32766，并非 999）→ 按 500 分片只为稳妥：
+    // >500 keys 分片查询不报错。
     let mut db = LibraryDb::open_in_memory().unwrap();
     let rows: Vec<TrackRow> = (0..1200)
         .map(|i| TrackRow {
