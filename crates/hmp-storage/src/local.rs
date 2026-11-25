@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::PictureType;
 use lofty::probe::Probe;
-use lofty::tag::{Accessor, ItemKey};
+use lofty::tag::{Accessor, ItemKey, Tag};
 
 /// 支持的音频扩展名。
 pub fn is_audio_ext(p: &Path) -> bool {
@@ -70,6 +70,27 @@ pub fn parse_rg_db(s: &str) -> Option<f64> {
 /// 封面整张静默滤成「无封面」（§18）；仍保留上限防病态文件撑爆扫描内存/落盘。
 const MAX_COVER_BYTES: usize = 32 * 1024 * 1024;
 
+/// 解析年份标签文本：取第一段连续 4 位数字（标准日期 `2020-05-01`、
+/// `©day` 的 `2020-05-01T07:00:00Z`、紧凑 `20200501` 都落到 2020）；
+/// 没有 → None（不阻断元数据读取）。
+fn parse_year(s: &str) -> Option<i64> {
+    s.as_bytes()
+        .windows(4)
+        .find(|w| w.iter().all(u8::is_ascii_digit))
+        .and_then(|w| std::str::from_utf8(w).ok())
+        .and_then(|d| d.parse().ok())
+}
+
+/// 标签年份：先读 `RecordingDate`（lofty 0.25 把标准日期标签——Vorbis `DATE` /
+/// ID3v2 `TDRC` / MP4 `©day` / RIFF `ICRD`——都映射到它，只有非标准 `YEAR`
+/// 才是 `ItemKey::Year`），读不出年份再退 `Year`。
+fn tag_year(tag: &Tag) -> Option<i64> {
+    [ItemKey::RecordingDate, ItemKey::Year]
+        .into_iter()
+        .filter_map(|key| tag.get_string(key))
+        .find_map(parse_year)
+}
+
 /// 读取标签元数据；无标签/不可解析 → None。
 pub fn read_meta(path: &Path) -> Option<LocalMeta> {
     let tagged = Probe::open(path).ok()?.read().ok()?;
@@ -120,9 +141,7 @@ pub fn read_meta(path: &Path) -> Option<LocalMeta> {
             .map(|s| s.to_string()),
         track_number: tag.and_then(|t| t.track()).map(|n| n as u16),
         disc_number: tag.and_then(|t| t.disk()).map(|n| n as u16),
-        year: tag
-            .and_then(|t| t.get_string(ItemKey::Year))
-            .and_then(|y| y.trim().parse::<i64>().ok()),
+        year: tag.and_then(tag_year),
         genre: tag.and_then(|t| t.genre()).map(|s| s.to_string()),
         cover,
         replaygain_track_db: tag
@@ -274,6 +293,140 @@ mod tests {
         let p = dir.path().join("fake.mp3");
         std::fs::write(&p, b"not an audio file at all").unwrap();
         assert!(read_meta(&p).is_none());
+    }
+
+    /// AUDIT §30.7：年份文本取第一段连续 4 位数字，没有 → None。
+    #[test]
+    fn parses_year_from_date_text() {
+        assert_eq!(parse_year("2020"), Some(2020));
+        assert_eq!(parse_year("2020-05-01"), Some(2020));
+        assert_eq!(parse_year("2020-00-00"), Some(2020));
+        assert_eq!(parse_year("2020-05-01T07:00:00Z"), Some(2020), "取第一段");
+        assert_eq!(parse_year("20200501"), Some(2020));
+        assert_eq!(parse_year("  1999 "), Some(1999));
+        assert_eq!(parse_year(""), None);
+        assert_eq!(parse_year("   "), None);
+        assert_eq!(parse_year("Unknown"), None);
+        assert_eq!(parse_year("202"), None, "不足 4 位");
+    }
+
+    /// AUDIT §30.7：标准日期标签（Vorbis `DATE`）lofty 0.25 映射为
+    /// `RecordingDate`，只有非标准 `YEAR` 才是 `ItemKey::Year`——旧实现只读
+    /// Year，FLAC/MP3/M4A 的年份恒空。先读前者，读不出再退后者。
+    #[test]
+    fn year_reads_recording_date_then_year() {
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::VorbisComments);
+        // 无日期 → None
+        assert_eq!(tag_year(&tag), None);
+        // 空日期 → None
+        tag.insert_text(ItemKey::RecordingDate, "".into());
+        assert_eq!(tag_year(&tag), None);
+        // 标准 DATE=2020-05-01：落在 RecordingDate，Year 键读不到
+        tag.insert_text(ItemKey::RecordingDate, "2020-05-01".into());
+        assert_eq!(tag.get_string(ItemKey::Year), None, "DATE 不映射到 Year");
+        assert_eq!(tag_year(&tag), Some(2020));
+        // 只有非标准 YEAR=2019：回退读到
+        let mut year_only = lofty::tag::Tag::new(lofty::tag::TagType::VorbisComments);
+        year_only.insert_text(ItemKey::Year, "2019".into());
+        assert_eq!(year_only.get_string(ItemKey::RecordingDate), None);
+        assert_eq!(tag_year(&year_only), Some(2019));
+        // 两者都有：RecordingDate 优先
+        tag.insert_text(ItemKey::Year, "2019".into());
+        assert_eq!(tag_year(&tag), Some(2020));
+        // DATE 读不出年份（乱串）→ 仍退 Year
+        tag.insert_text(ItemKey::RecordingDate, "unknown".into());
+        assert_eq!(tag_year(&tag), Some(2019));
+    }
+
+    /// RIFF 块：FourCC + LE 长度 + 内容；奇数长度补 1 字节对齐（不计入长度）。
+    fn push_chunk(out: &mut Vec<u8>, fourcc: &[u8; 4], body: &[u8]) {
+        out.extend_from_slice(fourcc);
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            out.push(0);
+        }
+    }
+
+    /// 手造最小合法 WAV（8kHz 单声道 16bit PCM 静音，参数同 hmp-player 测试），
+    /// 可带 `ID3 ` 块：ID3v2.4 UTF-8 文本帧（`TIT2`/`TPE1`/`TDRC` = lofty 的
+    /// 标准标题/歌手/RecordingDate 键）与内嵌封面帧（APIC）。
+    fn minimal_wav(frames: &[(&[u8; 4], &str)], embedded_png: Option<&[u8]>) -> Vec<u8> {
+        let mut fmt = Vec::new();
+        for n in [1u16, 1] {
+            fmt.extend_from_slice(&n.to_le_bytes()); // PCM / 单声道
+        }
+        for n in [8000u32, 16000] {
+            fmt.extend_from_slice(&n.to_le_bytes()); // 采样率 / 字节率
+        }
+        for n in [2u16, 16] {
+            fmt.extend_from_slice(&n.to_le_bytes()); // 块对齐 / 位深
+        }
+        // ID3v2.4 帧：标识 + 同步安全长度 + 标志 + 正文。
+        fn syncsafe(n: usize) -> [u8; 4] {
+            [21, 14, 7, 0].map(|shift| ((n >> shift) & 0x7f) as u8)
+        }
+        let mut tag = Vec::new();
+        let mut push_frame = |id: &[u8; 4], body: &[u8]| {
+            tag.extend_from_slice(id);
+            tag.extend_from_slice(&syncsafe(body.len()));
+            tag.extend_from_slice(&[0, 0]);
+            tag.extend_from_slice(body);
+        };
+        for (id, text) in frames {
+            let mut body = vec![3]; // UTF-8
+            body.extend_from_slice(text.as_bytes());
+            push_frame(id, &body);
+        }
+        if let Some(png) = embedded_png {
+            let mut body = vec![0]; // Latin-1
+            body.extend_from_slice(b"image/png\0");
+            body.extend_from_slice(&[3, 0]); // PictureType::CoverFront / 空描述
+            body.extend_from_slice(png);
+            push_frame(b"APIC", &body);
+        }
+        let mut riff = Vec::new();
+        push_chunk(&mut riff, b"fmt ", &fmt);
+        push_chunk(&mut riff, b"data", &vec![0u8; 1600]);
+        if !tag.is_empty() {
+            let mut id3 = b"ID3\x04\x00\x00".to_vec();
+            id3.extend_from_slice(&syncsafe(tag.len()));
+            id3.extend_from_slice(&tag);
+            push_chunk(&mut riff, b"ID3 ", &id3);
+        }
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&(riff.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(&riff);
+        wav
+    }
+
+    /// AUDIT §30.7 端到端：真实容器里的标准日期标签（ID3v2.4 `TDRC`）经 lofty
+    /// 映射到 RecordingDate——旧实现只读 ItemKey::Year，年份恒空。
+    #[test]
+    fn read_meta_reads_standard_date_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("a.wav");
+        std::fs::write(
+            &wav,
+            minimal_wav(
+                &[
+                    (b"TIT2", "夜曲"),
+                    (b"TPE1", "周杰伦"),
+                    (b"TDRC", "2020-05-01"),
+                ],
+                None,
+            ),
+        )
+        .unwrap();
+        let meta = read_meta(&wav).unwrap();
+        assert_eq!(meta.year, Some(2020));
+        assert_eq!(meta.title, "夜曲");
+        assert_eq!(meta.artist.as_deref(), Some("周杰伦"));
+        // 无日期标签 → None
+        let plain = dir.path().join("b.wav");
+        std::fs::write(&plain, minimal_wav(&[], None)).unwrap();
+        assert_eq!(read_meta(&plain).unwrap().year, None);
     }
 
     /// sidecar 候选序：`<stem>.lrc` 优先，其次 `<完整文件名>.lrc`；去重。
