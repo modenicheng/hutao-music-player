@@ -654,7 +654,6 @@ fn apply_snapshot(
         .iter()
         .map(SongRow::to_track_row)
         .collect();
-    data.set_local_tracks(model(all_local_rows.clone()));
     data.set_local_count(snap.local_tracks.len() as i32);
     data.set_local_duration(snap.local_duration_text.clone().into());
     data.set_local_size(snap.local_size_text.clone().into());
@@ -673,20 +672,11 @@ fn apply_snapshot(
     // ——— 监视文件夹过滤：点击行过滤曲目表，再点/显示全部取消 ———
     // TrackRow 不带 folder 字段（派生关系留在 Rust 侧）；分组来自真实扫描根
     // 前缀匹配（嵌套根取最长优先），与文件夹行的聚合口径一致。
-    let rows_by_folder: Vec<(String, TrackRow)> = snap
-        .local_tracks
-        .iter()
-        .filter_map(|row| {
-            let folder = row.folder.clone()?;
-            Some((folder, row.to_track_row()))
-        })
-        .collect();
-    let folder_paths: Vec<String> = snap.folders.iter().map(|f| f.path.clone()).collect();
-    let folder_titles: Vec<String> = snap
-        .folders
-        .iter()
-        .map(|f| format!("{} · {} 首", path_basename(&f.path), f.track_count))
-        .collect();
+    let folder_filter = FolderFilter::from_snapshot(snap, all_local_rows);
+    // 库刷新重放（D8）：此前快照无条件把曲目表重置成全部，文件夹行仍高亮、
+    // 表头仍写「某文件夹 · N 首」，内容却变成全部（点红心/建歌单/文件监听
+    // 落库都会触发）——现在按当前选中的文件夹重放。
+    apply_folder_filter(&data, &folder_filter);
     {
         let ui_weak: Weak<AppWindow> = ui.as_weak();
         data.on_filter_folder(move |index| {
@@ -700,21 +690,7 @@ fn apply_snapshot(
                 index
             };
             data.set_selected_folder(selected);
-
-            let (rows, title): (Vec<TrackRow>, SharedString) = if selected < 0 {
-                (all_local_rows.clone(), "全部音乐".into())
-            } else if let Some(path) = folder_paths.get(selected as usize) {
-                let filtered = rows_by_folder
-                    .iter()
-                    .filter(|(folder, _)| folder == path)
-                    .map(|(_, row)| row.clone())
-                    .collect();
-                (filtered, folder_titles[selected as usize].clone().into())
-            } else {
-                (all_local_rows.clone(), "全部音乐".into())
-            };
-            data.set_local_tracks(model(rows));
-            data.set_local_table_title(title);
+            apply_folder_filter(&data, &folder_filter);
         });
     }
 
@@ -767,6 +743,85 @@ fn spawn_recent_reload(ui_weak: Weak<AppWindow>, runtime: &Arc<crate::backend::B
             }
         });
     });
+}
+
+/// 音乐库表头的默认标题（未选中文件夹 / 选中行越界回退）。
+const ALL_MUSIC_TITLE: &str = "全部音乐";
+
+/// 音乐库曲目表的文件夹过滤索引（每次快照重建，随 `on_filter_folder` 闭包
+/// 持有；TrackRow 不带 folder 字段，归属关系留在这里）。
+struct FolderFilter {
+    /// 全部本地曲目（未选中文件夹时的表内容）。
+    all: Vec<TrackRow>,
+    /// 带归属扫描根的行：(扫描根路径, 行)。
+    by_folder: Vec<(String, TrackRow)>,
+    /// 文件夹行路径（下标 = 文件夹行下标 = `Data.selected-folder`）。
+    paths: Vec<String>,
+    /// 各文件夹的表头标题（`basename · N 首`，与 paths 同下标）。
+    titles: Vec<String>,
+}
+
+impl FolderFilter {
+    /// 从快照建索引（`all` = 该快照全部本地曲目的表行）。
+    fn from_snapshot(snap: &library_view::Snapshot, all: Vec<TrackRow>) -> Self {
+        Self {
+            all,
+            by_folder: snap
+                .local_tracks
+                .iter()
+                .filter_map(|row| {
+                    let folder = row.folder.clone()?;
+                    Some((folder, row.to_track_row()))
+                })
+                .collect(),
+            paths: snap.folders.iter().map(|f| f.path.clone()).collect(),
+            titles: snap
+                .folders
+                .iter()
+                .map(|f| format!("{} · {} 首", path_basename(&f.path), f.track_count))
+                .collect(),
+        }
+    }
+
+    /// 选中行是否仍有效（库刷新后文件夹行可能减少）。
+    fn is_valid(&self, selected: i32) -> bool {
+        selected >= 0 && (selected as usize) < self.paths.len()
+    }
+
+    /// 过滤 + 表头（纯函数）：选中有效行 → 该文件夹的曲目 + 对应标题；
+    /// 未选（-1）或越界 → 全部曲目 + 「全部音乐」。
+    fn resolve(&self, selected: i32) -> (Vec<TrackRow>, String) {
+        if selected < 0 {
+            return (self.all.clone(), ALL_MUSIC_TITLE.into());
+        }
+        let Some(path) = self.paths.get(selected as usize) else {
+            return (self.all.clone(), ALL_MUSIC_TITLE.into());
+        };
+        (
+            self.by_folder
+                .iter()
+                .filter(|(folder, _)| folder == path)
+                .map(|(_, row)| row.clone())
+                .collect(),
+            self.titles[selected as usize].clone(),
+        )
+    }
+}
+
+/// 监视文件夹过滤落地（D8）：按 `Data.selected-folder` 重放曲目表并同步表头
+/// 标题——点击处理器与每次快照末尾都走这里，库刷新不再重置过滤。选中行
+/// 越界（刷新后文件夹行减少）→ 回「全部音乐」并取消高亮。
+fn apply_folder_filter(data: &Data, filter: &FolderFilter) {
+    let selected = data.get_selected_folder();
+    let selected = if filter.is_valid(selected) {
+        selected
+    } else {
+        -1
+    };
+    data.set_selected_folder(selected);
+    let (rows, title) = filter.resolve(selected);
+    data.set_local_tracks(model(rows));
+    data.set_local_table_title(title.into());
 }
 
 /// 路由落地后的详情装载（导航路径：单次同步读，单页查询量小；库变更刷新
@@ -1728,6 +1783,7 @@ mod tests {
             assert_eq!(data.get_artist_state(), 2, "本地歌手命中复位就绪态");
         });
     }
+
     /// D7：进页重读的落地——曲目表、计数与 latest/earliest 一起更新（后台
     /// 读库 + invoke 回包那段无头后端不泵，这里直接驱动落地函数）。
     #[test]
@@ -1764,6 +1820,111 @@ mod tests {
             assert_eq!(data.get_recent_count(), 2);
             assert_eq!(data.get_recent_latest().as_str(), "08-08 12:00");
             assert_eq!(data.get_recent_earliest().as_str(), "07-25 17:20");
+        });
+    }
+
+    fn folder_song(mid: &str, folder: &str) -> SongRow {
+        SongRow {
+            mid: mid.into(),
+            source: 1,
+            title: mid.into(),
+            artists: String::new(),
+            album: String::new(),
+            duration_ms: 0,
+            quality: String::new(),
+            cover_uri: None,
+            remote_cover: None,
+            folder: Some(folder.into()),
+        }
+    }
+
+    /// 合成音乐库快照 → 过滤索引（不读库）：`folders` = (扫描根, 曲目数)。
+    fn folder_filter_of(folders: &[(&str, i32)], rows: Vec<SongRow>) -> FolderFilter {
+        let snap = library_view::Snapshot {
+            local_tracks: rows,
+            folders: folders
+                .iter()
+                .map(|(path, count)| library_view::FolderStat {
+                    path: (*path).into(),
+                    track_count: *count,
+                    size_bytes: 0,
+                    last_scan: "—".into(),
+                })
+                .collect(),
+            ..library_view::Snapshot::empty()
+        };
+        FolderFilter::from_snapshot(
+            &snap,
+            snap.local_tracks
+                .iter()
+                .map(SongRow::to_track_row)
+                .collect(),
+        )
+    }
+
+    fn local_track_mids(data: &Data) -> Vec<String> {
+        use slint::Model;
+        let tracks = data.get_local_tracks();
+        (0..tracks.row_count())
+            .filter_map(|i| tracks.row_data(i))
+            .map(|row| row.mid.to_string())
+            .collect()
+    }
+
+    /// D8：库刷新后按当前选中的文件夹重放过滤——选中行仍在 → 曲目表与表头
+    /// 跟随新快照；选中行已不存在 → 回「全部音乐」并取消高亮。
+    #[test]
+    fn folder_filter_replays_across_snapshot_refresh() {
+        crate::player_bridge::tests::run_on_platform_thread(|| {
+            let ui = AppWindow::new().unwrap();
+            let data = Data::get(&ui);
+
+            let first = folder_filter_of(
+                &[("D:/音乐", 2), ("E:/无损", 1)],
+                vec![
+                    folder_song("a", "D:/音乐"),
+                    folder_song("b", "D:/音乐"),
+                    folder_song("c", "E:/无损"),
+                ],
+            );
+            apply_folder_filter(&data, &first);
+            assert_eq!(local_track_mids(&data), ["a", "b", "c"]);
+            assert_eq!(data.get_local_table_title().as_str(), "全部音乐");
+
+            // 选中第二个文件夹
+            data.set_selected_folder(1);
+            apply_folder_filter(&data, &first);
+            assert_eq!(local_track_mids(&data), ["c"]);
+            assert_eq!(data.get_local_table_title().as_str(), "无损 · 1 首");
+
+            // 库刷新（新快照多了一首）：选中行仍在 → 过滤与表头保持
+            let second = folder_filter_of(
+                &[("D:/音乐", 3), ("E:/无损", 1)],
+                vec![
+                    folder_song("a", "D:/音乐"),
+                    folder_song("b", "D:/音乐"),
+                    folder_song("d", "D:/音乐"),
+                    folder_song("c", "E:/无损"),
+                ],
+            );
+            apply_folder_filter(&data, &second);
+            assert_eq!(data.get_selected_folder(), 1, "选中行仍在则保持高亮");
+            assert_eq!(local_track_mids(&data), ["c"]);
+            assert_eq!(data.get_local_table_title().as_str(), "无损 · 1 首");
+
+            // 再刷新：文件夹行减少、选中行没了 → 回全部音乐并取消高亮
+            let third = folder_filter_of(
+                &[("D:/音乐", 3)],
+                vec![
+                    folder_song("a", "D:/音乐"),
+                    folder_song("b", "D:/音乐"),
+                    folder_song("d", "D:/音乐"),
+                ],
+            );
+            apply_folder_filter(&data, &third);
+            assert_eq!(data.get_selected_folder(), -1, "越界应取消高亮");
+            assert_eq!(local_track_mids(&data), ["a", "b", "d"]);
+            assert_eq!(data.get_local_table_title().as_str(), "全部音乐");
         });
     }
 }
