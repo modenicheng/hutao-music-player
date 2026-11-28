@@ -21,8 +21,8 @@ pub mod xdg;
 pub use config::{Config, QualityMode, QualityPref};
 pub use credential::{BackendKind, CredentialStore, FileStore, SecretServiceStore};
 pub use db::{
-    FavoriteRow, LibraryDb, LocalCoverRow, PlayEnd, PlaylistOpRow, PlaylistRow, PlaylistTrackRow,
-    RecentPlay, RelationRow, ScanOutcome, TrackMeta, TrackRow,
+    ArtistRefRow, FavoriteRow, LibraryDb, LocalCoverRow, PlayEnd, PlaylistOpRow, PlaylistRow,
+    PlaylistTrackRow, RecentPlay, RelationRow, ScanOutcome, TrackMeta, TrackRow,
 };
 pub use local::{
     LocalMeta, decode_lrc_text, is_audio_ext, is_folder_cover_path, read_embedded_lyrics,

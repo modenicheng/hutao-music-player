@@ -12,6 +12,15 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
+/// 曲目歌手行（`track_artists` 的窄投影；存储层不依赖媒体模型）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArtistRefRow {
+    /// QQ 歌手 mid（本地标签行恒 `None`）。
+    pub mid: Option<String>,
+    /// 展示名称。
+    pub name: String,
+}
+
 /// 曲目行（窄投影：调用方从 `hmp_core::Track` 映射，存储层不依赖媒体模型）。
 #[derive(Clone, Debug)]
 pub struct TrackRow {
@@ -21,7 +30,11 @@ pub struct TrackRow {
     pub source_key: String,
     pub title: String,
     pub album: Option<String>,
+    /// 专辑 mid（QQ `album.mid`；本地 NULL，v9）。
+    pub album_mid: Option<String>,
     pub artist: Option<String>,
+    /// 歌手引用（含 QQ singer mid；本地 mid 为 NULL，v9）。
+    pub artist_refs: Vec<ArtistRefRow>,
     /// 毫秒。
     pub duration_ms: Option<i64>,
     pub cover_uri: Option<String>,
@@ -42,7 +55,9 @@ impl Default for TrackRow {
             source_key: String::new(),
             title: String::new(),
             album: None,
+            album_mid: None,
             artist: None,
+            artist_refs: Vec::new(),
             duration_ms: None,
             cover_uri: None,
             qq_song_id: None,
@@ -238,6 +253,68 @@ pub struct ArtistGroup {
     pub track_count: i64,
 }
 
+/// 本地标签歌手名 → `track_artists` 行（本地无 mid，§30.2.6 phase 1）。
+fn local_artist_refs(artists: &[String]) -> Vec<ArtistRefRow> {
+    artists
+        .iter()
+        .filter(|name| !name.is_empty())
+        .map(|name| ArtistRefRow {
+            mid: None,
+            name: name.clone(),
+        })
+        .collect()
+}
+
+/// 重写多艺术家行（先删后插，position 保序）。
+///
+/// v9：`artist_mid` 随行写入；新投影的 mid 为 `None` 时按同名旧行保留
+/// （"新值为 NULL 不覆盖旧值"的 COALESCE 语义）。空列表 = 本次投影没有
+/// 歌手信息，保留既有行不动（stub 缓存/收藏意图等窄投影不得清空歌手）。
+fn write_track_artists(
+    conn: &Connection,
+    track_id: i64,
+    artists: &[ArtistRefRow],
+) -> rusqlite::Result<()> {
+    if artists.is_empty() {
+        return Ok(());
+    }
+    // 旧 mid 必须先读：DELETE 之后同名歌手的历史 mid 已无从恢复。
+    let old_mids: std::collections::HashMap<String, String> = {
+        let mut stmt =
+            conn.prepare("SELECT artist, artist_mid FROM track_artists WHERE track_id = ?1")?;
+        let rows = stmt.query_map(params![track_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (name, mid) = row?;
+            if let Some(mid) = mid.filter(|m| !m.is_empty()) {
+                map.insert(name, mid);
+            }
+        }
+        map
+    };
+    conn.execute(
+        "DELETE FROM track_artists WHERE track_id = ?1",
+        params![track_id],
+    )?;
+    for (i, artist) in artists.iter().enumerate() {
+        if artist.name.is_empty() {
+            continue;
+        }
+        let mid = artist
+            .mid
+            .clone()
+            .filter(|m| !m.is_empty())
+            .or_else(|| old_mids.get(&artist.name).cloned());
+        conn.execute(
+            "INSERT OR IGNORE INTO track_artists (track_id, artist, artist_mid, position) VALUES (?1,?2,?3,?4)",
+            params![track_id, artist.name, mid, i as i64],
+        )?;
+    }
+    Ok(())
+}
+
 const SCHEMA_V1: &str = r#"
 CREATE TABLE tracks (
   id INTEGER PRIMARY KEY,
@@ -332,17 +409,20 @@ impl LibraryDb {
     }
 
     /// 幂等写入/更新曲目元数据；返回 track id。
+    /// v9：`album_mid` 与 `artist_refs` 随行落库（NULL/空串不覆盖旧值；
+    /// 歌手行的 mid 按同名旧行保留，见 [`write_track_artists`]）。
     pub fn upsert_track(&mut self, t: &TrackRow) -> rusqlite::Result<i64> {
         let source_key = canonical_local_key(t.source, &t.source_key);
         self.conn.execute(
-            r#"INSERT INTO tracks (source, source_key, title, album, artist, duration_ms, cover_uri, album_artist, track_number, disc_number, year, genre)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            r#"INSERT INTO tracks (source, source_key, title, album, album_mid, artist, duration_ms, cover_uri, album_artist, track_number, disc_number, year, genre)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                ON CONFLICT(source, source_key) DO UPDATE SET
                  title = CASE
                    -- 意图方不知真实标题时以（原始）键代之，不得踩掉已有元数据
-                   WHEN excluded.title = ?13 THEN tracks.title
+                   WHEN excluded.title = ?14 THEN tracks.title
                    ELSE excluded.title END,
                  album = COALESCE(excluded.album, tracks.album),
+                 album_mid = COALESCE(NULLIF(excluded.album_mid, ''), tracks.album_mid),
                  artist = COALESCE(excluded.artist, tracks.artist),
                  duration_ms = COALESCE(excluded.duration_ms, tracks.duration_ms),
                  cover_uri = CASE
@@ -363,6 +443,7 @@ impl LibraryDb {
                 source_key,
                 t.title,
                 t.album,
+                t.album_mid,
                 t.artist,
                 t.duration_ms,
                 t.cover_uri,
@@ -374,11 +455,15 @@ impl LibraryDb {
                 t.source_key
             ],
         )?;
-        self.conn.query_row(
+        let id: i64 = self.conn.query_row(
             "SELECT id FROM tracks WHERE source = ?1 AND source_key = ?2",
             params![t.source, source_key],
             |r| r.get(0),
-        )
+        )?;
+        if !t.artist_refs.is_empty() {
+            write_track_artists(&self.conn, id, &t.artist_refs)?;
+        }
+        Ok(id)
     }
 
     /// 记录播放会话开始（INSERT play_events），返回事件 id（供结束按 id 精确
@@ -499,22 +584,48 @@ impl LibraryDb {
             .optional()
     }
 
+    /// 曲目歌手行（含 `artist_mid`；QQ 入库回归与 phase 2 实体化的读取出口）。
+    pub fn track_artists(&mut self, track_id: i64) -> rusqlite::Result<Vec<ArtistRefRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT artist_mid, artist FROM track_artists WHERE track_id = ?1 ORDER BY position",
+        )?;
+        let rows = stmt.query_map(params![track_id], |r| {
+            Ok(ArtistRefRow {
+                mid: r.get(0)?,
+                name: r.get(1)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 曲目专辑 mid（`None` = 未知/本地行）。
+    pub fn album_mid(&mut self, track_id: i64) -> rusqlite::Result<Option<String>> {
+        self.conn.query_row(
+            "SELECT album_mid FROM tracks WHERE id = ?1",
+            params![track_id],
+            |r| r.get(0),
+        )
+    }
+
     /// 批量 upsert（单事务）：列表解析的元数据缓存（1500 曲歌单避免逐条提交）。
     /// 不返回 id（缓存场景不需要）；失败整体回滚。
     /// 标题保护与单条 `upsert_track` 同规则：以（原始）键代标题的 stub 行
     /// 不得踩掉已有真实标题（否则解析好的标题被打回 mid，AUDIT §30.7）。
+    /// v9：`album_mid` 与 `artist_refs` 同样落库（`artist_refs` 为空 = 本次
+    /// 投影没有歌手信息，保留 `track_artists` 既有行不动）。
     pub fn upsert_tracks_batch(&mut self, rows: &[TrackRow]) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         for row in rows {
             tx.execute(
-                r#"INSERT INTO tracks (source, source_key, title, album, artist, duration_ms, cover_uri)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                r#"INSERT INTO tracks (source, source_key, title, album, album_mid, artist, duration_ms, cover_uri)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                    ON CONFLICT(source, source_key) DO UPDATE SET
                      title = CASE
                        -- 意图方不知真实标题时以（原始）键代之，不得踩掉已有元数据
-                       WHEN excluded.title = ?8 THEN tracks.title
+                       WHEN excluded.title = ?9 THEN tracks.title
                        ELSE excluded.title END,
                      album = COALESCE(excluded.album, tracks.album),
+                     album_mid = COALESCE(NULLIF(excluded.album_mid, ''), tracks.album_mid),
                      artist = COALESCE(excluded.artist, tracks.artist),
                      duration_ms = COALESCE(excluded.duration_ms, tracks.duration_ms),
                      cover_uri = COALESCE(excluded.cover_uri, tracks.cover_uri)"#,
@@ -523,12 +634,21 @@ impl LibraryDb {
                     row.source_key,
                     row.title,
                     row.album,
+                    row.album_mid,
                     row.artist,
                     row.duration_ms,
                     row.cover_uri,
                     row.source_key
                 ],
             )?;
+            if !row.artist_refs.is_empty() {
+                let tid: i64 = tx.query_row(
+                    "SELECT id FROM tracks WHERE source = ?1 AND source_key = ?2",
+                    params![row.source, row.source_key],
+                    |r| r.get(0),
+                )?;
+                write_track_artists(&tx, tid, &row.artist_refs)?;
+            }
         }
         tx.commit()
     }
@@ -593,6 +713,10 @@ impl LibraryDb {
         } else {
             meta.artists.clone()
         };
+        // 展示串与写入行同一口径（" / "，§30.2.6 phase 1）；本地歌手无 mid。
+        let artist = (!artists.is_empty())
+            .then(|| hmp_core::join_artist_names(artists.iter().map(String::as_str)));
+        let artist_refs = local_artist_refs(&artists);
         let title = if meta.title.trim().is_empty() {
             path.file_stem()
                 .and_then(|s| s.to_str())
@@ -606,15 +730,13 @@ impl LibraryDb {
             source_key,
             title,
             album: meta.album,
-            artist: meta.artist,
+            artist,
+            artist_refs,
             duration_ms: meta.duration_ms,
             cover_uri: None,
             qq_song_id: None,
             ..Default::default()
         })?;
-        if !artists.is_empty() {
-            self.write_track_artists(id, &artists)?;
-        }
         let md = std::fs::metadata(path).ok();
         // 播放路径入库的行也要归入所在扫描根：否则 `finish_scan` 只按
         // `scan_root_id` 收尾，永远看不到它——daemon 停机期间删掉的文件会
@@ -896,12 +1018,26 @@ impl LibraryDb {
                         .unwrap_or("(unknown title)")
                         .to_string()
                 });
+            let artists: Vec<String> = meta_owned
+                .as_ref()
+                .map(|m| {
+                    if m.artists.is_empty() {
+                        m.artist.iter().cloned().collect()
+                    } else {
+                        m.artists.clone()
+                    }
+                })
+                .unwrap_or_default();
+            let artist = (!artists.is_empty())
+                .then(|| hmp_core::join_artist_names(artists.iter().map(String::as_str)));
             let tid = self.upsert_track(&TrackRow {
                 source: "local",
                 source_key: format!("local:{path_str}"),
                 title,
                 album: meta_owned.as_ref().and_then(|m| m.album.clone()),
-                artist: meta_owned.as_ref().and_then(|m| m.artist.clone()),
+                album_mid: None,
+                artist,
+                artist_refs: local_artist_refs(&artists),
                 duration_ms: meta_owned.as_ref().and_then(|m| m.duration_ms),
                 cover_uri: None,
                 qq_song_id: None,
@@ -932,9 +1068,6 @@ impl LibraryDb {
                 root_id
             ],
         )?;
-            if let Some(m) = &meta_owned {
-                self.write_track_artists(tid, &m.artists)?;
-            }
             Ok(ScanOutcome::Added)
         })();
         match result {
@@ -1104,6 +1237,13 @@ impl LibraryDb {
         track_id: i64,
         m: &crate::local::LocalMeta,
     ) -> rusqlite::Result<()> {
+        let artists: Vec<String> = if m.artists.is_empty() {
+            m.artist.iter().cloned().collect()
+        } else {
+            m.artists.clone()
+        };
+        let artist = (!artists.is_empty())
+            .then(|| hmp_core::join_artist_names(artists.iter().map(String::as_str)));
         self.conn.execute(
             "UPDATE tracks SET title = ?1, album = ?2, artist = ?3, duration_ms = ?4,
                     album_artist = ?5, track_number = ?6, disc_number = ?7, year = ?8, genre = ?9
@@ -1111,7 +1251,7 @@ impl LibraryDb {
             params![
                 m.title,
                 m.album,
-                m.artist,
+                artist,
                 m.duration_ms,
                 m.album_artist,
                 m.track_number.map(|n| n as i64),
@@ -1121,22 +1261,7 @@ impl LibraryDb {
                 track_id
             ],
         )?;
-        self.write_track_artists(track_id, &m.artists)
-    }
-
-    /// 重写多艺术家行（先删后插，position 保序）。
-    fn write_track_artists(&mut self, track_id: i64, artists: &[String]) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "DELETE FROM track_artists WHERE track_id = ?1",
-            params![track_id],
-        )?;
-        for (i, a) in artists.iter().enumerate() {
-            self.conn.execute(
-                "INSERT OR IGNORE INTO track_artists (track_id, artist, position) VALUES (?1,?2,?3)",
-                params![track_id, a, i as i64],
-            )?;
-        }
-        Ok(())
+        write_track_artists(&self.conn, track_id, &local_artist_refs(&artists))
     }
 
     /// LIKE 通配符转义（配合 `ESCAPE '\\'`）。
@@ -2543,8 +2668,35 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
             }
         }
     }
+    if current < 9 {
+        // v9：停止丢信息（§30.2.6 phase 1）——QQ 专辑/歌手 mid 落库 + 本地
+        // 标签解析版本（存量行下次扫描强制重读，见 LOCAL_TAG_VERSION）。
+        // 只加列，不回填：旧行 mid 保持 NULL，等下一轮 reconcile/扫描自然补。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute_batch(MIGRATION_V9)?;
+            conn.pragma_update(None, "user_version", 9)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+    }
     Ok(())
 }
+
+/// v9：曲目身份列——`tracks.album_mid`（QQ 专辑 mid）、
+/// `track_artists.artist_mid`（QQ 歌手 mid；本地 NULL）与
+/// `local_files.tag_version`（本地标签解析规则版本，0 = 旧规则）。
+const MIGRATION_V9: &str = r#"
+ALTER TABLE tracks ADD COLUMN album_mid TEXT;
+ALTER TABLE track_artists ADD COLUMN artist_mid TEXT;
+ALTER TABLE local_files ADD COLUMN tag_version INTEGER NOT NULL DEFAULT 0;
+"#;
 
 /// v8：封面 URL → 本地产物索引（daemon `CoverGet` 下载落盘后登记，
 /// 后续同 URL 请求直接命中，零出网）。

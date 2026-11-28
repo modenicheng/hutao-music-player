@@ -19,7 +19,7 @@ fn row() -> TrackRow {
 #[test]
 fn migration_creates_v1() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 8); // v8：封面 URL → 本地产物索引
+    assert_eq!(db.version().unwrap(), 9); // v9：曲目 mid + 本地标签版本
     let mut db = db;
     assert_eq!(db.track_id("qq", "mid123").unwrap(), None);
 }
@@ -269,7 +269,7 @@ fn migration_v2_migrates_favorites_into_relations() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        8
+        9
     );
     // favorites 表已删除；数据在 relations（track/liked，synced）。
     let count: i64 = conn
@@ -836,7 +836,7 @@ fn mark_pending_with_delete_op_rolls_back_on_op_failure() {
 #[test]
 fn migration_v3_adds_columns_and_tables() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 8);
+    assert_eq!(db.version().unwrap(), 9);
     let cols: Vec<String> = db
         .conn
         .prepare("PRAGMA table_info(local_files)")
@@ -910,7 +910,7 @@ fn migration_v2_to_v3_upgrades_in_place() {
         .conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 8);
+    assert_eq!(v, 9);
     db.conn
         .execute("UPDATE tracks SET genre='Rock' WHERE id=1", [])
         .unwrap();
@@ -2013,4 +2013,198 @@ fn update_track_cover_sets_clears_and_skips_unchanged() {
         0,
         "库中无此曲目：零行"
     );
+}
+
+/// v9 迁移：v8 库原地升级——`user_version` 变 9、旧数据保留、新列按默认
+/// （mid 为 NULL、tag_version 为 0），重复打开幂等。
+#[test]
+fn migration_v8_to_v9_upgrades_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.sqlite3");
+    // 按 v1→v8 逐级建一个真实的 v8 库（v5/v7 是数据迁移、不改 schema，跳过）。
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        for step in [
+            MIGRATION_V2,
+            MIGRATION_V3,
+            MIGRATION_V4,
+            MIGRATION_V6,
+            MIGRATION_V8,
+        ] {
+            conn.execute_batch(step).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 8).unwrap();
+        conn.execute(
+            "INSERT INTO tracks (source, source_key, title, album, artist)
+             VALUES ('qq', 'mid-old', '旧曲', '旧专辑', '旧歌手')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_artists (track_id, artist, position) VALUES (1, '旧歌手', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_files (track_id, path) VALUES (1, '/old.mp3')",
+            [],
+        )
+        .unwrap();
+    }
+    {
+        let db = LibraryDb::open(&path).unwrap();
+        assert_eq!(db.version().unwrap(), 9);
+        let (title, album_mid): (String, Option<String>) = db
+            .conn
+            .query_row(
+                "SELECT title, album_mid FROM tracks WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "旧曲", "旧数据保留");
+        assert_eq!(album_mid, None, "旧行不回填 mid");
+        let artist_mid: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT artist_mid FROM track_artists WHERE track_id = 1 AND position = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(artist_mid, None);
+        let tag_version: i64 = db
+            .conn
+            .query_row(
+                "SELECT tag_version FROM local_files WHERE track_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tag_version, 0, "旧行等下次扫描升级");
+    }
+    // 重复打开：版本不倒退、数据不丢（迁移幂等）。
+    let db = LibraryDb::open(&path).unwrap();
+    assert_eq!(db.version().unwrap(), 9);
+    let n: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+/// v9：QQ 行 upsert 落 `album_mid` 与 `artist_mid`；窄投影（无 mid）不覆盖
+/// 旧 mid，也不清空既有歌手行。
+#[test]
+fn upsert_track_persists_mids_and_keeps_them_on_null_projection() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let full = TrackRow {
+        source: "qq",
+        source_key: "mid-1".into(),
+        title: "夜曲".into(),
+        album: Some("十一月的萧邦".into()),
+        album_mid: Some("album-mid".into()),
+        artist: Some("周杰伦 / 费玉清".into()),
+        artist_refs: vec![
+            ArtistRefRow {
+                mid: Some("singer-1".into()),
+                name: "周杰伦".into(),
+            },
+            ArtistRefRow {
+                mid: Some("singer-2".into()),
+                name: "费玉清".into(),
+            },
+        ],
+        ..Default::default()
+    };
+    let tid = db.upsert_track(&full).unwrap();
+    assert_eq!(db.album_mid(tid).unwrap().as_deref(), Some("album-mid"));
+    assert_eq!(
+        db.track_artists(tid).unwrap(),
+        vec![
+            ArtistRefRow {
+                mid: Some("singer-1".into()),
+                name: "周杰伦".into()
+            },
+            ArtistRefRow {
+                mid: Some("singer-2".into()),
+                name: "费玉清".into()
+            },
+        ]
+    );
+
+    // 窄投影：title/artist 无 mid、无歌手行 → 身份列与歌手行原样保留。
+    let narrow = TrackRow {
+        source: "qq",
+        source_key: "mid-1".into(),
+        title: "夜曲".into(),
+        artist: Some("周杰伦 / 费玉清".into()),
+        ..Default::default()
+    };
+    db.upsert_track(&narrow).unwrap();
+    assert_eq!(db.album_mid(tid).unwrap().as_deref(), Some("album-mid"));
+    assert_eq!(db.track_artists(tid).unwrap().len(), 2);
+
+    // 歌手投影显式给 NULL mid 但同名 → 按同名旧行保留 mid（COALESCE 语义）。
+    let reordered = TrackRow {
+        source: "qq",
+        source_key: "mid-1".into(),
+        title: "夜曲".into(),
+        artist_refs: vec![
+            ArtistRefRow {
+                mid: None,
+                name: "费玉清".into(),
+            },
+            ArtistRefRow {
+                mid: None,
+                name: "周杰伦".into(),
+            },
+        ],
+        ..Default::default()
+    };
+    db.upsert_track(&reordered).unwrap();
+    assert_eq!(
+        db.track_artists(tid).unwrap(),
+        vec![
+            ArtistRefRow {
+                mid: Some("singer-2".into()),
+                name: "费玉清".into()
+            },
+            ArtistRefRow {
+                mid: Some("singer-1".into()),
+                name: "周杰伦".into()
+            },
+        ],
+        "重排/无 mid 的投影不得丢身份"
+    );
+}
+
+/// v9：批量缓存路径同样落 mid（列表解析缓存不再只留名字）。
+#[test]
+fn upsert_tracks_batch_persists_mids() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    db.upsert_tracks_batch(&[TrackRow {
+        source: "qq",
+        source_key: "mid-batch".into(),
+        title: "批量曲".into(),
+        album: Some("批量专辑".into()),
+        album_mid: Some("album-batch".into()),
+        artist: Some("A / B".into()),
+        artist_refs: vec![
+            ArtistRefRow {
+                mid: Some("sa".into()),
+                name: "A".into(),
+            },
+            ArtistRefRow {
+                mid: Some("sb".into()),
+                name: "B".into(),
+            },
+        ],
+        ..Default::default()
+    }])
+    .unwrap();
+    let tid = db.track_id("qq", "mid-batch").unwrap().unwrap();
+    assert_eq!(db.album_mid(tid).unwrap().as_deref(), Some("album-batch"));
+    assert_eq!(db.track_artists(tid).unwrap().len(), 2);
 }
