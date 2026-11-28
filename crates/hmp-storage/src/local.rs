@@ -129,43 +129,53 @@ fn tag_year(tag: &Tag) -> Option<i64> {
 }
 
 /// 读取标签元数据；无标签/不可解析 → None。
+///
+/// 字段按「primary tag → 其余 tag」逐个兜底，而不是只读 primary：WAV 的
+/// RIFF `LIST/INFO` 标签不是 primary（文件里同时有 ID3 时 primary 是 ID3），
+/// 旧实现对纯 RIFF INFO 的 WAV 读不到标题/歌手/年份（AUDIT §30.7 遗留）。
 pub fn read_meta(path: &Path) -> Option<LocalMeta> {
     let tagged = Probe::open(path).ok()?.read().ok()?;
-    let tag = tagged.primary_tag();
     let props = tagged.properties();
-    let artists: Vec<String> = tag
-        .map(|t| {
-            t.get_strings(ItemKey::TrackArtist)
+    let tags: Vec<&Tag> = tagged
+        .primary_tag()
+        .into_iter()
+        .chain(tagged.tags().iter())
+        .collect();
+    let artists: Vec<String> = tags
+        .iter()
+        .find_map(|tag| {
+            let values: Vec<String> = tag
+                .get_strings(ItemKey::TrackArtist)
                 .map(|s| s.to_string())
-                .collect()
+                .collect();
+            (!values.is_empty()).then_some(values)
         })
         .unwrap_or_default();
-    // 封面：primary tag 优先（CoverFront → 首图），primary 无图再扫其余 tag
-    // （歌词提取同款 primary → 全 tag 兜底语义）；全无内嵌图再退同目录封面文件。
-    let cover = tagged
-        .primary_tag()
-        .map(|t| {
-            t.get_picture_type(PictureType::CoverFront)
-                .or_else(|| t.pictures().first())
+    // 封面：按同一顺序取第一张（CoverFront → 首图）；全无内嵌图再退同目录封面文件。
+    let cover = tags
+        .iter()
+        .find_map(|tag| {
+            tag.get_picture_type(PictureType::CoverFront)
+                .or_else(|| tag.pictures().first())
         })
-        .or_else(|| {
-            Some(tagged.tags().iter().find_map(|t| {
-                t.get_picture_type(PictureType::CoverFront)
-                    .or_else(|| t.pictures().first())
-            }))
-        })
-        .flatten()
-        .map(|p| p.data())
-        .filter(|d| !d.is_empty() && d.len() <= MAX_COVER_BYTES)
-        .map(|d| d.to_vec())
+        .map(|picture| picture.data())
+        .filter(|data| !data.is_empty() && data.len() <= MAX_COVER_BYTES)
+        .map(|data| data.to_vec())
         .or_else(|| folder_cover(path.parent().unwrap_or_else(|| Path::new("."))));
     Some(LocalMeta {
-        title: tag
-            .and_then(|t| t.title())
+        title: tags
+            .iter()
+            .find_map(|tag| tag.title())
             .map(|s| s.to_string())
             .unwrap_or_default(),
-        artist: tag.and_then(|t| t.artist()).map(|s| s.to_string()),
-        album: tag.and_then(|t| t.album()).map(|s| s.to_string()),
+        artist: tags
+            .iter()
+            .find_map(|tag| tag.artist())
+            .map(|s| s.to_string()),
+        album: tags
+            .iter()
+            .find_map(|tag| tag.album())
+            .map(|s| s.to_string()),
         duration_ms: Some(props.duration().as_millis() as i64),
         format: path
             .extension()
@@ -174,16 +184,21 @@ pub fn read_meta(path: &Path) -> Option<LocalMeta> {
         bitrate: props.audio_bitrate().map(|b| b as i64),
         sample_rate: props.sample_rate().map(|r| r as i64),
         artists,
-        album_artist: tag
-            .and_then(|t| t.get_string(ItemKey::AlbumArtist))
+        album_artist: tags
+            .iter()
+            .find_map(|tag| tag.get_string(ItemKey::AlbumArtist))
+            .map(str::to_string),
+        track_number: tags.iter().find_map(|tag| tag.track()).map(|n| n as u16),
+        disc_number: tags.iter().find_map(|tag| tag.disk()).map(|n| n as u16),
+        year: tags.iter().find_map(|tag| tag_year(tag)),
+        genre: tags
+            .iter()
+            .find_map(|tag| tag.genre())
             .map(|s| s.to_string()),
-        track_number: tag.and_then(|t| t.track()).map(|n| n as u16),
-        disc_number: tag.and_then(|t| t.disk()).map(|n| n as u16),
-        year: tag.and_then(tag_year),
-        genre: tag.and_then(|t| t.genre()).map(|s| s.to_string()),
         cover,
-        replaygain_track_db: tag
-            .and_then(|t| t.get_string(ItemKey::ReplayGainTrackGain))
+        replaygain_track_db: tags
+            .iter()
+            .find_map(|tag| tag.get_string(ItemKey::ReplayGainTrackGain))
             .and_then(parse_rg_db),
     })
 }
@@ -489,6 +504,15 @@ mod tests {
     /// 可带 `ID3 ` 块：ID3v2.4 UTF-8 文本帧（`TIT2`/`TPE1`/`TDRC` = lofty 的
     /// 标准标题/歌手/RecordingDate 键）与内嵌封面帧（APIC）。
     fn minimal_wav(frames: &[(&[u8; 4], &str)], embedded_png: Option<&[u8]>) -> Vec<u8> {
+        minimal_wav_with(frames, embedded_png, &[])
+    }
+
+    /// 同 [`minimal_wav`]，另带 RIFF `LIST/INFO` 标签块（无 ID3 的 WAV 场景）。
+    fn minimal_wav_with(
+        frames: &[(&[u8; 4], &str)],
+        embedded_png: Option<&[u8]>,
+        info: &[(&[u8; 4], &str)],
+    ) -> Vec<u8> {
         let mut fmt = Vec::new();
         for n in [1u16, 1] {
             fmt.extend_from_slice(&n.to_le_bytes()); // PCM / 单声道
@@ -531,6 +555,15 @@ mod tests {
             id3.extend_from_slice(&tag);
             push_chunk(&mut riff, b"ID3 ", &id3);
         }
+        if !info.is_empty() {
+            let mut list = b"INFO".to_vec();
+            for (id, text) in info {
+                let mut body = text.as_bytes().to_vec();
+                body.push(0); // RIFF INFO 字符串以 NUL 结尾
+                push_chunk(&mut list, id, &body);
+            }
+            push_chunk(&mut riff, b"LIST", &list);
+        }
         let mut wav = b"RIFF".to_vec();
         wav.extend_from_slice(&(riff.len() as u32).to_le_bytes());
         wav.extend_from_slice(b"WAVE");
@@ -564,6 +597,33 @@ mod tests {
         let plain = dir.path().join("b.wav");
         std::fs::write(&plain, minimal_wav(&[], None)).unwrap();
         assert_eq!(read_meta(&plain).unwrap().year, None);
+    }
+
+    /// 纯 RIFF `LIST/INFO` 标签（无 ID3）的 WAV：primary tag 为空/非它，
+    /// 字段必须按 tag 顺序兜底读到（AUDIT §30.7 遗留）。
+    #[test]
+    fn read_meta_reads_riff_info_without_id3() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("info.wav");
+        std::fs::write(
+            &wav,
+            minimal_wav_with(
+                &[],
+                None,
+                &[
+                    (b"INAM", "夜曲"),
+                    (b"IART", "周杰伦"),
+                    (b"IPRD", "十一月的萧邦"),
+                    (b"ICRD", "2005"),
+                ],
+            ),
+        )
+        .unwrap();
+        let meta = read_meta(&wav).unwrap();
+        assert_eq!(meta.title, "夜曲");
+        assert_eq!(meta.artist.as_deref(), Some("周杰伦"));
+        assert_eq!(meta.album.as_deref(), Some("十一月的萧邦"));
+        assert_eq!(meta.year, Some(2005));
     }
 
     /// AUDIT §30.7 端到端：无内嵌图的音频走同目录封面文件（与内嵌图同一
