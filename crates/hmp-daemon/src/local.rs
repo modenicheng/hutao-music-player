@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use hmp_core::{
-    AlbumRef, ArtistId, ArtistRef, AudioQuality, CoverRef, PlayRequest, Track, TrackId,
+    AlbumId, AlbumRef, ArtistId, ArtistRef, AudioQuality, CoverRef, PlayRequest, Track, TrackId,
 };
 use hmp_storage::LibraryDb;
 
@@ -147,6 +147,7 @@ impl LocalSourceResolver {
             })
             .unwrap_or_default();
         let album = meta.as_ref().and_then(|m| m.album.clone());
+        let album_artist = meta.as_ref().and_then(|m| m.album_artist.clone());
         let duration = meta.as_ref().and_then(|m| m.duration_ms);
         let cover = project_local_cover(&path, meta.as_ref());
 
@@ -159,7 +160,7 @@ impl LocalSourceResolver {
                     path.display()
                 ))
             })?;
-        {
+        let (artist_ids, album_id) = {
             let mut lib = self.library.lock().unwrap();
             lib.add_local_file(&path, meta.as_ref())
                 .map_err(|e| EngineError::Internal(format!("library write failed: {e}")))?;
@@ -169,7 +170,25 @@ impl LocalSourceResolver {
             {
                 tracing::warn!(%error, path = %path.display(), "failed to index local cover");
             }
-        }
+            // 实体 id：入库解析后的唯一身份（`track_artists.artist_id` /
+            // `tracks.album_id`）。存储读投影没有行级 id 外读口，按实体聚合
+            // 反查（实体名/专辑歌手唯一）；查不到 → None → "local" 哨兵。
+            let artist_ids = if artist_names.is_empty() {
+                Vec::new()
+            } else {
+                local_artist_entity_ids(&mut lib, &artist_names)
+            };
+            let album_id = album.as_deref().and_then(|title| {
+                local_album_entity_id(
+                    &mut lib,
+                    title,
+                    album_artist
+                        .as_deref()
+                        .or_else(|| artist_names.first().map(String::as_str)),
+                )
+            });
+            (artist_ids, album_id)
+        };
         // 本地音质如实上报（按格式/码率；旧实现一律 Mp3_128，无损曲目被误报，P1）。
         let quality = local_quality(&path, meta.as_ref());
         let track = Track {
@@ -177,13 +196,14 @@ impl LocalSourceResolver {
             title,
             artists: artist_names
                 .iter()
-                .map(|name| ArtistRef {
-                    id: ArtistId::new("local"),
+                .enumerate()
+                .map(|(index, name)| ArtistRef {
+                    id: local_artist_entity_link(artist_ids.get(index).copied().flatten()),
                     name: name.clone(),
                 })
                 .collect(),
             album: album.map(|name| AlbumRef {
-                id: hmp_core::AlbumId::new("local"),
+                id: local_album_entity_link(album_id),
                 name,
             }),
             duration: duration.map(|ms| std::time::Duration::from_millis(ms as u64)),
@@ -342,6 +362,81 @@ impl SourceResolver for LocalSourceResolver {
     }
 }
 
+/// 本地实体导航 id 前缀（与桌面 `library_view` 的 `artist:`/`album:` 参数同
+/// 契约，§30.2.6 phase 2b）：桌面 `player_bridge::detail_link_params` 直接
+/// 透传为播放页链接参数。
+const ARTIST_ID_PREFIX: &str = "artist:";
+const ALBUM_ID_PREFIX: &str = "album:";
+
+/// 本地歌手名 → 实体 id（`library_artists` 的实体投影；`NOCASE` 比较）。
+/// 存储读投影没有行级 `artist_id`，按实体名反查；phase 2 跨 provider 名称
+/// 归一后同名歌手只保留一个实体。
+fn local_artist_entity_ids(db: &mut LibraryDb, names: &[String]) -> Vec<Option<i64>> {
+    let Ok(groups) = db.library_artists() else {
+        return vec![None; names.len()];
+    };
+    names
+        .iter()
+        .map(|name| {
+            let key = name.trim().to_lowercase();
+            groups
+                .iter()
+                .find(|group| group.id > 0 && group.artist.trim().to_lowercase() == key)
+                .map(|group| group.id)
+        })
+        .collect()
+}
+
+/// 本地专辑（名 + 专辑歌手/首位歌手）→ 实体 id：同名不同专辑歌手只认歌手
+/// 匹配的那个；无歌手匹配时标题唯一才认（否则回退 "local" 哨兵）。
+fn local_album_entity_id(
+    db: &mut LibraryDb,
+    album: &str,
+    key_artist: Option<&str>,
+) -> Option<i64> {
+    let title = album.trim().to_lowercase();
+    if title.is_empty() {
+        return None;
+    }
+    let groups = db.library_albums(Some(album)).ok()?;
+    let same: Vec<_> = groups
+        .iter()
+        .filter(|group| group.id > 0 && group.album.trim().to_lowercase() == title)
+        .collect();
+    if let Some(named) = key_artist.map(str::trim).filter(|name| !name.is_empty()) {
+        let named = named.to_lowercase();
+        if let Some(group) = same.iter().find(|group| {
+            group
+                .artist
+                .as_deref()
+                .map(|artist| artist.trim().to_lowercase() == named)
+                .unwrap_or(false)
+        }) {
+            return Some(group.id);
+        }
+    }
+    if same.len() == 1 {
+        return Some(same[0].id);
+    }
+    None
+}
+
+/// 本地歌手实体 id → `ArtistRef.id`（`artist:<id>`；无实体回退 `"local"`）。
+fn local_artist_entity_link(entity_id: Option<i64>) -> ArtistId {
+    match entity_id.filter(|id| *id > 0) {
+        Some(id) => ArtistId::new(format!("{ARTIST_ID_PREFIX}{id}")),
+        None => ArtistId::new("local"),
+    }
+}
+
+/// 本地专辑实体 id → `AlbumRef.id`（`album:<id>`；无实体回退 `"local"`）。
+fn local_album_entity_link(entity_id: Option<i64>) -> AlbumId {
+    match entity_id.filter(|id| *id > 0) {
+        Some(id) => AlbumId::new(format!("{ALBUM_ID_PREFIX}{id}")),
+        None => AlbumId::new("local"),
+    }
+}
+
 /// 本地文件音质如实映射（P1：旧实现一律 Mp3_128，FLAC/WAV 被误报）。
 /// 无损格式 → Flac；AAC → Aac；OGG/Opus → Mp3_320（HQ 档）；MP3 按码率分档。
 fn local_quality(path: &std::path::Path, meta: Option<&hmp_storage::LocalMeta>) -> AudioQuality {
@@ -430,6 +525,49 @@ mod tests {
         );
         assert!(LocalSourceResolver::path_of(&TrackId::new("mid123")).is_err());
         assert!(LocalSourceResolver::path_of(&TrackId::new("local:")).is_err());
+    }
+
+    fn meta(title: &str, artist: &str, album: &str) -> hmp_storage::LocalMeta {
+        hmp_storage::LocalMeta {
+            title: title.into(),
+            artist: Some(artist.into()),
+            album: Some(album.into()),
+            duration_ms: Some(1_000),
+            ..Default::default()
+        }
+    }
+
+    /// 本地实体 id 反查（§30.2.6 phase 2b）：歌手按实体名；专辑按（名, 歌手）
+    /// 区分同名不同专辑歌手的两个实体；查不到 → None（回退 "local" 哨兵）。
+    #[test]
+    fn local_entity_ids_resolve_from_library() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        db.add_local_file(
+            std::path::Path::new("/entity-a.flac"),
+            Some(&meta("A", "周杰伦", "十一月的萧邦")),
+        )
+        .unwrap();
+        db.add_local_file(
+            std::path::Path::new("/entity-b.flac"),
+            Some(&meta("B", "歌手乙", "十一月的萧邦")),
+        )
+        .unwrap();
+
+        let artist_ids = local_artist_entity_ids(&mut db, &["周杰伦".into(), "查无此人".into()]);
+        assert!(artist_ids[0].is_some_and(|id| id > 0));
+        assert_eq!(artist_ids[1], None);
+
+        let album_a = local_album_entity_id(&mut db, "十一月的萧邦", Some("周杰伦"));
+        let album_b = local_album_entity_id(&mut db, "十一月的萧邦", Some("歌手乙"));
+        assert!(album_a.is_some_and(|id| id > 0));
+        assert!(album_b.is_some_and(|id| id > 0));
+        assert_ne!(album_a, album_b, "同名不同专辑歌手是两个实体");
+        assert_eq!(local_album_entity_id(&mut db, "不存在", None), None);
+
+        assert_eq!(local_artist_entity_link(Some(7)).as_ref(), "artist:7");
+        assert_eq!(local_artist_entity_link(None).as_ref(), "local");
+        assert_eq!(local_album_entity_link(Some(9)).as_ref(), "album:9");
+        assert_eq!(local_album_entity_link(None).as_ref(), "local");
     }
 
     #[tokio::test]
