@@ -1153,7 +1153,7 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 
 - `persist_cover` 一律落 `<hash>.jpg`：读侧已按内容解码，盘上文件名仍然错标。
 - `read_meta` 的标题/歌手/年份只读 primary tag：WAV 只有 RIFF INFO 标签时读不到，D4 对这种文件不生效。
-- hmp-desktop 集成测试不隔离数据目录：带 runtime 的用例只要走到库读取就会只读投影真实库（既有问题，`navigation_scroll.rs` 因 D7 多一处）。
+- hmp-desktop 集成测试不隔离数据目录：带 runtime 的用例只要走到库读取就会只读投影真实库（既有问题，`navigation_scroll.rs` 因 D7 多一处；§31 `419c59c` 已修）。
 - 目录封面在扫描读标签时生效：之后才放进目录的封面文件要等重新扫描才会被读到。
 - 内嵌 PNG 封面 >512px 走派生缩略件不受影响，≤512px 的此前一直不显示（`0d5c813` 一并修好）。
 
@@ -1209,6 +1209,24 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 | `07aa438` | **§4.3**：`add_local_file` 把播放入库的行归入所在扫描根并带当前代际；`finish_scan` 的 missing 收尾从此覆盖播放行 | `playback_ingested_file_joins_scan_root_and_is_marked_missing` |
 | `843cc57` | 封面缓存扩展名按内容魔数（此前一律 `.jpg`，PNG/WebP 被错标；读侧早已按内容解码） | `persist_cover_extension_follows_content` |
 | `57f3550` | `read_meta` 逐字段按 primary → 全部 tag 兜底；纯 RIFF `LIST/INFO` 的 WAV 不再丢标题/歌手/专辑/年份 | `read_meta_reads_riff_info_without_id3`（去掉兜底即红） |
+| `419c59c` | 桌面集成测试不再打开真实库：新增 `load_data_with_snapshot` / `load_data_offline` 与 `bind_offline`，13 个只装载空壳的 UI 用例改用 `load_data_offline`，`navigation_scroll` / `remote_navigation` 用 `bind_offline`；`load_data` / `bind` 生产语义不变 | `injected_snapshot_and_offline_bind_never_touch_data_dir`（hmp-desktop +1） |
+
+**桌面集成测试的库隔离（`419c59c` 细节）**：
+
+- 生产启动仍是 `bridge::load_data`（`library_view::load_snapshot` 直读 `data_dir`）与
+  `bridge::bind`；新增入口只供测试/离线注入，避免把「读真实库」当成启动副作用。
+- 13 个原本调用 `bridge::load_data` 的 UI 用例改用 `load_data_offline`（空快照）；`navigation_scroll`
+  新增空快照装载并改用 `bind_offline`（导航到本地详情 / 「最近播放」时不再读库）；
+  `remote_navigation` 同样走 `bind_offline`；bridge 的 `load_detail` 单测改传入 `offline = true`，
+  不再因本机存在真实库而偶然打开它。
+- `live_daemon` 是例外：它的 E2E 断言（本地曲目整表 play-tracks）需要真实媒体库，且本就
+  `#[ignore]`，保持 `load_data`。
+- 回归测试把 `XDG_DATA_HOME` 一次性指向临时目录，在临时库里播种「磁盘行 / 磁盘专辑」，
+  然后断言注入快照与离线绑定看不到这些内容、且主库 / WAL / SHM 的文件指纹不变。这个
+  `set_var` 只在本测试二进制（单用例、且在任何 UI / runtime / 线程创建之前）调用一次，
+  没有把进程级环境隔离扩散到全套测试，避免 Rust 2024 `set_var` 的线程竞态。
+- 真机验证：`cargo test -p hmp-desktop` 前后 `~/.local/share/hmp/library.sqlite3` 的
+  size/mtime 不变（1445888 / 1795688714），且没有生成 `-wal` / `-shm`。
 
 **仍未修**：
 
@@ -1216,7 +1234,4 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
   key_size 很小时（尾部 4 字节恰为小整数）剥离后仍解得出 `fLaC` / MP3 同步字，音频尾部被
   静默截断。可靠修法要在下载与流式两条路径上用候选 key 解密首块并验魔数，且需要真实
   V1/QMC1 样本做正反向测试——没有样本前动手有把真 V1 判死的风险，保持开放。
-- **桌面集成测试仍读真实数据目录**（`bridge::load_data` → `library_view::load_snapshot`）。
-  隔离要在每个测试进程启动前改 `XDG_DATA_HOME`；`set_var` 与运行时线程有竞态，
-  需要单独的测试夹具方案，不能照搬登录测试的目录注入。
 - **目录封面在扫描后才放进目录**的，要等下次扫描才可见（§30.7 任务书外发现）。
