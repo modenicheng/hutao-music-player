@@ -223,6 +223,66 @@ export component ListKeys inherits FocusScope {
     }
 }
 
+// ——— MenuKeys：弹层菜单的键盘导航（M7 收口，AUDIT §29）———
+// 右键菜单 / 音质选择这类「一列条目」弹层：打开即聚焦本作用域（PopupWindow
+// 内容每次 show 重新实例化 → init 即打开时机），↑/↓ 移动条目光标，Home/End
+// 到首尾，Enter/空格激活，Tab/Shift+Tab 在弹层内消化（不把焦点带去主界面）。
+// Tab 默认遍历不参与条目渲染：光标高亮/焦点环由宿主按 cursor 画（条目不是
+// 独立停靠点，弹层只有一个焦点）。ESC 不在这里消费：交给框架关 PopupWindow
+// （close-policy），宿主按 is-open 落回触发控件。
+export component MenuKeys inherits FocusScope {
+    /** -1 = 上移，+1 = 下移 */
+    callback step(int);
+    callback home;
+    callback end;
+    callback activate;
+    /** false = 空菜单（无可用条目）退出 Tab 链与焦点 */
+    in property <bool> available: true;
+    /** true = 模态层内的弹层（播放页 overlay 的音质选择） */
+    in property <bool> in-modal: false;
+
+    focus-on-click: false;
+    focus-on-tab-navigation: root.available && KeyNav.tab-navigable(root.in-modal);
+    enabled: root.available;
+
+    // 弹层打开即聚焦（PopupWindow 内容重新实例化的 init 就是 show 时机）
+    init => {
+        self.focus();
+    }
+
+    key-pressed(event) => {
+        if (event.modifiers.control || event.modifiers.meta || event.modifiers.alt) {
+            return reject;
+        }
+        if (event.text == Key.UpArrow) {
+            root.step(-1);
+            return accept;
+        }
+        if (event.text == Key.DownArrow) {
+            root.step(1);
+            return accept;
+        }
+        if (event.text == Key.Home) {
+            root.home();
+            return accept;
+        }
+        if (event.text == Key.End) {
+            root.end();
+            return accept;
+        }
+        if (event.text == Key.Return || event.text == " ") {
+            root.activate();
+            return accept;
+        }
+        // Tab / Backtab：弹层内消化——默认遍历会把焦点带去弹层外（主界面），
+        // 弹层只有一个焦点，方向键才是条目导航
+        if (event.text == Key.Tab || event.text == Key.Backtab) {
+            return accept;
+        }
+        return reject;
+    }
+}
+
 // ——— Button（Button.vue：variant/size + 图标 + 文本）———
 export enum ButtonVariant {
     default,

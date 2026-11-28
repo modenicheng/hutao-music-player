@@ -255,6 +255,15 @@ export component TrackTable inherits Rectangle {
                     property <int> artist-col: rowd.artist-mid != "" ? 1 : -1;
                     property <int> album-col: root.show-album && rowd.album-mid != ""
                         ? (rowd.artist-mid != "" ? 2 : 1) : -1;
+                    // 右键菜单关闭后焦点回列表，光标停在触发菜单的行（Esc/
+                    // 点外/执行动作同一路径；不还焦点则键盘用户丢失落点）。
+                    // is-open 只有弹层真的开过才变化，初始 false 不触发。
+                    property <bool> menu-open: row-menu.is-open;
+                    changed menu-open => {
+                        if (!self.menu-open) {
+                            list-key.focus();
+                        }
+                    }
                     // 键盘光标行高亮：与 hover 滑块同族中性底（仅列表持有键盘焦点时显示，
                     // 鼠标点击不留下「选中」残影）
                     background: list-key.has-focus && root.cursor-row == hover-item.abs-index
@@ -273,6 +282,9 @@ export component TrackTable inherits Rectangle {
                             ? MenuContext.playlist : MenuContext.library;
                         TrackMenu.index = root.window-start + offset;
                         TrackMenu.track = rowd;
+                        // 关闭弹层后的焦点落点 = 被右键的行（同列表 roving 光标）
+                        root.cursor = root.window-start + offset;
+                        root.cursor-col = 0;
                         TrackMenu.source-list = root.tracks;
                         TrackMenu.open-x = mx;
                         TrackMenu.open-y = my;

@@ -8,7 +8,7 @@
 // 会以最顶层命中截断行 hover 链，primitives.slint HoverGroup 注）。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon, Scroll } from "primitives.slint";
+import { AppIcon, MenuKeys, Scroll } from "primitives.slint";
 import { TrackRow } from "data.slint";
 import { Player, Data, TrackPalette } from "stores.slint";
 import { Nav, Route } from "nav.slint";
@@ -51,16 +51,27 @@ export global TrackMenu {
 // —— 菜单条目行：图标 + 文本（+ 尾注），hover 底随上下文主题色 ———
 // 禁用项 opacity 0.45（quality-badge 选项行同款）；尾注给"为何禁用"的
 // 短说明（弹层内不做 Tooltip：Tooltip 本身是 popup，嵌套弹层不可靠）
-component MenuActionRow inherits Rectangle {
+export component MenuActionRow inherits Rectangle {
     in property <image> icon;
     in property <string> text;
     in property <bool> item-enabled: true;
     in property <string> note: "";
+    /** 键盘条目光标（TrackMenuPanel 的 MenuKeys 维护；弹层内只有一个焦点） */
+    in property <bool> selected: false;
     callback activated;
 
     height: 36px;
     border-radius: Theme.radius-md;
-    background: touch.has-hover && item-enabled ? TrackPalette.ctx-accent-soft : transparent;
+    background: (touch.has-hover || root.selected) && item-enabled
+        ? TrackPalette.ctx-accent-soft : transparent;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.item-enabled;
+    accessible-action-default => {
+        if (root.item-enabled) {
+            root.activated();
+        }
+    }
     animate background {
         duration: Theme.duration-fast;
         easing: cubic-bezier(0.2, 0, 0, 1);
@@ -73,6 +84,18 @@ component MenuActionRow inherits Rectangle {
         clicked => {
             root.activated();
         }
+    }
+
+    // 键盘光标环：内嵌 2px（行间距只有 2px，外扩环会压到邻行）
+    if root.selected: Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        border-width: 2px;
+        border-color: Theme.ring;
+        border-radius: Theme.radius-md;
+        background: transparent;
     }
 
     HorizontalLayout {
@@ -130,6 +153,155 @@ export component TrackMenuPanel inherits Rectangle {
     /** 每个动作执行完触发，宿主接 popup.close() */
     callback dismissed;
 
+    // —— 键盘导航（M7 收口，AUDIT §29「弹层方向键导航未做」）——
+    /** 主模式条目光标：0 播放 / 1 下一首播放 / 2 加入队列 / 3 加入播放列表 /
+        4 从队列移除 / 5 从歌单移除 / 6 查看歌手 / 7 查看专辑 */
+    property <int> cursor: 0;
+    /** picker 模式光标：0 = 返回行，n = Data.sidebar-created[n-1] */
+    property <int> picker-cursor: 0;
+
+    /** 该条目在**当前上下文**是否渲染（隐藏项不进光标环） */
+    pure function item-visible(id: int) -> bool {
+        return id == 4 ? TrackMenu.context == MenuContext.queue
+            : id == 5 ? TrackMenu.context == MenuContext.playlist
+            : id == 3 ? TrackMenu.context != MenuContext.queue
+            : true;
+    }
+
+    /** 该条目是否可激活（无远端 mid 的导航项诚实禁用） */
+    pure function item-enabled(id: int) -> bool {
+        return id == 6 ? TrackMenu.track.artist-mid != ""
+            : id == 7 ? TrackMenu.track.album-mid != ""
+            : true;
+    }
+
+    pure function item-usable(id: int) -> bool {
+        return root.item-visible(id) && root.item-enabled(id);
+    }
+
+    pure function wrap-item(id: int) -> int {
+        return Math.mod(id + 8, 8);
+    }
+
+    /** 方向键落点：跳过隐藏/禁用条目（游标环最多 8 项，最长连续不可用 4 项，
+        显式探测 6 步即可；Slint 函数没有循环语句） */
+    function advance(from: int, dir: int) -> int {
+        let a = root.wrap-item(from + dir);
+        if (root.item-usable(a)) {
+            return a;
+        }
+        let b = root.wrap-item(a + dir);
+        if (root.item-usable(b)) {
+            return b;
+        }
+        let c = root.wrap-item(b + dir);
+        if (root.item-usable(c)) {
+            return c;
+        }
+        let d = root.wrap-item(c + dir);
+        if (root.item-usable(d)) {
+            return d;
+        }
+        let e = root.wrap-item(d + dir);
+        if (root.item-usable(e)) {
+            return e;
+        }
+        let f = root.wrap-item(e + dir);
+        if (root.item-usable(f)) {
+            return f;
+        }
+        return from;
+    }
+
+    /** 末个可用条目（End） */
+    pure function last-usable() -> int {
+        return root.item-usable(7) ? 7
+            : root.item-usable(6) ? 6
+            : root.item-usable(5) ? 5
+            : root.item-usable(4) ? 4
+            : root.item-usable(3) ? 3
+            : root.item-usable(2) ? 2
+            : root.item-usable(1) ? 1
+            : 0;
+    }
+
+    function move-picker(dir: int) {
+        let n = Data.sidebar-created.length + 1;
+        root.picker-cursor = Math.mod(root.picker-cursor + dir + n, n);
+    }
+
+    function activate() {
+        if (root.picker-mode) {
+            if (root.picker-cursor == 0) {
+                root.picker-mode = false;
+                return;
+            }
+            let p = Data.sidebar-created[root.picker-cursor - 1];
+            // 禁用行保留在光标环里（能看到「不支持本地曲」注），激活无动作
+            if (root.playlist-allows(p.relation)) {
+                TrackMenu.add-to-playlist(p.id);
+                root.dismissed();
+            }
+            return;
+        }
+        if (!root.item-usable(root.cursor)) {
+            return;
+        }
+        if (root.cursor == 0) {
+            root.play-now();
+        } else if (root.cursor == 1) {
+            TrackMenu.play-next();
+        } else if (root.cursor == 2) {
+            TrackMenu.append-queue();
+        } else if (root.cursor == 3) {
+            // 二级 picker：焦点仍在 menu-keys（本作用域），光标交给 picker
+            root.picker-mode = true;
+            root.picker-cursor = 0;
+            return;
+        } else if (root.cursor == 4) {
+            Player.remove-at(TrackMenu.index);
+        } else if (root.cursor == 5) {
+            TrackMenu.remove-from-playlist();
+        } else if (root.cursor == 6) {
+            Nav.navigate(Route.artist, TrackMenu.track.artist-mid);
+        } else if (root.cursor == 7) {
+            Nav.navigate(Route.album, TrackMenu.track.album-mid);
+        }
+        root.dismissed();
+    }
+
+    // 弹层唯一焦点：打开即聚焦（MenuKeys init），方向键移动条目光标
+    menu-keys := MenuKeys {
+        width: parent.width;
+        height: parent.height;
+        // 播放条/播放页里打开的弹层：PopupWindow 自成一窗，这里只作模态期防御
+        in-modal: true;
+        step(dir) => {
+            if (root.picker-mode) {
+                root.move-picker(dir);
+            } else {
+                root.cursor = root.advance(root.cursor, dir);
+            }
+        }
+        home => {
+            if (root.picker-mode) {
+                root.picker-cursor = 0;
+            } else {
+                root.cursor = 0;
+            }
+        }
+        end => {
+            if (root.picker-mode) {
+                root.picker-cursor = max(Data.sidebar-created.length, 0);
+            } else {
+                root.cursor = root.last-usable();
+            }
+        }
+        activate => {
+            root.activate();
+        }
+    }
+
     // 二级面板态：加入播放列表选择
     property <bool> picker-mode: false;
     /** 歌单选择列表可见行数上限（超出滚动） */
@@ -171,6 +343,7 @@ export component TrackMenuPanel inherits Rectangle {
         MenuActionRow {
             icon: Icons.play_arrow;
             text: "播放";
+            selected: menu-keys.has-focus && !root.picker-mode && root.cursor == 0;
             activated => {
                 root.play-now();
                 root.dismissed();
@@ -179,6 +352,7 @@ export component TrackMenuPanel inherits Rectangle {
         MenuActionRow {
             icon: Icons.playlist_play;
             text: "下一首播放";
+            selected: menu-keys.has-focus && !root.picker-mode && root.cursor == 1;
             activated => {
                 TrackMenu.play-next();
                 root.dismissed();
@@ -187,6 +361,7 @@ export component TrackMenuPanel inherits Rectangle {
         MenuActionRow {
             icon: Icons.queue_music;
             text: "加入队列";
+            selected: menu-keys.has-focus && !root.picker-mode && root.cursor == 2;
             activated => {
                 TrackMenu.append-queue();
                 root.dismissed();
@@ -199,6 +374,7 @@ export component TrackMenuPanel inherits Rectangle {
         if TrackMenu.context != MenuContext.queue: MenuActionRow {
             icon: Icons.add;
             text: "加入播放列表…";
+            selected: menu-keys.has-focus && !root.picker-mode && root.cursor == 3;
             activated => {
                 root.picker-mode = true;
             }
@@ -206,6 +382,7 @@ export component TrackMenuPanel inherits Rectangle {
         if TrackMenu.context == MenuContext.queue: MenuActionRow {
             icon: Icons.close;
             text: "从队列移除";
+            selected: menu-keys.has-focus && !root.picker-mode && root.cursor == 4;
             activated => {
                 Player.remove-at(TrackMenu.index);
                 root.dismissed();
@@ -214,6 +391,7 @@ export component TrackMenuPanel inherits Rectangle {
         if TrackMenu.context == MenuContext.playlist: MenuActionRow {
             icon: Icons.close;
             text: "从歌单移除";
+            selected: menu-keys.has-focus && !root.picker-mode && root.cursor == 5;
             activated => {
                 TrackMenu.remove-from-playlist();
                 root.dismissed();
@@ -226,6 +404,7 @@ export component TrackMenuPanel inherits Rectangle {
         MenuActionRow {
             icon: Icons.person;
             text: "查看歌手";
+            selected: menu-keys.has-focus && !root.picker-mode && root.cursor == 6;
             item-enabled: TrackMenu.track.artist-mid != "";
             activated => {
                 Nav.navigate(Route.artist, TrackMenu.track.artist-mid);
@@ -235,6 +414,7 @@ export component TrackMenuPanel inherits Rectangle {
         MenuActionRow {
             icon: Icons.album;
             text: "查看专辑";
+            selected: menu-keys.has-focus && !root.picker-mode && root.cursor == 7;
             item-enabled: TrackMenu.track.album-mid != "";
             activated => {
                 Nav.navigate(Route.album, TrackMenu.track.album-mid);
@@ -250,6 +430,7 @@ export component TrackMenuPanel inherits Rectangle {
         MenuActionRow {
             icon: Icons.arrow_back;
             text: "加入播放列表";
+            selected: menu-keys.has-focus && root.picker-mode && root.picker-cursor == 0;
             activated => {
                 root.picker-mode = false;
             }
@@ -262,9 +443,10 @@ export component TrackMenuPanel inherits Rectangle {
             clip: true;
 
             Scroll {
-                for p in Data.sidebar-created: MenuActionRow {
+                for p[i] in Data.sidebar-created: MenuActionRow {
                     icon: Icons.library_music;
                     text: p.name;
+                    selected: menu-keys.has-focus && root.picker-mode && root.picker-cursor == i + 1;
                     item-enabled: root.playlist-allows(p.relation);
                     note: self.item-enabled ? "" : "不支持本地曲";
                     activated => {

@@ -388,6 +388,13 @@ export component QueueDrawer inherits Rectangle {
                                 // `row` 名在 for 体内不可作属性名，改 rowd）
                                 property <int> abs-index: parent.window-start + offset;
                                 property <QueueRow> rowd: Player.queue[abs-index];
+                                // 右键菜单关闭后焦点回队列表，光标停在触发行
+                                property <bool> menu-open: row-menu.is-open;
+                                changed menu-open => {
+                                    if (!self.menu-open) {
+                                        drawer-keys.focus();
+                                    }
+                                }
                                 // 键盘光标行高亮（仅列表持有键盘焦点时）：底色与
                                 // hover 滑块同一套（主界面中性 / themed 专辑色）
                                 background: drawer-keys.has-focus && root.cursor-row == abs-index
@@ -410,6 +417,8 @@ export component QueueDrawer inherits Rectangle {
                                 context-requested(mx, my) => {
                                     TrackMenu.context = MenuContext.queue;
                                     TrackMenu.index = abs-index;
+                                    // 关闭弹层后的焦点落点 = 被右键的行
+                                    root.cursor = abs-index;
                                     TrackMenu.track = {
                                         mid: rowd.mid,
                                         source: rowd.source,

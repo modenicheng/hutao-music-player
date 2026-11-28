@@ -2,7 +2,7 @@
 // 显示实际生效档位 = min(用户偏好 Quality.selected, 曲目最高 Player.track-max-tier)；
 // 点击弹出四档选择（PopupWindow，向上展开），超出曲目提供的档位禁用。
 import { Theme } from "theme.slint";
-import { AppIcon, KeyTouch } from "primitives.slint";
+import { AppIcon, KeyTouch, MenuKeys } from "primitives.slint";
 import { Icons } from "icons.slint";
 import { Player, Quality, TrackPalette } from "stores.slint";
 
@@ -45,11 +45,47 @@ export component QualityBadge inherits Rectangle {
         }
     }
 
+    // —— 弹层键盘导航（M7 收口，AUDIT §29「音质选择方向键导航未做」）——
+    // 打开即聚焦第一档（MenuKeys init），↑/↓ 在档位间移动、Home/End 到首尾、
+    // Enter/空格选定；超过本曲最高档的选项不可达（诚实禁用）。关闭（ESC/
+    // 点外/选定）后焦点回触发徽章。
+    property <int> cursor: 0;
+    property <bool> pop-open: quality-pop.is-open;
+    changed pop-open => {
+        if (!self.pop-open) {
+            touch.focus();
+        }
+    }
+    function last-tier() -> int {
+        return clamp(Player.track-max-tier, 0, 3);
+    }
+
     quality-pop := PopupWindow {
         x: (parent.width - self.width) / 2;
         y: -self.height - 10px;
         width: 208px;
         height: 244px;
+
+        menu-keys := MenuKeys {
+            width: parent.width;
+            height: parent.height;
+            in-modal: root.in-modal;
+            step(dir) => {
+                root.cursor = clamp(root.cursor + dir, 0, root.last-tier());
+            }
+            home => {
+                root.cursor = 0;
+            }
+            end => {
+                root.cursor = root.last-tier();
+            }
+            activate => {
+                if (root.cursor <= root.last-tier()) {
+                    Quality.select(root.cursor);
+                    quality-pop.close();
+                }
+            }
+        }
 
         Rectangle {
             border-radius: Theme.radius-lg;
@@ -70,13 +106,38 @@ export component QualityBadge inherits Rectangle {
                     vertical-alignment: center;
                 }
 
-                for tier in [0, 1, 2, 3]: Rectangle {
+                for tier in [0, 1, 2, 3]: tier-row := Rectangle {
                     height: 44px;
                     border-radius: Theme.radius-md;
-                    background: option-touch.has-hover && tier <= Player.track-max-tier ? TrackPalette.ctx-accent-soft : transparent;
+                    property <bool> selected: menu-keys.has-focus && root.cursor == tier
+                        && tier <= root.last-tier();
+                    background: (option-touch.has-hover || tier-row.selected)
+                        && tier <= root.last-tier()
+                        ? TrackPalette.ctx-accent-soft : transparent;
+                    accessible-role: button;
+                    accessible-label: "\{Quality.tier-label(tier)}（\{Quality.tier-detail(tier)}）";
+                    accessible-enabled: tier <= root.last-tier();
+                    accessible-action-default => {
+                        if (tier <= root.last-tier()) {
+                            Quality.select(tier);
+                            quality-pop.close();
+                        }
+                    }
                     animate background {
                         duration: Theme.duration-fast;
                         easing: cubic-bezier(0.2, 0, 0, 1);
+                    }
+
+                    // 键盘光标环（内嵌 2px，不压选项行间距）
+                    if tier-row.selected: Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        border-width: 2px;
+                        border-color: Theme.ring;
+                        border-radius: Theme.radius-md;
+                        background: transparent;
                     }
 
                     option-touch := TouchArea {
