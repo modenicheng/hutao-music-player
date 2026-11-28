@@ -29,7 +29,10 @@ pub use ipc::{
     Response, SearchAlbum, SearchPage, SearchSinger, SearchSong, TopCategoryPage, TopDetailPage,
     TopGroupDto, TopSongDto, TopSummaryDto, TrackProvider, TrackRef,
 };
-pub use media::{Album, AlbumRef, ArtistRef, AudioQuality, CoverRef, Playlist, Track, TrackStub};
+pub use media::{
+    Album, AlbumRef, ArtistRef, AudioQuality, CoverRef, Playlist, Track, TrackStub,
+    join_artist_names,
+};
 pub use player::{
     LoadRequest, LoopMode, MediaStream, MediaStreamSource, PlaybackCapabilities, PlaybackState,
     PlaybackStatus, PlayerCommand, PlayerEvent,

@@ -32,6 +32,15 @@ pub struct CoverRef {
     pub url: String,
 }
 
+/// 歌手展示串：`" / "` 连接（空列表 → 空串）。
+///
+/// 全仓唯一口径：播放路径（[`Track::artist_names`]）、列表缓存
+/// （`TrackStub`）、QQ 入库与本地标签入库的 `tracks.artist` 都经本函数，
+/// 禁止再各自用 `", "` 或标签原文拼串（AUDIT §30.2.1/§30.2.3）。
+pub fn join_artist_names<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    names.into_iter().collect::<Vec<_>>().join(" / ")
+}
+
 // ——— 派生缩略封面契约（S9 R2：换曲/浏览路径的 miss 解码降本）———
 //
 // 写侧（hmp-storage `persist_cover`）在原图 `covers/<hash>.jpg` 之外增写
@@ -215,6 +224,13 @@ pub struct TrackStub {
     pub duration_ms: Option<i64>,
 }
 
+impl TrackStub {
+    /// 歌手展示名（与 [`Track::artist_names`] 同口径）。
+    pub fn artist_names(&self) -> String {
+        join_artist_names(self.artists.iter().map(String::as_str))
+    }
+}
+
 /// 曲目（docs/PROJECT.md §7.1）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
@@ -252,13 +268,10 @@ impl Track {
         }
     }
 
-    /// 歌手展示名（`"A / B"` 形式，空列表返回空串）。
+    /// 歌手展示名（`"A / B"` 形式，空列表返回空串；口径见
+    /// [`join_artist_names`]）。
     pub fn artist_names(&self) -> String {
-        self.artists
-            .iter()
-            .map(|a| a.name.as_str())
-            .collect::<Vec<_>>()
-            .join(" / ")
+        join_artist_names(self.artists.iter().map(|a| a.name.as_str()))
     }
 
     /// 是否具备最低播放身份（有 ID 且有标题）。
@@ -379,6 +392,28 @@ mod tests {
         assert!(t.is_playable());
         let empty = Track::new(TrackId::new(""), "");
         assert!(!empty.is_playable());
+    }
+
+    /// 展示串唯一口径：`" / "` 连接；空列表为空串；Track/TrackStub 同源。
+    #[test]
+    fn artist_display_names_use_single_separator() {
+        assert_eq!(join_artist_names(["A", "B", "C"]), "A / B / C");
+        assert_eq!(join_artist_names(["A"]), "A");
+        assert_eq!(join_artist_names(Vec::<&str>::new()), "");
+        let mut t = sample_track();
+        t.artists.push(ArtistRef {
+            id: ArtistId::new("artist-2"),
+            name: "周杰伦".into(),
+        });
+        assert_eq!(t.artist_names(), "孙燕姿 / 周杰伦");
+        let stub = TrackStub {
+            id: TrackId::new("mid-1"),
+            title: "开始懂了".into(),
+            artists: vec!["孙燕姿".into(), "周杰伦".into()],
+            album: None,
+            duration_ms: None,
+        };
+        assert_eq!(stub.artist_names(), t.artist_names());
     }
 
     #[test]
