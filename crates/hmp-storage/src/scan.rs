@@ -43,7 +43,9 @@ pub fn persist_cover(cover: &[u8]) -> std::io::Result<String> {
     std::fs::create_dir_all(&covers)?;
     let mut hasher = DefaultHasher::new();
     hasher.write(cover);
-    let name = format!("{:016x}.jpg", hasher.finish());
+    // 扩展名按内容而不是一律 .jpg：读侧虽已按 magic 解码，但盘上文件名
+    // 错标会让外部工具（图片查看器/同步盘/用户）按扩展名误判。
+    let name = format!("{:016x}.{}", hasher.finish(), cover_extension(cover));
     let cpath = covers.join(&name);
     if !cpath.exists() {
         // tmp + rename：并发写同一 hash（watcher 与播放解析同时命中新封面）
@@ -54,6 +56,23 @@ pub fn persist_cover(cover: &[u8]) -> std::io::Result<String> {
     }
     write_derived_cover(&covers, &name, cover);
     Ok(format!("file://{}", cpath.display()))
+}
+
+/// 按内容魔数给封面挑扩展名（无法识别时沿用 .jpg，读侧会再按内容解码）。
+fn cover_extension(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpg"
+    } else if bytes.starts_with(b"GIF8") {
+        "gif"
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "webp"
+    } else if bytes.starts_with(b"BM") {
+        "bmp"
+    } else {
+        "jpg"
+    }
 }
 
 /// 派生缩略件写（S9 R2，best-effort）：拼名契约 [`hmp_core::media::derived_cover_name`]
@@ -148,6 +167,23 @@ mod tests {
         unsafe {
             std::env::remove_var("XDG_DATA_HOME");
         }
+    }
+
+    /// 封面盘上扩展名跟内容走：此前一律 `.jpg`，PNG 原图被错标（读侧靠
+    /// magic 解码不受影响，外部工具按扩展名会误判）。
+    #[test]
+    fn persist_cover_extension_follows_content() {
+        let (_lock, _dir, covers) = isolated_covers();
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let uri = persist_cover(&png).unwrap();
+        assert!(uri.ends_with(".png"), "{uri}");
+        let path = std::path::PathBuf::from(uri.strip_prefix("file://").unwrap());
+        assert!(path.exists());
+        assert_eq!(path.parent(), Some(covers.as_path()));
+        let jpg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        let uri = persist_cover(&jpg).unwrap();
+        assert!(uri.ends_with(".jpg"), "{uri}");
+        drop_isolation();
     }
 
     // —— S9 R2 派生缩略件写侧（互锚契约：hmp-core::media::derived_cover_name）——
