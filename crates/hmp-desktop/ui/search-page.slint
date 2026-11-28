@@ -198,6 +198,11 @@ export component SearchPage inherits Rectangle {
                         color: Theme.foreground;
                         vertical-alignment: center;
                         horizontal-stretch: 1;
+                        // 播放页 overlay 是模态焦点陷阱（keynav.slint）：本输入框
+                        // 被全屏层盖住，TextInput 没有 focus-on-tab-navigation
+                        // 可摘（引擎内置项），按「不可交互」禁用——否则 Tab 仍会
+                        // 停到被遮盖的搜索框上。
+                        enabled: !KeyNav.modal-active;
                         // 空关键词：Rust 侧早退不重置状态，前端直接回初始态清掉旧结果
                         accepted => {
                             root.submit();

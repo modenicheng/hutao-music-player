@@ -15,6 +15,9 @@ import { KeyNav } from "keynav.slint";
 import { Player, TrackPalette } from "stores.slint";
 
 export component VolumeControl inherits Rectangle {
+    /** true = 模态层内实例（播放页 overlay）：焦点陷阱期间仍留在 Tab 序 */
+    in property <bool> in-modal: false;
+
     width: 36px;
     height: 36px;
     border-radius: Theme.pill(self.height);
@@ -130,6 +133,7 @@ export component VolumeControl inherits Rectangle {
         icon-touch := KeyTouch {
             ring-radius: Theme.pill(self.height);
             activate-on-click: true;
+            in-modal: root.in-modal;
             Tooltip { text: @markdown("\{root.muted ? "取消静音" : "静音"}"); }
             scroll-event(event) => {
                 return root.wheel-volume(event.delta-y);

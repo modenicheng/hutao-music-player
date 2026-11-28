@@ -62,6 +62,9 @@ export component KeyTouch inherits FocusScope {
     in property <bool> activate-on-click: false;
     /** false = 不进 Tab 链（roving 光标的列表行由列表级 ListKeys 统一停靠） */
     in property <bool> tab-stop: true;
+    /** true = 本控件属于模态层（播放页 overlay / 标题栏窗口钮 / 队列抽屉）：
+        KeyNav.modal-active 期间仍留在 Tab 序（见 keynav.slint 焦点陷阱） */
+    in property <bool> in-modal: false;
     /** 焦点环圆角（默认直角；圆键传 Theme.pill(size)） */
     in property <length> ring-radius: 0px;
     /** 外部强制显示焦点环：roving 光标列表的行内单元格（链接不是 Tab 停靠点，
@@ -69,7 +72,7 @@ export component KeyTouch inherits FocusScope {
     in property <bool> ring-forced: false;
 
     focus-on-click: false;
-    focus-on-tab-navigation: root.tab-stop;
+    focus-on-tab-navigation: root.tab-stop && KeyNav.tab-navigable(root.in-modal);
 
     ta := TouchArea {
         enabled: root.enabled;
@@ -172,9 +175,11 @@ export component ListKeys inherits FocusScope {
     callback step-horizontal(int);
     /** false = 空列表/不可用时退出 Tab 链 */
     in property <bool> available: true;
+    /** true = 模态层内的列表（播放页 overlay / 队列抽屉） */
+    in property <bool> in-modal: false;
 
     focus-on-click: false;
-    focus-on-tab-navigation: root.available;
+    focus-on-tab-navigation: root.available && KeyNav.tab-navigable(root.in-modal);
     enabled: root.available;
 
     // 指针活动退出键盘模式（KeyTouch 同款两段式：让出 + 登记）
@@ -345,6 +350,8 @@ export component TextLink inherits Rectangle {
     in property <bool> context-enabled: false;
     /** 是否进 Tab 链（roving 光标列表的行内链接置 false，行由列表统一停靠） */
     in property <bool> tab-stop: true;
+    /** true = 模态层内的链接（播放页 overlay；见 keynav.slint 焦点陷阱） */
+    in property <bool> in-modal: false;
     /** 外部强制焦点环（列表子光标落在本链接上时） */
     in property <bool> ring-forced: false;
     /** 右键释放：参数 = 相对本链接的 x/y（宿主负责换算回行内坐标） */
@@ -361,6 +368,7 @@ export component TextLink inherits Rectangle {
 
     ta := KeyTouch {
         tab-stop: root.tab-stop;
+        in-modal: root.in-modal;
         ring-forced: root.ring-forced;
         ring-radius: Theme.radius-sm;
         mouse-cursor: pointer;

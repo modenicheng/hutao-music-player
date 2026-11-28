@@ -7,6 +7,9 @@ import { Icons } from "icons.slint";
 import { Player, Quality, TrackPalette } from "stores.slint";
 
 export component QualityBadge inherits Rectangle {
+    /** true = 模态层内实例（播放页 overlay）：焦点陷阱期间仍留在 Tab 序 */
+    in property <bool> in-modal: false;
+
     width: badge-text.preferred-width + 16px;
     height: 22px;
     border-radius: Theme.pill(self.height);
@@ -20,6 +23,7 @@ export component QualityBadge inherits Rectangle {
         mouse-cursor: pointer;
         ring-radius: Theme.pill(self.height);
         activate-on-click: true;
+        in-modal: root.in-modal;
         Tooltip { text: @markdown("音质偏好"); }
         activated => {
             quality-pop.show();

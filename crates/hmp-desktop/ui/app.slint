@@ -168,9 +168,27 @@ export component AppWindow inherits Window {
         changed route-focus-watch => {
             esc-scope.focus();
         }
+        // —— 模态焦点陷阱开关（M7 收口）———
+        // 播放页 overlay 打开期间摘掉被遮盖主界面的 Tab 停靠点（KeyTouch /
+        // ListKeys / TextLink 统一查 KeyNav.tab-navigable），Tab/Shift+Tab 只在
+        // overlay + 标题栏窗口钮（+ 队列表层）之间环绕；关闭后由 PlayerBar
+        // 把焦点交还打开它的「打开播放页」控件。
+        // global 属性只能在命令式代码里赋值：用哨兵 changed 落账（同 Viewport）。
+        property <bool> modal-watch: Player.overlay-visible;
+        changed modal-watch => {
+            KeyNav.modal-active = self.modal-watch;
+        }
+        init => {
+            KeyNav.modal-active = Player.overlay-visible;
+        }
+        // 打开：焦点交还窗口根作用域（overlay 控件随挂载进入 Tab 序，Tab 从
+        // 头到达 overlay 第一站）；关闭：焦点由 PlayerBar 交还打开控件，
+        // 此处不再抢。
         property <bool> overlay-focus-watch: Player.overlay-visible;
         changed overlay-focus-watch => {
-            esc-scope.focus();
+            if (self.overlay-focus-watch) {
+                esc-scope.focus();
+            }
         }
         property <bool> queue-focus-watch: Player.queue-visible;
         changed queue-focus-watch => {

@@ -26,6 +26,19 @@ export global KeyNav {
         （已停在搜索页时组件不重挂载，init 不再触发，需要显式信号） */
     in-out property <int> focus-search-seq: 0;
 
+    /** 模态焦点陷阱开关：true = 只有「模态层」控件留在 Tab 序（播放页
+        overlay 打开期间，由 app.slint 按 Player.overlay-visible 写入）。
+        Tab 遍历由 Slint 引擎按 `focus-on-tab-navigation` 做环绕，语言层
+        没有「拦截 Tab」的原生钩子——摘掉被遮盖层的停靠点是最小侵入面：
+        Tab/Shift+Tab 自然只在剩下的停靠点间循环。 */
+    in-out property <bool> modal-active: false;
+
+    /** 某个控件是否留在 Tab 序：非模态期全部保留；模态期只留 from-modal-layer
+        （overlay 自身 + 标题栏窗口钮 + 队列表层） */
+    public pure function tab-navigable(from-modal-layer: bool) -> bool {
+        return !root.modal-active || from-modal-layer;
+    }
+
     /** 登记一次指针活动（供 .slint 侧调用，如自绘滚动条拖拽的测试入口） */
     public function pointer-activity() {
         root.pointer-seq += 1;

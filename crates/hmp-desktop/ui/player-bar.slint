@@ -16,6 +16,17 @@ import { Player } from "stores.slint";
 export component PlayerBar inherits Rectangle {
     background: transparent;
 
+    // 播放页 overlay 关闭后焦点回打开它的控件（now-touch）。overlay 是模态
+    // 焦点陷阱（keynav.slint）：打开期间焦点被收进 overlay，关闭后不还给
+    // 触发器的话键盘用户会停在窗口根作用域，「回车重开播放页」不可达。
+    // 鼠标开/关也回同一落点——与 M7「弹层关闭回触发控件」同语义。
+    property <bool> overlay-watch: Player.overlay-visible;
+    changed overlay-watch => {
+        if (!self.overlay-watch) {
+            now-touch.focus();
+        }
+    }
+
     // 布局常量（对齐 PlayerBar.vue：2.25rem 控制键 / 2.6rem 主键 / 2.75rem 封面）
     property <length> ctl: 36px;
     property <length> play-ctl: 41.6px;

@@ -35,6 +35,9 @@ component CaptionButton inherits Rectangle {
         : transparent;
 
     btn := KeyTouch {
+        // 标题栏窗口钮「始终可用」的既有设计：播放页 overlay 打开时模态
+        // 焦点陷阱不摘它们（keynav.slint tab-navigable）
+        in-modal: true;
         activate-on-click: true;
         activated => {
             root.clicked();
@@ -125,6 +128,8 @@ export component TitleBar inherits Rectangle {
         mouse-cursor: pointer;
         ring-radius: 0px;
         activate-on-click: true;
+        // 沉浸态收起键：与窗口钮同级，模态焦点陷阱期间仍在 Tab 序
+        in-modal: true;
         Tooltip { text: @markdown("收起播放页（ESC）"); }
         activated => {
             root.collapse-request();

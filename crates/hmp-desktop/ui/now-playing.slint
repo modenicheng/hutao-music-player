@@ -514,6 +514,7 @@ export component NowPlayingOverlay inherits Rectangle {
                                             height: 40px;
                                             y: (parent.height - self.height) / 2;
                                             mouse-cursor: pointer;
+                                            in-modal: true;
                                             ring-radius: Theme.pill(self.height);
                                             activate-on-click: true;
                                             Tooltip { text: @markdown("\{NowPlaying.liked ? "取消喜欢" : "喜欢"}"); }
@@ -545,6 +546,7 @@ export component NowPlayingOverlay inherits Rectangle {
                                     TextLink {
                                         font-size: 16px;
                                         text: Player.artists;
+                                        in-modal: true;
                                         clicked => {
                                             Nav.go(Route.artist, (Player.artist-mid != "" ? Player.artist-mid : Player.artists));
                                             Player.hide-overlay();
@@ -553,6 +555,7 @@ export component NowPlayingOverlay inherits Rectangle {
                                     if Player.album != "": TextLink {
                                         font-size: 14px;
                                         text: Player.album;
+                                        in-modal: true;
                                         clicked => {
                                             Nav.go(Route.album, (Player.album-mid != "" ? Player.album-mid : Player.album));
                                             Player.hide-overlay();
@@ -685,6 +688,7 @@ export component NowPlayingOverlay inherits Rectangle {
                                         width: tab-text.preferred-width;
                                         height: 30px;
                                         mouse-cursor: pointer;
+                                        in-modal: true;
                                         ring-radius: Theme.pill(self.height);
                                         activate-on-click: true;
                                         activated => {
@@ -984,6 +988,7 @@ export component NowPlayingOverlay inherits Rectangle {
                             width: parent.width;
                             height: parent.height;
                             mouse-cursor: pointer;
+                            in-modal: true;
                             ring-radius: Theme.radius-md;
                             activatable: false;
                             // 方向键微调（对齐 Vue RulerProgress：±2%）；空格不在此
@@ -1030,9 +1035,11 @@ export component NowPlayingOverlay inherits Rectangle {
 
                         QualityBadge {
                             y: (parent.height - self.height) / 2;
+                            in-modal: true;
                         }
                         VolumeControl {
                             y: (parent.height - self.height) / 2;
+                            in-modal: true;
                         }
                     }
 
@@ -1049,6 +1056,7 @@ export component NowPlayingOverlay inherits Rectangle {
                             height: 36px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
+                            in-modal: true;
                             ring-radius: Theme.pill(self.height);
                             activate-on-click: true;
                             Tooltip { text: @markdown("\{Player.shuffle ? "随机播放：开" : "随机播放：关"}"); }
@@ -1088,6 +1096,7 @@ export component NowPlayingOverlay inherits Rectangle {
                             y: (parent.height - self.height) / 2;
                             enabled: Player.can-previous;
                             mouse-cursor: pointer;
+                            in-modal: true;
                             ring-radius: Theme.pill(self.height);
                             activate-on-click: true;
                             Tooltip { text: @markdown("上一曲"); }
@@ -1121,6 +1130,7 @@ export component NowPlayingOverlay inherits Rectangle {
                             height: 48px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
+                            in-modal: true;
                             ring-radius: Theme.pill(self.height);
                             activate-on-click: true;
                             Tooltip { text: @markdown("\{Player.playing ? "暂停" : "播放"}（空格）"); }
@@ -1153,6 +1163,7 @@ export component NowPlayingOverlay inherits Rectangle {
                             y: (parent.height - self.height) / 2;
                             enabled: Player.can-next;
                             mouse-cursor: pointer;
+                            in-modal: true;
                             ring-radius: Theme.pill(self.height);
                             activate-on-click: true;
                             Tooltip { text: @markdown("下一曲"); }
@@ -1187,6 +1198,7 @@ export component NowPlayingOverlay inherits Rectangle {
                             height: 36px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
+                            in-modal: true;
                             ring-radius: Theme.pill(self.height);
                             activate-on-click: true;
                             Tooltip {
@@ -1234,6 +1246,7 @@ export component NowPlayingOverlay inherits Rectangle {
                             height: 36px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
+                            in-modal: true;
                             ring-radius: Theme.pill(self.height);
                             activate-on-click: true;
                             Tooltip { text: @markdown("\{slide.in-comments ? "返回歌词" : "查看评论"}"); }
@@ -1266,6 +1279,7 @@ export component NowPlayingOverlay inherits Rectangle {
                             height: 36px;
                             y: (parent.height - self.height) / 2;
                             mouse-cursor: pointer;
+                            in-modal: true;
                             ring-radius: Theme.pill(self.height);
                             activate-on-click: true;
                             Tooltip { text: @markdown("播放列表"); }
