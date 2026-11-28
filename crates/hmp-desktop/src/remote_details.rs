@@ -8,10 +8,11 @@
 //! `SEARCH_GENERATION` 先例）：快速导航 A→B 时 A 的迟到回包按代数丢弃
 //! （R4），防旧数据覆盖新页。
 //!
-//! 本地投影路径不受影响：本地参数（歌单=DB id、专辑/歌手=展示名）不含
-//! `qq:` 前缀，`bridge::load_detail` 原样处理；远端参数在本地 miss 后才
-//! 分流到本模块（本地事实优先，R3）。库变更重放（schedule_refresh）对
-//! 远端参数返回 `DetailData::None` no-op，远端页面数据不被误清（D-1）。
+//! 本地投影路径不受影响：本地参数（歌单=DB id、专辑/歌手=实体 id
+//! `album:<id>`/`artist:<id>` 或裸展示名）不含 `qq:` 前缀，`bridge::load_detail`
+//! 原样处理；远端参数在本地 miss 后才分流到本模块（本地事实优先，R3）。
+//! 库变更重放（schedule_refresh）对远端参数返回 `DetailData::None` no-op，
+//! 远端页面数据不被误清（D-1）。
 
 use std::cell::Cell;
 use std::sync::Arc;

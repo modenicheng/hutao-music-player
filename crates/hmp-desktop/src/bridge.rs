@@ -98,6 +98,19 @@ fn path_basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// 歌手页专辑卡：`mid` 即导航参数（`album:<id>`；历史行回退专辑名），
+/// 卡片点击按实体 id 进专辑页（同名另一实体不混入）。
+fn artist_album_card(album: &library_view::ArtistAlbum) -> CoverCardData {
+    CoverCardData {
+        mid: album.param.clone().into(),
+        title: album.name.clone().into(),
+        subtitle: format!("{} · {} 首", album.year_text, album.track_count).into(),
+        // 真封面优先（与专辑页同源），缺失回退程序化封面
+        cover: local_cover_image(album.cover_uri.as_deref())
+            .unwrap_or_else(|| cover_image(&format!("album:{}", album.name))),
+    }
+}
+
 /// UI 音质档（0=标准 1=高清 2=无损 3=Hi-Res）→ config 别名（写路径）。
 /// Hi-Res 档映射 `hires`：resolver 对 hires/master 请求同一 MASTER 文件
 /// 类型（上游无独立 Hi-Res 档，见 daemon player.rs 映射注释）。
@@ -140,18 +153,9 @@ fn search_track_row(song: &hmp_core::SearchSong) -> TrackRow {
 }
 
 /// 发现页/榜单/猜你喜欢共用曲目行（DiscoverNewSong 投影；有专辑与时长）。
+/// 行内歌手/专辑链接带 `qq:<mid>`（D-5）：与远端详情页同一套导航参数。
 fn discover_track_row(s: &hmp_core::DiscoverNewSong) -> TrackRow {
-    TrackRow {
-        mid: s.mid.as_str().into(),
-        source: 0,
-        title: s.name.as_str().into(),
-        artists: s.singer.as_str().into(),
-        artist_mid: "".into(),
-        album: s.album.as_str().into(),
-        album_mid: "".into(),
-        duration_ms: (s.interval * 1000) as i32,
-        quality: "".into(),
-    }
+    crate::remote_details::remote_track_row(s)
 }
 
 /// 搜索专辑卡（SearchAlbum → CoverCardData；C6）。mid 带 `qq:` 前缀——
@@ -1053,14 +1057,7 @@ fn apply_detail(
                 detail
                     .albums
                     .iter()
-                    .map(|album| CoverCardData {
-                        mid: album.name.clone().into(),
-                        title: album.name.clone().into(),
-                        subtitle: format!("{} · {} 首", album.year_text, album.track_count).into(),
-                        // 真封面优先（与专辑页同源），缺失回退程序化封面
-                        cover: local_cover_image(album.cover_uri.as_deref())
-                            .unwrap_or_else(|| cover_image(&format!("album:{}", album.name))),
-                    })
+                    .map(artist_album_card)
                     .collect::<Vec<_>>(),
             ));
         }
@@ -1730,6 +1727,40 @@ mod tests {
             load_detail(crate::Route::Artist, "周杰伦", true),
             DetailData::Artist(_)
         ));
+        // 本地实体 id 参数（§30.2.6 phase 2b）不能被 qq: 分流误判：形态保持，
+        // 交由 library_view 按 id 查（offline 下不读库，只锚定分流语义）。
+        assert!(crate::remote_details::remote_param("album:7").is_none());
+        assert!(crate::remote_details::remote_param("artist:7").is_none());
+        assert!(matches!(
+            load_detail(crate::Route::Album, "album:7", true),
+            DetailData::Album(_)
+        ));
+        assert!(matches!(
+            load_detail(crate::Route::Artist, "artist:7", true),
+            DetailData::Artist(_)
+        ));
+    }
+
+    /// 歌手页专辑卡：`mid` 即导航参数，实体 id 优先、历史行回退专辑名。
+    #[test]
+    fn artist_album_cards_navigate_by_entity_param() {
+        let album = library_view::ArtistAlbum {
+            name: "十一月的萧邦".into(),
+            param: "album:7".into(),
+            year_text: "2005".into(),
+            track_count: 12,
+            cover_uri: None,
+        };
+        let card = artist_album_card(&album);
+        assert_eq!(card.mid.as_str(), "album:7");
+        assert_eq!(card.title.as_str(), "十一月的萧邦");
+        assert_eq!(card.subtitle.as_str(), "2005 · 12 首");
+
+        let legacy = library_view::ArtistAlbum {
+            param: "十一月的萧邦".into(),
+            ..album
+        };
+        assert_eq!(artist_album_card(&legacy).mid.as_str(), "十一月的萧邦");
     }
 
     /// M1 验收：推荐卡 mid（qq: 前缀形态）↔ 封面旁路表键一致——卡片构造与
@@ -1857,6 +1888,10 @@ mod tests {
                 title: title.into(),
                 artists: "歌手".into(),
                 album: "专辑".into(),
+                artist_id: 0,
+                album_id: 0,
+                artist_mid: None,
+                album_mid: None,
                 duration_ms: 0,
                 quality: String::new(),
                 cover_uri: None,
@@ -1888,6 +1923,10 @@ mod tests {
             title: mid.into(),
             artists: String::new(),
             album: String::new(),
+            artist_id: 0,
+            album_id: 0,
+            artist_mid: None,
+            album_mid: None,
             duration_ms: 0,
             quality: String::new(),
             cover_uri: None,

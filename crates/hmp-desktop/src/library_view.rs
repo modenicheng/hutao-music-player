@@ -13,6 +13,15 @@
 //! - 本地行 cover_uri 只能经 `library_albums` 按专辑取（行级列未暴露）；
 //! - local_files 的 file_size/format/mtime 列无读 API → 容量按现文件 stat 聚合，
 //!   格式取源键路径扩展名（与 local_files.format 同源），last_scan 诚实显示 "—"。
+//!
+//! 导航身份（§30.2.6 phase 2b）：行上 `artist_id`/`album_id`（本地实体）与
+//! `artist_mid`/`album_mid`（QQ）由 `SongRow::to_track_row` 生成
+//! `artist:<id>` / `album:<id>` / `qq:<mid>` 参数；实体缺失回退裸展示名
+//! （旧按名路径）。存储读投影 `LibraryTrackRow` 目前不带行级实体 id/mid：
+//! 本地行经 `library_artists`/`library_albums` 的名称索引反查实体，
+//! QQ 行经 `track_artists`/`album_mid` 逐行取 mid。同名专辑的另一实体、
+//! 多歌手展示串里的非首位歌手在索引层无法唯一对应时按契约回退展示名——
+//! 待存储读接口补行级列后换成直接投影（报告里的接口缺口）。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -49,6 +58,15 @@ pub struct SongRow {
     /// 展示串（多人合唱以 " / " 连接；当前投影为单主艺术家）。
     pub artists: String,
     pub album: String,
+    /// 歌手实体 id（本地行；0 = 无实体/QQ 行）。导航参数 `artist:<id>`。
+    pub artist_id: i64,
+    /// 专辑实体 id（本地行；0 = 无实体/QQ 行）。导航参数 `album:<id>`。
+    pub album_id: i64,
+    /// QQ 歌手 mid（QQ 行取 `track_artists.artist_mid`；本地行取实体登记的
+    /// QQ mid）。导航参数 `qq:<mid>`。
+    pub artist_mid: Option<String>,
+    /// QQ 专辑 mid（QQ 行取 `tracks.album_mid`；本地行取实体登记的 QQ mid）。
+    pub album_mid: Option<String>,
     pub duration_ms: i32,
     /// 音质徽章文案；无损以下为空（对齐 mock 纪律）。
     pub quality: String,
@@ -156,14 +174,14 @@ fn with_db<T>(read: impl FnOnce(&mut LibraryDb) -> Option<T>) -> Option<T> {
 /// 单次投影：全部读查询走同一连接（进程内单连接 + WAL 跨进程并发读）。
 /// 任一查询失败 → None（调用方降级全空；不部分渲染，避免页间口径漂移）。
 fn read_snapshot(db: &mut LibraryDb) -> Option<Snapshot> {
-    let album_covers = album_cover_map(db)?;
+    let entities = LibraryEntities::build(db)?;
     let roots = db.scan_roots().ok()?;
     let local_rows_vec = db.library_tracks(None, None, None, false).ok()?;
     let local_by_key = index_by_key(&local_rows_vec);
 
-    let liked = liked_rows(db, &album_covers, &local_by_key)?;
-    let (recent, recent_latest, recent_earliest) = recent_rows(db, &local_by_key, &album_covers)?;
-    let (local_tracks, folders) = local_rows(&local_rows_vec, &album_covers, &roots)?;
+    let liked = liked_rows(db, &entities, &local_by_key)?;
+    let (recent, recent_latest, recent_earliest) = recent_rows(db, &entities, &local_by_key)?;
+    let (local_tracks, folders) = local_rows(db, &local_rows_vec, &entities, &roots)?;
     let (created, favorited) = playlist_entries(db)?;
 
     let total_ms: u64 = local_tracks
@@ -200,45 +218,190 @@ pub fn load_recent() -> Option<(Vec<SongRow>, String, String)> {
 }
 
 /// 最近播放页投影：与快照同一口径（`recent_rows`），本地行补全所需的
-/// 专辑封面表与曲目表在此单独取一次。
+/// 实体索引与曲目表在此单独取一次。
 fn read_recent(db: &mut LibraryDb) -> Option<(Vec<SongRow>, String, String)> {
-    let album_covers = album_cover_map(db)?;
+    let entities = LibraryEntities::build(db)?;
     let local_by_key = index_by_key(&db.library_tracks(None, None, None, false).ok()?);
-    recent_rows(db, &local_by_key, &album_covers)
+    recent_rows(db, &entities, &local_by_key)
 }
 
 // ————————————————————————————————————————————————————————————
 // 各页投影
 // ————————————————————————————————————————————————————————————
 
-/// 专辑名 → 封面 URI（`library_albums` 的 MAX(cover_uri)；扫描为整专辑提取
-/// 同源内嵌图，专辑级封面即行级封面的忠实代理）。
-fn album_cover_map(db: &mut LibraryDb) -> Option<HashMap<String, String>> {
-    Some(
-        db.library_albums(None)
-            .ok()?
-            .into_iter()
-            .filter_map(|a| a.cover_uri.map(|uri| (a.album, uri)))
-            .collect(),
-    )
+/// 专辑实体索引（`library_albums` 单次查询的投影）：封面 / 行级实体反查 /
+/// 同名歧义判定。同名不同专辑歌手在库里是两个实体；行上只有展示串，
+/// 因此只在 (标题, 展示歌手) 唯一或标题唯一时反查，否则诚实回退裸名。
+#[derive(Clone, Debug, Default)]
+struct AlbumIndex {
+    /// `library_albums` 原序组行（同名按 SQL 名序；详情按 id 取）。
+    groups: Vec<AlbumGroup>,
+    /// 标题 → 封面 URI（专辑级封面；扫描为整专辑提取同源内嵌图）。
+    covers: HashMap<String, String>,
+    /// (标题小写, 专辑歌手小写) → 实体 id（0 号历史直插行不入索引）。
+    ids_by_key: HashMap<(String, String), i64>,
+    /// 标题小写 → 该标题下的实体 id（同名歧义判定用）。
+    ids_by_title: HashMap<String, Vec<i64>>,
+    /// 实体 id → `groups` 下标。
+    by_id: HashMap<i64, usize>,
+}
+
+impl AlbumIndex {
+    fn build(db: &mut LibraryDb) -> Option<Self> {
+        let groups = db.library_albums(None).ok()?;
+        let mut index = Self::default();
+        for (i, group) in groups.iter().enumerate() {
+            if let Some(uri) = group.cover_uri.as_ref() {
+                // 同名专辑沿用旧 `album_cover_map` 的 collect 口径（后写覆盖）。
+                index.covers.insert(group.album.clone(), uri.clone());
+            }
+            if group.id <= 0 {
+                continue;
+            }
+            index.by_id.insert(group.id, i);
+            let title = group.album.trim().to_lowercase();
+            index
+                .ids_by_title
+                .entry(title.clone())
+                .or_default()
+                .push(group.id);
+            let artist = group
+                .artist
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase();
+            index.ids_by_key.insert((title, artist), group.id);
+        }
+        index.groups = groups;
+        Some(index)
+    }
+
+    fn group_by_id(&self, id: i64) -> Option<&AlbumGroup> {
+        self.by_id.get(&id).and_then(|i| self.groups.get(*i))
+    }
+
+    /// 本地行 → 专辑实体：先 (标题, 展示歌手) 精确命中，再同名唯一兜底；
+    /// 同名多实体且展示串对不上 → None（调用方回退裸名旧路径）。
+    fn for_row(&self, album: &str, artist: &str) -> Option<&AlbumGroup> {
+        let title = album.trim().to_lowercase();
+        let artist = artist.trim().to_lowercase();
+        if let Some(id) = self.ids_by_key.get(&(title.clone(), artist)) {
+            return self.group_by_id(*id);
+        }
+        match self.ids_by_title.get(&title)?.as_slice() {
+            [id] => self.group_by_id(*id),
+            _ => None,
+        }
+    }
+
+    fn cover(&self, album: &str) -> Option<String> {
+        self.covers.get(album).cloned()
+    }
+}
+
+/// 库内实体索引（本地行导航 id 反查）：歌手名与专辑组行。
+#[derive(Clone, Debug, Default)]
+struct LibraryEntities {
+    /// 歌手名小写 → (实体 id, 实体登记的 QQ mid)。
+    artists: HashMap<String, (i64, Option<String>)>,
+    albums: AlbumIndex,
+}
+
+impl LibraryEntities {
+    fn build(db: &mut LibraryDb) -> Option<Self> {
+        let mut artists = HashMap::new();
+        for group in db.library_artists().ok()? {
+            if group.id > 0 {
+                artists
+                    .entry(group.artist.trim().to_lowercase())
+                    .or_insert((group.id, group.artist_mid));
+            }
+        }
+        Some(Self {
+            artists,
+            albums: AlbumIndex::build(db)?,
+        })
+    }
+
+    /// 本地行展示歌手 → 歌手实体：整串优先（单歌手标签），否则取 `" / "`
+    /// 连接的第一位（与写入侧 `join_artist_names` 同分隔符）；多歌手行
+    /// 的链接统一指向主歌手（PORTING.md 决策 5）。
+    fn artist_for(&self, display: &str) -> Option<(i64, Option<String>)> {
+        let display = display.trim();
+        if display.is_empty() {
+            return None;
+        }
+        if let Some(entity) = self.artists.get(&display.to_lowercase()) {
+            return Some(entity.clone());
+        }
+        let first = display.split(" / ").next()?.trim();
+        self.artists.get(&first.to_lowercase()).cloned()
+    }
+}
+
+/// 行级实体导航投影（本地实体 id 与 QQ mid 同一载体，构造 SongRow 用）。
+#[derive(Clone, Debug, Default)]
+struct SongEntities {
+    artist_id: i64,
+    album_id: i64,
+    artist_mid: Option<String>,
+    album_mid: Option<String>,
+}
+
+/// QQ 行 → (歌手 mid, 专辑 mid)：`track_artists` / `tracks.album_mid` 是
+/// 存储层仅有的行级 mid 读口（`TrackMeta` 不含 mid）。页面行数有限
+/// （收藏/最近播放/歌单详情），逐行两次索引查询。
+fn qq_entity_map(
+    db: &mut LibraryDb,
+    track_ids: impl IntoIterator<Item = i64>,
+) -> HashMap<i64, SongEntities> {
+    track_ids
+        .into_iter()
+        .map(|track_id| {
+            let artist_mid = db.track_artists(track_id).ok().and_then(|refs| {
+                refs.into_iter()
+                    .find_map(|artist| artist.mid.filter(|mid| !mid.trim().is_empty()))
+            });
+            let album_mid = db
+                .album_mid(track_id)
+                .ok()
+                .flatten()
+                .filter(|mid| !mid.trim().is_empty());
+            (
+                track_id,
+                SongEntities {
+                    artist_mid,
+                    album_mid,
+                    ..SongEntities::default()
+                },
+            )
+        })
+        .collect()
 }
 
 /// 我喜欢：`list_favorites`（本地事实视图，新→旧）为权威序；
 /// 本地行经全量本地曲目表补全元数据，QQ 行经 `track_meta_batch` 补全歌手/专辑。
 fn liked_rows(
     db: &mut LibraryDb,
-    album_covers: &HashMap<String, String>,
+    entities: &LibraryEntities,
     local_by_key: &HashMap<String, LibraryTrackRow>,
 ) -> Option<Vec<SongRow>> {
     let favs = db.list_favorites(LIKED_LIMIT).ok()?;
     let qq_meta = qq_meta_map(db, favs.iter().map(|f| f.source_key.clone()).collect());
+    let qq_entities = qq_entity_map(
+        db,
+        favs.iter()
+            .filter(|f| f.source != "local")
+            .map(|f| f.track_id),
+    );
 
     Some(
         favs.into_iter()
             .map(|f| match f.source.as_str() {
                 "local" => match local_by_key.get(f.source_key.as_str()) {
                     // 与详情投影共用口径（时长/音质/封面按专辑聚合）
-                    Some(t) => song_row_from_local(t, album_covers),
+                    Some(t) => song_row_from_local(db, t, entities),
                     // 收藏先于扫描入库（无 local_files 行）：稀疏行诚实展示。
                     None => SongRow {
                         mid: f.source_key.clone(),
@@ -246,6 +409,10 @@ fn liked_rows(
                         title: f.title,
                         artists: String::new(),
                         album: String::new(),
+                        artist_id: 0,
+                        album_id: 0,
+                        artist_mid: None,
+                        album_mid: None,
                         duration_ms: 0,
                         quality: quality_text(format_of_key(&f.source_key)),
                         cover_uri: None,
@@ -255,7 +422,12 @@ fn liked_rows(
                 },
                 // QQ 行：时长/歌手/专辑/封面走 track_meta_batch 库内缓存
                 // （远程封面 URL 交预取器，见 song_row_from_qq）。
-                _ => song_row_from_qq(&f.source_key, f.title, qq_meta.get(f.source_key.as_str())),
+                _ => song_row_from_qq(
+                    &f.source_key,
+                    f.title,
+                    qq_meta.get(f.source_key.as_str()),
+                    qq_entities.get(&f.track_id).cloned().unwrap_or_default(),
+                ),
             })
             .collect(),
     )
@@ -267,8 +439,8 @@ fn liked_rows(
 /// QQ 行经 `track_meta_batch` 补全歌手/专辑（与我喜欢页同口径，mid 可直接回放）。
 fn recent_rows(
     db: &mut LibraryDb,
+    entities: &LibraryEntities,
     local_by_key: &HashMap<String, LibraryTrackRow>,
-    album_covers: &HashMap<String, String>,
 ) -> Option<(Vec<SongRow>, String, String)> {
     let plays = db.recent_tracks(RECENT_LIMIT).ok()?;
     if plays.is_empty() {
@@ -281,27 +453,28 @@ fn recent_rows(
     let latest = format_stamp(plays.first().map(|p| p.started_at).unwrap_or_default());
     let earliest = format_stamp(plays.last().map(|p| p.started_at).unwrap_or_default());
     let qq_meta = qq_meta_map(db, plays.iter().map(|p| p.source_key.clone()).collect());
+    let qq_entities = qq_entity_map(
+        db,
+        plays
+            .iter()
+            .filter(|p| p.source != "local")
+            .map(|p| p.track_id),
+    );
     let rows = plays
         .into_iter()
         .map(|play| match play.source.as_str() {
             "local" => {
                 let key = play.source_key;
                 match local_by_key.get(key.as_str()) {
-                    Some(t) => SongRow {
-                        mid: key,
-                        source: 1,
-                        title: play.title,
-                        artists: play.artist.unwrap_or_default(),
-                        album: t.album.clone().unwrap_or_default(),
-                        duration_ms: t.duration_ms.unwrap_or(0) as i32,
-                        quality: quality_text(format_of_key(&t.source_key)),
-                        cover_uri: t
-                            .album
-                            .as_deref()
-                            .and_then(|album| album_covers.get(album).cloned()),
-                        remote_cover: None,
-                        folder: None,
-                    },
+                    Some(t) => {
+                        // 展示名沿用播放记录（历史行可能带旧标签），实体 id /
+                        // 封面 / 时长仍按曲目行投影（与详情页同口径）。
+                        let mut row = song_row_from_local(db, t, entities);
+                        row.mid = key;
+                        row.title = play.title;
+                        row.artists = play.artist.unwrap_or_default();
+                        row
+                    }
                     None => {
                         let quality = quality_text(format_of_key(&key));
                         SongRow {
@@ -310,6 +483,10 @@ fn recent_rows(
                             title: play.title,
                             artists: play.artist.unwrap_or_default(),
                             album: String::new(),
+                            artist_id: 0,
+                            album_id: 0,
+                            artist_mid: None,
+                            album_mid: None,
                             duration_ms: 0,
                             quality,
                             cover_uri: None,
@@ -325,6 +502,7 @@ fn recent_rows(
                 &play.source_key,
                 play.title,
                 qq_meta.get(play.source_key.as_str()),
+                qq_entities.get(&play.track_id).cloned().unwrap_or_default(),
             ),
         })
         .collect();
@@ -334,8 +512,9 @@ fn recent_rows(
 /// 音乐库：全部本地曲目行（library_tracks ORDER BY title）+ 按扫描根前缀
 /// 分组的文件夹统计（嵌套根取最长前缀，与 `scan_root_for` 同语义）。
 fn local_rows(
+    db: &mut LibraryDb,
     rows: &[LibraryTrackRow],
-    album_covers: &HashMap<String, String>,
+    entities: &LibraryEntities,
     roots: &[String],
 ) -> Option<(Vec<SongRow>, Vec<FolderStat>)> {
     // 根序 = scan_roots 的 id 序（注册序），稳定展示。
@@ -352,21 +531,9 @@ fn local_rows(
                 // DB file_size 列无读 API → stat 现文件（缺失/离线盘贡献 0）。
                 sizes[i] += std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
             }
-            SongRow {
-                mid: t.source_key.clone(),
-                source: 1,
-                title: t.title.clone(),
-                artists: t.artist.clone().unwrap_or_default(),
-                album: t.album.clone().unwrap_or_default(),
-                duration_ms: t.duration_ms.unwrap_or(0) as i32,
-                quality: quality_text(format_of_key(&t.source_key)),
-                cover_uri: t
-                    .album
-                    .as_deref()
-                    .and_then(|album| album_covers.get(album).cloned()),
-                remote_cover: None,
-                folder: root_idx.map(|i| roots[i].clone()),
-            }
+            let mut row = song_row_from_local(db, t, entities);
+            row.folder = root_idx.map(|i| roots[i].clone());
+            row
         })
         .collect();
     let folders = roots
@@ -439,6 +606,8 @@ pub struct AlbumDetail {
 #[derive(Clone, Debug)]
 pub struct ArtistAlbum {
     pub name: String,
+    /// 专辑卡导航参数：`album:<id>`；历史行（无实体）回退专辑名旧路径。
+    pub param: String,
     pub year_text: String,
     pub track_count: i32,
     pub cover_uri: Option<String>,
@@ -468,14 +637,20 @@ fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
         .map(|p| (p.name, p.cover_uri, p.relation))?;
     let rows = db.playlist_tracks(id).ok()?;
     let local_by_key = local_track_map(db)?;
-    let album_covers = album_cover_map(db)?;
+    let entities = LibraryEntities::build(db)?;
     let qq_meta = qq_meta_map(db, rows.iter().map(|r| r.source_key.clone()).collect());
+    let qq_entities = qq_entity_map(
+        db,
+        rows.iter()
+            .filter(|r| !r.source_key.starts_with("local:"))
+            .map(|r| r.track_id),
+    );
 
     let tracks: Vec<SongRow> = rows
         .iter()
         .map(|row| match row.source_key.strip_prefix("local:") {
             Some(_) => match local_by_key.get(row.source_key.as_str()) {
-                Some(t) => song_row_from_local(t, &album_covers),
+                Some(t) => song_row_from_local(db, t, &entities),
                 // 本地曲目已被移出扫描（收藏/歌单行仍在）：稀疏行诚实展示。
                 None => SongRow {
                     mid: row.source_key.clone(),
@@ -483,6 +658,10 @@ fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
                     title: row.title.clone(),
                     artists: String::new(),
                     album: String::new(),
+                    artist_id: 0,
+                    album_id: 0,
+                    artist_mid: None,
+                    album_mid: None,
                     duration_ms: 0,
                     quality: quality_text(format_of_key(&row.source_key)),
                     cover_uri: None,
@@ -494,6 +673,7 @@ fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
                 &row.source_key,
                 row.title.clone(),
                 qq_meta.get(&row.source_key),
+                qq_entities.get(&row.track_id).cloned().unwrap_or_default(),
             ),
         })
         .collect();
@@ -507,29 +687,50 @@ fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
     })
 }
 
-/// 专辑详情：按专辑名（大小写不敏感精确）取本地曲目（track_number 序）；
-/// 头部元数据（主歌手/年份/封面）取 `library_albums` 组行。
-pub fn album_detail(name: &str) -> Option<AlbumDetail> {
-    with_db(|db| album_detail_from(db, name))
+/// 本地实体导航参数前缀（`Nav.param` 契约，§30.2.6 phase 2b）。
+pub const ARTIST_PARAM_PREFIX: &str = "artist:";
+/// 专辑实体导航参数前缀（同上）。
+pub const ALBUM_PARAM_PREFIX: &str = "album:";
+
+/// `artist:<id>` / `album:<id>` → 实体 id；前缀不符或 id 非正整数 → None
+/// （走旧按名路径——展示名不能被误判成实体参数）。
+fn entity_id_param(param: &str, prefix: &str) -> Option<i64> {
+    param
+        .strip_prefix(prefix)?
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0)
 }
 
-fn album_detail_from(db: &mut LibraryDb, name: &str) -> Option<AlbumDetail> {
-    // search 是子串过滤：组行须再按名精确（NOCASE）命中，避免"Love Story"
-    // 命中 "Love Stories"。
-    let group = db
-        .library_albums(Some(name))
-        .ok()?
-        .into_iter()
-        .find(|a| a.album.eq_ignore_ascii_case(name))?;
-    let track_rows = db.local_tracks_by_album(name).ok()?;
-    let mut album_covers = HashMap::new();
-    if let Some(uri) = group.cover_uri.clone() {
-        album_covers.insert(group.album.clone(), uri);
+/// 专辑详情：`album:<id>` 按实体 id（同名另一实体不混入）；否则按专辑名
+/// （大小写不敏感精确）走旧路径。头部元数据（主歌手/年份/封面）取组行。
+pub fn album_detail(param: &str) -> Option<AlbumDetail> {
+    with_db(|db| album_detail_from(db, param))
+}
+
+fn album_detail_from(db: &mut LibraryDb, param: &str) -> Option<AlbumDetail> {
+    if let Some(album_id) = entity_id_param(param, ALBUM_PARAM_PREFIX) {
+        return album_detail_by_id(db, album_id);
     }
-    let tracks: Vec<SongRow> = track_rows
+    let entities = LibraryEntities::build(db)?;
+    // 组行按专辑名精确（NOCASE）命中，避免"Love Story"命中"Love Stories"。
+    let group = entities
+        .albums
+        .groups
         .iter()
-        .map(|t| song_row_from_local(t, &album_covers))
+        .find(|a| a.album.eq_ignore_ascii_case(param))?
+        .clone();
+    let track_rows = db.local_tracks_by_album(param).ok()?;
+    let mut tracks: Vec<SongRow> = track_rows
+        .iter()
+        .map(|t| song_row_from_local(db, t, &entities))
         .collect();
+    // 旧口径：同名专辑的行共用组行封面（行级封面列未暴露）。
+    if let Some(uri) = group.cover_uri.as_ref() {
+        for row in &mut tracks {
+            row.cover_uri = Some(uri.clone());
+        }
+    }
     let total_ms: u64 = tracks.iter().map(|r| r.duration_ms.max(0) as u64).sum();
     Some(AlbumDetail {
         name: group.album,
@@ -541,14 +742,55 @@ fn album_detail_from(db: &mut LibraryDb, name: &str) -> Option<AlbumDetail> {
     })
 }
 
-/// 歌手详情：曲目按 track_artists 精确名命中；入参是曲目行展示串（主歌手
-/// 原始标签，可能含分隔符），与库内歌手名不一致时按最长包含匹配归一。
+/// 按实体 id 取专辑详情（`album_tracks_by_id` 只回该实体曲目）。
+/// 实体存在但本地无曲目（QQ-only 实体）→ None（诚实 miss，不伪造空页）。
+fn album_detail_by_id(db: &mut LibraryDb, album_id: i64) -> Option<AlbumDetail> {
+    let entity = db.album_by_id(album_id).ok()??;
+    let track_rows = db.album_tracks_by_id(album_id).ok()?;
+    if track_rows.is_empty() {
+        return None;
+    }
+    let entities = LibraryEntities::build(db)?;
+    let cover_uri = entities
+        .albums
+        .group_by_id(album_id)
+        .and_then(|group| group.cover_uri.clone());
+    let mut tracks: Vec<SongRow> = track_rows
+        .iter()
+        .map(|t| song_row_from_local(db, t, &entities))
+        .collect();
+    if let Some(uri) = cover_uri.as_ref() {
+        for row in &mut tracks {
+            row.cover_uri = Some(uri.clone());
+        }
+    }
+    let total_ms: u64 = tracks.iter().map(|r| r.duration_ms.max(0) as u64).sum();
+    Some(AlbumDetail {
+        name: entity.title,
+        artist: entity.album_artist,
+        year: entity.year,
+        cover_uri,
+        tracks,
+        total_ms,
+    })
+}
+
+/// 歌手详情：`artist:<id>` 按实体 id（同名实体不混入，也不走"最长包含
+/// 匹配"）；否则按旧展示名路径（曲目行展示串可能含分隔符，归一到库内名）。
 /// 专辑 = 该歌手曲目出现过的专辑（组行提供年份/封面/全碟曲目数）。
-pub fn artist_detail(name: &str) -> Option<ArtistDetail> {
-    with_db(|db| artist_detail_from(db, name))
+pub fn artist_detail(param: &str) -> Option<ArtistDetail> {
+    with_db(|db| artist_detail_from(db, param))
 }
 
 fn artist_detail_from(db: &mut LibraryDb, param: &str) -> Option<ArtistDetail> {
+    if let Some(artist_id) = entity_id_param(param, ARTIST_PARAM_PREFIX) {
+        let entity = db.artist_by_id(artist_id).ok()??;
+        let tracks = db.artist_tracks_by_id(artist_id).ok()?;
+        if tracks.is_empty() {
+            return None;
+        }
+        return artist_detail_from_rows(db, entity.name, tracks);
+    }
     if param.is_empty() {
         return None;
     }
@@ -573,14 +815,16 @@ fn artist_detail_from(db: &mut LibraryDb, param: &str) -> Option<ArtistDetail> {
     if tracks.is_empty() {
         return None;
     }
+    artist_detail_from_rows(db, name, tracks)
+}
 
-    let album_covers = album_cover_map(db)?;
-    let groups: HashMap<String, AlbumGroup> = db
-        .library_albums(None)
-        .ok()?
-        .into_iter()
-        .map(|g| (g.album.clone(), g))
-        .collect();
+/// 歌手详情的共用投影（按名/按 id 两条路径同口径）。
+fn artist_detail_from_rows(
+    db: &mut LibraryDb,
+    name: String,
+    tracks: Vec<LibraryTrackRow>,
+) -> Option<ArtistDetail> {
+    let entities = LibraryEntities::build(db)?;
     let mut albums: Vec<ArtistAlbum> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for t in &tracks {
@@ -590,14 +834,22 @@ fn artist_detail_from(db: &mut LibraryDb, param: &str) -> Option<ArtistDetail> {
         if !seen.insert(album.to_string()) {
             continue;
         }
-        if let Some(g) = groups.get(album) {
-            albums.push(ArtistAlbum {
-                name: g.album.clone(),
-                year_text: g.year.map(|y| y.to_string()).unwrap_or_else(|| "—".into()),
-                track_count: g.track_count as i32,
-                cover_uri: g.cover_uri.clone(),
-            });
-        }
+        let Some(group) = entities
+            .albums
+            .for_row(album, t.artist.as_deref().unwrap_or_default())
+        else {
+            continue;
+        };
+        albums.push(ArtistAlbum {
+            name: group.album.clone(),
+            param: album_nav_param(group),
+            year_text: group
+                .year
+                .map(|y| y.to_string())
+                .unwrap_or_else(|| "—".into()),
+            track_count: group.track_count as i32,
+            cover_uri: group.cover_uri.clone(),
+        });
     }
     // 年份降序、缺年份垫底，同年按名稳定序（发行时间线阅读顺序）。
     albums.sort_by(|a, b| {
@@ -612,16 +864,30 @@ fn artist_detail_from(db: &mut LibraryDb, param: &str) -> Option<ArtistDetail> {
             .cmp(&year_of(&a.year_text))
             .then_with(|| a.name.cmp(&b.name))
     });
-    let cover_map = album_covers;
     let track_rows: Vec<SongRow> = tracks
         .iter()
-        .map(|t| song_row_from_local(t, &cover_map))
+        .map(|t| song_row_from_local(db, t, &entities))
         .collect();
     Some(ArtistDetail {
         name,
         tracks: track_rows,
         albums,
     })
+}
+
+/// 歌手页专辑卡导航参数：实体 id 优先，历史行（id=0）回退专辑名旧路径。
+fn album_nav_param(group: &AlbumGroup) -> String {
+    if group.id > 0 {
+        format!("{ALBUM_PARAM_PREFIX}{}", group.id)
+    } else {
+        group.album.clone()
+    }
+}
+
+/// QQ mid → `qq:<mid>` 导航参数；空串/全空白/无 mid → None（回退展示名）。
+fn qq_mid_param(mid: Option<&str>) -> Option<String> {
+    let mid = mid.map(str::trim).filter(|mid| !mid.is_empty())?;
+    Some(format!("{}{mid}", crate::remote_details::REMOTE_PREFIX))
 }
 
 // ————————————————————————————————————————————————————————————
@@ -652,32 +918,81 @@ fn qq_meta_map(db: &mut LibraryDb, keys: Vec<String>) -> HashMap<String, TrackMe
         .collect()
 }
 
+/// 本地行 → 专辑实体：名称索引唯一命中直接用；同名多实体且行展示歌手
+/// 对不上时，按实体曲目成员关系精确定位（行级 `tracks.album_id` 没有
+/// 读口；只在这类歧义行按候选实体查询 `album_tracks_by_id`）。
+fn local_album_entity(
+    db: &mut LibraryDb,
+    entities: &LibraryEntities,
+    t: &LibraryTrackRow,
+) -> Option<(i64, Option<String>)> {
+    let album = t.album.as_deref()?;
+    if let Some(group) = entities
+        .albums
+        .for_row(album, t.artist.as_deref().unwrap_or_default())
+    {
+        return Some((group.id, group.album_mid.clone()));
+    }
+    let ids = entities
+        .albums
+        .ids_by_title
+        .get(&album.trim().to_lowercase())?;
+    for id in ids {
+        let rows = db.album_tracks_by_id(*id).ok()?;
+        if rows.iter().any(|row| row.track_id == t.track_id) {
+            let group = entities.albums.group_by_id(*id)?;
+            return Some((group.id, group.album_mid.clone()));
+        }
+    }
+    None
+}
+
 /// 本地行 → SongRow（详情投影与收藏页共用口径：时长/音质来自本地曲目表，
-/// 封面按专辑聚合命中）。
-fn song_row_from_local(t: &LibraryTrackRow, album_covers: &HashMap<String, String>) -> SongRow {
+/// 封面按专辑聚合命中；实体 id 经名称索引反查，见 `LibraryEntities`）。
+fn song_row_from_local(
+    db: &mut LibraryDb,
+    t: &LibraryTrackRow,
+    entities: &LibraryEntities,
+) -> SongRow {
+    let artist = t
+        .artist
+        .as_deref()
+        .and_then(|display| entities.artist_for(display));
+    let album = local_album_entity(db, entities, t);
     SongRow {
         mid: t.source_key.clone(),
         source: 1,
         title: t.title.clone(),
         artists: t.artist.clone().unwrap_or_default(),
         album: t.album.clone().unwrap_or_default(),
+        artist_id: artist.as_ref().map(|(id, _)| *id).unwrap_or(0),
+        album_id: album.as_ref().map(|(id, _)| *id).unwrap_or(0),
+        artist_mid: artist.and_then(|(_, mid)| mid),
+        album_mid: album.and_then(|(_, mid)| mid),
         duration_ms: t.duration_ms.unwrap_or(0) as i32,
         quality: quality_text(format_of_key(&t.source_key)),
         cover_uri: t
             .album
             .as_deref()
-            .and_then(|album| album_covers.get(album).cloned()),
+            .and_then(|title| entities.albums.cover(title)),
         remote_cover: None,
         folder: None,
     }
 }
 
 /// QQ 行 → SongRow：时长/歌手/专辑/封面走 track_meta_batch 库内缓存（reconcile
-/// 曲目缓存与播放路径写入）。封面分流：`file://`（rebind 回写产物）直接读盘；
-/// 远程 URL 是预取输入（UI 禁直连 HTTP），交列表预取器经 daemon CoverGet 换图；
-/// 全缺 → 程序化占位。此前 cover_uri 无条件置空——库里明明有 rebind 产物，
-/// 列表页也永远显示占位（2026-10-03 封面审计三断点之一）。
-fn song_row_from_qq(source_key: &str, title: String, meta: Option<&TrackMeta>) -> SongRow {
+/// 曲目缓存与播放路径写入）。实体导航只有 mid（QQ 行没有本地实体 id；
+/// `entities.artist_mid`/`album_mid` 来自行级 `track_artists`/`tracks.album_mid`）。
+/// 封面分流：`file://`（rebind 回写产物）直接读盘；远程 URL 是预取输入
+/// （UI 禁直连 HTTP），交列表预取器经 daemon CoverGet 换图；全缺 → 程序化占位。
+/// 此前 cover_uri 无条件置空——库里明明有 rebind 产物，列表页也永远显示占位
+/// （2026-10-03 封面审计三断点之一）。
+fn song_row_from_qq(
+    source_key: &str,
+    title: String,
+    meta: Option<&TrackMeta>,
+    entities: SongEntities,
+) -> SongRow {
     let (cover_uri, remote_cover) = match meta.and_then(|m| m.cover_uri.clone()) {
         Some(uri) if uri.starts_with("http") => (None, Some(uri)),
         Some(uri) => (Some(uri), None),
@@ -689,6 +1004,10 @@ fn song_row_from_qq(source_key: &str, title: String, meta: Option<&TrackMeta>) -
         title,
         artists: meta.and_then(|m| m.artist.clone()).unwrap_or_default(),
         album: meta.and_then(|m| m.album.clone()).unwrap_or_default(),
+        artist_id: entities.artist_id,
+        album_id: entities.album_id,
+        artist_mid: entities.artist_mid,
+        album_mid: entities.album_mid,
         // 时长走库内缓存（track_meta_batch 读 tracks.duration_ms；reconcile
         // 曲目缓存/播放路径写入）——此前恒 0，详情页"总时长"永远 0:00。
         duration_ms: meta.and_then(|m| m.duration_ms).unwrap_or(0) as i32,
@@ -756,6 +1075,36 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 impl SongRow {
+    /// 行内歌手/专辑链接的导航参数（`Nav.param` 单串命名空间，§30.2.6 phase 2b）：
+    /// - 本地行：实体 id 优先 → `artist:<id>` / `album:<id>`（按 id 查，同名
+    ///   另一实体不混入）；id=0（历史直插行）→ 裸展示名（旧按名路径）。
+    /// - QQ 行：真 mid → `qq:<mid>`（远端详情）；mid 缺失 → 裸展示名。
+    /// - 展示名也为空 → 空串（UI 禁用链接）。
+    fn artist_nav_param(&self) -> String {
+        if self.source == 1 && self.artist_id > 0 {
+            return format!("{ARTIST_PARAM_PREFIX}{}", self.artist_id);
+        }
+        if self.source != 1
+            && let Some(param) = qq_mid_param(self.artist_mid.as_deref())
+        {
+            return param;
+        }
+        self.artists.clone()
+    }
+
+    /// 专辑导航参数（规则同 [`SongRow::artist_nav_param`]）。
+    fn album_nav_param(&self) -> String {
+        if self.source == 1 && self.album_id > 0 {
+            return format!("{ALBUM_PARAM_PREFIX}{}", self.album_id);
+        }
+        if self.source != 1
+            && let Some(param) = qq_mid_param(self.album_mid.as_deref())
+        {
+            return param;
+        }
+        self.album.clone()
+    }
+
     /// SongRow → TrackRow。表格行不带封面（TrackRow 已剥 `cover` 字段）：
     /// 12+ 个表格模型每行背全尺寸位图是 RSS 2.4GB 的根因之一，表格只承担
     /// 文本列；侧栏/详情头图/卡片的封面由行外消费点各自取图，队列行走
@@ -766,11 +1115,9 @@ impl SongRow {
             source: self.source,
             title: self.title.clone().into(),
             artists: self.artists.clone().into(),
-            // 详情页参数：远端 mid 要等内容接口（AUDIT §8.2），本地投影期用
-            // 展示名（歌手/专辑页按名查库）；无数据 → 空串（行链接禁用）。
-            artist_mid: self.artists.clone().into(),
+            artist_mid: self.artist_nav_param().into(),
             album: self.album.clone().into(),
-            album_mid: self.album.clone().into(),
+            album_mid: self.album_nav_param().into(),
             duration_ms: self.duration_ms,
             quality: self.quality.clone().into(),
         }
@@ -1195,10 +1542,20 @@ mod tests {
         })
         .unwrap();
         let meta = db.track_meta_batch("qq", &["mid-dur".to_owned()]).unwrap();
-        let row = song_row_from_qq("mid-dur", "有时长".into(), Some(&meta[0]));
+        let row = song_row_from_qq(
+            "mid-dur",
+            "有时长".into(),
+            Some(&meta[0]),
+            SongEntities::default(),
+        );
         assert_eq!(row.duration_ms, 95_000);
         // 无缓存行/无时长列 → 诚实 0。
-        let row = song_row_from_qq("mid-none", "无时长".into(), None);
+        let row = song_row_from_qq(
+            "mid-none",
+            "无时长".into(),
+            None,
+            SongEntities::default(),
+        );
         assert_eq!(row.duration_ms, 0);
     }
 
@@ -1220,6 +1577,7 @@ mod tests {
             "mid",
             "曲".into(),
             Some(&meta(Some("file://C:/covers/aa.jpg"))),
+            SongEntities::default(),
         );
         assert_eq!(
             rebound.cover_uri.as_deref(),
@@ -1233,6 +1591,7 @@ mod tests {
             Some(&meta(Some(
                 "https://y.gtimg.cn/music/photo_new/T002R300x300M000x.jpg",
             ))),
+            SongEntities::default(),
         );
         assert_eq!(remote.cover_uri, None, "http 封面不落 UI 直读列（禁网）");
         assert_eq!(
@@ -1240,7 +1599,12 @@ mod tests {
             Some("https://y.gtimg.cn/music/photo_new/T002R300x300M000x.jpg")
         );
 
-        let none = song_row_from_qq("mid", "曲".into(), Some(&meta(None)));
+        let none = song_row_from_qq(
+            "mid",
+            "曲".into(),
+            Some(&meta(None)),
+            SongEntities::default(),
+        );
         assert_eq!(none.cover_uri, None);
         assert_eq!(none.remote_cover, None);
     }
@@ -1313,5 +1677,268 @@ mod tests {
         // 退「未找到」/远端装载——D2c）；空参 → None。
         assert!(artist_detail_from(&mut db, "不存在的歌手").is_none());
         assert!(artist_detail_from(&mut db, "").is_none());
+    }
+
+    /// 导航参数前缀只认实体 id：`qq:` / 裸展示名 / 非数字不能被误判成本地实体。
+    #[test]
+    fn entity_param_prefix_parsing() {
+        assert_eq!(entity_id_param("album:7", ALBUM_PARAM_PREFIX), Some(7));
+        assert_eq!(
+            entity_id_param("artist:12", ARTIST_PARAM_PREFIX),
+            Some(12)
+        );
+        assert_eq!(entity_id_param("album:0", ALBUM_PARAM_PREFIX), None);
+        assert_eq!(entity_id_param("album:x", ALBUM_PARAM_PREFIX), None);
+        assert_eq!(entity_id_param("qq:7", ALBUM_PARAM_PREFIX), None);
+        assert_eq!(entity_id_param("十一月的萧邦", ALBUM_PARAM_PREFIX), None);
+    }
+
+    /// 本地曲目行：歌手/专辑走实体 id 参数（不再用展示名当 id）。
+    #[test]
+    fn local_song_row_navigates_by_entity_id() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let dir = test_dir("row-entities");
+        let a = dir.join("a.flac");
+        db.add_local_file(
+            &a,
+            Some(&meta("夜曲", "周杰伦", "十一月的萧邦", 180_000, "flac")),
+        )
+        .unwrap();
+
+        let snap = read_snapshot(&mut db).expect("projection ok");
+        let row = snap
+            .local_tracks
+            .iter()
+            .find(|r| r.title == "夜曲")
+            .expect("local row");
+        let artist_id = db
+            .library_artists()
+            .unwrap()
+            .into_iter()
+            .find(|g| g.artist == "周杰伦")
+            .expect("artist entity")
+            .id;
+        let album_id = db
+            .library_albums(None)
+            .unwrap()
+            .into_iter()
+            .find(|g| g.album == "十一月的萧邦")
+            .expect("album entity")
+            .id;
+        assert_eq!(row.artist_id, artist_id);
+        assert_eq!(row.album_id, album_id);
+
+        let track = row.to_track_row();
+        assert_eq!(
+            track.artist_mid.to_string(),
+            format!("artist:{artist_id}")
+        );
+        assert_eq!(track.album_mid.to_string(), format!("album:{album_id}"));
+    }
+
+    /// QQ 曲目行：真 mid → `qq:` 参数（歌手指第一位；资料来源 track_artists /
+    /// tracks.album_mid）；实体 id 保持 0。
+    #[test]
+    fn qq_song_row_navigates_by_mid() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        db.upsert_track(&hmp_storage::TrackRow {
+            source: "qq",
+            source_key: "mid-9".into(),
+            title: "晴天".into(),
+            artist: Some("周杰伦".into()),
+            album: Some("叶惠美".into()),
+            album_mid: Some("album-mid-1".into()),
+            artist_refs: vec![hmp_storage::ArtistRefRow {
+                mid: Some("singer-mid-1".into()),
+                name: "周杰伦".into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        db.add_favorite("qq", "mid-9", "晴天").unwrap();
+
+        let snap = read_snapshot(&mut db).expect("projection ok");
+        let row = snap
+            .liked
+            .iter()
+            .find(|r| r.mid == "mid-9")
+            .expect("qq row");
+        assert_eq!(row.artist_id, 0);
+        assert_eq!(row.album_id, 0);
+        assert_eq!(row.artist_mid.as_deref(), Some("singer-mid-1"));
+        assert_eq!(row.album_mid.as_deref(), Some("album-mid-1"));
+
+        let track = row.to_track_row();
+        assert_eq!(track.artist_mid.as_str(), "qq:singer-mid-1");
+        assert_eq!(track.album_mid.as_str(), "qq:album-mid-1");
+    }
+
+    /// 实体缺失回退裸展示名（历史直插行 / QQ 无 mid），不生成半截前缀。
+    #[test]
+    fn song_row_nav_falls_back_to_display_names() {
+        let mut row = SongRow {
+            mid: "local:/a.mp3".into(),
+            source: 1,
+            title: "A".into(),
+            artists: "周杰伦".into(),
+            album: "十一月的萧邦".into(),
+            artist_id: 0,
+            album_id: 0,
+            artist_mid: None,
+            album_mid: None,
+            duration_ms: 0,
+            quality: String::new(),
+            cover_uri: None,
+            remote_cover: None,
+            folder: None,
+        };
+        let track = row.to_track_row();
+        assert_eq!(track.artist_mid.as_str(), "周杰伦", "实体缺失回退展示名");
+        assert_eq!(track.album_mid.as_str(), "十一月的萧邦");
+
+        // QQ 行无 mid：同样回退展示名（旧按名路径）。
+        row.source = 0;
+        let track = row.to_track_row();
+        assert_eq!(track.artist_mid.as_str(), "周杰伦");
+        assert_eq!(track.album_mid.as_str(), "十一月的萧邦");
+
+        // 展示名也为空 → 空串（UI 禁用链接）。
+        row.artists = String::new();
+        row.album = String::new();
+        let track = row.to_track_row();
+        assert_eq!(track.artist_mid.as_str(), "");
+        assert_eq!(track.album_mid.as_str(), "");
+    }
+
+    /// 同名专辑两个实体：`album:<id>` 只出现该实体曲目，行上专辑参数也落到
+    /// 各自实体（名称 + 展示歌手能唯一对应时）。
+    #[test]
+    fn album_detail_by_id_excludes_same_name_other_entity() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let dir = test_dir("album-id");
+        let a = dir.join("a.flac");
+        let b = dir.join("b.flac");
+        db.add_local_file(
+            &a,
+            Some(&meta("A", "歌手甲", "同名专辑", 1_000, "flac")),
+        )
+        .unwrap();
+        db.add_local_file(
+            &b,
+            Some(&meta("B", "歌手乙", "同名专辑", 2_000, "flac")),
+        )
+        .unwrap();
+
+        let groups = db.library_albums(None).unwrap();
+        let album_a = groups
+            .iter()
+            .find(|g| g.album == "同名专辑" && g.artist.as_deref() == Some("歌手甲"))
+            .expect("album A");
+        let album_b = groups
+            .iter()
+            .find(|g| g.album == "同名专辑" && g.artist.as_deref() == Some("歌手乙"))
+            .expect("album B");
+        assert_ne!(album_a.id, album_b.id, "同名不同专辑歌手是两个实体");
+
+        let detail =
+            album_detail_from(&mut db, &format!("album:{}", album_a.id)).expect("album id detail");
+        assert_eq!(detail.name, "同名专辑");
+        assert_eq!(detail.artist.as_deref(), Some("歌手甲"));
+        assert_eq!(detail.tracks.len(), 1, "只含该实体的曲目");
+        assert_eq!(detail.tracks[0].title, "A");
+        assert_eq!(detail.tracks[0].album_id, album_a.id);
+        assert_eq!(
+            detail.tracks[0].to_track_row().album_mid.to_string(),
+            format!("album:{}", album_a.id)
+        );
+
+        // 行级导航参数同样按实体区分（名称 + 展示歌手唯一对应）。
+        let snap = read_snapshot(&mut db).expect("projection ok");
+        let row_a = snap.local_tracks.iter().find(|r| r.title == "A").unwrap();
+        let row_b = snap.local_tracks.iter().find(|r| r.title == "B").unwrap();
+        assert_eq!(row_a.album_id, album_a.id);
+        assert_eq!(row_b.album_id, album_b.id);
+
+        assert!(album_detail_from(&mut db, "album:999999").is_none());
+    }
+
+    /// 同名专辑且行展示歌手对不上专辑歌手（专辑歌手在行级不可见）：
+    /// 按实体曲目成员关系精确回填行级 album_id，不退回裸名。
+    #[test]
+    fn ambiguous_album_row_resolves_by_membership() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let dir = test_dir("album-ambiguous");
+        let a = dir.join("a.flac");
+        let b = dir.join("b.flac");
+        let mut meta_a = meta("A", "演唱者一", "同名专辑", 1_000, "flac");
+        meta_a.album_artist = Some("制作人一".into());
+        let mut meta_b = meta("B", "演唱者二", "同名专辑", 2_000, "flac");
+        meta_b.album_artist = Some("制作人二".into());
+        db.add_local_file(&a, Some(&meta_a)).unwrap();
+        db.add_local_file(&b, Some(&meta_b)).unwrap();
+
+        let groups = db.library_albums(None).unwrap();
+        let album_a = groups
+            .iter()
+            .find(|g| g.album == "同名专辑" && g.artist.as_deref() == Some("制作人一"))
+            .expect("album A");
+        let album_b = groups
+            .iter()
+            .find(|g| g.album == "同名专辑" && g.artist.as_deref() == Some("制作人二"))
+            .expect("album B");
+        assert_ne!(album_a.id, album_b.id);
+
+        // 行展示歌手（演唱者）与专辑歌手（制作人）不同：名称索引必失配，
+        // 成员关系查询把它落回各自的实体。
+        let snap = read_snapshot(&mut db).expect("projection ok");
+        let row_a = snap.local_tracks.iter().find(|r| r.title == "A").unwrap();
+        let row_b = snap.local_tracks.iter().find(|r| r.title == "B").unwrap();
+        assert_eq!(row_a.album_id, album_a.id);
+        assert_eq!(row_b.album_id, album_b.id);
+    }
+
+    /// 歌手实体 id 路径不再走"最长包含匹配"：展示串里的 HOYO-MiX 不抢页。
+    #[test]
+    fn artist_detail_by_id_uses_entity_without_name_heuristics() {
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let dir = test_dir("artist-id");
+        let a = dir.join("a.flac");
+        let b = dir.join("b.flac");
+        db.add_local_file(
+            &a,
+            Some(&meta(
+                "歌一",
+                "知更鸟 / HOYO-MiX / Chevy",
+                "合辑一",
+                100_000,
+                "flac",
+            )),
+        )
+        .unwrap();
+        db.add_local_file(
+            &b,
+            Some(&meta("歌二", "HOYO-MiX", "合辑二", 120_000, "flac")),
+        )
+        .unwrap();
+
+        let groups = db.library_artists().unwrap();
+        let literal = groups
+            .iter()
+            .find(|g| g.artist == "知更鸟 / HOYO-MiX / Chevy")
+            .expect("literal artist entity");
+        let detail = artist_detail_from(&mut db, &format!("artist:{}", literal.id))
+            .expect("artist id detail");
+        assert_eq!(detail.name, "知更鸟 / HOYO-MiX / Chevy");
+        assert_eq!(detail.tracks.len(), 1, "只含该实体曲目");
+        assert_eq!(detail.tracks[0].title, "歌一");
+        assert_eq!(detail.tracks[0].artist_id, literal.id);
+        assert_eq!(detail.albums.len(), 1);
+        assert!(
+            detail.albums[0].param.starts_with(ALBUM_PARAM_PREFIX),
+            "歌手页专辑卡按实体 id 导航: {}",
+            detail.albums[0].param
+        );
+
+        assert!(artist_detail_from(&mut db, "artist:999999").is_none());
     }
 }

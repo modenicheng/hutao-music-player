@@ -12,9 +12,12 @@ export struct TrackRow {
     title: string,
     /** 展示串："白栖遥 / 陈屿帆"（点击整体跳主歌手页，PORTING.md 决策 5） */
     artists: string,
-    /** 主歌手 mid */
+    /** 主歌手导航参数：`qq:<mid>`（远端）/ `artist:<id>`（本地实体）；
+        空串 → UI 回落展示名旧路径 */
     artist-mid: string,
     album: string,
+    /** 专辑导航参数：`qq:<mid>`（远端）/ `album:<id>`（本地实体）；
+        空串 → UI 回落展示名旧路径 */
     album-mid: string,
     duration-ms: int,
     /** 音质徽章文案，如 "FLAC · 44.1kHz"；无损以下为空 */

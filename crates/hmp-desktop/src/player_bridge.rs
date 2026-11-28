@@ -1666,29 +1666,38 @@ fn clear_now_playing(player: &Player, ui_weak: &Weak<AppWindow>) {
     }
 }
 
-/// 本地曲目歌手/专辑的 id 哨兵（daemon `local.rs` 的 `ArtistId::new("local")`
-/// / `AlbumId::new("local")`）：不是 QQ mid，不能拿去导航远端详情页。
+/// 本地曲目歌手/专辑的 id 哨兵（daemon `local.rs` 查不到实体时的回退）：
+/// 不是导航参数，播放页回落展示名（旧行为）。
 const LOCAL_ENTITY_ID: &str = "local";
 
-/// 播放页歌手/专辑链接的导航参数 (歌手, 专辑)：QQ 曲目带真 mid → `qq:` 远端
-/// 参数（落远端歌手/专辑页）；本地曲目的哨兵与空串 → 空串（UI 回落展示名
-/// 导航，行为不变）。歌手取第一位——播放条显示的是拼接串，点进去落到主
-/// 歌手页即可。
+/// 播放页歌手/专辑链接的导航参数 (歌手, 专辑)：daemon 下发的实体 id 已经带
+/// 命名空间（QQ `qq:<mid>` / 本地 `artist:<id>` / `album:<id>`），直接透传；
+/// 裸 mid（QQ 播放路径的旧形态）补 `qq:`；本地哨兵/空串 → 空串（UI 回落
+/// 展示名导航，行为不变）。歌手取第一位——播放条显示的是拼接串，点进去落到
+/// 主歌手页即可。
 fn detail_link_params(track: &hmp_core::Track) -> (String, String) {
     (
-        remote_link_param(track.artists.first().map(|a| a.id.as_ref())),
-        remote_link_param(track.album.as_ref().map(|a| a.id.as_ref())),
+        entity_link_param(track.artists.first().map(|a| a.id.as_ref())),
+        entity_link_param(track.album.as_ref().map(|a| a.id.as_ref())),
     )
 }
 
-/// 实体 id → 远端导航参数：空串或本地哨兵 → 空串；否则 `qq:` + mid。
-fn remote_link_param(id: Option<&str>) -> String {
-    match id {
-        Some(mid) if !mid.is_empty() && mid != LOCAL_ENTITY_ID => {
-            format!("{}{mid}", crate::remote_details::REMOTE_PREFIX)
-        }
-        _ => String::new(),
+/// 实体 id → 导航参数：已带命名空间的原样透传；空串/本地哨兵 → 空串；
+/// 其余（QQ 裸 mid）补 `qq:`。
+fn entity_link_param(id: Option<&str>) -> String {
+    let Some(id) = id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return String::new();
+    };
+    if id == LOCAL_ENTITY_ID {
+        return String::new();
     }
+    if id.starts_with(crate::remote_details::REMOTE_PREFIX)
+        || id.starts_with(crate::library_view::ARTIST_PARAM_PREFIX)
+        || id.starts_with(crate::library_view::ALBUM_PARAM_PREFIX)
+    {
+        return id.to_string();
+    }
+    format!("{}{id}", crate::remote_details::REMOTE_PREFIX)
 }
 
 /// 当前曲 mid：队列摘要 `current`（规范下标）指向最近一次投影列表
@@ -1945,8 +1954,9 @@ pub(crate) mod tests {
         assert!(lyric_fetch_admit(&mut ledger, id, now));
     }
 
-    /// U6：播放条歌手/专辑链接取哪个 mid——QQ 真 mid → `qq:` 远端参数（歌手
-    /// 取第一位）；本地哨兵 / 空串 / 无专辑 → 空串（回落展示名导航）。
+    /// U6：播放条歌手/专辑链接取哪个 id——QQ 裸 mid → `qq:` 远端参数；
+    /// 本地实体 id（daemon 已带 `artist:`/`album:` 前缀）原样透传（歌手取
+    /// 第一位）；本地哨兵 / 空串 / 无专辑 → 空串（回落展示名导航）。
     #[test]
     fn detail_link_params_take_first_artist_and_drop_local_sentinel() {
         use hmp_core::{AlbumId, AlbumRef, ArtistId, ArtistRef};
@@ -1964,15 +1974,24 @@ pub(crate) mod tests {
         assert_eq!(
             detail_link_params(&track),
             ("qq:0025NhlN2yWrP4".into(), "qq:002albUMZTyiKq".into()),
-            "QQ 曲目按真 mid 落远端详情页，歌手取第一位"
+            "QQ 裸 mid 补远端前缀，歌手取第一位"
         );
 
-        // 本地曲目：哨兵 local → 空串
+        // 本地实体 id：daemon resolve_local 已带命名空间 → 原样透传。
+        track.artists = vec![artist("artist:12", "周杰伦"), artist("artist:13", "费玉清")];
+        track.album = Some(album("album:34", "十一月的萧邦"));
+        assert_eq!(
+            detail_link_params(&track),
+            ("artist:12".into(), "album:34".into()),
+            "本地实体 id 直接进本地详情页"
+        );
+
+        // 本地曲目无实体：哨兵 local → 空串（回落展示名旧路径）
         track.artists = vec![artist("local", "周杰伦")];
         track.album = Some(album("local", "十一月的萧邦"));
         assert_eq!(detail_link_params(&track), (String::new(), String::new()));
 
-        // 空串 / 无歌手 / 无专辑一律视为没有 mid
+        // 空串 / 无歌手 / 无专辑一律视为没有导航参数
         track.artists = vec![artist("", "周杰伦")];
         track.album = Some(album("", "十一月的萧邦"));
         assert_eq!(detail_link_params(&track), (String::new(), String::new()));
