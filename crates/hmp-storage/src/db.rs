@@ -275,11 +275,213 @@ fn local_artist_refs(artists: &[String]) -> Vec<ArtistRefRow> {
         .collect()
 }
 
+// ——— 实体身份（schema v10，§30.2.6 phase 2）———
+//
+// 身份规则（桌面下一任务依赖，改动前先读这里）：
+// - qq：key 用 mid（`singer[].mid` / `album.mid`）。mid 为空或纯数字
+//   fallback（phase 1 已知的极少数情况）时没有身份性，按 local 名称键处理。
+// - local：歌手 key = 标签歌手名原文（比较 `NOCASE`，同名大小写不分裂）；
+//   专辑 key = `lower(title) + U+001F + lower(album_artist 或 artist)`，
+//   同名不同专辑歌手因此是两个实体。
+// - 跨 provider 归一：key 查不到时先按名称（歌手名 / 专辑 title + 专辑歌手，
+//   `NOCASE`）复用现有实体并挂 key，仍查不到才新建。同一歌手/专辑不会因为
+//   本地与 QQ 各来一条而分裂；两张不同 mid 但同名的 QQ 歌手也归一到同一
+//   实体（宁可合并，保证 id 导航稳定）。
+
+/// `artist_keys` / `album_keys` 的 `provider` 取值。
+const PROVIDER_QQ: &str = "qq";
+const PROVIDER_LOCAL: &str = "local";
+
+/// 本地专辑 key 里标题与专辑歌手的分隔符（U+001F，避免 " / " 拼接歧义）。
+const ALBUM_KEY_SEP: char = '\u{1f}';
+
+/// QQ 身份键（mid）是否可用：空串与纯数字 fallback 不具身份性，退回名称键。
+fn usable_mid(mid: Option<&str>) -> Option<&str> {
+    let mid = mid?.trim();
+    if mid.is_empty() || mid.bytes().all(|b| b.is_ascii_digit()) {
+        None
+    } else {
+        Some(mid)
+    }
+}
+
+/// 本地专辑身份键：`lower(title) + U+001F + lower(album_artist 或 artist)`。
+///
+/// 大小写用 Rust `to_lowercase`（Unicode；SQLite `lower()` 只折 ASCII）——
+/// 写入与迁移回填共用这一个函数，两边拼法不会漂移。
+fn local_album_key(title: &str, album_artist: Option<&str>) -> String {
+    format!(
+        "{}{ALBUM_KEY_SEP}{}",
+        title.trim().to_lowercase(),
+        album_artist.unwrap_or("").trim().to_lowercase()
+    )
+}
+
+/// (provider, key) → 歌手实体 id。local key 用 `NOCASE`（同一歌手名的
+/// 大小写差异不分裂）；qq mid 大小写敏感，按 BINARY 精确匹配。
+fn artist_id_by_key(conn: &Connection, provider: &str, key: &str) -> rusqlite::Result<Option<i64>> {
+    let sql = if provider == PROVIDER_LOCAL {
+        "SELECT artist_id FROM artist_keys \
+         WHERE provider = ?1 AND provider_key = ?2 COLLATE NOCASE ORDER BY artist_id LIMIT 1"
+    } else {
+        "SELECT artist_id FROM artist_keys \
+         WHERE provider = ?1 AND provider_key = ?2 ORDER BY artist_id LIMIT 1"
+    };
+    conn.query_row(sql, params![provider, key], |r| r.get(0))
+        .optional()
+}
+
+/// 解析/创建歌手实体（写路径与迁移回填共用；调用方负责事务）。
+///
+/// 顺序：key 命中 → 名称命中 → 新建；随后把本次 (provider, key) 挂到实体上
+/// （已存在则不动，保证幂等）。`mid` 为 None 或不可用时走 local 名称键。
+fn resolve_artist_entity(
+    conn: &Connection,
+    name: &str,
+    mid: Option<&str>,
+) -> rusqlite::Result<i64> {
+    let (provider, key) = match usable_mid(mid) {
+        Some(mid) => (PROVIDER_QQ, mid),
+        None => (PROVIDER_LOCAL, name),
+    };
+    if let Some(id) = artist_id_by_key(conn, provider, key)? {
+        return Ok(id);
+    }
+    let by_name: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM artists WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
+            params![name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let id = match by_name {
+        Some(id) => id,
+        None => {
+            conn.execute("INSERT INTO artists (name) VALUES (?1)", params![name])?;
+            conn.last_insert_rowid()
+        }
+    };
+    conn.execute(
+        "INSERT INTO artist_keys (artist_id, provider, provider_key) VALUES (?1, ?2, ?3)
+         ON CONFLICT(provider, provider_key) DO NOTHING",
+        params![id, provider, key],
+    )?;
+    // 防御性回读：万一 key 已属于别的实体（正常路径上面已命中），以 key 的
+    // 真正所有者为准，避免返回与 key 不一致的 id。
+    Ok(artist_id_by_key(conn, provider, key)?.unwrap_or(id))
+}
+
+/// 专辑实体的身份输入（写路径与迁移回填共用的窄投影）。
+struct AlbumIdentity<'a> {
+    /// 专辑名（调用方保证非空）。
+    title: &'a str,
+    /// local key 的歌手分量：`album_artist`，缺失时回退整行 `artist` 展示串。
+    key_artist: Option<&'a str>,
+    /// `albums.album_artist_id` 的解析输入：`album_artist` 标签或曲目首个歌手。
+    album_artist: Option<(&'a str, Option<&'a str>)>,
+    /// QQ 专辑 mid（本地行 None）。
+    album_mid: Option<&'a str>,
+    year: Option<i64>,
+}
+
+/// (provider, key) → 专辑实体 id（键拼法已统一小写，BINARY 精确匹配即可）。
+fn album_id_by_key(conn: &Connection, provider: &str, key: &str) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT album_id FROM album_keys \
+         WHERE provider = ?1 AND provider_key = ?2 ORDER BY album_id LIMIT 1",
+        params![provider, key],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// 解析/创建专辑实体（写路径与迁移回填共用；调用方负责事务）。
+///
+/// 顺序：key 命中 →（title, 专辑歌手名）NOCASE 命中 → 新建，随后挂 key。
+/// 同名不同专辑歌手是不同实体；同名同专辑歌手的本地/QQ 行归一到一个实体。
+fn resolve_album_entity(conn: &Connection, album: &AlbumIdentity<'_>) -> rusqlite::Result<i64> {
+    let title = album.title.trim();
+    let (provider, key) = match usable_mid(album.album_mid) {
+        Some(mid) => (PROVIDER_QQ, mid.to_owned()),
+        None => (PROVIDER_LOCAL, local_album_key(title, album.key_artist)),
+    };
+    if let Some(id) = album_id_by_key(conn, provider, &key)? {
+        return Ok(id);
+    }
+    // 专辑歌手实体先解析：名称匹配与新建都要用它的 id。
+    let album_artist_id = match album.album_artist {
+        Some((name, mid)) => Some(resolve_artist_entity(conn, name, mid)?),
+        None => None,
+    };
+    let by_name: Option<i64> = conn
+        .query_row(
+            "SELECT al.id FROM albums al \
+             LEFT JOIN artists ar ON ar.id = al.album_artist_id \
+             WHERE al.title = ?1 COLLATE NOCASE \
+               AND CASE WHEN ?2 IS NULL THEN al.album_artist_id IS NULL \
+                        ELSE ar.name = ?2 COLLATE NOCASE END \
+             ORDER BY al.id LIMIT 1",
+            params![title, album.album_artist.map(|(name, _)| name)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let id = match by_name {
+        Some(id) => {
+            // 既有实体补年份（首次入库可能没有年份）；已有值不回退。
+            conn.execute(
+                "UPDATE albums SET year = COALESCE(year, ?2) WHERE id = ?1",
+                params![id, album.year],
+            )?;
+            id
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO albums (title, album_artist_id, year) VALUES (?1, ?2, ?3)",
+                params![title, album_artist_id, album.year],
+            )?;
+            conn.last_insert_rowid()
+        }
+    };
+    conn.execute(
+        "INSERT INTO album_keys (album_id, provider, provider_key) VALUES (?1, ?2, ?3)
+         ON CONFLICT(provider, provider_key) DO NOTHING",
+        params![id, provider, key],
+    )?;
+    Ok(album_id_by_key(conn, provider, &key)?.unwrap_or(id))
+}
+
+/// `TrackRow` → 专辑身份（无专辑名/全空白 → None，不建专辑实体）。
+fn track_album_identity(t: &TrackRow) -> Option<AlbumIdentity<'_>> {
+    let title = t.album.as_deref()?.trim();
+    if title.is_empty() {
+        return None;
+    }
+    let album_artist = t
+        .album_artist
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let first_ref = t.artist_refs.iter().find(|r| !r.name.trim().is_empty());
+    Some(AlbumIdentity {
+        title,
+        key_artist: album_artist
+            .or_else(|| t.artist.as_deref().map(str::trim).filter(|s| !s.is_empty())),
+        album_artist: match album_artist {
+            Some(name) => Some((name, None)),
+            None => first_ref.map(|r| (r.name.as_str(), r.mid.as_deref())),
+        },
+        album_mid: t.album_mid.as_deref(),
+        year: t.year,
+    })
+}
+
 /// 重写多艺术家行（先删后插，position 保序）。
 ///
 /// v9：`artist_mid` 随行写入；新投影的 mid 为 `None` 时按同名旧行保留
 /// （"新值为 NULL 不覆盖旧值"的 COALESCE 语义）。空列表 = 本次投影没有
 /// 歌手信息，保留既有行不动（stub 缓存/收藏意图等窄投影不得清空歌手）。
+/// v10：每行同时解析并写入 `artist_id`（实体先解析、后删旧行——解析要用
+/// 旧行的 mid 补足窄投影丢掉的歌手身份）。
 fn write_track_artists(
     conn: &Connection,
     track_id: i64,
@@ -416,6 +618,13 @@ impl LibraryDb {
     /// （见 `merge_noncanonical_local_tracks`）。独立暴露供迁移测试直接驱动。
     pub fn merge_noncanonical_local_tracks(&mut self) -> rusqlite::Result<()> {
         merge_noncanonical_local_tracks(&self.conn)
+    }
+
+    /// v10 迁移步骤（幂等）：从既有 `track_artists` / `tracks` 建/找实体与
+    /// key，回填 `track_artists.artist_id` 与 `tracks.album_id`
+    /// （见 `backfill_entities`）。独立暴露供迁移测试直接驱动。
+    pub fn backfill_entities(&mut self) -> rusqlite::Result<()> {
+        backfill_entities(&self.conn)
     }
 
     /// 幂等写入/更新曲目元数据；返回 track id。
@@ -2602,6 +2811,146 @@ pub(crate) fn merge_noncanonical_local_tracks(conn: &Connection) -> rusqlite::Re
     Ok(())
 }
 
+/// v10 回填步骤（幂等）：从既有 `track_artists` / `tracks` 建/找实体与 key，
+/// 回填 `artist_id` / `album_id`，最后校验没有漏挂实体的非空行。只处理仍为
+/// NULL 的关联，重复调用零写入；失败由调用方的迁移事务整体回滚。
+pub(crate) fn backfill_entities(conn: &Connection) -> rusqlite::Result<()> {
+    backfill_track_artist_ids(conn)?;
+    backfill_track_album_ids(conn)?;
+    verify_entity_backfill(conn)
+}
+
+/// 步骤 1：`track_artists` 的（歌手名, mid）→ artists + artist_keys，
+/// 回填 `track_artists.artist_id`。空名/全空白行没有实体可言，跳过。
+fn backfill_track_artist_ids(conn: &Connection) -> rusqlite::Result<()> {
+    let rows: Vec<(i64, i64, String, Option<String>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT track_id, position, artist, artist_mid FROM track_artists \
+             WHERE artist_id IS NULL AND TRIM(artist) <> '' \
+             ORDER BY track_id, position",
+        )?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (track_id, position, name, mid) in rows {
+        let artist_id = resolve_artist_entity(conn, &name, mid.as_deref())?;
+        conn.execute(
+            "UPDATE track_artists SET artist_id = ?1 WHERE track_id = ?2 AND position = ?3",
+            params![artist_id, track_id, position],
+        )?;
+    }
+    Ok(())
+}
+
+/// 步骤 2：`tracks` 的（专辑, album_artist 或 artist, album_mid）→ albums +
+/// album_keys，回填 `tracks.album_id`。空专辑名跳过（无专辑的曲目没有实体）。
+fn backfill_track_album_ids(conn: &Connection) -> rusqlite::Result<()> {
+    struct PendingAlbum {
+        track_id: i64,
+        album: String,
+        album_artist: Option<String>,
+        artist: Option<String>,
+        album_mid: Option<String>,
+        year: Option<i64>,
+        /// 曲目首个歌手（`track_artists` position 最小行）——专辑歌手缺失时
+        /// 用它解析 `album_artist_id`（§30.2.6 phase 2 身份规则）。
+        first_artist: Option<String>,
+        first_artist_mid: Option<String>,
+    }
+    let rows: Vec<PendingAlbum> = {
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.album, t.album_artist, t.artist, t.album_mid, t.year, \
+                    (SELECT ta.artist FROM track_artists ta WHERE ta.track_id = t.id \
+                      ORDER BY ta.position LIMIT 1), \
+                    (SELECT ta.artist_mid FROM track_artists ta WHERE ta.track_id = t.id \
+                      ORDER BY ta.position LIMIT 1) \
+             FROM tracks t \
+             WHERE t.album_id IS NULL AND t.album IS NOT NULL AND TRIM(t.album) <> '' \
+             ORDER BY t.id",
+        )?;
+        let mapped = stmt.query_map([], |r| {
+            Ok(PendingAlbum {
+                track_id: r.get(0)?,
+                album: r.get(1)?,
+                album_artist: r.get(2)?,
+                artist: r.get(3)?,
+                album_mid: r.get(4)?,
+                year: r.get(5)?,
+                first_artist: r.get(6)?,
+                first_artist_mid: r.get(7)?,
+            })
+        })?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for row in rows {
+        let album_artist = row
+            .album_artist
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let first_artist = row
+            .first_artist
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let identity = AlbumIdentity {
+            title: row.album.trim(),
+            key_artist: album_artist.or_else(|| {
+                row.artist
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            }),
+            album_artist: match album_artist {
+                Some(name) => Some((name, None)),
+                None => first_artist.map(|name| (name, row.first_artist_mid.as_deref())),
+            },
+            album_mid: row.album_mid.as_deref(),
+            year: row.year,
+        };
+        let album_id = resolve_album_entity(conn, &identity)?;
+        conn.execute(
+            "UPDATE tracks SET album_id = ?1 WHERE id = ?2",
+            params![album_id, row.track_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// 步骤 3：回填后校验——每个非空 `track_artists` 行有 `artist_id`，每个有
+/// 专辑名的 `tracks` 行有 `album_id`。校验失败返回约束错误，迁移事务回滚
+/// （不砖化库：user_version 不推进，下次打开重跑）。
+fn verify_entity_backfill(conn: &Connection) -> rusqlite::Result<()> {
+    let artists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM track_artists WHERE artist_id IS NULL AND TRIM(artist) <> ''",
+        [],
+        |r| r.get(0),
+    )?;
+    if artists != 0 {
+        return Err(entity_backfill_error("track_artists", artists));
+    }
+    let albums: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tracks \
+         WHERE album_id IS NULL AND album IS NOT NULL AND TRIM(album) <> ''",
+        [],
+        |r| r.get(0),
+    )?;
+    if albums != 0 {
+        return Err(entity_backfill_error("tracks", albums));
+    }
+    Ok(())
+}
+
+/// 回填校验失败的错误（约束类；消息带表名与残留行数，便于定位坏数据）。
+fn entity_backfill_error(table: &str, rows: i64) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+        Some(format!(
+            "v10 entity backfill left {rows} {table} row(s) without an entity id"
+        )),
+    )
+}
+
 /// 逐级迁移到最新 user_version。
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -2751,6 +3100,25 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
             }
         }
     }
+    if current < 10 {
+        // v10：实体化（§30.2.6 phase 2）——artists/albums 实体与 key 表、
+        // `tracks.album_id` / `track_artists.artist_id`；同一事务内从既有行
+        // 回填实体、key 与关联（回填后校验，失败整体回滚、user_version 不推进）。
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute_batch(MIGRATION_V10)?;
+            backfill_entities(conn)?;
+            conn.pragma_update(None, "user_version", 10)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2761,6 +3129,49 @@ const MIGRATION_V9: &str = r#"
 ALTER TABLE tracks ADD COLUMN album_mid TEXT;
 ALTER TABLE track_artists ADD COLUMN artist_mid TEXT;
 ALTER TABLE local_files ADD COLUMN tag_version INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// v10：实体化（§30.2.6 phase 2）——`artists`/`albums` 实体与 key 表，
+/// `tracks.album_id` / `track_artists.artist_id`。
+///
+/// 删除策略沿用现有 schema 惯例：key 行随实体 `ON DELETE CASCADE`；
+/// 曲目/专辑关联列不级联（实体从不删除，关联列按现有 `local_files` 同款
+/// 无动作外键）。新增索引只覆盖实际查询：实体 key 查找、按实体取曲目。
+const MIGRATION_V10: &str = r#"
+CREATE TABLE artists (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  sort_key TEXT
+);
+CREATE TABLE artist_keys (
+  artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  provider_key TEXT NOT NULL,
+  PRIMARY KEY (provider, provider_key)
+);
+CREATE TABLE albums (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  album_artist_id INTEGER REFERENCES artists(id),
+  year INTEGER
+);
+CREATE TABLE album_keys (
+  album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  provider_key TEXT NOT NULL,
+  PRIMARY KEY (provider, provider_key)
+);
+ALTER TABLE tracks ADD COLUMN album_id INTEGER REFERENCES albums(id);
+ALTER TABLE track_artists ADD COLUMN artist_id INTEGER REFERENCES artists(id);
+CREATE INDEX idx_artist_keys_artist ON artist_keys(artist_id);
+-- local 歌手 key 的 NOCASE 查找（qq mid 大小写敏感，走上面的主键索引）。
+CREATE INDEX idx_artist_keys_local ON artist_keys(provider, provider_key COLLATE NOCASE);
+-- 跨 provider 归一按名称找既有实体（NOCASE）。
+CREATE INDEX idx_artists_name ON artists(name COLLATE NOCASE);
+CREATE INDEX idx_albums_title ON albums(title COLLATE NOCASE);
+CREATE INDEX idx_album_keys_album ON album_keys(album_id);
+CREATE INDEX idx_tracks_album ON tracks(album_id);
+CREATE INDEX idx_track_artists_artist_id ON track_artists(artist_id);
 "#;
 
 /// v8：封面 URL → 本地产物索引（daemon `CoverGet` 下载落盘后登记，

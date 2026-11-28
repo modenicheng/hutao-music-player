@@ -19,7 +19,7 @@ fn row() -> TrackRow {
 #[test]
 fn migration_creates_v1() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 9); // v9：曲目 mid + 本地标签版本
+    assert_eq!(db.version().unwrap(), 10); // v10：专辑/歌手实体 + 关联 id
     let mut db = db;
     assert_eq!(db.track_id("qq", "mid123").unwrap(), None);
 }
@@ -269,7 +269,7 @@ fn migration_v2_migrates_favorites_into_relations() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        9
+        10
     );
     // favorites 表已删除；数据在 relations（track/liked，synced）。
     let count: i64 = conn
@@ -836,7 +836,7 @@ fn mark_pending_with_delete_op_rolls_back_on_op_failure() {
 #[test]
 fn migration_v3_adds_columns_and_tables() {
     let db = LibraryDb::open_in_memory().unwrap();
-    assert_eq!(db.version().unwrap(), 9);
+    assert_eq!(db.version().unwrap(), 10);
     let cols: Vec<String> = db
         .conn
         .prepare("PRAGMA table_info(local_files)")
@@ -910,7 +910,7 @@ fn migration_v2_to_v3_upgrades_in_place() {
         .conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 9);
+    assert_eq!(v, 10);
     db.conn
         .execute("UPDATE tracks SET genre='Rock' WHERE id=1", [])
         .unwrap();
@@ -2069,7 +2069,7 @@ fn migration_v8_to_v9_upgrades_in_place() {
     }
     {
         let db = LibraryDb::open(&path).unwrap();
-        assert_eq!(db.version().unwrap(), 9);
+        assert_eq!(db.version().unwrap(), 10);
         let (title, album_mid): (String, Option<String>) = db
             .conn
             .query_row(
@@ -2101,7 +2101,7 @@ fn migration_v8_to_v9_upgrades_in_place() {
     }
     // 重复打开：版本不倒退、数据不丢（迁移幂等）。
     let db = LibraryDb::open(&path).unwrap();
-    assert_eq!(db.version().unwrap(), 9);
+    assert_eq!(db.version().unwrap(), 10);
     let n: i64 = db
         .conn
         .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
@@ -2450,3 +2450,283 @@ fn local_artist_display_uses_shared_separator() {
         assert_eq!(db.track_artists(tid).unwrap(), expected_refs, "{label}");
     }
 }
+
+// ——— v10 实体化（§30.2.6 phase 2，存储/入库部分）———
+
+/// `artist_keys` 全量（id, provider, provider_key），按稳定序便于断言。
+fn artist_keys_of(db: &LibraryDb) -> Vec<(i64, String, String)> {
+    let mut stmt = db
+        .conn
+        .prepare(
+            "SELECT artist_id, provider, provider_key FROM artist_keys \
+             ORDER BY artist_id, provider, provider_key",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap();
+    rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+}
+
+/// `album_keys` 全量（id, provider, provider_key）。
+fn album_keys_of(db: &LibraryDb) -> Vec<(i64, String, String)> {
+    let mut stmt = db
+        .conn
+        .prepare(
+            "SELECT album_id, provider, provider_key FROM album_keys \
+             ORDER BY album_id, provider, provider_key",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap();
+    rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+}
+
+fn table_count(db: &LibraryDb, table: &str) -> i64 {
+    db.conn
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+        .unwrap()
+}
+
+/// 实体规模快照：artists / artist_keys / albums / album_keys / track_artists。
+fn entity_counts(db: &LibraryDb) -> (i64, i64, i64, i64, i64) {
+    (
+        table_count(db, "artists"),
+        table_count(db, "artist_keys"),
+        table_count(db, "albums"),
+        table_count(db, "album_keys"),
+        table_count(db, "track_artists"),
+    )
+}
+
+fn track_album_id(db: &LibraryDb, track_id: i64) -> Option<i64> {
+    db.conn
+        .query_row(
+            "SELECT album_id FROM tracks WHERE id = ?1",
+            params![track_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// v9 → v10 迁移回填：QQ（有 mid）与本地行升级后实体/键/关联齐全；
+/// 同名歌手按名称归一到同一实体；同名不同专辑歌手分两个实体；空专辑/空歌手
+/// 跳过；重开与重复回填幂等。
+#[test]
+fn migration_v9_to_v10_backfills_entities() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.sqlite3");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        for step in [
+            MIGRATION_V2,
+            MIGRATION_V3,
+            MIGRATION_V4,
+            MIGRATION_V6,
+            MIGRATION_V8,
+            MIGRATION_V9,
+        ] {
+            conn.execute_batch(step).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 9).unwrap();
+        // 1) QQ 曲目：专辑 mid + 两个歌手 mid。
+        conn.execute(
+            "INSERT INTO tracks (source, source_key, title, album, album_mid, artist) \
+             VALUES ('qq', 'qq-mid-1', 'QQ 曲', 'QQ 专辑', 'amid-1', '周深 / 费玉清')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_artists (track_id, artist, artist_mid, position) \
+             VALUES (1, '周深', 'smid-1', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_artists (track_id, artist, artist_mid, position) \
+             VALUES (1, '费玉清', 'smid-2', 1)",
+            [],
+        )
+        .unwrap();
+        // 2) 本地曲目：同名歌手（无 mid）+ 同名专辑 → 跨 provider 归一。
+        conn.execute(
+            "INSERT INTO tracks (source, source_key, title, album, artist) \
+             VALUES ('local', 'local:/zs.flac', '本地曲', 'QQ 专辑', '周深')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_artists (track_id, artist, position) VALUES (2, '周深', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_files (track_id, path) VALUES (2, '/zs.flac')",
+            [],
+        )
+        .unwrap();
+        // 3) 本地曲目：同名专辑、不同专辑歌手 + 年份 → 第二个专辑实体。
+        conn.execute(
+            "INSERT INTO tracks (source, source_key, title, album, artist, album_artist, year) \
+             VALUES ('local', 'local:/other.flac', '另一曲', 'QQ 专辑', '费玉清', '费玉清', 2020)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_artists (track_id, artist, position) VALUES (3, '费玉清', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_files (track_id, path) VALUES (3, '/other.flac')",
+            [],
+        )
+        .unwrap();
+        // 4) 空专辑名 + 全空白歌手行：不建实体、不回填。
+        conn.execute(
+            "INSERT INTO tracks (source, source_key, title) VALUES ('local', 'local:/single.flac', '单曲')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_files (track_id, path) VALUES (4, '/single.flac')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_artists (track_id, artist, position) VALUES (4, '   ', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let mut db = LibraryDb::open(&path).unwrap();
+    assert_eq!(db.version().unwrap(), 10);
+
+    // 歌手实体：周深 / 费玉清 各一个（QQ 与本地同名归一到同一实体）。
+    let artists: Vec<(i64, String)> = {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT id, name FROM artists ORDER BY name")
+            .unwrap();
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    assert_eq!(artists.len(), 2, "两个歌手实体");
+    assert!(artists.iter().any(|(_, n)| n == "周深"));
+    assert!(artists.iter().any(|(_, n)| n == "费玉清"));
+    let zhou = artists.iter().find(|(_, n)| n == "周深").unwrap().0;
+    let fei = artists.iter().find(|(_, n)| n == "费玉清").unwrap().0;
+    let keys = artist_keys_of(&db);
+    assert_eq!(keys.len(), 4, "两个歌手各挂 qq mid + local 名称键");
+    assert!(keys.contains(&(zhou, "qq".into(), "smid-1".into())));
+    assert!(keys.contains(&(zhou, "local".into(), "周深".into())));
+    assert!(keys.contains(&(fei, "qq".into(), "smid-2".into())));
+    assert!(keys.contains(&(fei, "local".into(), "费玉清".into())));
+
+    // 专辑实体：QQ 专辑（qq mid + 本地周深 key）+ 费玉清那张（本地 key）。
+    let albums: Vec<(i64, String, Option<i64>, Option<i64>)> = {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT id, title, album_artist_id, year FROM albums ORDER BY id")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap();
+        rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    assert_eq!(albums.len(), 2, "同名不同专辑歌手 → 两个专辑实体");
+    assert_eq!(albums[0].1, "QQ 专辑");
+    assert_eq!(albums[0].2, Some(zhou), "QQ 专辑的专辑歌手 = 首个歌手");
+    let album_keys = album_keys_of(&db);
+    assert_eq!(album_keys.len(), 3);
+    assert!(album_keys.contains(&(albums[0].0, "qq".into(), "amid-1".into())));
+    assert!(album_keys.contains(&(albums[0].0, "local".into(), "qq 专辑\u{1f}周深".into())));
+    assert!(album_keys.contains(&(albums[1].0, "local".into(), "qq 专辑\u{1f}费玉清".into())));
+    assert_eq!(albums[1].2, Some(fei));
+    assert_eq!(albums[1].3, Some(2020), "回填专辑年份");
+
+    // 关联回填：曲目 1/2 同一专辑实体；3 另一实体；4 无专辑。
+    assert_eq!(track_album_id(&db, 1), Some(albums[0].0));
+    assert_eq!(track_album_id(&db, 2), Some(albums[0].0));
+    assert_eq!(track_album_id(&db, 3), Some(albums[1].0));
+    assert_eq!(track_album_id(&db, 4), None);
+    // 非空歌手行全部有实体；空白行保持 NULL（迁移校验口径一致）。
+    let missing: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM track_artists WHERE artist_id IS NULL AND TRIM(artist) <> ''",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(missing, 0);
+    let blank: Option<i64> = db
+        .conn
+        .query_row(
+            "SELECT artist_id FROM track_artists WHERE track_id = 4 AND position = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(blank, None);
+
+    // 重开幂等 + 回填再跑一遍零写入。
+    let before = entity_counts(&db);
+    db.backfill_entities().unwrap();
+    assert_eq!(entity_counts(&db), before, "回填步骤幂等");
+    drop(db);
+    let db = LibraryDb::open(&path).unwrap();
+    assert_eq!(db.version().unwrap(), 10);
+    assert_eq!(entity_counts(&db), before, "重开不重复建实体");
+}
+
+/// v10 迁移失败整体回滚：DDL 与回填同一事务，user_version 不推进、库不砖化。
+#[test]
+fn migration_v10_rolls_back_on_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.sqlite3");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        for step in [
+            MIGRATION_V2,
+            MIGRATION_V3,
+            MIGRATION_V4,
+            MIGRATION_V6,
+            MIGRATION_V8,
+            MIGRATION_V9,
+        ] {
+            conn.execute_batch(step).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 9).unwrap();
+        // 预先占用 albums 表名：v10 建表中途失败（此前已建的 artists 等须回滚）。
+        conn.execute_batch("CREATE TABLE albums (id INTEGER PRIMARY KEY);")
+            .unwrap();
+    }
+    assert!(LibraryDb::open(&path).is_err(), "迁移失败必须返回错误");
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 9, "失败不推进 user_version");
+    let leftover: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('artists','artist_keys','album_keys')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover, 0, "已建实体表随事务回滚");
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(tracks)")
+        .unwrap()
+        .query_map([], |r| r.get(1))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!cols.iter().any(|c| c == "album_id"), "加列也回滚");
+}
+
