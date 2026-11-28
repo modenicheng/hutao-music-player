@@ -2525,6 +2525,21 @@ fn track_album_id(db: &LibraryDb, track_id: i64) -> Option<i64> {
         .unwrap()
 }
 
+fn local_meta(
+    title: &str,
+    artist: &str,
+    album: &str,
+    album_artist: Option<&str>,
+) -> crate::local::LocalMeta {
+    crate::local::LocalMeta {
+        title: title.to_owned(),
+        artist: Some(artist.to_owned()),
+        album: Some(album.to_owned()),
+        album_artist: album_artist.map(str::to_owned),
+        ..Default::default()
+    }
+}
+
 /// v9 → v10 迁移回填：QQ（有 mid）与本地行升级后实体/键/关联齐全；
 /// 同名歌手按名称归一到同一实体；同名不同专辑歌手分两个实体；空专辑/空歌手
 /// 跳过；重开与重复回填幂等。
@@ -2743,6 +2758,63 @@ fn migration_v10_rolls_back_on_failure() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert!(!cols.iter().any(|c| c == "album_id"), "加列也回滚");
+}
+
+/// 同名专辑、不同专辑歌手 → 两个实体 + 两个 local key；按 id 查询互不混入；
+/// 按名查询保持旧口径（桌面切换前不能破坏）。
+#[test]
+fn local_same_album_title_different_album_artist_splits_entities() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let a = db
+        .add_local_file(
+            &dir.path().join("a.mp3"),
+            Some(&local_meta("A", "甲", "同名专辑", Some("甲"))),
+        )
+        .unwrap();
+    let b = db
+        .add_local_file(
+            &dir.path().join("b.mp3"),
+            Some(&local_meta("B", "乙", "同名专辑", Some("乙"))),
+        )
+        .unwrap();
+
+    let albums = db.library_albums(None).unwrap();
+    assert_eq!(albums.len(), 2);
+    let id_a = albums
+        .iter()
+        .find(|g| g.artist.as_deref() == Some("甲"))
+        .unwrap()
+        .id;
+    let id_b = albums
+        .iter()
+        .find(|g| g.artist.as_deref() == Some("乙"))
+        .unwrap()
+        .id;
+    assert_ne!(id_a, id_b);
+    assert_ne!(id_a, 0);
+    assert_eq!(track_album_id(&db, a), Some(id_a));
+    assert_eq!(track_album_id(&db, b), Some(id_b));
+
+    let keys = album_keys_of(&db);
+    assert_eq!(keys.len(), 2, "两个专辑实体各一个 local key");
+    assert!(keys.contains(&(id_a, "local".into(), "同名专辑\u{1f}甲".into())));
+    assert!(keys.contains(&(id_b, "local".into(), "同名专辑\u{1f}乙".into())));
+
+    let tracks_of = |db: &mut LibraryDb, id: i64| -> Vec<i64> {
+        db.album_tracks_by_id(id)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.track_id)
+            .collect()
+    };
+    assert_eq!(tracks_of(&mut db, id_a), vec![a], "只回该实体曲目");
+    assert_eq!(tracks_of(&mut db, id_b), vec![b], "另一实体不混入");
+    assert_eq!(
+        db.local_tracks_by_album("同名专辑").unwrap().len(),
+        2,
+        "按名查询仍是合并视图"
+    );
 }
 
 /// 跨 provider 归一：同名歌手/专辑（本地无 mid + QQ 有 mid）归一到一个实体、
@@ -3023,3 +3095,154 @@ fn album_artist_id_resolution_rules() {
     assert_eq!(album.album_artist_id, None);
 }
 
+/// 聚合行暴露实体 id 与 mid：本地曲目挂进 QQ 同名实体后，组行从实体 key
+/// 取得 mid（本地行自身没有 mid）；by_id 投影与组行一致。
+#[test]
+fn library_groups_expose_entity_ids_and_mids() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    db.upsert_track(&TrackRow {
+        source: "qq",
+        source_key: "qq-1".into(),
+        title: "QQ 曲".into(),
+        album: Some("专辑".into()),
+        album_mid: Some("amid-1".into()),
+        artist: Some("周深".into()),
+        artist_refs: vec![ArtistRefRow {
+            mid: Some("smid-1".into()),
+            name: "周深".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    let tid = db
+        .add_local_file(
+            &dir.path().join("a.mp3"),
+            Some(&local_meta("本地曲", "周深", "专辑", None)),
+        )
+        .unwrap();
+
+    let albums = db.library_albums(None).unwrap();
+    assert_eq!(albums.len(), 1, "同名同专辑歌手归一到一个实体");
+    assert_eq!(albums[0].id, track_album_id(&db, tid).unwrap());
+    assert_eq!(
+        albums[0].album_mid.as_deref(),
+        Some("amid-1"),
+        "本地行无 mid，实体 key 提供"
+    );
+    assert_eq!(albums[0].track_count, 1, "本地库页只算本地曲目");
+    let artists = db.library_artists().unwrap();
+    assert_eq!(artists.len(), 1);
+    assert_eq!(artists[0].id, track_artist_ids(&db, tid)[0].2.unwrap());
+    assert_eq!(
+        artists[0].artist_mid.as_deref(),
+        Some("smid-1"),
+        "本地行无 mid，实体 key 提供"
+    );
+
+    let artist = db.artist_by_id(artists[0].id).unwrap().unwrap();
+    assert_eq!(artist.id, artists[0].id);
+    assert_eq!(artist.name, "周深");
+    assert_eq!(artist.artist_mid.as_deref(), Some("smid-1"));
+    let album = db.album_by_id(albums[0].id).unwrap().unwrap();
+    assert_eq!(album.id, albums[0].id);
+    assert_eq!(album.title, "专辑");
+    assert_eq!(album.album_artist.as_deref(), Some("周深"));
+    assert_eq!(album.album_mid.as_deref(), Some("amid-1"));
+    assert_eq!(db.artist_by_id(i64::MAX).unwrap(), None);
+    assert_eq!(db.album_by_id(i64::MAX).unwrap(), None);
+}
+
+/// 按歌手实体 id 查询只回该实体曲目：同名歌手的另一实体（绕过解析器直接
+/// 构造）不混入；按名查询仍是旧口径的合并视图。
+#[test]
+fn artist_tracks_by_id_scopes_to_entity() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let a_track = db
+        .add_local_file(
+            &dir.path().join("a.mp3"),
+            Some(&local_meta("A", "甲", "甲 专辑", None)),
+        )
+        .unwrap();
+    let b_track = db
+        .add_local_file(
+            &dir.path().join("b.mp3"),
+            Some(&local_meta("B", "乙", "乙 专辑", None)),
+        )
+        .unwrap();
+    let artists = db.library_artists().unwrap();
+    let id_a = artists.iter().find(|a| a.artist == "甲").unwrap().id;
+    let id_b = artists.iter().find(|a| a.artist == "乙").unwrap().id;
+    assert_eq!(
+        db.artist_tracks_by_id(id_a)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.track_id)
+            .collect::<Vec<_>>(),
+        vec![a_track]
+    );
+    assert_eq!(
+        db.artist_tracks_by_id(id_b)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.track_id)
+            .collect::<Vec<_>>(),
+        vec![b_track]
+    );
+
+    // 同名第二实体（解析器不会造出这种数据，这里直接构造以证明查询按 id）。
+    db.conn
+        .execute("INSERT INTO artists (name) VALUES ('甲')", [])
+        .unwrap();
+    let dup = db.conn.last_insert_rowid();
+    db.conn
+        .execute(
+            "INSERT INTO artist_keys (artist_id, provider, provider_key) VALUES (?1, 'local', '甲（同名另一实体）')",
+            params![dup],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO tracks (id, source, source_key, title, album, artist) \
+             VALUES (100, 'local', 'local:/dup.mp3', '另一曲', '专辑', '甲')",
+            [],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO local_files (track_id, path) VALUES (100, '/dup.mp3')",
+            [],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO track_artists (track_id, artist, position, artist_id) \
+             VALUES (100, '甲', 0, ?1)",
+            params![dup],
+        )
+        .unwrap();
+    assert_eq!(
+        db.artist_tracks_by_id(dup)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.track_id)
+            .collect::<Vec<_>>(),
+        vec![100],
+        "按 id 只回本实体曲目"
+    );
+    assert_eq!(
+        db.artist_tracks_by_id(id_a)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.track_id)
+            .collect::<Vec<_>>(),
+        vec![a_track],
+        "同名另一实体的曲目不混入"
+    );
+    assert_eq!(
+        db.local_tracks_by_artist("甲").unwrap().len(),
+        2,
+        "按名查询仍是旧口径"
+    );
+}

@@ -236,15 +236,43 @@ pub struct LibraryTrackRow {
 }
 
 /// 本地专辑聚合行。
+///
+/// v10：`id` 是专辑实体主键（`albums.id`，按 id 取曲目见
+/// [`LibraryDb::album_tracks_by_id`]）；0 表示没有实体的历史直插行（v10 后
+/// 写路径全部解析实体，正常数据不会出现）。
 #[derive(Clone, Debug)]
 pub struct AlbumGroup {
+    /// 专辑实体 id（`albums.id`；历史直插行为 0）。
+    pub id: i64,
     pub album: String,
     pub artist: Option<String>,
-    /// 专辑 mid（QQ 行有值；本地扫盘行 NULL）——v9。
+    /// 专辑 mid（QQ 行有值；本地扫盘行 NULL，实体登记过 QQ key 时取 key）——v9/v10。
     pub album_mid: Option<String>,
     pub track_count: i64,
     pub year: Option<i64>,
     pub cover_uri: Option<String>,
+}
+
+/// 歌手实体（`artists` 行 + 登记的 QQ mid，`artist_by_id` 结果）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtistEntity {
+    pub id: i64,
+    pub name: String,
+    /// 实体登记的 QQ 歌手 mid（`artist_keys(provider='qq')`；无则 None）。
+    pub artist_mid: Option<String>,
+}
+
+/// 专辑实体（`album_by_id` 结果）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlbumEntity {
+    pub id: i64,
+    pub title: String,
+    /// `album_artist_id` 的展示名（无专辑歌手 → None）。
+    pub album_artist: Option<String>,
+    pub album_artist_id: Option<i64>,
+    pub year: Option<i64>,
+    /// 实体登记的 QQ 专辑 mid（`album_keys(provider='qq')`；无则 None）。
+    pub album_mid: Option<String>,
 }
 
 /// 目录内已入库的本地曲目（目录封面刷新输入）。
@@ -257,9 +285,16 @@ pub struct LocalCoverRow {
 }
 
 /// 本地歌手聚合行（track_artists 多值拆行）。
+///
+/// v10：`id` 是歌手实体主键（`artists.id`，按 id 取曲目见
+/// [`LibraryDb::artist_tracks_by_id`]）；0 表示没有实体的历史直插行。
 #[derive(Clone, Debug)]
 pub struct ArtistGroup {
+    /// 歌手实体 id（`artists.id`；历史直插行为 0）。
+    pub id: i64,
     pub artist: String,
+    /// 实体登记的 QQ 歌手 mid（本地行自身恒 NULL；跨 provider 归一后取 key）。
+    pub artist_mid: Option<String>,
     pub track_count: i64,
 }
 
@@ -1674,14 +1709,23 @@ impl LibraryDb {
     }
 
     /// 本地专辑聚合（album 非空；search 子串过滤）。
-    /// 分组键 =（专辑名, 专辑歌手）：专辑歌手有 `album_artist`（空串视同无）
-    /// 取它，否则取该行 `artist`——同名不同专辑歌手不再合并（§30.2.6 phase 1）。
-    /// 专辑歌手为整组同一表达式值；`album_mid` 取组内 `MAX`（QQ 行回填后可用）。
+    ///
+    /// v10：分组键 = 专辑实体（`tracks.album_id`），同名不同专辑歌手是两个
+    /// 实体、两行（§30.2.6 phase 1 的分组口径由实体固化）。没有实体的历史
+    /// 直插行按旧口径兜底（专辑名 + 专辑歌手 NOCASE），`id = 0`。
+    /// `album_mid` 优先取行上回填值（phase 1 语义），缺失时取实体登记的 QQ
+    /// mid（本地曲目挂进 QQ 同名专辑实体后也有 mid）。
     pub fn library_albums(&mut self, search: Option<&str>) -> rusqlite::Result<Vec<AlbumGroup>> {
         let mut sql = String::from(
-            "SELECT t.album,
-                    MAX(COALESCE(NULLIF(t.album_artist, ''), t.artist)),
-                    COUNT(*), MAX(t.year), MAX(t.cover_uri), MAX(t.album_mid)
+            "SELECT COALESCE(t.album_id, 0) AS id,
+                    MAX(t.album) AS album,
+                    MAX(COALESCE(NULLIF(t.album_artist, ''), t.artist)) AS artist,
+                    COUNT(DISTINCT t.id),
+                    MAX(t.year), MAX(t.cover_uri),
+                    COALESCE(MAX(t.album_mid),
+                             (SELECT k.provider_key FROM album_keys k
+                               WHERE k.album_id = t.album_id AND k.provider = 'qq'
+                               ORDER BY k.provider_key LIMIT 1))
              FROM tracks t JOIN local_files lf ON lf.track_id = t.id
              WHERE t.source = 'local' AND t.album IS NOT NULL AND t.album <> ''",
         );
@@ -1691,21 +1735,24 @@ impl LibraryDb {
             vals.push(Box::new(format!("%{}%", Self::escape_like(s))));
         }
         sql.push_str(
-            " GROUP BY t.album COLLATE NOCASE,
-                      COALESCE(NULLIF(t.album_artist, ''), t.artist) COLLATE NOCASE
-              ORDER BY t.album COLLATE NOCASE, 2",
+            " GROUP BY COALESCE(t.album_id, 0),
+                      CASE WHEN t.album_id IS NULL THEN t.album COLLATE NOCASE END,
+                      CASE WHEN t.album_id IS NULL
+                           THEN COALESCE(NULLIF(t.album_artist, ''), t.artist) COLLATE NOCASE END
+              ORDER BY 2 COLLATE NOCASE, 3",
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
             rusqlite::params_from_iter(vals.iter().map(|v| v.as_ref())),
             |r| {
                 Ok(AlbumGroup {
-                    album: r.get(0)?,
-                    artist: r.get(1)?,
-                    track_count: r.get(2)?,
-                    year: r.get(3)?,
-                    cover_uri: r.get(4)?,
-                    album_mid: r.get(5)?,
+                    id: r.get(0)?,
+                    album: r.get(1)?,
+                    artist: r.get(2)?,
+                    track_count: r.get(3)?,
+                    year: r.get(4)?,
+                    cover_uri: r.get(5)?,
+                    album_mid: r.get(6)?,
                 })
             },
         )?;
@@ -1713,19 +1760,35 @@ impl LibraryDb {
     }
 
     /// 本地歌手聚合（多值拆行；曲目数按 distinct track 计）。
+    ///
+    /// v10：按歌手实体分组（`track_artists.artist_id`），展示名取实体名；
+    /// `artist_mid` 优先取行上 mid，缺失时取实体登记的 QQ mid——本地曲目
+    /// 挂进 QQ 同名歌手实体后也能拿到 mid（桌面按 mid 导航用）。
+    /// 没有实体的历史直插行按歌手名兜底分组（`id = 0`）。
     pub fn library_artists(&mut self) -> rusqlite::Result<Vec<ArtistGroup>> {
         let mut stmt = self.conn.prepare(
-            "SELECT ta.artist, COUNT(DISTINCT ta.track_id)
+            "SELECT COALESCE(ta.artist_id, 0) AS id,
+                    COALESCE((SELECT a.name FROM artists a WHERE a.id = ta.artist_id),
+                             MAX(ta.artist)),
+                    COALESCE(MAX(ta.artist_mid),
+                             (SELECT k.provider_key FROM artist_keys k
+                               WHERE k.artist_id = ta.artist_id AND k.provider = 'qq'
+                               ORDER BY k.provider_key LIMIT 1)),
+                    COUNT(DISTINCT ta.track_id)
              FROM track_artists ta
              JOIN tracks t ON t.id = ta.track_id
              JOIN local_files lf ON lf.track_id = t.id
              WHERE t.source = 'local'
-             GROUP BY ta.artist ORDER BY ta.artist",
+             GROUP BY COALESCE(ta.artist_id, 0),
+                      CASE WHEN ta.artist_id IS NULL THEN ta.artist END
+             ORDER BY 2",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(ArtistGroup {
-                artist: r.get(0)?,
-                track_count: r.get(1)?,
+                id: r.get(0)?,
+                artist: r.get(1)?,
+                artist_mid: r.get(2)?,
+                track_count: r.get(3)?,
             })
         })?;
         rows.collect()
@@ -1783,6 +1846,85 @@ impl LibraryDb {
             })
         })?;
         rows.collect()
+    }
+
+    /// 按歌手实体 id 取本地曲目（桌面歌手页；与 `local_tracks_by_artist`
+    /// 同口径：JOIN `local_files`、`missing` 字段、标题序），但按 `artist_id`
+    /// 命中——同名歌手的另一实体不会混入。
+    pub fn artist_tracks_by_id(
+        &mut self,
+        artist_id: i64,
+    ) -> rusqlite::Result<Vec<LibraryTrackRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT t.id, t.source_key, t.title, t.artist, t.album, t.duration_ms, t.year, t.genre, lf.missing
+             FROM tracks t
+             JOIN track_artists ta ON ta.track_id = t.id
+             JOIN local_files lf ON lf.track_id = t.id
+             WHERE t.source = 'local' AND ta.artist_id = ?1
+             ORDER BY t.title",
+        )?;
+        let rows = stmt.query_map(params![artist_id], library_track_row)?;
+        rows.collect()
+    }
+
+    /// 按专辑实体 id 取本地曲目（桌面专辑页；与 `local_tracks_by_album`
+    /// 同口径的曲序：碟号 → 曲号 → 标题），但按 `album_id` 命中——同名专辑
+    /// 的另一实体不会混入。
+    pub fn album_tracks_by_id(&mut self, album_id: i64) -> rusqlite::Result<Vec<LibraryTrackRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.source_key, t.title, t.artist, t.album, t.duration_ms, t.year, t.genre, lf.missing
+             FROM tracks t JOIN local_files lf ON lf.track_id = t.id
+             WHERE t.source = 'local' AND t.album_id = ?1
+             ORDER BY COALESCE(t.disc_number, 1), COALESCE(t.track_number, 999), t.title",
+        )?;
+        let rows = stmt.query_map(params![album_id], library_track_row)?;
+        rows.collect()
+    }
+
+    /// 歌手实体投影（展示名 + 登记的 QQ mid）；id 不存在 → None。
+    pub fn artist_by_id(&mut self, id: i64) -> rusqlite::Result<Option<ArtistEntity>> {
+        self.conn
+            .query_row(
+                "SELECT a.id, a.name,
+                        (SELECT k.provider_key FROM artist_keys k
+                          WHERE k.artist_id = a.id AND k.provider = 'qq'
+                          ORDER BY k.provider_key LIMIT 1)
+                 FROM artists a WHERE a.id = ?1",
+                params![id],
+                |r| {
+                    Ok(ArtistEntity {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        artist_mid: r.get(2)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    /// 专辑实体投影（title / 专辑歌手 / year / 登记的 QQ mid）；不存在 → None。
+    pub fn album_by_id(&mut self, id: i64) -> rusqlite::Result<Option<AlbumEntity>> {
+        self.conn
+            .query_row(
+                "SELECT al.id, al.title, ar.name, al.album_artist_id, al.year,
+                        (SELECT k.provider_key FROM album_keys k
+                          WHERE k.album_id = al.id AND k.provider = 'qq'
+                          ORDER BY k.provider_key LIMIT 1)
+                 FROM albums al LEFT JOIN artists ar ON ar.id = al.album_artist_id
+                 WHERE al.id = ?1",
+                params![id],
+                |r| {
+                    Ok(AlbumEntity {
+                        id: r.get(0)?,
+                        title: r.get(1)?,
+                        album_artist: r.get(2)?,
+                        album_artist_id: r.get(3)?,
+                        year: r.get(4)?,
+                        album_mid: r.get(5)?,
+                    })
+                },
+            )
+            .optional()
     }
 
     /// 已注册扫描根（watcher/E2 用）。
@@ -2629,6 +2771,22 @@ fn row_of_relation(r: &rusqlite::Row<'_>) -> rusqlite::Result<RelationRow> {
         retry_count: r.get(7)?,
         last_sync_error: r.get(8)?,
         updated_at: r.get(9)?,
+    })
+}
+
+/// `LibraryTrackRow` 行映射（按 id 的两个查询共用；列序固定为
+/// `id, source_key, title, artist, album, duration_ms, year, genre, missing`）。
+fn library_track_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryTrackRow> {
+    Ok(LibraryTrackRow {
+        track_id: r.get(0)?,
+        source_key: r.get(1)?,
+        title: r.get(2)?,
+        artist: r.get(3)?,
+        album: r.get(4)?,
+        duration_ms: r.get(5)?,
+        year: r.get(6)?,
+        genre: r.get(7)?,
+        missing: r.get::<_, i64>(8)? != 0,
     })
 }
 
