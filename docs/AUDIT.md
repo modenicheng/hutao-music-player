@@ -92,6 +92,9 @@
    真库当前没有「有关系无曲目」的孤儿行；INNER JOIN 议题独立，仍未决策。
 3. **播放路径创建的 local_files 行是二等行**（无 scan_root/generation）：daemon 关机期间
    删除的文件永不标记 missing，直到下次扫描。
+   **2026-11-28 已修根内文件**（§31）：`add_local_file` 归入所在扫描根并带当前代际，
+   `finish_scan` 的 missing 收尾从此覆盖播放行；扫描根之外的播放行仍无根可归
+   （没有 watcher 覆盖，属预期）。
 4. ~~**`delete_playlists_absent` FK 地雷**：subscribed 歌单一旦有曲目缓存就会 FK 失败~~
    **已拆除**（2026-10-02）：歌单曲目缓存随 `reconcile_playlist_tracks` 落地（§17），
    `purge_tracks_of_absent_playlists` 在删除歌单前按同一谓词清理子行（含 subscribed），
@@ -1193,3 +1196,27 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 - 修复与升级的真机表现见 §30.7 末的真机实测记录。
 - Slint 1.19 在真机 GL 渲染器下的样子没有实测：离屏 A/B 用的是软件渲染器，而 1.18 的软件渲染器根本不画投影，所以「升级前」那一半截图里的面板本来就没有投影，不能拿来推断真机前后差异。真机上需要人眼确认的：封面投影、标题两行、圆角与文字抗锯齿。
 - 标「未复核」的条目来自子代理报告，主代理没有逐条回代码核对。
+
+## §31 修复轮补遗（2026-11-28，承接 §30.7）
+
+§30.7 之后逐条处理「任务书外发现」与 §4 遗留。每项单独提交、各自带回归测试；合入态
+验证：`cargo fmt --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、
+`cargo test --workspace` 全绿（hmp-storage 85 → 88）。
+
+| 提交 | 内容 | 回归测试 |
+|---|---|---|
+| `46df596` | 登录二维码 PNG 落盘目录可注入：测试不再写真实 `data_dir`（此前在只读 HOME / 沙箱下 `cancel_removes_qr_file` 必红） | 断言路径落在注入目录 |
+| `07aa438` | **§4.3**：`add_local_file` 把播放入库的行归入所在扫描根并带当前代际；`finish_scan` 的 missing 收尾从此覆盖播放行 | `playback_ingested_file_joins_scan_root_and_is_marked_missing` |
+| `843cc57` | 封面缓存扩展名按内容魔数（此前一律 `.jpg`，PNG/WebP 被错标；读侧早已按内容解码） | `persist_cover_extension_follows_content` |
+| `57f3550` | `read_meta` 逐字段按 primary → 全部 tag 兜底；纯 RIFF `LIST/INFO` 的 WAV 不再丢标题/歌手/专辑/年份 | `read_meta_reads_riff_info_without_id3`（去掉兜底即红） |
+
+**仍未修**：
+
+- **§4.1 QMC1/V1 footer 误报**。现有 magic-mismatch 重试只兜住「剥离后解不出魔数」的大剥离；
+  key_size 很小时（尾部 4 字节恰为小整数）剥离后仍解得出 `fLaC` / MP3 同步字，音频尾部被
+  静默截断。可靠修法要在下载与流式两条路径上用候选 key 解密首块并验魔数，且需要真实
+  V1/QMC1 样本做正反向测试——没有样本前动手有把真 V1 判死的风险，保持开放。
+- **桌面集成测试仍读真实数据目录**（`bridge::load_data` → `library_view::load_snapshot`）。
+  隔离要在每个测试进程启动前改 `XDG_DATA_HOME`；`set_var` 与运行时线程有竞态，
+  需要单独的测试夹具方案，不能照搬登录测试的目录注入。
+- **目录封面在扫描后才放进目录**的，要等下次扫描才可见（§30.7 任务书外发现）。
