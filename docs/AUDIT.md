@@ -79,9 +79,20 @@
 
 ## 4. 已知问题（未修，需决策/低优先）
 
-1. **QMC1/V1 footer 误报**（media/decrypt）：尾 4 字节 LE 恰落 1..=1024 时被当成 V1
+1. ~~**QMC1/V1 footer 误报**（media/decrypt）：尾 4 字节 LE 恰落 1..=1024 时被当成 V1
    密钥区，静默截掉最后 `4+key_size` 字节音频（约 1/400k 概率但按文件确定）。
-   修法需验证提取的 key 能解出已知魔数，涉及流式与两条下载路径，建议单独立项。
+   修法需验证提取的 key 能解出已知魔数，涉及流式与两条下载路径，建议单独立项。~~
+   **已修**（2026-11-28，`f1298e1`，§31）：候选 V1 必须能从 key 区解析出合法 ekey
+   （Base64 文本或历史形态的已解码 blob），否则按无 footer 处理
+   （`audio_len = total_len`、不剥离；已有 API ekey 时仍用它解整段）。下载路径读
+   `4 + MAX_V1_KEY_SIZE` 尾部，流式路径按末尾长度提示补拉完整 key 区再校验；QTag
+   分支不变。回归：`detect_v1_rejects_unparseable_key_area`、
+   `detect_v1_rejects_random_bytes_key_area`、
+   `detect_v1_accepts_decoded_ekey_blob_key_area`、
+   `embedded_ekey_from_bytes_accepts_decoded_v1_key_blob`、
+   `prepare_keeps_tail_when_v1_candidate_is_not_ekey`、
+   `prepare_media_treats_unparseable_v1_tail_as_plaintext`；真 V1 正向：
+   `prepare_media_extracts_v1_ekey_from_long_tail`。
 2. **`list_favorites` INNER JOIN**：reconcile-only 的 QQ 收藏（未播放/未缓存过）不显示
    ——首次登录后「QQ 上几百首收藏，列表只有十几首」的观感。需要决定：LEFT JOIN +
    占位标题，或 reconcile 时补建 tracks 行。
@@ -1201,7 +1212,7 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 
 §30.7 之后逐条处理「任务书外发现」与 §4 遗留。每项单独提交、各自带回归测试；合入态
 验证：`cargo fmt --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、
-`cargo test --workspace` 全绿（hmp-storage 85 → 88）。
+`cargo test --workspace` 全绿（hmp-storage 85 → 91，hmp-daemon lib 180 → 182，hmp-desktop +1）。
 
 | 提交 | 内容 | 回归测试 |
 |---|---|---|
@@ -1210,6 +1221,8 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 | `843cc57` | 封面缓存扩展名按内容魔数（此前一律 `.jpg`，PNG/WebP 被错标；读侧早已按内容解码） | `persist_cover_extension_follows_content` |
 | `57f3550` | `read_meta` 逐字段按 primary → 全部 tag 兜底；纯 RIFF `LIST/INFO` 的 WAV 不再丢标题/歌手/专辑/年份 | `read_meta_reads_riff_info_without_id3`（去掉兜底即红） |
 | `419c59c` | 桌面集成测试不再打开真实库：新增 `load_data_with_snapshot` / `load_data_offline` 与 `bind_offline`，13 个只装载空壳的 UI 用例改用 `load_data_offline`，`navigation_scroll` / `remote_navigation` 用 `bind_offline`；`load_data` / `bind` 生产语义不变 | `injected_snapshot_and_offline_bind_never_touch_data_dir`（hmp-desktop +1） |
+| `f1298e1` | **§4.1**：V1 footer 候选必须从 key 区解析出合法 ekey（Base64 文本或已解码 blob）；下载读 `4 + 0x400` 尾部，流式按长度提示补拉完整 key 区；两种形态都解析失败才按无 footer 处理，不截断 | `detect_v1_rejects_unparseable_key_area`、`detect_v1_rejects_random_bytes_key_area`、`detect_v1_accepts_decoded_ekey_blob_key_area`、`embedded_ekey_from_bytes_accepts_decoded_v1_key_blob`、`prepare_keeps_tail_when_v1_candidate_is_not_ekey`、`prepare_media_treats_unparseable_v1_tail_as_plaintext`、`prepare_media_extracts_v1_ekey_from_long_tail` |
+| `a0a99e3` + `55ecb80` | 目录封面：候选名单单一事实源（探测与 watcher 事件共用）；`local_tracks_in_dir` 走 `local_files.path` 索引区间；封面事件重读同目录曲目，内嵌图优先、删除回退/清空，只在值变化时写行并 bump `LibraryChanged` | `folder_cover_refresh_updates_only_affected_rows`、`watcher_applies_folder_cover_events`（hmp-storage +3，hmp-daemon +2） |
 
 **桌面集成测试的库隔离（`419c59c` 细节）**：
 
@@ -1228,10 +1241,17 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 - 真机验证：`cargo test -p hmp-desktop` 前后 `~/.local/share/hmp/library.sqlite3` 的
   size/mtime 不变（1445888 / 1795688714），且没有生成 `-wal` / `-shm`。
 
-**仍未修**：
+**§4.1 验证边界**（`f1298e1`）：没有真实 V1/QMC1 样本，正反向测试均用 `generate_ekey`
+合成夹具。手头唯一真实 `.mgg`（`/mnt/d/QQMusicDownloads`，1.9 MB，只读）尾部是 8 字节
+`musicex\0`，全文件不含 `QTag` / `STag` / `EncV2` 标记——它不是 QTag 样本，detect
+在修复前后都按无 footer 处理，既不能作 QTag 正向证据，也不能作 V1 证据。真机遇到 V1
+文件时仍需复验。
 
-- **§4.1 QMC1/V1 footer 误报**。现有 magic-mismatch 重试只兜住「剥离后解不出魔数」的大剥离；
-  key_size 很小时（尾部 4 字节恰为小整数）剥离后仍解得出 `fLaC` / MP3 同步字，音频尾部被
-  静默截断。可靠修法要在下载与流式两条路径上用候选 key 解密首块并验魔数，且需要真实
-  V1/QMC1 样本做正反向测试——没有样本前动手有把真 V1 判死的风险，保持开放。
-- **目录封面在扫描后才放进目录**的，要等下次扫描才可见（§30.7 任务书外发现）。
+**目录封面的事件边界**（`55ecb80`）：只保证同一目录内相关行一致；同名专辑分散在多个目录、
+某目录无封面时，专辑聚合 `MAX(cover_uri)` 仍可能取到别目录的行（不误清其它目录的代价）。
+事件识别按探测拼写，`COVER.JPG` 这类全大写扩展名在不区分大小写的文件系统上能被探测读到，
+但自身事件不匹配，要等下次全量扫描。
+
+**仍未修 / 后续**：§29 的 UI 键盘/焦点/歌单管理开放项与 §30.2.6 phase 1 另行推进
+（任务书 `docs/plans/2026-11-28-M1-track-info.md`）；§4.2 `list_favorites` INNER JOIN 与
+§30.6 的产品语义决策仍开放。
