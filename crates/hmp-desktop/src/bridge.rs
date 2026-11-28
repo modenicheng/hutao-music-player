@@ -563,7 +563,24 @@ fn spawn_login_poll_loop(
 /// 把媒体库快照（直读 library.sqlite3，离线降级为空）装载进 Data global：
 /// 五个库页真数据；下载/已购两页后端无对应域，渲染为诚实空态。
 pub fn load_data(ui: &AppWindow, runtime: &Arc<crate::backend::BackendRuntime>) {
-    apply_snapshot(ui, runtime, &library_view::load_snapshot());
+    load_data_with_snapshot(ui, runtime, &library_view::load_snapshot());
+}
+
+/// 用给定快照装载（测试 / 离线注入的显式入口）：不读 `data_dir`、不打开
+/// `LibraryDb`。生产启动仍走 [`load_data`]；集成测试用它装载合成空壳，
+/// 避免只读投影用户真实库。
+pub fn load_data_with_snapshot(
+    ui: &AppWindow,
+    runtime: &Arc<crate::backend::BackendRuntime>,
+    snapshot: &library_view::Snapshot,
+) {
+    apply_snapshot(ui, runtime, snapshot);
+}
+
+/// 空快照装载：离线诚实空壳（测试入口，等价于注入
+/// [`library_view::Snapshot::empty`]）。
+pub fn load_data_offline(ui: &AppWindow, runtime: &Arc<crate::backend::BackendRuntime>) {
+    load_data_with_snapshot(ui, runtime, &library_view::Snapshot::empty());
 }
 
 /// 库变更刷新（`Event::LibraryChanged` 驱动，AUDIT §8.9）：防抖合并 + 后台
@@ -592,7 +609,7 @@ pub fn schedule_refresh(ui: &AppWindow, runtime: &Arc<crate::backend::BackendRun
                 // 阻塞 rusqlite 在 runtime 工作线程执行（与 backend 队列
                 // 投影同惯例；投影数据均为纯数据，满足 Send）。
                 let snap = library_view::load_snapshot();
-                let detail = load_detail(route, &param);
+                let detail = load_detail(route, &param, false);
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = ui_weak.upgrade() else {
                         return;
@@ -827,18 +844,22 @@ fn apply_folder_filter(data: &Data, filter: &FolderFilter) {
 /// 路由落地后的详情装载（导航路径：单次同步读，单页查询量小；库变更刷新
 /// 路径走后台预计算 + [`apply_detail`]）。本地 miss 即诚实空态（state=3）。
 /// 远端参数（`qq:` 前缀）在本地 miss 后分流到异步远端装载（D-1）。
+///
+/// `offline` = 不从磁盘读库（[`bind_offline`] 的测试/离线注入路径）：本地详情
+/// 直接按 miss 处理，远端分流与其余回调不变。
 fn apply_route(
     ui: &AppWindow,
     runtime: &Arc<crate::backend::BackendRuntime>,
     route: crate::Route,
     param: SharedString,
+    offline: bool,
 ) {
     // 最近播放（D7）：引擎写播放历史不发 LibraryChanged，库变更刷新之外再无
     // 重读时机——进页（导航与返回两条路径都经此）后台重读一次。
-    if route == crate::Route::Recent {
+    if !offline && route == crate::Route::Recent {
         spawn_recent_reload(ui.as_weak(), runtime);
     }
-    let detail = load_detail(route, &param);
+    let detail = load_detail(route, &param, offline);
     // 远端分流：本地投影 miss 且带 qq: 前缀 → 异步远端装载（本地事实
     // 优先，R3：同形展示名本地命中时不会走到这里）。load_detail 对远端
     // 参数返回 None，miss 判定涵盖。
@@ -881,13 +902,15 @@ enum DetailData {
     None,
 }
 
-fn load_detail(route: crate::Route, param: &str) -> DetailData {
+/// 详情投影（`offline` = 不读磁盘库；远端参数分流与本地 miss 语义不变）。
+fn load_detail(route: crate::Route, param: &str, offline: bool) -> DetailData {
     match route {
         crate::Route::Playlist => {
-            if let Some(detail) = param
-                .parse::<i64>()
-                .ok()
-                .and_then(library_view::playlist_detail)
+            if !offline
+                && let Some(detail) = param
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(library_view::playlist_detail)
             {
                 return DetailData::Playlist(param.to_string(), Some(detail));
             }
@@ -903,7 +926,12 @@ fn load_detail(route: crate::Route, param: &str) -> DetailData {
         // 专辑/歌手（展示名参数）：本地命中优先（R3——展示名理论上可叫
         // "qq:…" 属极端构造，本地事实先行）；miss 且带前缀 → None（同上）。
         crate::Route::Album => {
-            if let Some(detail) = library_view::album_detail(param) {
+            let local = if offline {
+                None
+            } else {
+                library_view::album_detail(param)
+            };
+            if let Some(detail) = local {
                 DetailData::Album(Some(detail))
             } else if crate::remote_details::remote_param(param).is_some() {
                 DetailData::None
@@ -912,7 +940,12 @@ fn load_detail(route: crate::Route, param: &str) -> DetailData {
             }
         }
         crate::Route::Artist => {
-            if let Some(detail) = library_view::artist_detail(param) {
+            let local = if offline {
+                None
+            } else {
+                library_view::artist_detail(param)
+            };
+            if let Some(detail) = local {
                 DetailData::Artist(Some(detail))
             } else if crate::remote_details::remote_param(param).is_some() {
                 DetailData::None
@@ -1042,6 +1075,26 @@ pub fn bind(
     prefs: Arc<Mutex<Prefs>>,
     runtime: Arc<crate::backend::BackendRuntime>,
 ) {
+    bind_impl(ui, prefs, runtime, false);
+}
+
+/// 离线绑定（测试 / 离线注入）：导航到本地详情与「最近播放」时不读磁盘库，
+/// 模型由调用方经 [`load_data_with_snapshot`] / [`load_data_offline`] 注入；
+/// 其余回调与 [`bind`] 完全一致。
+pub fn bind_offline(
+    ui: &AppWindow,
+    prefs: Arc<Mutex<Prefs>>,
+    runtime: Arc<crate::backend::BackendRuntime>,
+) {
+    bind_impl(ui, prefs, runtime, true);
+}
+
+fn bind_impl(
+    ui: &AppWindow,
+    prefs: Arc<Mutex<Prefs>>,
+    runtime: Arc<crate::backend::BackendRuntime>,
+    offline: bool,
+) {
     // ——— 导航历史栈 ———
     // 条目 = 离开时的 (路由, 参数, 页面滚动偏移)。前进到新页归顶；返回时
     // 恢复到离开时的位置（此前路由切换从不碰滚动偏移：从长列表中部点进
@@ -1081,7 +1134,7 @@ pub fn bind(
             nav.set_route(route);
             nav.set_param(param.clone());
             nav.set_can_go_back(!history.lock().expect("nav history").is_empty());
-            apply_route(&ui, &rt, nav.get_route(), nav.get_param());
+            apply_route(&ui, &rt, nav.get_route(), nav.get_param(), offline);
             // 前进到新页（含同页重复导航，如再点侧栏当前项）：归顶
             request_page_scroll(&ui_weak, 0.0);
             // M4 在线内容页进入时懒加载（免登录页自动拉，猜你喜欢需登录）
@@ -1124,7 +1177,7 @@ pub fn bind(
                 request_page_scroll(&ui_weak, scroll_y);
             }
             nav.set_can_go_back(!history.lock().expect("nav history").is_empty());
-            apply_route(&ui, &rt, nav.get_route(), nav.get_param());
+            apply_route(&ui, &rt, nav.get_route(), nav.get_param(), offline);
         });
     }
 
@@ -1646,31 +1699,32 @@ mod tests {
 
     /// D-1 分流：远端参数（qq:）→ `DetailData::None`（导航分流信号 + 库变更
     /// 重放 no-op）；本地参数形态（数字 id / 展示名）不误判（miss 走诚实空态）。
+    /// `offline = true`：本单测不读真实 data_dir（本地命中与否不是断言目标）。
     #[test]
     fn load_detail_routes_remote_params_to_none() {
         assert!(matches!(
-            load_detail(crate::Route::Playlist, "qq:8522132521"),
+            load_detail(crate::Route::Playlist, "qq:8522132521", true),
             DetailData::None
         ));
         assert!(matches!(
-            load_detail(crate::Route::Album, "qq:002albUMZTyiKq"),
+            load_detail(crate::Route::Album, "qq:002albUMZTyiKq", true),
             DetailData::None
         ));
         assert!(matches!(
-            load_detail(crate::Route::Artist, "qq:0025NhlN2yWrP4"),
+            load_detail(crate::Route::Artist, "qq:0025NhlN2yWrP4", true),
             DetailData::None
         ));
-        // 本地参数：形态保持（命中与否取决于本机库，只锚定不误判远端）
-        match load_detail(crate::Route::Playlist, "123") {
+        // 本地参数：形态保持（离线模式不查库，只锚定不误判远端）
+        match load_detail(crate::Route::Playlist, "123", true) {
             DetailData::Playlist(p, _) => assert_eq!(p, "123"),
             _ => panic!("本地数字 id 参数必须保持 Playlist 形态"),
         }
         assert!(matches!(
-            load_detail(crate::Route::Album, "十一月的萧邦"),
+            load_detail(crate::Route::Album, "十一月的萧邦", true),
             DetailData::Album(_)
         ));
         assert!(matches!(
-            load_detail(crate::Route::Artist, "周杰伦"),
+            load_detail(crate::Route::Artist, "周杰伦", true),
             DetailData::Artist(_)
         ));
     }

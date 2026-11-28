@@ -74,6 +74,8 @@ fn live_daemon_playback_operations() {
     let ui = AppWindow::new().unwrap();
     ui.window().set_size(slint::PhysicalSize::new(1280, 800));
     let runtime = Arc::new(backend::BackendRuntime::new().unwrap());
+    // 本 E2E 的前提就是真实媒体库（play-tracks 整表入队断言依赖本地曲目），
+    // 故有意保留 `load_data` 直读 data_dir；`#[ignore]` 下按需手动运行。
     bridge::load_data(&ui, &runtime);
     let prefs = Arc::new(Mutex::new(prefs::load()));
     player_bridge::bind(&ui, Arc::clone(&runtime), prefs);

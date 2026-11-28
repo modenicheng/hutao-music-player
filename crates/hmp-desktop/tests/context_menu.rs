@@ -52,7 +52,7 @@ fn context_menu_snapshot_and_gates() {
 
     let ui = hmp_desktop::AppWindow::new().unwrap();
     ui.window().set_size(slint::PhysicalSize::new(1280, 800));
-    hmp_desktop::bridge::load_data(
+    hmp_desktop::bridge::load_data_offline(
         &ui,
         &std::sync::Arc::new(hmp_desktop::backend::BackendRuntime::new().unwrap()),
     );

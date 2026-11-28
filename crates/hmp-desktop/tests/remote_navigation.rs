@@ -6,7 +6,8 @@
 //!
 //! 出网隔离：导航会真实 spawn 请求——HMP_IPC_ENDPOINT 指向不存在管道令
 //! 其快速失败；no_event_loop 下其迟到回包的 invoke 闭包不会被泵执行，
-//! 断言只依赖手工注入的回包（确定性）。
+//! 断言只依赖手工注入的回包（确定性）。本地库同样隔离：`bind_offline`
+//! 不读 data_dir。
 
 use slint::{ComponentHandle, Global, Model};
 
@@ -23,7 +24,7 @@ fn remote_playlist_navigation_drops_late_response() {
     ui.window().set_size(slint::PhysicalSize::new(1280, 800));
     let runtime = std::sync::Arc::new(hmp_desktop::backend::BackendRuntime::new().unwrap());
     let prefs = std::sync::Arc::new(std::sync::Mutex::new(hmp_desktop::prefs::Prefs::default()));
-    hmp_desktop::bridge::bind(&ui, prefs, std::sync::Arc::clone(&runtime));
+    hmp_desktop::bridge::bind_offline(&ui, prefs, std::sync::Arc::clone(&runtime));
 
     let nav = hmp_desktop::Nav::get(&ui);
     let data = hmp_desktop::Data::get(&ui);

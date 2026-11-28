@@ -11,7 +11,7 @@
 //!
 //! 走真实的 `bridge::bind`（历史栈在那里）。出网隔离：HMP_IPC_ENDPOINT
 //! 指向不存在的 socket，在线内容请求快速失败；库页数据由本测试播种，
-//! 不依赖真实媒体库内容。
+//! 不依赖真实媒体库内容（`bind_offline` + 空快照，导航不再读 data_dir）。
 
 use std::sync::Arc;
 
@@ -66,8 +66,9 @@ fn navigation_scroll_position_and_shortcuts() {
     let ui = hmp_desktop::AppWindow::new().unwrap();
     ui.window().set_size(slint::PhysicalSize::new(1280, 800));
     let runtime = Arc::new(hmp_desktop::backend::BackendRuntime::new().unwrap());
+    hmp_desktop::bridge::load_data_offline(&ui, &runtime);
     let prefs = Arc::new(std::sync::Mutex::new(hmp_desktop::prefs::Prefs::default()));
-    hmp_desktop::bridge::bind(&ui, prefs, Arc::clone(&runtime));
+    hmp_desktop::bridge::bind_offline(&ui, prefs, Arc::clone(&runtime));
 
     // 我喜欢：400 行（内容高 ≫ 视口 648），离开位置可分辨
     let rows: Vec<TrackRow> = (0..400)
