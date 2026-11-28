@@ -36,8 +36,9 @@ fn tap(ui: &hmp_desktop::AppWindow, key: impl Into<SharedString>) {
 
 fn shift_tab(ui: &hmp_desktop::AppWindow) {
     let shift: SharedString = slint::platform::Key::Shift.into();
-    ui.window()
-        .dispatch_event(WindowEvent::KeyPressed { text: shift.clone() });
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: shift.clone(),
+    });
     tap(ui, slint::platform::Key::Tab);
     ui.window()
         .dispatch_event(WindowEvent::KeyReleased { text: shift });
@@ -74,9 +75,7 @@ fn overlay_traps_focus_and_returns_to_opener() {
     {
         let navs = Arc::clone(&navs);
         Nav::get(&ui).on_navigate(move |route, param| {
-            navs.lock()
-                .unwrap()
-                .push(format!("{route:?}:{param}"));
+            navs.lock().unwrap().push(format!("{route:?}:{param}"));
         });
     }
     let toggles = Arc::new(Mutex::new(0usize));
@@ -119,11 +118,7 @@ fn overlay_traps_focus_and_returns_to_opener() {
     shift_tab(&ui); // 根作用域倒着走 = 标题栏关闭
     tap(&ui, slint::platform::Key::Tab);
     tap(&ui, slint::platform::Key::Return);
-    assert_eq!(
-        *liked.lock().unwrap(),
-        3,
-        "指针活动后 Tab 仍应只进模态层"
-    );
+    assert_eq!(*liked.lock().unwrap(), 3, "指针活动后 Tab 仍应只进模态层");
 
     // —— 4. 关闭 overlay：焦点回打开它的播放条控件 ———
     player.set_overlay_visible(false);

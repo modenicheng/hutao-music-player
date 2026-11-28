@@ -23,9 +23,7 @@ use hmp_core::ipc::Request;
 use hmp_core::{PlayRequest, PlaylistWriteOp, Response, TrackId};
 
 use crate::backend::{BackendError, BackendRuntime};
-use crate::{
-    AppWindow, Data, Nav, PlaylistMenu, Route, TrackMenu, bridge, player_bridge, prefs,
-};
+use crate::{AppWindow, Data, Nav, PlaylistMenu, Route, TrackMenu, bridge, player_bridge, prefs};
 
 /// 歌单名称校验（纯逻辑，单测锚点）：去首尾空白，空名 → None。
 fn playlist_name(raw: &str) -> Option<String> {

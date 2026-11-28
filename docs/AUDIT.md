@@ -884,6 +884,16 @@ daemon 侧实测见上（探针法：起 HEAD daemon + 直发 CoverGet，观察�
 - 歌单重命名/删除仍只有 CLI（`hmp playlist rename/delete`）；UI 的右键菜单是曲目语义，歌单级菜单需新面板。
 - 窄窗设置行描述文字截断（T8，既有）。
 
+**2026-11-28 收口（`fix/ui-keyboard`）**：以上五项已修——overlay 改 Tab 序
+摘点实现模态焦点陷阱（`KeyNav.modal-active` / `tab-navigable`，标题栏窗口
+钮保留在环内，关闭回触发器）；`MenuKeys` 给右键菜单与音质弹层补 ↑/↓ /
+Home/End / Enter / Esc 与焦点回落；侧栏歌单改为组级 roving `ListKeys`（窗外
+行可达、不进 Tab 序）；新增歌单级菜单（重命名复用 `NewPlaylistForm`，删除
+按 daemon 语义分流 local/subscribed/owned，云端重命名禁用并注明，错误走
+反馈条）；`SettingRow` 窄窗描述换行降级。机制与测试见
+`crates/hmp-desktop/PORTING.md`「M7 键盘 / 焦点 / 减动效」与
+`tests/overlay_focus.rs`、`tests/menu_keys.rs`、`tests/sidebar_playlists.rs`。
+
 ## §30 架构与曲库两问审计（2026-11-25，用户问「前后端分离是否合理、以后扩展性如何」+「本地库与 QQ 库的结合、音频整理与艺人/专辑逻辑很奇怪」；八路只读子代理专项 + 主代理真库取证）
 
 **范围与方法**：基线 `e24e843`（main，工作树干净），审计阶段全程只读、未运行 cargo、未改代码。拆成八路只读分工并行：IPC 契约与边界矩阵 / crate 分层与进程拓扑 / 桌面前端职责 / 曲库存储模型 / 曲库入库同步与播放 / QQ 侧实体建模 / 曲库 UI 呈现 / 文档与演进史。其中五路返回（桌面、存储、入库同步、UI、文档史），三路（IPC、分层、QQ 实体）触发模型用量上限中断、未产出，其影响结论的事实由主代理补读核实。**凡标了位置且未注明「未复核」的结论，均由主代理回代码或回真实数据核对过**；子代理独有且主代理未复核的条目标「未复核」。真库取证：把 `library.sqlite3` 连同 `-wal` 拷到 `/tmp` 查副本（daemon 常驻、WAL 未落盘；不拷 `-shm`；不读账号表），用完删除，运行中的库未被触碰。

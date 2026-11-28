@@ -17,7 +17,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use slint::{ComponentHandle, Global, Model, ModelRc, SharedString, VecModel, platform::WindowEvent};
+use slint::{ComponentHandle, Global, ModelRc, SharedString, VecModel, platform::WindowEvent};
 
 use hmp_desktop::{Data, Nav, PlaylistCover, PlaylistMenu, Route, TrackRow};
 
@@ -49,15 +49,6 @@ fn click(ui: &hmp_desktop::AppWindow, x: f32, y: f32) {
             }
         });
     }
-}
-
-fn shift_tab(ui: &hmp_desktop::AppWindow) {
-    let shift: SharedString = slint::platform::Key::Shift.into();
-    ui.window()
-        .dispatch_event(WindowEvent::KeyPressed { text: shift.clone() });
-    tap(ui, slint::platform::Key::Tab);
-    ui.window()
-        .dispatch_event(WindowEvent::KeyReleased { text: shift });
 }
 
 fn type_text(ui: &hmp_desktop::AppWindow, text: &str) {

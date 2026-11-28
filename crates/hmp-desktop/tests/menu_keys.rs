@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use slint::{ComponentHandle, Global, ModelRc, SharedString, VecModel, platform::WindowEvent};
 
-use hmp_desktop::{Data, PlaylistCover, Player, Quality, QueueRow, TrackMenu, TrackRow};
+use hmp_desktop::{Data, Player, PlaylistCover, Quality, QueueRow, TrackMenu, TrackRow};
 
 const ROW_X: f32 = 640.0;
 const ROW_Y: f32 = 350.0;
@@ -42,8 +42,9 @@ fn tap(ui: &hmp_desktop::AppWindow, key: impl Into<SharedString>) {
 
 fn shift_tab(ui: &hmp_desktop::AppWindow) {
     let shift: SharedString = slint::platform::Key::Shift.into();
-    ui.window()
-        .dispatch_event(WindowEvent::KeyPressed { text: shift.clone() });
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: shift.clone(),
+    });
     tap(ui, slint::platform::Key::Tab);
     ui.window()
         .dispatch_event(WindowEvent::KeyReleased { text: shift });
@@ -137,12 +138,7 @@ fn popup_menus_navigate_by_keyboard_and_restore_focus() {
     }
 
     // 左键标定命中行（同 context_menu.rs：先标定再断言，几何漂移免疫）
-    click(
-        &ui,
-        ROW_X,
-        ROW_Y,
-        slint::platform::PointerEventButton::Left,
-    );
+    click(&ui, ROW_X, ROW_Y, slint::platform::PointerEventButton::Left);
     settle(64);
     let hit = *plays.lock().unwrap().last().expect("左键应命中的行");
     let baseline_plays = plays.lock().unwrap().len();
@@ -185,7 +181,11 @@ fn popup_menus_navigate_by_keyboard_and_restore_focus() {
     settle(64);
     tap(&ui, slint::platform::Key::DownArrow);
     tap(&ui, slint::platform::Key::Return);
-    assert_eq!(*play_nexts.lock().unwrap(), 1, "↓ 后 Enter 应触发下一首播放");
+    assert_eq!(
+        *play_nexts.lock().unwrap(),
+        1,
+        "↓ 后 Enter 应触发下一首播放"
+    );
 
     // —— 3. End 跳过禁用项 → 末个可用 =「加入播放列表…」→ picker → 选歌单 ——
     click(
@@ -198,7 +198,10 @@ fn popup_menus_navigate_by_keyboard_and_restore_focus() {
     tap(&ui, slint::platform::Key::End);
     tap(&ui, slint::platform::Key::Return);
     settle(64);
-    assert!(adds.lock().unwrap().is_empty(), "End 应落在「加入播放列表…」而非禁用导航项");
+    assert!(
+        adds.lock().unwrap().is_empty(),
+        "End 应落在「加入播放列表…」而非禁用导航项"
+    );
     tap(&ui, slint::platform::Key::DownArrow);
     tap(&ui, slint::platform::Key::Return);
     settle(64);

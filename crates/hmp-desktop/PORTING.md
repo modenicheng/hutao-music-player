@@ -132,19 +132,52 @@ ESC **必须收口在公共祖先上**：此前写在根作用域（各控件的
 
 **已知局限**
 
-- Tab 遍历是整窗一条链：播放页 overlay 打开时 Tab 仍会经过被遮盖的主界面
-  控件（无模态焦点陷阱）。
-- 侧栏歌单行只有行窗内的才是停靠点（窗外行需先滚动）。
-- 弹层内部（右键菜单 / 音质选择）的方向键导航未做。
-- 窄窗（683px）下设置行的描述文字被截断（T8：SettingRow 不换行降级）；
-  播放条曲名簇按「不与居中控制排重叠」收紧到约 1 个字。
+- 播放条曲名簇按「不与居中控制排重叠」收紧，窄窗（683px）下约 1 个字
+  （elide；非布局缺陷，属可读性取舍）。
 
-**验证**：`cargo test -p hmp-desktop` 105 单测 + 19 集成二进制全绿。新增
+**2026-11-28 收口（AUDIT §29 开放项）**
+
+- **播放页 overlay 模态焦点陷阱**：Slint 语言层没有拦截 Tab 的钩子，改由
+  Tab 序摘点实现——`KeyNav.modal-active` + `tab-navigable()`，KeyTouch /
+  ListKeys / TextLink 统一查询；overlay 自身、标题栏窗口钮（既有「始终
+  可用」设计）与队列表层标 `in-modal`。被遮盖主界面的停靠点在 overlay
+  打开期间退出 Tab 序，Tab/Shift+Tab 自然只在模态层环绕；关闭后 PlayerBar
+  把焦点交还打开它的「打开播放页」控件。搜索页 TextInput 无法用
+  `focus-on-tab-navigation` 摘除（引擎内置项），模态期置 `enabled: false`。
+- **弹层方向键导航**：`primitives.slint` 新增 `MenuKeys`（弹层内唯一焦点，
+  打开即聚焦）：↑/↓ 移动条目光标、Home/End 到首尾、Enter/空格激活、
+  Tab 在弹层内消化；右键菜单按「可见 + 可用」谓词跳过禁用项（无远端 mid
+  的歌手/专辑、云端歌单的重命名），音质弹层把光标钳在本曲最高档内。关闭
+  （动作/Esc/点外）按宿主 `is-open` 把焦点交还触发控件（曲目表光标行、
+  队列抽屉光标行、音质徽章、歌单页「⋯」）。PopupWindow 内容在 show/close
+  间可能被复用：打开时复位光标/确认态并延后一拍重新聚焦（写法同 Timer
+  restart 陷阱：`if running { restart } else { running = true }`）。
+- **侧栏歌单 Tab 可达**：每组的行窗改成一个 roving `ListKeys` 停靠点（宽
+  侧栏自建/收藏两组、窄边栏封面列表各一）；↑/↓ 按绝对下标走遍全部歌单并
+  滚动跟随（行窗只影响绘制），Enter 打开，Menu / Shift+F10 弹歌单菜单。
+  行本身不再进 Tab 链——窗外的行不会被塞进 Tab 序，也不会漏可达。
+- **歌单级菜单（重命名 / 删除）**：`playlist-menu.slint` 的 `PlaylistMenu`
+  global + `PlaylistMenuPanel`，弹层单实例声明在 app.slint（侧栏行与歌单页
+  「⋯」共用，锚点走窗口坐标）。重命名复用 `NewPlaylistForm`（标题/初值/
+  提交文案经属性注入，打开带原名并全选）；删除按 daemon 语义：local 直删、
+  subscribed = 取消收藏、owned 提交远端删除（行保留到成功，注「同步云端」），
+  全部两步确认（3s）。owned/subscribed 的重命名先禁用并注「云端不支持」
+  （daemon 仍会拒 `RemoteRenameUnsupported`，兜底走反馈条人话）。歌单归属经
+  `PlaylistDetail.relation` → `Data.playlist-relation` 下传。
+- **窄窗设置行描述（T8）**：`SettingRow` 在 ≤832px 时描述换行两行、行高
+  44/56 → 74px，宽窗保持单行 elide；683×800 下列表由页面滚动承载，不改变
+  控件控制区宽度与位置。
+
+**验证**：`cargo test -p hmp-desktop` 114 单测 + 23 集成二进制全绿。新增
 `tests/keyboard.rs`（Tab 遍历/激活/指针退出/首次点击不被吞）、
-`volume_control.rs`、`navigation_scroll.rs`、`list_keys.rs`（曲目表光标），
-`queue_keys.rs`、`search_page.rs`、`new_playlist.rs`、`soft_timers.rs`、
-`reduce_motion.rs`。视觉验收：`shot-headless` 新增 `--size WxH` / `--tab N` /
-`--keys A,B`，窄窗 683×800 十一页 + 播放页 + 抽屉、亮暗焦点环与光标行截图。
+`overlay_focus.rs`（模态陷阱/窗口钮环绕/指针让出/关闭回触发器）、
+`menu_keys.rs`（右键菜单与音质弹层的方向键/Home/End/Enter/Esc/禁用跳过/
+焦点回落）、`sidebar_playlists.rs`（组级 roving 到行窗外、歌单菜单、命名
+弹层、两步删除、owned/subscribed 语义）、`volume_control.rs`、
+`navigation_scroll.rs`、`list_keys.rs`（曲目表光标）、`queue_keys.rs`、
+`search_page.rs`、`new_playlist.rs`、`soft_timers.rs`、`reduce_motion.rs`。
+视觉验收：`shot-headless` 新增 `--size WxH` / `--tab N` / `--keys A,B`，
+窄窗 683×800 十一页 + 播放页 + 抽屉、亮暗焦点环与光标行截图。
 
 ## 已定工程决策
 
