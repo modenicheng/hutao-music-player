@@ -153,7 +153,10 @@ async fn resolve_id_stubs(
                         id: TrackId::new(meta.source_key.clone()),
                         title: meta.title,
                         artists: meta.artist.into_iter().collect(),
+                        // TrackMeta 投影不含 mid；详情解析/扫描路径补全。
+                        artist_refs: Vec::new(),
                         album: meta.album,
+                        album_mid: None,
                         duration_ms: meta.duration_ms.map(|ms| ms.clamp(0, u32::MAX as i64)),
                     },
                 );
@@ -1659,21 +1662,41 @@ fn now_unix() -> i64 {
 /// `hmp_core::Track` → 媒体库行（窄投影：只存稳定身份与元数据，不存播放 URL）。
 /// 按 provider 写 source（P1：本地曲目不得写 `qq`，否则同一文件在
 /// tracks 中生成两条记录——local_files 连一条、播放历史连另一条）。
-fn track_row(t: &hmp_core::Track) -> hmp_storage::TrackRow {
+pub(crate) fn track_row(t: &hmp_core::Track) -> hmp_storage::TrackRow {
     let source = if hmp_core::TrackProvider::from_id(&t.id.0) == hmp_core::TrackProvider::Local {
         "local"
     } else {
         "qq"
     };
+    let qq = source == "qq";
+    // 本地歌手没有 mid；QQ 的 ArtistRef.id 即 mid（缺 mid 时播放解析回退数字 id）。
+    let artist_refs: Vec<hmp_storage::ArtistRefRow> = t
+        .artists
+        .iter()
+        .filter(|a| !a.name.is_empty())
+        .map(|a| hmp_storage::ArtistRefRow {
+            mid: qq.then(|| a.id.0.clone()).filter(|mid| !mid.is_empty()),
+            name: a.name.clone(),
+        })
+        .collect();
     hmp_storage::TrackRow {
         source,
         source_key: t.id.0.clone(),
         title: t.title.clone(),
         album: t.album.as_ref().map(|a| a.name.clone()),
+        album_mid: if qq {
+            t.album
+                .as_ref()
+                .map(|a| a.id.0.clone())
+                .filter(|mid| !mid.is_empty())
+        } else {
+            None
+        },
         artist: {
             let names = t.artist_names();
             (!names.is_empty()).then_some(names)
         },
+        artist_refs,
         duration_ms: t.duration.map(|d| d.as_millis() as i64),
         cover_uri: t.cover.as_ref().map(|c| c.url.clone()),
         qq_song_id: None, // 播放路径无 numeric id；列表解析缓存（stub_row）时写入
@@ -1682,18 +1705,34 @@ fn track_row(t: &hmp_core::Track) -> hmp_storage::TrackRow {
 }
 
 /// stub → 媒体库行（批量缓存；source 规则与 `track_row` 一致）。
-fn stub_row(s: &hmp_core::TrackStub) -> hmp_storage::TrackRow {
+pub(crate) fn stub_row(s: &hmp_core::TrackStub) -> hmp_storage::TrackRow {
     let source = if hmp_core::TrackProvider::from_id(&s.id.0) == hmp_core::TrackProvider::Local {
         "local"
     } else {
         "qq"
     };
+    let qq = source == "qq";
+    let artist_refs: Vec<hmp_storage::ArtistRefRow> = s
+        .artist_refs
+        .iter()
+        .filter(|a| !a.name.is_empty())
+        .map(|a| hmp_storage::ArtistRefRow {
+            mid: qq.then(|| a.id.0.clone()).filter(|mid| !mid.is_empty()),
+            name: a.name.clone(),
+        })
+        .collect();
     hmp_storage::TrackRow {
         source,
         source_key: s.id.to_string(),
         title: s.title.clone(),
         album: s.album.clone(),
-        artist: (!s.artists.is_empty()).then(|| s.artists.join(", ")),
+        album_mid: if qq {
+            s.album_mid.clone().filter(|mid| !mid.is_empty())
+        } else {
+            None
+        },
+        artist: (!s.artists.is_empty()).then(|| s.artist_names()),
+        artist_refs,
         duration_ms: s.duration_ms,
         cover_uri: None,
         qq_song_id: None, // TrackStub 不含 numeric id；后续由列表解析补全

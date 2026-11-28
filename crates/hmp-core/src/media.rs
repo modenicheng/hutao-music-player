@@ -218,8 +218,15 @@ pub struct TrackStub {
     pub title: String,
     /// 歌手列表。
     pub artists: Vec<String>,
+    /// 歌手引用（含 QQ singer mid；本地标签以 `"local"` 作 id）。
+    /// 入库时与 `artists` 同时填（§30.2.6 phase 1：不再丢 mid）。
+    #[serde(default)]
+    pub artist_refs: Vec<ArtistRef>,
     /// 专辑名（可选）。
     pub album: Option<String>,
+    /// 专辑 mid（QQ `album.mid`；本地 None，v9）。
+    #[serde(default)]
+    pub album_mid: Option<String>,
     /// 时长毫秒（可选）。
     pub duration_ms: Option<i64>,
 }
@@ -410,10 +417,38 @@ mod tests {
             id: TrackId::new("mid-1"),
             title: "开始懂了".into(),
             artists: vec!["孙燕姿".into(), "周杰伦".into()],
+            artist_refs: Vec::new(),
             album: None,
+            album_mid: None,
             duration_ms: None,
         };
         assert_eq!(stub.artist_names(), t.artist_names());
+    }
+
+    /// 旧 IPC 载荷（无 mid 字段）仍可反序列化：新字段带 serde default。
+    #[test]
+    fn track_stub_mid_fields_default_for_old_payloads() {
+        let stub: TrackStub = serde_json::from_value(json!({
+            "id": "mid-1",
+            "title": "开始懂了",
+            "artists": ["孙燕姿"],
+            "album": "未完成",
+            "duration_ms": 1000,
+        }))
+        .unwrap();
+        assert!(stub.artist_refs.is_empty());
+        assert_eq!(stub.album_mid, None);
+        let with_mids = TrackStub {
+            artist_refs: vec![ArtistRef {
+                id: ArtistId::new("singer-mid"),
+                name: "孙燕姿".into(),
+            }],
+            album_mid: Some("album-mid".into()),
+            ..stub
+        };
+        let back: TrackStub =
+            serde_json::from_str(&serde_json::to_string(&with_mids).unwrap()).unwrap();
+        assert_eq!(back, with_mids);
     }
 
     #[test]

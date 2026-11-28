@@ -80,11 +80,17 @@ impl LocalSourceResolver {
                         .map(|s| s.to_string())
                 })
                 .unwrap_or_else(|| id.to_string());
-            let artists = meta
+            // 多艺术家口径与扫描/播放路径一致（artists 全量；空则回退主歌手）。
+            let artists: Vec<String> = meta
                 .as_ref()
-                .and_then(|m| m.artist.clone())
-                .into_iter()
-                .collect::<Vec<_>>();
+                .map(|m| {
+                    if m.artists.is_empty() {
+                        m.artist.iter().cloned().collect()
+                    } else {
+                        m.artists.clone()
+                    }
+                })
+                .unwrap_or_default();
             let album = meta.as_ref().and_then(|m| m.album.clone());
             let duration_ms = meta.as_ref().and_then(|m| m.duration_ms);
             (title, artists, album, duration_ms)
@@ -92,8 +98,16 @@ impl LocalSourceResolver {
         Some(hmp_core::TrackStub {
             id,
             title,
-            artists,
+            artists: artists.clone(),
+            artist_refs: artists
+                .iter()
+                .map(|name| ArtistRef {
+                    id: ArtistId::new("local"),
+                    name: name.clone(),
+                })
+                .collect(),
             album,
+            album_mid: None,
             duration_ms,
         })
     }
@@ -122,7 +136,16 @@ impl LocalSourceResolver {
                     .map(|s| s.to_string())
             })
             .unwrap_or_else(|| "(unknown title)".to_string());
-        let artist = meta.as_ref().and_then(|m| m.artist.clone());
+        let artist_names: Vec<String> = meta
+            .as_ref()
+            .map(|m| {
+                if m.artists.is_empty() {
+                    m.artist.iter().cloned().collect()
+                } else {
+                    m.artists.clone()
+                }
+            })
+            .unwrap_or_default();
         let album = meta.as_ref().and_then(|m| m.album.clone());
         let duration = meta.as_ref().and_then(|m| m.duration_ms);
         let cover = project_local_cover(&path, meta.as_ref());
@@ -152,14 +175,13 @@ impl LocalSourceResolver {
         let track = Track {
             id,
             title,
-            artists: artist
-                .map(|name| {
-                    vec![ArtistRef {
-                        id: ArtistId::new("local"),
-                        name,
-                    }]
+            artists: artist_names
+                .iter()
+                .map(|name| ArtistRef {
+                    id: ArtistId::new("local"),
+                    name: name.clone(),
                 })
-                .unwrap_or_default(),
+                .collect(),
             album: album.map(|name| AlbumRef {
                 id: hmp_core::AlbumId::new("local"),
                 name,
@@ -237,7 +259,11 @@ impl SourceResolver for LocalSourceResolver {
                             id: TrackId::new(r.source_key),
                             title: r.title,
                             artists: r.artist.into_iter().collect(),
+                            // 库内投影只有展示串，没有歌手 mid/列表；留空以免
+                            // 用拼接串重写 track_artists（既有行保持不动）。
+                            artist_refs: Vec::new(),
                             album: r.album,
+                            album_mid: None,
                             duration_ms: r.duration_ms,
                         })
                         .collect();
@@ -266,7 +292,11 @@ impl SourceResolver for LocalSourceResolver {
                             id: TrackId::new(r.source_key),
                             title: r.title,
                             artists: r.artist.into_iter().collect(),
+                            // 库内投影只有展示串，没有歌手 mid/列表；留空以免
+                            // 用拼接串重写 track_artists（既有行保持不动）。
+                            artist_refs: Vec::new(),
                             album: r.album,
+                            album_mid: None,
                             duration_ms: r.duration_ms,
                         })
                         .collect();

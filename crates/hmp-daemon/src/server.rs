@@ -1082,7 +1082,9 @@ mod tests {
                     id: TrackId::new("a"),
                     title: "a".into(),
                     artists: Vec::new(),
+                    artist_refs: Vec::new(),
                     album: None,
+                    album_mid: None,
                     duration_ms: None,
                 }])
             })

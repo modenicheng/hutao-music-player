@@ -570,7 +570,9 @@ fn id_stub(id: &TrackId) -> hmp_core::TrackStub {
         id: id.clone(),
         title: id.to_string(),
         artists: Vec::new(),
+        artist_refs: Vec::new(),
         album: None,
+        album_mid: None,
         duration_ms: None,
     }
 }
@@ -589,11 +591,27 @@ fn song_stub(s: &hmp_qqmusic_api::models::Song) -> Option<hmp_core::TrackStub> {
     } else {
         s.name.clone()
     };
+    // 空名歌手不进展示串，也不造空 ArtistRef（mid 缺失时回退数字 id，
+    // 与播放详情解析同口径）。
+    let singers: Vec<&hmp_qqmusic_api::models::Singer> =
+        s.singer.iter().filter(|x| !x.name.is_empty()).collect();
     Some(hmp_core::TrackStub {
         id: hmp_core::TrackId::new(s.mid.clone()),
         title,
-        artists: s.singer.iter().map(|x| x.name.clone()).collect(),
+        artists: singers.iter().map(|x| x.name.clone()).collect(),
+        artist_refs: singers
+            .iter()
+            .map(|x| ArtistRef {
+                id: ArtistId::new(if x.mid.is_empty() {
+                    x.id.to_string()
+                } else {
+                    x.mid.clone()
+                }),
+                name: x.name.clone(),
+            })
+            .collect(),
         album: (!s.album.name.is_empty()).then(|| s.album.name.clone()),
+        album_mid: (!s.album.mid.is_empty()).then(|| s.album.mid.clone()),
         duration_ms: (s.interval > 0).then(|| s.interval * 1000),
     })
 }
@@ -846,7 +864,9 @@ mod tests {
                             id: TrackId::new(i.to_string()),
                             title: format!("t{i}"),
                             artists: Vec::new(),
+                            artist_refs: Vec::new(),
                             album: None,
+                            album_mid: None,
                             duration_ms: None,
                         })
                         .collect();
@@ -877,7 +897,9 @@ mod tests {
                         id: TrackId::new(format!("p{page}")),
                         title: format!("p{page}"),
                         artists: Vec::new(),
+                        artist_refs: Vec::new(),
                         album: None,
+                        album_mid: None,
                         duration_ms: None,
                     }];
                     Ok((stubs, page < 2, 9999)) // total 很大但 hasmore=false 即停
@@ -906,7 +928,9 @@ mod tests {
                             id: TrackId::new(format!("p{page}-{i}")),
                             title: format!("p{page}-{i}"),
                             artists: Vec::new(),
+                            artist_refs: Vec::new(),
                             album: None,
+                            album_mid: None,
                             duration_ms: None,
                         })
                         .collect();

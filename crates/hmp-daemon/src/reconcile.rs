@@ -219,21 +219,8 @@ async fn repair_stub_metadata(client: &QqMusicClient, library: &Arc<Mutex<Librar
         if song.name.is_empty() || song.name == song.mid {
             continue;
         }
-        let row = hmp_storage::TrackRow {
-            source: "qq",
-            source_key: song.mid.clone(),
-            title: song.name.clone(),
-            artist: Some(
-                song.singer
-                    .iter()
-                    .map(|g| g.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
-            album: (!song.album.name.is_empty()).then(|| song.album.name.clone()),
-            cover_uri: cover_uri_from_song(&song), // COALESCE/CASE 只补齐不降级
-            ..Default::default()
-        };
+        // 与 reconcile 主入库同一投影：mid 一起补齐（COALESCE 不降级）。
+        let row = qq_track_row(&song);
         match lib.upsert_track(&row) {
             Ok(_) => repaired += 1,
             Err(e) => tracing::warn!(%e, mid = %song.mid, "reconcile: stub repair upsert failed"),
@@ -727,19 +714,25 @@ fn apply_playlist_track_snapshot(
 /// 远端 `Song` → 全量元数据曲目行（入库后桌面/CLI 经 track_meta_batch 补全展示）。
 /// cover_uri 从落地起就带 T002 模板 URL（此前 None——库内 99% 曲目无任何封面
 /// 线索，桌面列表只能程序化占位；UI 侧经 CoverGet 盘缓存换本地产物）。
-fn qq_track_row(song: &Song) -> hmp_storage::TrackRow {
+pub(crate) fn qq_track_row(song: &Song) -> hmp_storage::TrackRow {
+    // 空名歌手不进展示串/歌手行；mid 缺失时保留 None（交给下轮详情补齐）。
+    let singers: Vec<&hmp_qqmusic_api::models::Singer> =
+        song.singer.iter().filter(|g| !g.name.is_empty()).collect();
     hmp_storage::TrackRow {
         source: "qq",
         source_key: song.mid.clone(),
         title: song.name.clone(),
-        artist: (!song.singer.is_empty()).then(|| {
-            song.singer
-                .iter()
-                .map(|g| g.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        }),
+        artist: (!singers.is_empty())
+            .then(|| hmp_core::join_artist_names(singers.iter().map(|g| g.name.as_str()))),
+        artist_refs: singers
+            .iter()
+            .map(|g| hmp_storage::ArtistRefRow {
+                mid: (!g.mid.is_empty()).then(|| g.mid.clone()),
+                name: g.name.clone(),
+            })
+            .collect(),
         album: (!song.album.name.is_empty()).then(|| song.album.name.clone()),
+        album_mid: (!song.album.mid.is_empty()).then(|| song.album.mid.clone()),
         duration_ms: (song.interval > 0).then(|| song.interval * 1000),
         cover_uri: cover_uri_from_song(song),
         qq_song_id: (song.id > 0).then_some(song.id),
@@ -1561,5 +1554,128 @@ mod tests {
                     .is_some_and(|tid| tid > 0)
             })
             .count()
+    }
+
+    /// 构造带歌手/专辑 mid 的 QQ 曲目（phase 1 身份字段的输入形态）。
+    fn song_with_mids() -> Song {
+        use hmp_qqmusic_api::models::{Album, Singer};
+        Song {
+            id: 42,
+            mid: "mid-qq".to_owned(),
+            name: "希望有羽毛和翅膀".to_owned(),
+            interval: 180,
+            singer: vec![
+                Singer {
+                    id: 1,
+                    mid: "singer-a".to_owned(),
+                    name: "知更鸟".to_owned(),
+                    ..Default::default()
+                },
+                Singer {
+                    id: 2,
+                    mid: "singer-b".to_owned(),
+                    name: "HOYO-MiX".to_owned(),
+                    ..Default::default()
+                },
+                Singer {
+                    id: 3,
+                    mid: "singer-c".to_owned(),
+                    name: "Chevy".to_owned(),
+                    ..Default::default()
+                },
+            ],
+            album: Album {
+                id: 7,
+                mid: "album-mid".to_owned(),
+                name: "原神-闪耀的群星".to_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// §30.2.6 phase 1：QQ 入库保留 singer[].mid 与 album.mid（此前入库即丢）。
+    #[test]
+    fn qq_ingest_keeps_artist_and_album_mids() {
+        use hmp_storage::{ArtistRefRow, LibraryDb};
+        let mut db = LibraryDb::open_in_memory().unwrap();
+        let tid = db.upsert_track(&qq_track_row(&song_with_mids())).unwrap();
+        assert_eq!(
+            db.album_mid(tid).unwrap().as_deref(),
+            Some("album-mid"),
+            "专辑 mid 落库"
+        );
+        assert_eq!(
+            db.track_artists(tid).unwrap(),
+            vec![
+                ArtistRefRow {
+                    mid: Some("singer-a".into()),
+                    name: "知更鸟".into()
+                },
+                ArtistRefRow {
+                    mid: Some("singer-b".into()),
+                    name: "HOYO-MiX".into()
+                },
+                ArtistRefRow {
+                    mid: Some("singer-c".into()),
+                    name: "Chevy".into()
+                },
+            ],
+            "歌手 mid 按 position 落库"
+        );
+        let meta = db.track_meta_batch("qq", &["mid-qq".to_owned()]).unwrap();
+        assert_eq!(
+            meta[0].artist.as_deref(),
+            Some("知更鸟 / HOYO-MiX / Chevy"),
+            "展示串统一为 \" / \""
+        );
+    }
+
+    /// §30.2.6 phase 1：同一组歌手经 qq 入库 / stub 缓存 / 播放详情三条生产
+    /// 路径产出的 `artist` 展示串完全一致（不再混用 ", " 与标签原文）。
+    #[test]
+    fn artist_display_string_is_identical_across_producers() {
+        use hmp_core::{AlbumRef, ArtistId, ArtistRef, Track, TrackId};
+        let song = song_with_mids();
+        let names = ["知更鸟", "HOYO-MiX", "Chevy"];
+        let qq = qq_track_row(&song);
+        let stub = crate::engine::stub_row(&hmp_core::TrackStub {
+            id: TrackId::new(song.mid.clone()),
+            title: song.name.clone(),
+            artists: names.iter().map(|n| (*n).to_owned()).collect(),
+            artist_refs: ["singer-a", "singer-b", "singer-c"]
+                .iter()
+                .zip(names)
+                .map(|(mid, name)| ArtistRef {
+                    id: ArtistId::new(*mid),
+                    name: (*name).to_owned(),
+                })
+                .collect(),
+            album: Some(song.album.name.clone()),
+            album_mid: Some(song.album.mid.clone()),
+            duration_ms: Some(180_000),
+        });
+        let mut track = Track::new(TrackId::new(song.mid.clone()), song.name.clone());
+        track.artists = ["singer-a", "singer-b", "singer-c"]
+            .iter()
+            .zip(names)
+            .map(|(mid, name)| ArtistRef {
+                id: ArtistId::new(*mid),
+                name: (*name).to_owned(),
+            })
+            .collect();
+        track.album = Some(AlbumRef {
+            id: hmp_core::AlbumId::new(song.album.mid.clone()),
+            name: song.album.name.clone(),
+        });
+        let play = crate::engine::track_row(&track);
+        assert_eq!(qq.artist.as_deref(), Some("知更鸟 / HOYO-MiX / Chevy"));
+        assert_eq!(stub.artist, qq.artist, "stub 缓存与入库同口径");
+        assert_eq!(play.artist, qq.artist, "播放详情与入库同口径");
+        // mid 也随三条路径一致保留（本地行才允许 NULL）。
+        assert_eq!(qq.album_mid.as_deref(), Some("album-mid"));
+        assert_eq!(stub.album_mid, qq.album_mid);
+        assert_eq!(play.album_mid, qq.album_mid);
+        assert_eq!(stub.artist_refs, qq.artist_refs);
     }
 }

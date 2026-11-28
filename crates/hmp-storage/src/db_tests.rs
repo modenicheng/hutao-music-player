@@ -2343,6 +2343,28 @@ fn scan_rereads_tags_when_tag_version_is_stale() {
             .unwrap(),
         ScanOutcome::Skipped
     ));
+    // 文件变化（size/mtime 变）→ 常规更新路径同样把版本推进到当前。
+    std::fs::write(&path, b"changed-content").unwrap();
+    let changed = crate::local::LocalMeta {
+        title: "换标签".into(),
+        ..meta
+    };
+    assert!(matches!(
+        db.record_scan_file(root_id, generation, &path, Some(&changed), "fp-tag-2")
+            .unwrap(),
+        ScanOutcome::Updated
+    ));
+    let (title, version): (String, i64) = db
+        .conn
+        .query_row(
+            "SELECT t.title, lf.tag_version
+             FROM tracks t JOIN local_files lf ON lf.track_id = t.id WHERE lf.path = ?1",
+            params![path.display().to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(title, "换标签");
+    assert_eq!(version, LOCAL_TAG_VERSION);
 }
 
 /// §30.2.6 phase 1：播放路径入库（`add_local_file`）同样写当前标签版本，
@@ -2368,4 +2390,63 @@ fn add_local_file_writes_current_tag_version() {
         )
         .unwrap();
     assert_eq!(version, LOCAL_TAG_VERSION);
+}
+
+/// §30.2.6 phase 1：本地标签多歌手的展示串也走统一 `" / "`（播放入库与
+/// 扫描入库同一口径），歌手行 mid 恒 NULL。
+#[test]
+fn local_artist_display_uses_shared_separator() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let meta = crate::local::LocalMeta {
+        title: "多歌手".into(),
+        artist: Some("张韶涵".into()),
+        artists: vec!["张韶涵".into(), "HOYO-MiX".into()],
+        album: Some("专辑".into()),
+        ..Default::default()
+    };
+    let played = dir.path().join("played.mp3");
+    std::fs::write(&played, b"a").unwrap();
+    let played_id = db.add_local_file(&played, Some(&meta)).unwrap();
+    let scanned = dir.path().join("scanned.mp3");
+    std::fs::write(&scanned, b"b").unwrap();
+    let (root_id, generation) = db.begin_scan(dir.path()).unwrap();
+    db.record_scan_file(root_id, generation, &scanned, Some(&meta), "fp-local")
+        .unwrap();
+    let expected_refs = vec![
+        ArtistRefRow {
+            mid: None,
+            name: "张韶涵".into(),
+        },
+        ArtistRefRow {
+            mid: None,
+            name: "HOYO-MiX".into(),
+        },
+    ];
+    for (label, tid) in [
+        ("播放入库", played_id),
+        (
+            "扫描入库",
+            db.track_id(
+                "local",
+                &format!(
+                    "local:{}",
+                    crate::canonical_display_path(&scanned).display()
+                ),
+            )
+            .unwrap()
+            .unwrap(),
+        ),
+    ] {
+        let artist: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT artist FROM tracks WHERE id = ?1",
+                params![tid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(artist.as_deref(), Some("张韶涵 / HOYO-MiX"), "{label}");
+        assert_eq!(db.track_artists(tid).unwrap(), expected_refs, "{label}");
+    }
 }

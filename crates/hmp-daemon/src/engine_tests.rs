@@ -264,7 +264,9 @@ fn stub_list(ids: Vec<TrackId>) -> Vec<hmp_core::TrackStub> {
             id: id.clone(),
             title: id.to_string(),
             artists: Vec::new(),
+            artist_refs: Vec::new(),
             album: None,
+            album_mid: None,
             duration_ms: None,
         })
         .collect()
@@ -3148,7 +3150,9 @@ async fn play_source_caches_stub_metadata() {
         id: TrackId::new("mid-1"),
         title: "夜曲".into(),
         artists: vec!["周杰伦".into()],
+        artist_refs: Vec::new(),
         album: Some("十一月的萧邦".into()),
+        album_mid: None,
         duration_ms: Some(193_000),
     }]]);
     let library = Arc::new(Mutex::new(LibraryDb::open_in_memory().unwrap()));
@@ -3716,7 +3720,9 @@ impl SourceResolver for StreamResolver {
                 id: id.clone(),
                 title: id.to_string(),
                 artists: Vec::new(),
+                artist_refs: Vec::new(),
                 album: None,
+                album_mid: None,
                 duration_ms: None,
             }],
             _ => Vec::new(),
@@ -4215,7 +4221,9 @@ impl SourceResolver for DegradeResolver {
                     id: id.clone(),
                     title: format!("t-{id}"),
                     artists: vec![],
+                    artist_refs: Vec::new(),
                     album: None,
+                    album_mid: None,
                     duration_ms: Some(60_000),
                 })
                 .collect())
@@ -4379,7 +4387,9 @@ impl SourceResolver for ExhaustResolver {
                     id: id.clone(),
                     title: format!("t-{id}"),
                     artists: vec![],
+                    artist_refs: Vec::new(),
                     album: None,
+                    album_mid: None,
                     duration_ms: Some(60_000),
                 })
                 .collect())
