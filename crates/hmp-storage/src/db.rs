@@ -420,7 +420,7 @@ impl LibraryDb {
 
     /// 幂等写入/更新曲目元数据；返回 track id。
     /// v9：`album_mid` 与 `artist_refs` 随行落库（NULL/空串不覆盖旧值；
-    /// 歌手行的 mid 按同名旧行保留，见 [`write_track_artists`]）。
+    /// 歌手行的 mid 按同名旧行保留（见私有 `write_track_artists`）。
     pub fn upsert_track(&mut self, t: &TrackRow) -> rusqlite::Result<i64> {
         let source_key = canonical_local_key(t.source, &t.source_key);
         self.conn.execute(

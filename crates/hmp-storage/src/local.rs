@@ -94,7 +94,7 @@ fn folder_cover_names() -> impl Iterator<Item = (&'static str, &'static str)> {
     })
 }
 
-/// 路径是否是目录封面文件（watcher 事件识别；与 [`folder_cover`] 同源）。
+/// 路径是否是目录封面文件（watcher 事件识别；与私有 `folder_cover` 同源）。
 ///
 /// 只按文件名判断（删除事件时文件已不存在）：主名/扩展名必须落在候选集合内，
 /// 大小写变体按探测规则——小写主名或首字母大写，扩展名小写。
