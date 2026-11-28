@@ -167,6 +167,9 @@ export global Data {
     in-out property <int> playlist-state: 0;
     in-out property <bool> playlist-found: false;
     in-out property <string> playlist-name: "";
+    /** 歌单归属（local / owned / subscribed；空 = 远端页或未就绪）：
+        歌单页级菜单按它禁用重命名、切换删除文案（daemon 语义） */
+    in-out property <string> playlist-relation: "";
     in-out property <[string]> playlist-meta-items;
     in-out property <image> playlist-cover;
     in-out property <[TrackRow]> playlist-tracks;

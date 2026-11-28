@@ -170,6 +170,8 @@ export component ListKeys inherits FocusScope {
     callback activate;
     /** 移除光标行（宿主不接 = 无此语义，按键照常消费） */
     callback remove;
+    /** 上下文菜单键（Menu 键 / Shift+F10）：宿主在光标行弹出菜单 */
+    callback menu;
     /** ←/→ 在光标行内移动子光标（宿主不接 = 无此语义，按键照常消费，不冒泡）。
         行内链接不是 Tab 停靠点，键盘经此到达 */
     callback step-horizontal(int);
@@ -217,6 +219,12 @@ export component ListKeys inherits FocusScope {
         }
         if (event.text == Key.Delete || event.text == Key.Backspace) {
             root.remove();
+            return accept;
+        }
+        // 上下文菜单键：Menu（键盘菜单键）或 Shift+F10（无 Menu 键的键盘）
+        if (event.text == Key.Menu
+            || (event.text == Key.F10 && event.modifiers.shift)) {
+            root.menu();
             return accept;
         }
         return reject;
@@ -307,6 +315,8 @@ export component Button inherits Rectangle {
     in property <bool> hover-tint: false;
     in property <bool> enabled: true;
     in property <string> tool-tip: "";
+    /** false = 行按钮由外层 roving 列表统一停靠（不进逐行 Tab 链） */
+    in property <bool> tab-stop: true;
     callback clicked;
 
     min-height: small ? 32px : 40px;
@@ -335,6 +345,7 @@ export component Button inherits Rectangle {
     // 键盘可达（KeyTouch）：Tab 停靠 + Enter/空格 = 点击；鼠标不改变键盘焦点
     touch := KeyTouch {
         enabled: root.enabled;
+        tab-stop: root.tab-stop;
         mouse-cursor: pointer;
         ring-radius: Theme.radius-md;
         activated => {

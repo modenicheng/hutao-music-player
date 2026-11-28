@@ -29,6 +29,8 @@ import { Nav, Route } from "nav.slint";
 import { Viewport, QueueWindow } from "viewport.slint";
 import { KeyNav } from "keynav.slint";
 import { TrackMenu, MenuContext } from "context-menu.slint";
+import { PlaylistMenu, PlaylistMenuPanel } from "playlist-menu.slint";
+import { NewPlaylistForm } from "new-playlist.slint";
 // 再导出：窗口化虚拟化的滚动状态单点出口 + 队列抽屉行窗（Rust 侧按窗回填
 // 队列封面），Rust 侧测试/探针需读回
 export { Viewport, QueueWindow }
@@ -37,7 +39,7 @@ import { Theme } from "theme.slint";
 import { TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData } from "data.slint";
 
 // 供生成代码（Rust 侧）访问的 global 与数据结构（HoverBus/EqClock 供集成测试探针）
-export { Theme, Nav, Player, Quality, Data, NowPlaying, TrackPalette, Route, TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData, HoverBus, EqClock, WinChrome, TrackMenu, MenuContext, KeyNav }
+export { Theme, Nav, Player, Quality, Data, NowPlaying, TrackPalette, Route, TrackRow, CoverCardData, FolderRow, LyricRow, CommentRow, TopCardData, TopGroupData, HoverBus, EqClock, WinChrome, TrackMenu, MenuContext, KeyNav, PlaylistMenu }
 
 export component AppWindow inherits Window {
     title: "胡桃音乐";
@@ -493,6 +495,65 @@ export component AppWindow inherits Window {
                 vertical-alignment: center;
                 overflow: elide;
             }
+        }
+
+        // —— 歌单级菜单 + 重命名弹层（单实例：侧栏歌单行与歌单页头共用）———
+        // 宿主只写 PlaylistMenu 快照（id/name/relation/source/row/锚点）并
+        // open-seq+1；弹层坐标 = 窗口坐标（宿主用 absolute-position 换算）。
+        // rename-seq 由面板发起：关菜单、开命名弹层（复用 NewPlaylistForm）。
+        // is-open 镜像回写 global，宿主据此在关闭后把焦点交还触发控件。
+        playlist-menu-pop := PopupWindow {
+            close-policy: close-on-click-outside;
+            x: PlaylistMenu.open-x;
+            y: PlaylistMenu.open-y;
+            width: 216px;
+            height: playlist-menu-panel.height;
+
+            playlist-menu-panel := PlaylistMenuPanel {
+                panel-open: playlist-menu-pop.is-open;
+                dismissed => {
+                    playlist-menu-pop.close();
+                }
+            }
+        }
+
+        playlist-rename-pop := PopupWindow {
+            close-policy: close-on-click-outside;
+            x: PlaylistMenu.open-x;
+            y: PlaylistMenu.open-y;
+            width: 264px;
+            height: 156px;
+
+            NewPlaylistForm {
+                form-title: "重命名歌单";
+                submit-label: "保存";
+                initial-name: PlaylistMenu.name;
+                submitted(name) => {
+                    PlaylistMenu.rename(name);
+                    playlist-rename-pop.close();
+                }
+                cancel => {
+                    playlist-rename-pop.close();
+                }
+            }
+        }
+
+        property <int> playlist-menu-seq: PlaylistMenu.open-seq;
+        changed playlist-menu-seq => {
+            playlist-menu-pop.show();
+        }
+        property <int> playlist-rename-seq: PlaylistMenu.rename-seq;
+        changed playlist-rename-seq => {
+            playlist-menu-pop.close();
+            playlist-rename-pop.show();
+        }
+        property <bool> playlist-menu-visible: playlist-menu-pop.is-open;
+        changed playlist-menu-visible => {
+            PlaylistMenu.menu-open = self.playlist-menu-visible;
+        }
+        property <bool> playlist-rename-visible: playlist-rename-pop.is-open;
+        changed playlist-rename-visible => {
+            PlaylistMenu.rename-open = self.playlist-rename-visible;
         }
 
         // —— 自绘标题栏（无边框壳：拖动移窗/双击最大化 + Windows 窗口钮）———

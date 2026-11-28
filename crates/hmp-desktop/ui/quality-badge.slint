@@ -50,9 +50,16 @@ export component QualityBadge inherits Rectangle {
     // Enter/空格选定；超过本曲最高档的选项不可达（诚实禁用）。关闭（ESC/
     // 点外/选定）后焦点回触发徽章。
     property <int> cursor: 0;
+    /** 打开序号：弹层内容可能被 show/close 复用（init 不保证重跑），
+        每次打开 +1，弹层内据此重新聚焦键盘光标 */
+    property <int> focus-seq: 0;
     property <bool> pop-open: quality-pop.is-open;
     changed pop-open => {
-        if (!self.pop-open) {
+        if (self.pop-open) {
+            // 每次打开回第一档
+            cursor = 0;
+            focus-seq += 1;
+        } else {
             touch.focus();
         }
     }
@@ -65,6 +72,12 @@ export component QualityBadge inherits Rectangle {
         y: -self.height - 10px;
         width: 208px;
         height: 244px;
+
+        // 复用的弹层内容：按打开序号重新聚焦（首次由 MenuKeys.init 聚焦）
+        property <int> focus-watch: root.focus-seq;
+        changed focus-watch => {
+            menu-keys.focus();
+        }
 
         menu-keys := MenuKeys {
             width: parent.width;

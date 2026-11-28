@@ -1,0 +1,209 @@
+// 歌单级菜单（重命名 / 删除·取消收藏）：歌单详情页「⋯」与侧栏歌单行右键
+// 共用同一面板与快照（PlaylistMenu global）。
+// 语义按 daemon（server.rs PlaylistWrite）：
+// - 重命名：仅 local 可改；owned/subscribed 由 daemon 拒绝
+//   （RemoteRenameUnsupported）——UI 先禁用并注明原因，不静默失败。
+// - 删除：local = 直接删；subscribed = 取消收藏；owned = 本地挂起，远端
+//   删除成功后行才消失（文案标注「同步云端」）。删除两步确认（同队列清空），
+//   防误触云端级联。
+// 键盘：打开即聚焦（MenuKeys），↑/↓ 在两项间移动（重命名禁用时跳过），
+// Enter 激活，Esc 由框架关弹层后焦点回触发控件（宿主按 is-open 落）。
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { MenuKeys } from "primitives.slint";
+import { MenuActionRow } from "context-menu.slint";
+
+/** 歌单级菜单快照 + 开关序号。弹层由 app.slint 统一声明（单实例），
+    宿主只写快照并 +1 open-seq；rename-seq 由面板发起（宿主侧关闭菜单、
+    打开命名弹层），menu-open/rename-open 是 is-open 的镜像（宿主监听关闭）。 */
+export global PlaylistMenu {
+    /** 目标歌单（侧栏行/歌单页头写入） */
+    in-out property <string> id: "";
+    in-out property <string> name: "";
+    /** `local` / `owned` / `subscribed`（空 = 远端页，不提供菜单） */
+    in-out property <string> relation: "";
+
+    /** 触发来源：0 = 侧栏自建组，1 = 侧栏收藏组，2 = 歌单详情页。
+        关闭弹层后宿主按它把焦点交还触发控件（组列表/页头「⋯」） */
+    in-out property <int> source: 2;
+    /** 侧栏组内绝对行下标（焦点回落的 roving 光标位置；页头来源忽略） */
+    in-out property <int> row: -1;
+
+    /** 菜单锚点（窗口坐标：宿主用 absolute-position 换算） */
+    in-out property <length> open-x: 0px;
+    in-out property <length> open-y: 0px;
+
+    /** 打开请求序号（宿主 +1；app.slint 监听后 show） */
+    in-out property <int> open-seq: 0;
+    /** 重命名请求序号（面板 +1；app.slint 关菜单、开命名弹层） */
+    in-out property <int> rename-seq: 0;
+
+    /** 弹层 is-open 镜像（app.slint 回写）：宿主监听关闭落焦点 */
+    in-out property <bool> menu-open: false;
+    in-out property <bool> rename-open: false;
+
+    /** 重命名提交（输入原样名称；去空白/空名在 Rust menu_bridge 统一处理） */
+    callback rename(string);
+    /** 删除（subscribed = 取消收藏；owned 远端同步） */
+    callback delete();
+}
+
+export component PlaylistMenuPanel inherits Rectangle {
+    /** 动作执行完触发，宿主接 popup.close() */
+    callback dismissed;
+    /** 宿主 PopupWindow 的 is-open（直接绑定，比 global 镜像早一拍）：
+        每次打开复位光标/确认态并要回焦点（内容复用时不走 init） */
+    in property <bool> panel-open: false;
+
+    // —— 键盘（MenuKeys；0 = 重命名，1 = 删除/取消收藏）——
+    property <int> cursor: 0;
+    /** 删除两步确认：首次激活只进入确认态，3s 内再激活才执行 */
+    property <bool> confirm-delete: false;
+    confirm-timer := Timer {
+        interval: 3s;
+        running: false;
+        triggered => {
+            self.stop();
+            root.confirm-delete = false;
+        }
+    }
+
+    pure function rename-usable() -> bool {
+        return PlaylistMenu.relation == "local";
+    }
+
+    pure function delete-label() -> string {
+        return PlaylistMenu.relation == "subscribed"
+            ? (root.confirm-delete ? "确认取消收藏" : "取消收藏")
+            : (root.confirm-delete ? "确认删除" : "删除歌单");
+    }
+
+    pure function delete-note() -> string {
+        return PlaylistMenu.relation == "owned" ? "同步云端"
+            : PlaylistMenu.relation == "subscribed" ? "仅取消收藏" : "";
+    }
+
+    function arm-delete() {
+        root.confirm-delete = true;
+        // Timer restart 陷阱（PORTING）：从未启动过的 Timer 上 restart() 是空操作
+        if (confirm-timer.running) {
+            confirm-timer.restart();
+        } else {
+            confirm-timer.running = true;
+        }
+    }
+
+    function activate() {
+        if (root.cursor == 0) {
+            if (root.rename-usable()) {
+                PlaylistMenu.rename-seq += 1;
+            }
+            return;
+        }
+        if (root.confirm-delete) {
+            PlaylistMenu.delete();
+            root.dismissed();
+        } else {
+            root.arm-delete();
+        }
+    }
+
+    function move(dir: int) {
+        if (root.rename-usable()) {
+            root.cursor = clamp(root.cursor + dir, 0, 1);
+        } else {
+            root.cursor = 1;
+        }
+    }
+
+    // 打开时复位：光标落到首个可用项（云端歌单的重命名禁用 → 直接落
+    // 「删除/取消收藏」），删除确认态撤回，焦点进弹层。PopupWindow 内容在
+    // show/close 间可能被复用（init 不保证每次重跑），所以挂 is-open 镜像：
+    // app.slint 每次 show/close 都把 PlaylistMenu.menu-open 回写。
+    init => {
+        root.cursor = root.rename-usable() ? 0 : 1;
+        root.refocus();
+    }
+    property <bool> menu-open-watch: PlaylistMenu.menu-open;
+    // 复用弹层内容时，is-open 回写与 popup 激活同拍，立即 focus() 会被
+    // 后续焦点恢复盖掉：延后一拍再要焦点（Timer restart 陷阱见 PORTING）
+    focus-timer := Timer {
+        interval: 16ms;
+        running: false;
+        triggered => {
+            self.stop();
+            menu-keys.focus();
+        }
+    }
+    function refocus() {
+        if (focus-timer.running) {
+            focus-timer.restart();
+        } else {
+            focus-timer.running = true;
+        }
+    }
+    changed menu-open-watch => {
+        if (self.menu-open-watch) {
+            root.cursor = root.rename-usable() ? 0 : 1;
+            root.confirm-delete = false;
+            root.refocus();
+        }
+    }
+
+    // 面板高：padding 16 + 两行 72 + 行距 2
+    height: 90px;
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-3;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: #241F1B.transparentize(0.82);
+    drop-shadow-offset-y: 4px;
+
+    menu-keys := MenuKeys {
+        width: parent.width;
+        height: parent.height;
+        in-modal: true;
+        // 删除/取消收藏恒可用：即使重命名禁用，菜单仍有可操作项（MenuKeys
+        // 的 available=false 会连焦点都拒收）
+        step(dir) => {
+            root.move(dir);
+        }
+        home => {
+            root.cursor = root.rename-usable() ? 0 : 1;
+        }
+        end => {
+            root.cursor = 1;
+        }
+        activate => {
+            root.activate();
+        }
+    }
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 2px;
+
+        MenuActionRow {
+            icon: Icons.edit;
+            text: "重命名";
+            item-enabled: root.rename-usable();
+            note: root.rename-usable() ? "" : "云端不支持";
+            selected: menu-keys.has-focus && root.cursor == 0;
+            activated => {
+                if (root.rename-usable()) {
+                    PlaylistMenu.rename-seq += 1;
+                }
+            }
+        }
+
+        MenuActionRow {
+            icon: PlaylistMenu.relation == "subscribed" ? Icons.bookmark : Icons.close;
+            text: root.delete-label();
+            note: root.delete-note();
+            selected: menu-keys.has-focus && root.cursor == 1;
+            activated => {
+                root.cursor = 1;
+                root.activate();
+            }
+        }
+    }
+}

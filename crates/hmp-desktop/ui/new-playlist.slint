@@ -1,13 +1,21 @@
-// 新建歌单命名表单（宿主包一层 PopupWindow）：标题 + 名称输入框 + 取消/创建。
-// 弹层内容每次 show 重新实例化（PORTING PopupWindow 四事实）——名称天然清空，
-// 输入框在 init 聚焦，打开即可打字；Enter 等同「创建」，ESC 由框架关弹层。
-// 动作只发意图（create(name)），请求/校验在 Rust（menu_bridge）。
+// 歌单命名表单（宿主包一层 PopupWindow）：标题 + 名称输入框 + 取消/提交。
+// 「新建」（侧栏「+」/「我喜欢」页）与「重命名」（歌单级菜单）共用：
+// 文案与初值经属性注入，结构/配色不变。
+// 弹层内容每次 show 重新实例化（PORTING PopupWindow 四事实）——初值在 init
+// 落账并聚焦输入框，打开即可打字；Enter 等同提交，ESC 由框架关弹层。
+// 动作只发意图（submitted(name)），请求/校验在 Rust（menu_bridge）。
 import { Theme } from "theme.slint";
 import { Button, ButtonVariant } from "primitives.slint";
 
 export component NewPlaylistForm inherits Rectangle {
+    /** 弹层标题（重命名 =「重命名歌单」） */
+    in property <string> form-title: "新建歌单";
+    /** 提交钮文案（重命名 =「保存」） */
+    in property <string> submit-label: "创建";
+    /** 输入框初值（重命名打开时带入原名称；新建留空） */
+    in property <string> initial-name: "";
     /** 提交：参数 = 输入的原样名称（去空白与空名拒绝在 Rust 侧统一处理） */
-    callback create(string);
+    callback submitted(string);
     callback cancel;
 
     width: 264px;
@@ -22,7 +30,14 @@ export component NewPlaylistForm inherits Rectangle {
 
     function submit() {
         if (name-input.text != "") {
-            root.create(name-input.text);
+            root.submitted(name-input.text);
+        }
+    }
+
+    init => {
+        name-input.text = root.initial-name;
+        if (root.initial-name != "") {
+            name-input.select-all();
         }
     }
 
@@ -31,7 +46,7 @@ export component NewPlaylistForm inherits Rectangle {
         spacing: 12px;
 
         Text {
-            text: "新建歌单";
+            text: root.form-title;
             color: Theme.foreground;
             font-size: 15px;
             font-weight: 650;
@@ -87,7 +102,7 @@ export component NewPlaylistForm inherits Rectangle {
             }
             Button {
                 variant: ButtonVariant.default;
-                text: "创建";
+                text: root.submit-label;
                 small: true;
                 height: 32px;
                 enabled: name-input.text != "";

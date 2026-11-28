@@ -3,8 +3,9 @@
 // 宽侧栏 = 分组折叠（chevron 旋转 + 高度过渡）；窄边栏 = 两级滑动导航。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { AppIcon, Button, HoverGroup, HoverItem, Scroll } from "primitives.slint";
+import { AppIcon, Button, HoverGroup, HoverItem, ListKeys, Scroll } from "primitives.slint";
 import { NewPlaylistForm } from "new-playlist.slint";
+import { PlaylistMenu } from "playlist-menu.slint";
 import { Nav, Route } from "nav.slint";
 import { PlaylistCover } from "data.slint";
 import { Data } from "stores.slint";
@@ -37,6 +38,14 @@ export component Sidebar inherits Rectangle {
     property <int> active-group: -1;
     /** 退出动画期间仍展示原分组：记住最后进入的分组 */
     property <int> last-group: 0;
+
+    // —— 歌单区键盘光标（roving，M7 收口 AUDIT §29）——
+    // 整组一个 Tab 停靠点：窗口化虚拟化只实例化行窗内的行，若每行一个 Tab 站，
+    // 窗外的歌单只能先手动滚动才可达。改由组级 ListKeys 统一停靠：↑/↓ 走遍
+    // 全部行（按绝对下标记 + 滚动跟随），Enter 打开、Menu/Shift+F10 弹歌单菜单。
+    in-out property <int> created-cursor: -1;
+    in-out property <int> favorited-cursor: -1;
+    in-out property <int> slider-cursor: -1;
 
     function nav-active(target: Route, exact: bool) -> bool {
         if (exact) {
@@ -224,7 +233,7 @@ export component Sidebar inherits Rectangle {
                                             close-policy: close-on-click-outside;
                                     
                                             NewPlaylistForm {
-                                                create(name) => {
+                                                submitted(name) => {
                                                     Data.create-playlist(name);
                                                     new-list-pop.close();
                                                 }
@@ -289,7 +298,7 @@ export component Sidebar inherits Rectangle {
                                     // 全局（那只服务顶层页面滚动）。依赖链单向：窗口量
                                     // 只依赖滚动状态与 N，绝不反向掺入（否则与滚动偏移
                                     // 绑定成环）。
-                                    Rectangle {
+                                    group-rows := Rectangle {
                                         property <int> n: root.playlists-of(group.group).length;
                                         // 容器顶在内容系 y：absolute-position 是窗口系
                                         // 且含滚动偏移（活依赖），减 scroll 原点与
@@ -308,6 +317,58 @@ export component Sidebar inherits Rectangle {
 
                                         height: n * 36px;
 
+                                        // 组级 roving 焦点：全组一个 Tab 站（AUDIT §29
+                                        // 「侧栏歌单行只有行窗内的才是停靠点」）。行窗只
+                                        // 决定绘制，光标按绝对下标记，↑/↓ 滚动跟随。
+                                        list-keys := ListKeys {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            available: group-rows.n > 0;
+                                            step(delta) => {
+                                                let from = root.cursor-of(group.group);
+                                                let cur = from < 0
+                                                    ? group-rows.window-start
+                                                    : clamp(from + delta, 0, group-rows.n - 1);
+                                                root.set-cursor(group.group, cur);
+                                                root.reveal-list-row(group-rows.list-top, 36px,
+                                                    nav-scroll.view-height, cur);
+                                            }
+                                            activate => {
+                                                let cur = root.cursor-of(group.group);
+                                                if (cur >= 0 && cur < group-rows.n) {
+                                                    Nav.navigate(Route.playlist,
+                                                        root.playlists-of(group.group)[cur].id);
+                                                }
+                                            }
+                                            menu => {
+                                                let cur = root.cursor-of(group.group);
+                                                if (cur >= 0 && cur < group-rows.n) {
+                                                    root.open-playlist-menu(group.group, cur,
+                                                        group-rows.absolute-position.x,
+                                                        group-rows.absolute-position.y + cur * 36px);
+                                                }
+                                            }
+                                            focus-gained(reason) => {
+                                                // 进入即有可见光标（模型缩短后钳住）
+                                                if (root.cursor-of(group.group) < 0
+                                                    || root.cursor-of(group.group) >= group-rows.n) {
+                                                    root.set-cursor(group.group, group-rows.window-start);
+                                                }
+                                            }
+                                        }
+
+                                        // 歌单菜单/重命名弹层关闭 → 焦点回本组列表，
+                                        // 光标停在触发的那一行（Esc/点外/执行动作同一路径）
+                                        property <bool> popup-open-watch:
+                                            PlaylistMenu.menu-open || PlaylistMenu.rename-open;
+                                        changed popup-open-watch => {
+                                            if (!self.popup-open-watch
+                                                && PlaylistMenu.source == group.group) {
+                                                root.set-cursor(group.group, PlaylistMenu.row);
+                                                list-keys.focus();
+                                            }
+                                        }
+
                                         // 行按绝对索引绝对定位；offset 只是窗口内序号，
                                         // 取数/跳转一律经 abs-index 换算回整表下标
                                         for offset in window-count: HoverItem {
@@ -318,15 +379,28 @@ export component Sidebar inherits Rectangle {
                                             y: abs-index * 36px;
                                             width: parent.width;
                                             height: 36px;
-                                            // 独立行：进 Tab 链（行内没有别的可聚焦控件），Enter/空格 = 打开歌单
-                                            tab-stop: true;
+                                            // 行不单独进 Tab 链：整组一个 roving 停靠点
+                                            tab-stop: false;
+                                            accessible-role: button;
+                                            accessible-label: rowd.name;
                                             // 正在浏览的歌单常亮：与音乐库「激活文件夹行」、导航当前项同语言
                                             // （此前打开歌单后侧栏毫无指示）
                                             property <bool> active: Nav.route == Route.playlist && Nav.param == rowd.id;
-                                            background: active ? Theme.muted : transparent;
+                                            property <bool> kb-cursor: list-keys.has-focus
+                                                && root.cursor-of(group.group) == abs-index;
+                                            background: active ? Theme.muted
+                                                : kb-cursor ? Theme.neutral-200.transparentize(0.45)
+                                                : transparent;
                                             // 行点击进歌单详情（参数与库页歌单卡同一 id 串）
                                             clicked => {
                                                 Nav.navigate(Route.playlist, rowd.id);
+                                            }
+                                            // 右键：歌单级菜单（重命名/删除）
+                                            context-enabled: true;
+                                            context-requested(mx, my) => {
+                                                root.open-playlist-menu(group.group, abs-index,
+                                                    self.absolute-position.x + mx,
+                                                    self.absolute-position.y + my);
                                             }
 
                                             HorizontalLayout {
@@ -441,7 +515,7 @@ export component Sidebar inherits Rectangle {
                             // —— 封面行窗口容器（窗口化虚拟化，同宽侧栏组内行窗）———
                             // slider-list 的 preferred-height 随钉死容器高度自然撑高，
                             // 外层 playlist-slider 的高度切换语义不变
-                            Rectangle {
+                            slider-rows := Rectangle {
                                 property <int> n: root.slider-covers().length;
                                 property <length> list-top: self.absolute-position.y
                                     - nav-scroll.absolute-position.y - nav-scroll.scroll-offset;
@@ -457,6 +531,53 @@ export component Sidebar inherits Rectangle {
 
                                 height: n * 40px;
 
+                                // 窄栏封面列表同样是组级 roving 焦点（整组一个停靠点）
+                                slider-keys := ListKeys {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    available: slider-rows.n > 0;
+                                    step(delta) => {
+                                        let from = root.slider-cursor;
+                                        let cur = from < 0
+                                            ? slider-rows.window-start
+                                            : clamp(from + delta, 0, slider-rows.n - 1);
+                                        root.slider-cursor = cur;
+                                        root.reveal-list-row(slider-rows.list-top, 40px,
+                                            nav-scroll.view-height, cur);
+                                    }
+                                    activate => {
+                                        let cur = root.slider-cursor;
+                                        if (cur >= 0 && cur < slider-rows.n) {
+                                            Nav.navigate(Route.playlist,
+                                                root.slider-covers()[cur].id);
+                                        }
+                                    }
+                                    menu => {
+                                        let cur = root.slider-cursor;
+                                        if (cur >= 0 && cur < slider-rows.n) {
+                                            root.open-playlist-menu(root.last-group, cur,
+                                                slider-rows.absolute-position.x,
+                                                slider-rows.absolute-position.y + cur * 40px);
+                                        }
+                                    }
+                                    focus-gained(reason) => {
+                                        if (root.slider-cursor < 0
+                                            || root.slider-cursor >= slider-rows.n) {
+                                            root.slider-cursor = slider-rows.window-start;
+                                        }
+                                    }
+                                }
+
+                                property <bool> popup-open-watch:
+                                    PlaylistMenu.menu-open || PlaylistMenu.rename-open;
+                                changed popup-open-watch => {
+                                    if (!self.popup-open-watch
+                                        && PlaylistMenu.source < 2) {
+                                        root.slider-cursor = PlaylistMenu.row;
+                                        slider-keys.focus();
+                                    }
+                                }
+
                                 for offset in window-count: HoverItem {
                                     property <int> abs-index: parent.window-start + offset;
                                     property <PlaylistCover> rowd: root.slider-covers()[abs-index];
@@ -465,10 +586,25 @@ export component Sidebar inherits Rectangle {
                                     y: abs-index * 40px;
                                     width: parent.width;
                                     height: 40px;
+                                    property <bool> kb-cursor: slider-keys.has-focus
+                                        && root.slider-cursor == abs-index;
+                                    background: kb-cursor
+                                        ? Theme.neutral-200.transparentize(0.45) : transparent;
+                                    accessible-role: button;
+                                    accessible-label: rowd.name;
+                                    // 右键：歌单级菜单
+                                    context-enabled: true;
+                                    context-requested(mx, my) => {
+                                        root.open-playlist-menu(root.last-group, abs-index,
+                                            self.absolute-position.x + mx,
+                                            self.absolute-position.y + my);
+                                    }
 
                                     Button {
                                         icon-only: true;
                                         suppress-hover: true;
+                                        // 行由组级 ListKeys 统一停靠
+                                        tab-stop: false;
                                         width: parent.width;
                                         height: 40px;
                                         tool-tip: rowd.name;
@@ -591,6 +727,51 @@ export component Sidebar inherits Rectangle {
 
     public pure function playlists-of(group: int) -> [PlaylistCover] {
         return group == 0 ? Data.sidebar-created : Data.sidebar-favorited;
+    }
+
+    // —— 歌单区键盘/菜单辅助 ——
+    public pure function cursor-of(group: int) -> int {
+        return group == 0 ? root.created-cursor : root.favorited-cursor;
+    }
+
+    function set-cursor(group: int, value: int) {
+        if (group == 0) {
+            root.created-cursor = value;
+        } else {
+            root.favorited-cursor = value;
+        }
+    }
+
+    /** 把第 index 行滚进侧栏滚动视口（已完整可见则不动） */
+    function reveal-list-row(top: length, pitch: length, view-h: length, index: int) {
+        if (view-h <= 0px || index < 0) {
+            return;
+        }
+        let row-top = top + index * pitch;
+        let view-top = -nav-scroll.scroll-offset;
+        let target = row-top < view-top ? row-top
+            : row-top + pitch > view-top + view-h ? row-top + pitch - view-h
+            : -1px;
+        if (target >= 0px) {
+            nav-scroll.scroll-offset = -target;
+        }
+    }
+
+    /** 打开歌单级菜单（快照 + 锚点；弹层单实例在 app.slint） */
+    public function open-playlist-menu(group: int, index: int, x: length, y: length) {
+        let list = root.playlists-of(group);
+        if (index < 0 || index >= list.length) {
+            return;
+        }
+        let cover = list[index];
+        PlaylistMenu.id = cover.id;
+        PlaylistMenu.name = cover.name;
+        PlaylistMenu.relation = cover.relation;
+        PlaylistMenu.source = group;
+        PlaylistMenu.row = index;
+        PlaylistMenu.open-x = x;
+        PlaylistMenu.open-y = y;
+        PlaylistMenu.open-seq += 1;
     }
 }
 

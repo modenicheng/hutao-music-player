@@ -152,6 +152,18 @@ component MenuSeparator inherits Rectangle {
 export component TrackMenuPanel inherits Rectangle {
     /** 每个动作执行完触发，宿主接 popup.close() */
     callback dismissed;
+    /** 宿主 PopupWindow 的 is-open：每次打开复位条目光标与二级态
+        （弹层内容在 show/close 间可能被复用，init 不保证重跑） */
+    in property <bool> is-open: false;
+    property <bool> open-watch: is-open;
+    changed open-watch => {
+        if (self.open-watch) {
+            root.cursor = 0;
+            root.picker-mode = false;
+            root.picker-cursor = 0;
+            menu-keys.focus();
+        }
+    }
 
     // —— 键盘导航（M7 收口，AUDIT §29「弹层方向键导航未做」）——
     /** 主模式条目光标：0 播放 / 1 下一首播放 / 2 加入队列 / 3 加入播放列表 /

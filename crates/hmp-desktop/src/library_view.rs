@@ -415,6 +415,9 @@ fn playlist_entries(db: &mut LibraryDb) -> Option<(Vec<PlaylistEntry>, Vec<Playl
 #[derive(Clone, Debug)]
 pub struct PlaylistDetail {
     pub name: String,
+    /// 歌单归属：`local` / `owned` / `subscribed`（歌单页级菜单按它裁剪
+    /// 重命名/删除语义；daemon 对 owned/subscribed 的重命名报错）
+    pub relation: String,
     pub tracks: Vec<SongRow>,
     pub total_ms: u64,
     /// 封面本地产物 URI（QQ 歌单 reconcile 回写；None → 程序化占位）。
@@ -457,12 +460,12 @@ pub fn playlist_detail(id: i64) -> Option<PlaylistDetail> {
 }
 
 fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
-    let (name, cover_uri) = db
+    let (name, cover_uri, relation) = db
         .list_playlists()
         .ok()?
         .into_iter()
         .find(|p| p.id == id)
-        .map(|p| (p.name, p.cover_uri))?;
+        .map(|p| (p.name, p.cover_uri, p.relation))?;
     let rows = db.playlist_tracks(id).ok()?;
     let local_by_key = local_track_map(db)?;
     let album_covers = album_cover_map(db)?;
@@ -497,6 +500,7 @@ fn playlist_detail_from(db: &mut LibraryDb, id: i64) -> Option<PlaylistDetail> {
     let total_ms: u64 = tracks.iter().map(|r| r.duration_ms.max(0) as u64).sum();
     Some(PlaylistDetail {
         name,
+        relation,
         cover_uri,
         tracks,
         total_ms,

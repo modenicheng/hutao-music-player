@@ -4,10 +4,11 @@
 // 远端（qq: 参数）：创建者/播放数/超窗标注由 remote_details 投影。
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { Button, ButtonVariant } from "primitives.slint";
+import { AppIcon, Button, ButtonVariant, KeyTouch } from "primitives.slint";
 import { PageHeader } from "page-parts.slint";
 import { TrackTable } from "track-table.slint";
 import { Nav } from "nav.slint";
+import { PlaylistMenu } from "playlist-menu.slint";
 import { Data, Player } from "stores.slint";
 
 export component PlaylistPage inherits Rectangle {
@@ -49,8 +50,9 @@ export component PlaylistPage inherits Rectangle {
 
         if Data.playlist-state == 2: Rectangle {
             // 两段式头部（Vue .playlist-head）：封面 | 页头信息，垂直居中。
-            // 子元素勿引用 parent.width（布局首选宽计算成环，会解出负宽）。
-            width: parent.width;
+            // 子元素勿引用 parent.width（布局首选宽计算成环，会解出负宽）；
+            // 本行宽度由纵向布局给（显式 width: parent.width 会取到含内距的
+            // 整宽、把行撑出内容右缘，页头右缘的动作区随之溢出被裁）。
             height: 176px;
 
             HorizontalLayout {
@@ -99,6 +101,60 @@ export component PlaylistPage inherits Rectangle {
                         clicked => {
                             Player.play-tracks(Data.playlist-tracks, 0);
                         }
+                    }
+
+                }
+            }
+
+            // 歌单级操作（重命名 / 删除·取消收藏）：仅本地歌单提供
+            // （Data.playlist-relation 空 = 远端 qq: 页，daemon 无写路径）。
+            // 不放进 PageHeader 的 @children 动作区：该组件嵌在「封面 + 页头」
+            // 的横向布局里时动作区不贴右缘（实测命中区跑到返回键右侧），
+            // 这里按页头行绝对定位到右缘，与页头信息垂直居中。
+            if Data.playlist-relation != "": Rectangle {
+                x: parent.width - self.width;
+                y: (parent.height - self.height) / 2;
+                width: 36px;
+                height: 36px;
+                border-radius: Theme.pill(self.height);
+                background: more-touch.has-hover ? Theme.muted : transparent;
+                animate background {
+                    duration: Theme.duration-fast;
+                    easing: cubic-bezier(0.2, 0, 0, 1);
+                }
+
+                more-touch := KeyTouch {
+                    mouse-cursor: pointer;
+                    ring-radius: Theme.pill(self.height);
+                    activate-on-click: true;
+                    Tooltip { text: @markdown("歌单操作"); }
+                    activated => {
+                        PlaylistMenu.id = Nav.param;
+                        PlaylistMenu.name = Data.playlist-name;
+                        PlaylistMenu.relation = Data.playlist-relation;
+                        PlaylistMenu.source = 2;
+                        PlaylistMenu.row = -1;
+                        PlaylistMenu.open-x = self.absolute-position.x;
+                        PlaylistMenu.open-y = self.absolute-position.y + self.height + 4px;
+                        PlaylistMenu.open-seq += 1;
+                    }
+                    AppIcon {
+                        source: Icons.more_horiz;
+                        icon-color: more-touch.has-hover
+                            ? Theme.foreground : Theme.muted-foreground;
+                        width: 20px;
+                        height: 20px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+
+                // 菜单/命名弹层关闭 → 焦点回触发钮（键盘用户可再次操作）
+                property <bool> popup-open-watch:
+                    PlaylistMenu.menu-open || PlaylistMenu.rename-open;
+                changed popup-open-watch => {
+                    if (!self.popup-open-watch && PlaylistMenu.source == 2) {
+                        more-touch.focus();
                     }
                 }
             }

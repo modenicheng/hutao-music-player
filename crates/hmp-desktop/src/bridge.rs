@@ -970,6 +970,8 @@ fn apply_detail(
             data.set_playlist_state(2);
             data.set_playlist_found(true);
             data.set_playlist_name(detail.name.clone().into());
+            // 歌单页级菜单的语义依据（local 可重命名；owned/subscribed 云端）
+            data.set_playlist_relation(detail.relation.clone().into());
             data.set_playlist_meta_items(model(vec![
                 format!("{} 首", detail.tracks.len()).into(),
                 format!("总时长 {}", format_long_duration(detail.total_ms)).into(),
@@ -993,6 +995,7 @@ fn apply_detail(
         DetailData::Playlist(_, None) => {
             data.set_playlist_state(3);
             data.set_playlist_found(false);
+            data.set_playlist_relation("".into());
         }
         DetailData::Album(Some(detail)) => {
             data.set_album_state(2);
@@ -1781,6 +1784,7 @@ mod tests {
                 "3".into(),
                 Some(library_view::PlaylistDetail {
                     name: "深夜循环".into(),
+                    relation: "local".into(),
                     tracks: vec![],
                     total_ms: 0,
                     cover_uri: None,

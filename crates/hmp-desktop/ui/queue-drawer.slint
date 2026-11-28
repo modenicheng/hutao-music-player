@@ -567,6 +567,7 @@ export component QueueDrawer inherits Rectangle {
                                     height: menu-panel.height;
 
                                     menu-panel := TrackMenuPanel {
+                                        is-open: row-menu.is-open;
                                         dismissed => {
                                             row-menu.close();
                                         }

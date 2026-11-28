@@ -7,6 +7,11 @@
 //!   `LibraryChanged` 推送互补，推送丢失或离线窗口期也不落空
 //! - 新建歌单：`PlaylistWriteOp::Create` → `Response::Created(id)` → 刷新库 +
 //!   直达新歌单页（侧栏「+」与「我喜欢」页的命名弹层发起）
+//! - 歌单级重命名 / 删除：`PlaylistWriteOp::{Rename,Delete}`（歌单页「⋯」与
+//!   侧栏歌单行右键菜单发起）。owned 重命名由 daemon 拒绝
+//!   （`RemoteRenameUnsupported`，UI 侧先按 relation 禁用 + 注明原因）；
+//!   subscribed 删除 = 取消收藏；owned 删除 = 行保留到远端删除成功。
+//!   拒绝/未连接一律反馈条人话，不静默失败。
 //!
 //! 错误反馈统一走 [`player_bridge`] 派发路径（未登录等人话文案复用）。
 
@@ -18,7 +23,9 @@ use hmp_core::ipc::Request;
 use hmp_core::{PlayRequest, PlaylistWriteOp, Response, TrackId};
 
 use crate::backend::{BackendError, BackendRuntime};
-use crate::{AppWindow, Data, Nav, Route, TrackMenu, bridge, player_bridge, prefs};
+use crate::{
+    AppWindow, Data, Nav, PlaylistMenu, Route, TrackMenu, bridge, player_bridge, prefs,
+};
 
 /// 歌单名称校验（纯逻辑，单测锚点）：去首尾空白，空名 → None。
 fn playlist_name(raw: &str) -> Option<String> {
@@ -60,6 +67,79 @@ fn apply_create_reply(
         }
         CreateOutcome::Failed(message) => {
             let _ = result;
+            player_bridge::show_feedback(&ui.as_weak(), message);
+        }
+    }
+}
+
+/// 歌单级写操作（重命名/删除）回包 → 动作（纯逻辑决策表，单测钉行为）。
+#[derive(Debug, PartialEq)]
+enum PlaylistWriteOutcome {
+    /// 受理：刷新库 + 反馈条文案（空串 = 不提示）
+    Accepted(String),
+    /// 未生效：反馈条文案
+    Failed(String),
+}
+
+fn rename_outcome(result: &Result<Response, BackendError>) -> PlaylistWriteOutcome {
+    match result {
+        Ok(Response::Ok) => PlaylistWriteOutcome::Accepted("歌单已重命名".into()),
+        // daemon 对 owned/subscribed 的拒绝也走这里：UI 已按 relation 禁用，
+        // 兜底仍把 daemon 的人话原样透出（不静默吞掉）
+        Ok(Response::Err { message, .. }) => {
+            PlaylistWriteOutcome::Failed(format!("重命名失败：{message}"))
+        }
+        Ok(_) => PlaylistWriteOutcome::Failed("重命名未生效：守护进程应答异常".into()),
+        Err(_) => PlaylistWriteOutcome::Failed("播放服务未连接，歌单没有重命名".into()),
+    }
+}
+
+/// 删除成功文案按 daemon 语义分流：subscribed = 取消收藏、owned = 先本地挂起
+/// 等远端删除（行保留到成功）、local = 立即删除。
+fn delete_success_text(relation: &str) -> &'static str {
+    match relation {
+        "subscribed" => "已取消收藏",
+        "owned" => "已提交删除，正在同步到云端",
+        _ => "歌单已删除",
+    }
+}
+
+fn delete_outcome(relation: &str, result: &Result<Response, BackendError>) -> PlaylistWriteOutcome {
+    match result {
+        Ok(Response::Ok) => PlaylistWriteOutcome::Accepted(delete_success_text(relation).into()),
+        Ok(Response::Err { message, .. }) => {
+            PlaylistWriteOutcome::Failed(format!("删除歌单失败：{message}"))
+        }
+        Ok(_) => PlaylistWriteOutcome::Failed("删除未生效：守护进程应答异常".into()),
+        Err(_) => PlaylistWriteOutcome::Failed("播放服务未连接，歌单没有删除".into()),
+    }
+}
+
+/// 重命名/删除受理后：刷新库（侧栏与当前详情页同步）；删除当前正在浏览的
+/// 歌单（本地行即刻消失的 local/subscribed）时回「我喜欢」，避免停在
+/// 「未找到歌单」。owned 删除先挂起、行保留，页面不动。
+fn apply_playlist_write(
+    ui: &AppWindow,
+    runtime: &Arc<BackendRuntime>,
+    outcome: PlaylistWriteOutcome,
+    deleted: Option<(i64, &str)>,
+) {
+    match outcome {
+        PlaylistWriteOutcome::Accepted(message) => {
+            bridge::schedule_refresh(ui, runtime);
+            if let Some((id, relation)) = deleted
+                && relation != "owned"
+            {
+                let nav = Nav::get(ui);
+                if nav.get_route() == Route::Playlist && nav.get_param() == id.to_string() {
+                    nav.invoke_navigate(Route::Library, "".into());
+                }
+            }
+            if !message.is_empty() {
+                player_bridge::show_feedback(&ui.as_weak(), message);
+            }
+        }
+        PlaylistWriteOutcome::Failed(message) => {
             player_bridge::show_feedback(&ui.as_weak(), message);
         }
     }
@@ -214,6 +294,69 @@ pub fn bind(ui: &AppWindow, prefs: Arc<Mutex<prefs::Prefs>>, runtime: Arc<Backen
     }
 
     {
+        // 歌单级重命名：菜单「重命名」→ 命名弹层（复用 NewPlaylistForm）→
+        // PlaylistWrite::Rename。owned/subscribed 由 UI 预先禁用（daemon 也会
+        // 拒绝 RemoteRenameUnsupported——两层都不静默）。
+        let runtime = Arc::clone(&runtime);
+        let ui_weak = ui.as_weak();
+        PlaylistMenu::get(ui).on_rename(move |raw| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let Some(name) = playlist_name(&raw) else {
+                player_bridge::show_feedback(&ui.as_weak(), "歌单名称不能为空".into());
+                return;
+            };
+            let Ok(id) = PlaylistMenu::get(&ui).get_id().parse::<i64>() else {
+                return;
+            };
+            let rt = Arc::clone(&runtime);
+            player_bridge::dispatch_with_reply(
+                &runtime,
+                &ui_weak,
+                Request::PlaylistWrite {
+                    op: PlaylistWriteOp::Rename { id, name },
+                },
+                move |ui, result| {
+                    apply_playlist_write(ui, &rt, rename_outcome(&result), None);
+                },
+            );
+        });
+    }
+
+    {
+        // 歌单级删除（subscribed = 取消收藏；owned = 远端删除成功后删本地行）
+        let runtime = Arc::clone(&runtime);
+        let ui_weak = ui.as_weak();
+        PlaylistMenu::get(ui).on_delete(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let menu = PlaylistMenu::get(&ui);
+            let Ok(id) = menu.get_id().parse::<i64>() else {
+                return;
+            };
+            let relation = menu.get_relation().to_string();
+            let rt = Arc::clone(&runtime);
+            player_bridge::dispatch_with_reply(
+                &runtime,
+                &ui_weak,
+                Request::PlaylistWrite {
+                    op: PlaylistWriteOp::Delete { id },
+                },
+                move |ui, result| {
+                    apply_playlist_write(
+                        ui,
+                        &rt,
+                        delete_outcome(&relation, &result),
+                        Some((id, relation.as_str())),
+                    );
+                },
+            );
+        });
+    }
+
+    {
         // 新建歌单：命名弹层发来原样名称 → Create → Created(id) → 刷新 + 直达
         let runtime = Arc::clone(&runtime);
         let ui_weak = ui.as_weak();
@@ -251,6 +394,45 @@ mod tests {
         );
         assert_eq!(playlist_name(""), None);
         assert_eq!(playlist_name("   \t\n"), None, "全是空白 = 空名");
+    }
+
+    #[test]
+    fn rename_and_delete_outcomes_map_every_reply_shape() {
+        assert_eq!(
+            rename_outcome(&Ok(Response::Ok)),
+            PlaylistWriteOutcome::Accepted("歌单已重命名".into())
+        );
+        let rejected = rename_outcome(&Ok(Response::Err {
+            code: hmp_core::IpcErrorCode::Internal,
+            message: "云端歌单不支持重命名".into(),
+        }));
+        assert_eq!(
+            rejected,
+            PlaylistWriteOutcome::Failed("重命名失败：云端歌单不支持重命名".into())
+        );
+        assert!(matches!(
+            rename_outcome(&Err(BackendError::NoBackendBinary)),
+            PlaylistWriteOutcome::Failed(_)
+        ));
+
+        assert_eq!(delete_success_text("subscribed"), "已取消收藏");
+        assert_eq!(delete_success_text("owned"), "已提交删除，正在同步到云端");
+        assert_eq!(delete_success_text("local"), "歌单已删除");
+        assert_eq!(
+            delete_outcome("local", &Ok(Response::Ok)),
+            PlaylistWriteOutcome::Accepted("歌单已删除".into())
+        );
+        let failed = delete_outcome(
+            "local",
+            &Ok(Response::Err {
+                code: hmp_core::IpcErrorCode::PlaylistNotFound,
+                message: "歌单不存在".into(),
+            }),
+        );
+        assert_eq!(
+            failed,
+            PlaylistWriteOutcome::Failed("删除歌单失败：歌单不存在".into())
+        );
     }
 
     #[test]

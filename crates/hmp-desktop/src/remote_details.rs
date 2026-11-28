@@ -152,6 +152,8 @@ pub fn apply_playlist_response(
     match result {
         Ok(hmp_core::Response::PlaylistDetail(page)) => {
             data.set_playlist_name(page.name.as_str().into());
+            // 远端（qq: 参数）歌单页不提供本地歌单菜单
+            data.set_playlist_relation("".into());
             data.set_playlist_meta_items(model_rc(remote_playlist_meta(&page)));
             // hero 封面：程序化占位先行，picurl 非空 → CoverGet 异步换真图
             data.set_playlist_cover(crate::covers::cover_image(&format!("playlist:{}", page.id)));

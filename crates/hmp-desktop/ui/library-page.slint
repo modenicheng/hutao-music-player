@@ -134,7 +134,7 @@ export component LibraryPage inherits Rectangle {
                         close-policy: close-on-click-outside;
         
                         NewPlaylistForm {
-                            create(name) => {
+                            submitted(name) => {
                                 Data.create-playlist(name);
                                 new-list-pop.close();
                             }
