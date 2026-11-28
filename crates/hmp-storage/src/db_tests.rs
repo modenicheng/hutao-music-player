@@ -1266,9 +1266,10 @@ fn library_browse_aggregations() {
     assert!(db.scan_roots().unwrap().is_empty());
 }
 
-/// AUDIT §30.7：专辑曲序按「碟号 → 曲号 → 标题」（碟号缺省 1、曲号缺省 999），
-/// 多碟专辑不再交错；专辑歌手有 album_artist（空串视同无）取它，否则沿用
-/// MAX(artist)（行为不变）。分组键仍为专辑名。
+/// AUDIT §30.7 + §30.2.6 phase 1：专辑曲序按「碟号 → 曲号 → 标题」（碟号
+/// 缺省 1、曲号缺省 999），多碟专辑不再交错；专辑按（专辑名, 专辑歌手）分组
+/// ——album_artist 优先（空串视同无、回退到该行 artist），同名不同专辑歌手
+/// 分两行。
 #[test]
 fn album_disc_order_and_album_artist() {
     let mut db = LibraryDb::open_in_memory().unwrap();
@@ -1313,19 +1314,33 @@ fn album_disc_order_and_album_artist() {
     );
 
     let albums = db.library_albums(None).unwrap();
-    let group = |name: &str| albums.iter().find(|a| a.album == name).unwrap();
+    let group = |album: &str, artist: &str| {
+        albums
+            .iter()
+            .find(|a| a.album == album && a.artist.as_deref() == Some(artist))
+            .unwrap()
+    };
     assert_eq!(
-        group("精选集").artist.as_deref(),
-        Some("专辑歌手"),
-        "album_artist 优先（空串视同无）"
+        group("精选集", "专辑歌手").track_count,
+        3,
+        "album_artist 相同的曲目一组"
     );
-    assert_eq!(group("精选集").track_count, 4, "仍按专辑名分组");
     assert_eq!(
-        group("单曲集").artist.as_deref(),
-        Some("B-singer"),
-        "无 album_artist → MAX(artist) 行为不变"
+        group("精选集", "歌手乙").track_count,
+        1,
+        "album_artist 为空 → 回退该行 artist，不再并进上面的组"
     );
-    assert_eq!(albums.len(), 2);
+    assert_eq!(
+        group("单曲集", "B-singer").track_count,
+        1,
+        "无 album_artist → 该行 artist 作分组键"
+    );
+    assert_eq!(group("单曲集", "A-singer").track_count, 1);
+    assert_eq!(
+        albums.len(),
+        4,
+        "同名不同专辑歌手分两行（精选集 2 + 单曲集 2）"
+    );
 }
 
 #[test]
@@ -2207,4 +2222,67 @@ fn upsert_tracks_batch_persists_mids() {
     let tid = db.track_id("qq", "mid-batch").unwrap().unwrap();
     assert_eq!(db.album_mid(tid).unwrap().as_deref(), Some("album-batch"));
     assert_eq!(db.track_artists(tid).unwrap().len(), 2);
+}
+
+/// §30.2.6 phase 1：专辑组行透传 `album_mid`（QQ 行回填后），本地组为 NULL；
+/// 同专辑同专辑歌手的多首曲目仍是一行。
+#[test]
+fn library_albums_exposes_album_mid_per_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let (root_id, generation) = db.begin_scan(dir.path()).unwrap();
+    let meta = |title: &str, album_artist: &str| crate::local::LocalMeta {
+        title: title.into(),
+        artist: Some(album_artist.into()),
+        album: Some("同名专辑".into()),
+        album_artist: Some(album_artist.into()),
+        ..Default::default()
+    };
+    let mut ids = Vec::new();
+    for (name, title, album_artist, fp) in [
+        ("a.mp3", "A", "甲", "fp-album-a"),
+        ("b.mp3", "B", "甲", "fp-album-b"),
+        ("c.mp3", "C", "乙", "fp-album-c"),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, name.as_bytes()).unwrap();
+        db.record_scan_file(
+            root_id,
+            generation,
+            &path,
+            Some(&meta(title, album_artist)),
+            fp,
+        )
+        .unwrap();
+        ids.push(
+            db.track_id(
+                "local",
+                &format!("local:{}", crate::canonical_display_path(&path).display()),
+            )
+            .unwrap()
+            .unwrap(),
+        );
+    }
+    // 模拟 reconcile 回填的专辑 mid（本地行本身没有 mid）。
+    db.conn
+        .execute(
+            "UPDATE tracks SET album_mid = 'amid-jia' WHERE id = ?1",
+            params![ids[0]],
+        )
+        .unwrap();
+
+    let albums = db.library_albums(None).unwrap();
+    assert_eq!(albums.len(), 2, "两个专辑歌手 → 两行");
+    let jia = albums
+        .iter()
+        .find(|a| a.artist.as_deref() == Some("甲"))
+        .unwrap();
+    assert_eq!(jia.track_count, 2, "同专辑歌手两首仍一行");
+    assert_eq!(jia.album_mid.as_deref(), Some("amid-jia"));
+    let yi = albums
+        .iter()
+        .find(|a| a.artist.as_deref() == Some("乙"))
+        .unwrap();
+    assert_eq!(yi.track_count, 1);
+    assert_eq!(yi.album_mid, None);
 }

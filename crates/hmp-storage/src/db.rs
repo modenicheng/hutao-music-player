@@ -232,6 +232,8 @@ pub struct LibraryTrackRow {
 pub struct AlbumGroup {
     pub album: String,
     pub artist: Option<String>,
+    /// 专辑 mid（QQ 行有值；本地扫盘行 NULL）——v9。
+    pub album_mid: Option<String>,
     pub track_count: i64,
     pub year: Option<i64>,
     pub cover_uri: Option<String>,
@@ -1337,12 +1339,15 @@ impl LibraryDb {
         rows.collect()
     }
 
-    /// 本地专辑聚合（album 非空；search 子串过滤；仍按专辑名分组）。
-    /// 专辑歌手：有 `album_artist`（空串视同无）取它，否则沿用 `MAX(artist)`
-    /// ——合辑/群星碟不再把参与曲目的歌手当成专辑歌手。
+    /// 本地专辑聚合（album 非空；search 子串过滤）。
+    /// 分组键 =（专辑名, 专辑歌手）：专辑歌手有 `album_artist`（空串视同无）
+    /// 取它，否则取该行 `artist`——同名不同专辑歌手不再合并（§30.2.6 phase 1）。
+    /// 专辑歌手为整组同一表达式值；`album_mid` 取组内 `MAX`（QQ 行回填后可用）。
     pub fn library_albums(&mut self, search: Option<&str>) -> rusqlite::Result<Vec<AlbumGroup>> {
         let mut sql = String::from(
-            "SELECT t.album, COALESCE(MAX(NULLIF(t.album_artist, '')), MAX(t.artist)), COUNT(*), MAX(t.year), MAX(t.cover_uri)
+            "SELECT t.album,
+                    MAX(COALESCE(NULLIF(t.album_artist, ''), t.artist)),
+                    COUNT(*), MAX(t.year), MAX(t.cover_uri), MAX(t.album_mid)
              FROM tracks t JOIN local_files lf ON lf.track_id = t.id
              WHERE t.source = 'local' AND t.album IS NOT NULL AND t.album <> ''",
         );
@@ -1351,7 +1356,11 @@ impl LibraryDb {
             sql.push_str(" AND t.album LIKE ? ESCAPE '\\'");
             vals.push(Box::new(format!("%{}%", Self::escape_like(s))));
         }
-        sql.push_str(" GROUP BY t.album COLLATE NOCASE ORDER BY t.album COLLATE NOCASE");
+        sql.push_str(
+            " GROUP BY t.album COLLATE NOCASE,
+                      COALESCE(NULLIF(t.album_artist, ''), t.artist) COLLATE NOCASE
+              ORDER BY t.album COLLATE NOCASE, 2",
+        );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
             rusqlite::params_from_iter(vals.iter().map(|v| v.as_ref())),
@@ -1362,6 +1371,7 @@ impl LibraryDb {
                     track_count: r.get(2)?,
                     year: r.get(3)?,
                     cover_uri: r.get(4)?,
+                    album_mid: r.get(5)?,
                 })
             },
         )?;
