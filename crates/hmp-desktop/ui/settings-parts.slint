@@ -40,7 +40,9 @@ export component SettingRow inherits Rectangle {
     in property <string> label;
     in property <string> desc: "";
     in property <bool> separator: false;
-    height: desc == "" ? 44px : 56px;
+    /** 窄窗（683–832px）：描述不再单行省略，换行两行降级（T8） */
+    property <bool> narrow: Theme.win-width <= 832px;
+    height: desc == "" ? 44px : (root.narrow ? 74px : 56px);
     background: transparent;
 
     // x 必须显式置 0：Slint 绝对定位子元素默认在父级居中，不是左上角
@@ -62,7 +64,10 @@ export component SettingRow inherits Rectangle {
             text: root.desc;
             color: Theme.muted-foreground;
             font-size: 12.8px;
-            overflow: elide;
+            // 窄窗控制区占宽后单行描述必被截断（T8）：换行两行 + 行高放宽；
+            // 宽窗保持单行省略
+            wrap: root.narrow ? word-wrap : no-wrap;
+            overflow: root.narrow ? clip : elide;
         }
     }
 
