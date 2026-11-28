@@ -2286,3 +2286,86 @@ fn library_albums_exposes_album_mid_per_group() {
     assert_eq!(yi.track_count, 1);
     assert_eq!(yi.album_mid, None);
 }
+
+/// §30.2.6 phase 1：旧解析规则的行（tag_version=0）即使 mtime/size 未变，
+/// 扫描也强制重读标签 → Updated + 字段刷新 + 版本推进；再扫一次 → Skipped。
+#[test]
+fn scan_rereads_tags_when_tag_version_is_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("song.flac");
+    std::fs::write(&path, b"x").unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let (root_id, generation) = db.begin_scan(dir.path()).unwrap();
+    // 旧规则入库的形态：行有文件指纹，但标签列为空、版本 0。
+    assert!(matches!(
+        db.record_scan_file(root_id, generation, &path, None, "fp-tag")
+            .unwrap(),
+        ScanOutcome::Added
+    ));
+    db.conn
+        .execute(
+            "UPDATE local_files SET tag_version = 0 WHERE path = ?1",
+            params![path.display().to_string()],
+        )
+        .unwrap();
+    let meta = crate::local::LocalMeta {
+        title: "夜曲".into(),
+        artist: Some("周杰伦".into()),
+        album: Some("十一月的萧邦".into()),
+        duration_ms: Some(193_000),
+        ..Default::default()
+    };
+    // mtime/size 与文件一致，仅解析规则版本过期 → 强制重读。
+    assert!(
+        matches!(
+            db.record_scan_file(root_id, generation, &path, Some(&meta), "fp-tag")
+                .unwrap(),
+            ScanOutcome::Updated
+        ),
+        "旧 tag_version 必须触发重读，而不是 Skipped"
+    );
+    let (title, artist, album, version): (String, Option<String>, Option<String>, i64) = db
+        .conn
+        .query_row(
+            "SELECT t.title, t.artist, t.album, lf.tag_version
+             FROM tracks t JOIN local_files lf ON lf.track_id = t.id WHERE lf.path = ?1",
+            params![path.display().to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(title, "夜曲");
+    assert_eq!(artist.as_deref(), Some("周杰伦"));
+    assert_eq!(album.as_deref(), Some("十一月的萧邦"));
+    assert_eq!(version, LOCAL_TAG_VERSION);
+    // 版本已是最新、文件未变 → 增量跳过。
+    assert!(matches!(
+        db.record_scan_file(root_id, generation, &path, Some(&meta), "fp-tag")
+            .unwrap(),
+        ScanOutcome::Skipped
+    ));
+}
+
+/// §30.2.6 phase 1：播放路径入库（`add_local_file`）同样写当前标签版本，
+/// 避免「先播放后扫描」的行在下次扫描被误判为旧规则。
+#[test]
+fn add_local_file_writes_current_tag_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("played.mp3");
+    std::fs::write(&path, b"x").unwrap();
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let meta = crate::local::LocalMeta {
+        title: "先播后扫".into(),
+        artist: Some("歌手".into()),
+        ..Default::default()
+    };
+    db.add_local_file(&path, Some(&meta)).unwrap();
+    let version: i64 = db
+        .conn
+        .query_row(
+            "SELECT tag_version FROM local_files WHERE path = ?1",
+            params![path.display().to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, LOCAL_TAG_VERSION);
+}

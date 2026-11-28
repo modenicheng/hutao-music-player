@@ -200,6 +200,14 @@ pub struct LibraryDb {
     conn: Connection,
 }
 
+/// 本地标签解析规则版本（`local_files.tag_version`）。
+///
+/// 改动 [`crate::local::read_meta`] 的解析规则（键映射、字段兜底、多值拆分）
+/// 时就 +1：存量行即使 mtime/size 未变，也会在下一次扫描时强制重读标签
+/// （`ScanOutcome::Updated`），不再依赖用户手动删除库（AUDIT §30.2.4 D4/D9
+/// 的同类问题，§30.2.6 phase 1）。
+pub const LOCAL_TAG_VERSION: i64 = 2;
+
 /// 扫描结果分类（里程碑 E）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanOutcome {
@@ -754,8 +762,8 @@ impl LibraryDb {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_nanos() as i64);
         self.conn.execute(
-            r#"INSERT INTO local_files (track_id, path, file_size, mtime, mtime_ns, format, bitrate, sample_rate, last_seen_generation, missing, scan_root_id)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)
+            r#"INSERT INTO local_files (track_id, path, file_size, mtime, mtime_ns, format, bitrate, sample_rate, last_seen_generation, missing, scan_root_id, tag_version)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11)
                ON CONFLICT(path) DO UPDATE SET
                  track_id = excluded.track_id,
                  file_size = excluded.file_size,
@@ -766,7 +774,8 @@ impl LibraryDb {
                  sample_rate = COALESCE(excluded.sample_rate, local_files.sample_rate),
                  missing = 0,
                  scan_root_id = COALESCE(local_files.scan_root_id, excluded.scan_root_id),
-                 last_seen_generation = MAX(local_files.last_seen_generation, excluded.last_seen_generation)
+                 last_seen_generation = MAX(local_files.last_seen_generation, excluded.last_seen_generation),
+                 tag_version = excluded.tag_version
                ON CONFLICT(track_id) DO UPDATE SET
                  path = excluded.path,
                  file_size = excluded.file_size,
@@ -777,7 +786,8 @@ impl LibraryDb {
                  sample_rate = COALESCE(excluded.sample_rate, local_files.sample_rate),
                  missing = 0,
                  scan_root_id = COALESCE(local_files.scan_root_id, excluded.scan_root_id),
-                 last_seen_generation = MAX(local_files.last_seen_generation, excluded.last_seen_generation)"#,
+                 last_seen_generation = MAX(local_files.last_seen_generation, excluded.last_seen_generation),
+                 tag_version = excluded.tag_version"#,
             params![
                 id,
                 path.display().to_string(),
@@ -792,6 +802,7 @@ impl LibraryDb {
                 meta.sample_rate,
                 seen_generation,
                 root_id,
+                LOCAL_TAG_VERSION,
             ],
         )?;
         Ok(id)
@@ -884,17 +895,42 @@ impl LibraryDb {
                 .map(|d| d.as_nanos() as i64);
             let size = md.as_ref().map(|m| m.len() as i64);
 
-            let existing: Option<(i64, Option<i64>, Option<i64>, i64)> = self
+            // 旧行投影（增量判定 + 标签版本，字段多，避免裸元组触发 type_complexity）。
+            struct ExistingScanRow {
+                track_id: i64,
+                mtime_ns: Option<i64>,
+                file_size: Option<i64>,
+                missing: i64,
+                tag_version: i64,
+            }
+            let existing: Option<ExistingScanRow> = self
             .conn
             .query_row(
-                "SELECT track_id, mtime_ns, file_size, missing FROM local_files WHERE path = ?1",
+                "SELECT track_id, mtime_ns, file_size, missing, tag_version FROM local_files WHERE path = ?1",
                 params![path_str],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| {
+                    Ok(ExistingScanRow {
+                        track_id: r.get(0)?,
+                        mtime_ns: r.get(1)?,
+                        file_size: r.get(2)?,
+                        missing: r.get(3)?,
+                        tag_version: r.get(4)?,
+                    })
+                },
             )
             .optional()?;
 
-            if let Some((track_id, old_ns, old_size, missing)) = existing {
-                if old_ns == mtime_ns && old_size == size {
+            if let Some(ExistingScanRow {
+                track_id,
+                mtime_ns: old_ns,
+                file_size: old_size,
+                missing,
+                tag_version: old_tag_version,
+            }) = existing
+            {
+                let unchanged = old_ns == mtime_ns && old_size == size;
+                let stale_tags = old_tag_version < LOCAL_TAG_VERSION;
+                if unchanged && !stale_tags {
                     // 增量跳过：刷新代际 + 清 missing（若曾缺失）。
                     self.conn.execute(
                     "UPDATE local_files SET last_seen_generation = ?1, missing = 0 WHERE track_id = ?2",
@@ -906,6 +942,20 @@ impl LibraryDb {
                         ScanOutcome::Skipped
                     });
                 }
+                if unchanged {
+                    // 文件没变，但标签解析规则升级过：强制应用本次按新规则
+                    // 读出的标签（meta 由调用方读出），版本号随之推进。
+                    if let Some(m) = meta {
+                        self.apply_local_meta(track_id, m)?;
+                    }
+                    self.conn.execute(
+                        "UPDATE local_files SET tag_version = ?1, last_seen_generation = ?2,
+                                missing = 0
+                         WHERE track_id = ?3",
+                        params![LOCAL_TAG_VERSION, generation, track_id],
+                    )?;
+                    return Ok(ScanOutcome::Updated);
+                }
                 // 变化：更新元数据 + 文件行。
                 if let Some(m) = meta {
                     self.apply_local_meta(track_id, m)?;
@@ -914,8 +964,9 @@ impl LibraryDb {
                     "UPDATE local_files SET file_size = ?1, mtime = ?2, mtime_ns = ?3,
                         format = COALESCE(?4, format), bitrate = COALESCE(?5, bitrate),
                         sample_rate = COALESCE(?6, sample_rate), fingerprint = ?7,
-                        last_seen_generation = ?8, missing = 0, scan_root_id = ?9
-                 WHERE track_id = ?10",
+                        last_seen_generation = ?8, missing = 0, scan_root_id = ?9,
+                        tag_version = ?10
+                 WHERE track_id = ?11",
                     params![
                         size,
                         mtime_ns.map(|n| n / 1_000_000_000),
@@ -926,6 +977,7 @@ impl LibraryDb {
                         fingerprint,
                         generation,
                         root_id,
+                        LOCAL_TAG_VERSION,
                         track_id
                     ],
                 )?;
@@ -964,8 +1016,9 @@ impl LibraryDb {
                         )?;
                         self.conn.execute(
                         "UPDATE local_files SET path = ?1, file_size = ?2, mtime = ?3, mtime_ns = ?4,
-                                fingerprint = ?5, last_seen_generation = ?6, missing = 0, scan_root_id = ?7
-                         WHERE track_id = ?8",
+                                fingerprint = ?5, last_seen_generation = ?6, missing = 0, scan_root_id = ?7,
+                                tag_version = ?8
+                         WHERE track_id = ?9",
                         params![
                             path_str,
                             size,
@@ -974,6 +1027,7 @@ impl LibraryDb {
                             fingerprint,
                             generation,
                             root_id,
+                            LOCAL_TAG_VERSION,
                             tid
                         ],
                     )?;
@@ -1054,8 +1108,8 @@ impl LibraryDb {
                 genre: meta_owned.as_ref().and_then(|m| m.genre.clone()),
             })?;
             self.conn.execute(
-            r#"INSERT INTO local_files (track_id, path, file_size, mtime, mtime_ns, format, bitrate, sample_rate, fingerprint, last_seen_generation, missing, scan_root_id)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0,?11)"#,
+            r#"INSERT INTO local_files (track_id, path, file_size, mtime, mtime_ns, format, bitrate, sample_rate, fingerprint, last_seen_generation, missing, scan_root_id, tag_version)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0,?11,?12)"#,
             params![
                 tid,
                 path_str,
@@ -1067,7 +1121,8 @@ impl LibraryDb {
                 meta_owned.as_ref().and_then(|m| m.sample_rate),
                 fingerprint,
                 generation,
-                root_id
+                root_id,
+                LOCAL_TAG_VERSION
             ],
         )?;
             Ok(ScanOutcome::Added)
