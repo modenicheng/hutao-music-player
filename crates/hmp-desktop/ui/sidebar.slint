@@ -323,7 +323,9 @@ export component Sidebar inherits Rectangle {
                                         list-keys := ListKeys {
                                             width: parent.width;
                                             height: parent.height;
-                                            available: group-rows.n > 0;
+                                            // 组收起时行被高度 0 裁掉：整组退出 Tab 序
+                                            available: group-rows.n > 0
+                                                && root.group-open(group.group);
                                             step(delta) => {
                                                 let from = root.cursor-of(group.group);
                                                 let cur = from < 0
@@ -535,7 +537,9 @@ export component Sidebar inherits Rectangle {
                                 slider-keys := ListKeys {
                                     width: parent.width;
                                     height: parent.height;
-                                    available: slider-rows.n > 0;
+                                    // 一级（分组入口）态下列表平移出视口：退出 Tab 序
+                                    available: slider-rows.n > 0
+                                        && root.active-group != -1;
                                     step(delta) => {
                                         let from = root.slider-cursor;
                                         let cur = from < 0

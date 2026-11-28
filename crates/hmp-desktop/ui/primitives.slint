@@ -317,6 +317,8 @@ export component Button inherits Rectangle {
     in property <string> tool-tip: "";
     /** false = 行按钮由外层 roving 列表统一停靠（不进逐行 Tab 链） */
     in property <bool> tab-stop: true;
+    /** true = 模态层内按钮（标题栏/队列抽屉）：焦点陷阱期间仍在 Tab 序 */
+    in property <bool> in-modal: false;
     callback clicked;
 
     min-height: small ? 32px : 40px;
@@ -346,6 +348,7 @@ export component Button inherits Rectangle {
     touch := KeyTouch {
         enabled: root.enabled;
         tab-stop: root.tab-stop;
+        in-modal: root.in-modal;
         mouse-cursor: pointer;
         ring-radius: Theme.radius-md;
         activated => {

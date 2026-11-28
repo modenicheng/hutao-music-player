@@ -208,6 +208,8 @@ export component QueueDrawer inherits Rectangle {
             width: parent.width;
             height: parent.height;
             available: Player.queue.length > 0;
+            // 抽屉可叠在播放页 overlay 之上：模态焦点陷阱期间仍在 Tab 序
+            in-modal: true;
             step(delta) => {
                 root.move-cursor(delta);
             }
@@ -268,6 +270,7 @@ export component QueueDrawer inherits Rectangle {
 
                 // 两步确认：首次点击只进入确认态，3s 内再点才真清
                 Button {
+                    in-modal: true;
                     text: root.confirm-clear ? "确认清空" : "清空";
                     variant: root.confirm-clear ? ButtonVariant.default : ButtonVariant.ghost;
                     small: true;
@@ -291,6 +294,7 @@ export component QueueDrawer inherits Rectangle {
                     }
                 }
                 Button {
+                    in-modal: true;
                     icon: Icons.close;
                     icon-only: true;
                     icon-size: 18px;
