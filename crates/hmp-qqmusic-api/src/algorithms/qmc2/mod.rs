@@ -11,5 +11,5 @@ pub mod key;
 pub mod tea;
 
 pub use cipher::{Qmc2Cipher, decrypt_factory};
-pub use detect::{Footer, detect_footer};
+pub use detect::{Footer, MAX_V1_KEY_SIZE, detect_footer, v1_key_size_hint};
 pub use key::{Qmc2Error, generate_ekey, parse_ekey, parse_ekey_decoded};

@@ -417,18 +417,39 @@ pub(crate) async fn prepare_media_with_params(
 
     let mut footer = qmc2::detect_footer(total_len as usize, &tail_bytes);
 
-    // QTag/V1 → 检查是否需要拉精确尾部（ekey 文本区超出 0x40 窗口）
+    // 0x40 探测窗不一定覆盖完整 V1 key 区（最长 0x400）。detect_footer 在
+    // 无法校验 ekey 时返回 None；这里按末尾 4 字节的长度提示补拉完整 key
+    // 区再判定。只多读至多 4 + 0x400 字节，不拉全量，也不在校验失败时
+    // 回退到同样会截断的下载路径。
     let mut have_full_tail = false; // tail_bytes 是否覆盖 audio_len..end
-    let needs_refetch =
-        if let Some(Footer::QTag { audio_len: al } | Footer::V1 { audio_len: al }) = &footer {
-            let al = *al as u64;
-            al + 8 < total_len && (total_len - 8 - al) > TAIL_PROBE
-        } else {
-            false
-        };
+    if footer.is_none()
+        && let Some(key_size) = qmc2::v1_key_size_hint(&tail_bytes)
+        && key_size + 4 > tail_bytes.len()
+        && (key_size as u64) + 4 <= total_len
+    {
+        let key_start = total_len - key_size as u64 - 4;
+        debug!(
+            key_size,
+            total_len, "V1 key region exceeds 0x40; fetching exact tail"
+        );
+        tail_bytes = fetch_range(&client, url, key_start, tail_end)
+            .await
+            .map_err(|e| MediaError::Network(format!("V1 key tail fetch failed: {e}")))?;
+        footer = qmc2::detect_footer(total_len as usize, &tail_bytes);
+        have_full_tail = footer.is_some();
+    }
+
+    // QTag → 检查是否需要拉精确尾部（ekey 文本区超出 0x40 窗口）。
+    // 魔数明确、分支不变；V1 已由上面的完整 key 区校验覆盖。
+    let needs_refetch = matches!(
+        &footer,
+        Some(Footer::QTag { audio_len: al })
+            if (*al as u64) + 8 < total_len
+                && total_len - 8 - (*al as u64) > TAIL_PROBE
+    );
     if needs_refetch {
         let al = match &footer {
-            Some(Footer::QTag { audio_len } | Footer::V1 { audio_len }) => *audio_len as u64,
+            Some(Footer::QTag { audio_len }) => *audio_len as u64,
             _ => unreachable!(),
         };
         debug!(
@@ -859,7 +880,7 @@ mod tests {
             v
         };
         let key = b"0123456789abcdefghij";
-        // 总是附带 footer 以避免加密尾部被误判为 V1
+        // 附带合法 V1 尾部（ekey 文本 + key_size），覆盖「API ekey + 剥离」路径
         let (server, ekey) = setup_range_cdn(&plaintext, key, true).await;
 
         let prepared = prepare_media(&server.uri(), Some(&ekey), None)
@@ -1139,6 +1160,64 @@ mod tests {
         // 全量读验证内容一致
         let body = read_all(&prepared).await;
         assert_eq!(&body, plaintext);
+    }
+
+    /// 真实 V1 尾部（`generate_ekey` 文本 + key_size），且 key 区超过 0x40：
+    /// 探测窗不足时按长度提示补拉完整 key 区，校验通过后剥离并提取 ekey。
+    #[tokio::test]
+    async fn prepare_media_extracts_v1_ekey_from_long_tail() {
+        let _env = testutil::isolate_cache("v1_long_ekey");
+        let plaintext = {
+            let mut v = b"fLaC".to_vec();
+            v.extend((0..4096).map(|i| (i % 256) as u8));
+            v
+        };
+        let key = vec![0x5a; 64];
+        let (server, ekey) = setup_range_cdn(&plaintext, &key, true).await;
+        assert!(
+            ekey.len() + 4 > TAIL_PROBE as usize,
+            "fixture V1 key region must exceed the 0x40 probe (got {})",
+            ekey.len()
+        );
+
+        let prepared = prepare_media(&server.uri(), None, None)
+            .await
+            .expect("V1 长 key 尾部应可流式准备");
+        let len = prepared.source.as_ref().unwrap().len();
+        assert_eq!(
+            len,
+            plaintext.len() as u64,
+            "V1 应剥离 ekey 尾部，audio_len == 明文长度"
+        );
+        let body = read_all(&prepared).await;
+        assert_eq!(&body, &plaintext, "内嵌 V1 ekey 应解出完整明文");
+    }
+
+    /// 明文流尾部 4 字节恰为 1u32 LE、key 区不是 ekey：必须按无 footer 直通
+    /// （audio_len == total_len），不得截断，也不得回退到下载路径。
+    #[tokio::test]
+    async fn prepare_media_treats_unparseable_v1_tail_as_plaintext() {
+        let _env = testutil::isolate_cache("v1_false_positive_plain");
+        let mut plaintext = b"fLaC".to_vec();
+        plaintext.extend((0..2000).map(|i| (i % 256) as u8));
+        plaintext.extend_from_slice(&1u32.to_le_bytes()); // 尾 4 字节 = key_size 1
+        let server = setup_range_cdn_plain(&plaintext).await;
+        let url = format!("{}/song.flac", server.uri());
+
+        let prepared = prepare_media(&url, None, None)
+            .await
+            .expect("不可解析的 V1 候选应按明文直通");
+        assert!(
+            prepared.source.is_some(),
+            "校验失败不得回退到会截断的下载路径"
+        );
+        assert_eq!(
+            prepared.source.as_ref().unwrap().len(),
+            plaintext.len() as u64,
+            "无 footer 时 audio_len == total_len"
+        );
+        let body = read_all(&prepared).await;
+        assert_eq!(&body, &plaintext, "明文直通不得丢失尾部字节");
     }
 
     #[tokio::test]

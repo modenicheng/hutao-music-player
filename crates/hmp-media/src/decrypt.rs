@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use hmp_qqmusic_api::algorithms::qmc2::{
-    Footer, decrypt_factory, detect_footer, parse_ekey, parse_ekey_decoded,
+    Footer, MAX_V1_KEY_SIZE, decrypt_factory, detect_footer, parse_ekey, parse_ekey_decoded,
 };
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
@@ -243,10 +243,13 @@ fn finish_error(tmp: &Path, final_base: &Path, error: DecryptError) -> Result<St
 /// - `tail`：从 `audio_len` 到文件末尾的全部字节（即 QTag 元数据区或 V1 密钥区）
 /// - `audio_len`：加密音频部分字节数
 ///
-/// `tail` 的 `len() + audio_len` 即原文件总长。
+/// `tail` 的 `len() + audio_len` 即原文件总长。V1 的 key 区可以是 Base64
+/// ekey 文本，也可以是历史形态的已解码 ekey blob；`detect_footer` 已按同一
+/// 规则校验，下面的提取保持「文本优先、blob 兜底」的既有顺序。
 pub(crate) fn embedded_ekey_from_bytes(tail: &[u8], audio_len: usize) -> Result<String> {
     let total_len = audio_len + tail.len();
-    let footer = detect_footer(total_len, &tail[tail.len().saturating_sub(0x40)..])
+    // 传完整尾部：V1 key 区最长 0x400，只给最后 0x40 无法校验长 key。
+    let footer = detect_footer(total_len, tail)
         .ok_or_else(|| MediaError::Unsupported("file has no embedded ekey tail".to_string()))?;
     let key_bytes = match footer {
         Footer::QTag { .. } => tail[..tail.len() - 8]
@@ -260,6 +263,7 @@ pub(crate) fn embedded_ekey_from_bytes(tail: &[u8], audio_len: usize) -> Result<
     {
         return Ok(text.to_owned());
     }
+    // 历史 V1/QTag 尾部可能直接存已解码的 ekey blob：重新编码成 ekey 文本。
     let key = parse_ekey_decoded(key_bytes)
         .map_err(|_| MediaError::Unsupported("embedded ekey unparseable".to_string()))?;
     Ok(hmp_qqmusic_api::algorithms::qmc2::generate_ekey(&key))
@@ -312,7 +316,10 @@ async fn download_and_detect_strip(
     download_to_file(url, tmp, progress).await?;
 
     let total_len = std::fs::metadata(tmp)?.len() as usize;
-    let tail_size = 0x40.min(total_len);
+    // 尾部探测要覆盖最长 V1 key 区（ekey 文本 + 4 字节长度），否则
+    // detect_footer 无法校验候选 V1，只会保守地按「无 footer」处理。
+    // 上限 4 + 0x400 = 1028 字节，不会把大文件读进来。
+    let tail_size = total_len.min(4 + MAX_V1_KEY_SIZE);
     let mut tail = vec![0u8; tail_size];
     {
         let file = std::fs::File::open(tmp)?;
@@ -779,45 +786,35 @@ mod tests {
         cleanup(&root);
     }
 
+    /// 尾部 4 字节恰为 1u32 LE（看起来像 V1 key_size=1），但 key 区不是
+    /// ekey：不得剥离（§4.1）。旧实现会静默截掉最后 5 字节，且首部 fLaC
+    /// 魔数仍能通过，magic-mismatch 重试兜不住。
     #[tokio::test]
-    async fn prepare_retries_without_strip_on_magic_mismatch() {
-        let root = test_cache_root().join("retry_nostrip");
+    async fn prepare_keeps_tail_when_v1_candidate_is_not_ekey() {
+        let root = test_cache_root().join("v1_false_positive");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
         let key = b"0123456789abcdefghij"; // 20 bytes → map cipher
-
-        // 构造 plaintext 使得加密后尾部 4 字节为 [64, 0, 0, 0]（V1 key_size=64），
-        // 导致 detect_footer 误判 V1: audio_len = 68 - 4 - 64 = 0。
-        // 首次 strip_len=0 → 解密为空 → magic None → 触发无剥离重试 → 成功。
-        //
-        // 加密公式: encrypted[i] = plaintext[i] XOR cipher_byte(i)
-        // 因此 plaintext[i] = desired_encrypted[i] XOR cipher_byte(i)
         let ekey = generate_ekey(key);
         let cipher = decrypt_factory(&ekey).unwrap();
 
-        // 获得位置 64-67 的密钥流
+        let mut plaintext = b"fLaC".to_vec();
+        plaintext.extend((0..124).map(|i| (i % 256) as u8));
+        let total = plaintext.len();
+
+        // 调整明文尾部，使加密后最后 4 字节 == 1u32 LE。
+        // encrypted[i] = plaintext[i] XOR cipher_byte(i)，故反向异或即可。
+        let desired = 1u32.to_le_bytes();
         let mut key_stream = [0u8; 4];
-        cipher.decrypt(64, &mut key_stream);
-
-        let desired_tail: [u8; 4] = 64u32.to_le_bytes(); // key_size = 64
-        let mut plaintext = vec![0u8; 68];
-        plaintext[0..4].copy_from_slice(b"fLaC");
-        for i in 0..64 {
-            plaintext[4 + i] = (i % 256) as u8;
-        }
-        // 调整尾部 4 字节使加密后尾部 = desired_tail
-        for i in 0..4 {
-            plaintext[64 + i] = desired_tail[i] ^ key_stream[i];
+        cipher.decrypt(total - 4, &mut key_stream);
+        for (i, byte) in desired.iter().enumerate() {
+            plaintext[total - 4 + i] = byte ^ key_stream[i];
         }
 
-        let (encrypted, _ekey) = testutil::make_encrypted(&plaintext, key, false);
-        // 验证尾部确实为目标值
-        assert_eq!(
-            &encrypted[encrypted.len() - 4..],
-            &desired_tail,
-            "encrypted tail must match desired key_size"
-        );
+        let (encrypted, _) = testutil::make_encrypted(&plaintext, key, false);
+        assert_eq!(&encrypted[total - 4..], &desired);
+        // 末尾 1 字节「key 区」不可能是合法 Base64 ekey（长度都不够）。
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -828,15 +825,65 @@ mod tests {
         let result = prepare_playable_at(&root, &server.uri(), Some(&ekey), None)
             .await
             .unwrap();
-
-        // 重试成功，返回 file:// URI，内容 == 明文
-        assert!(result.starts_with("file://"));
         let path = url::Url::parse(&result).unwrap().to_file_path().unwrap();
         let decoded = std::fs::read(path).unwrap();
         assert_eq!(
             decoded, plaintext,
-            "retry without strip must recover plaintext"
+            "unparseable V1 key area must not strip the tail"
         );
+
+        cleanup(&root);
+    }
+
+    /// 历史 V1：key 区直接存已解码 ekey blob（原始字节，不是 Base64 文本）
+    /// 时，检测与提取都必须成功，不能把合法 V1 判成无 footer。
+    #[test]
+    fn embedded_ekey_from_bytes_accepts_decoded_v1_key_blob() {
+        use base64::Engine;
+
+        let key = b"0123456789abcdefghij";
+        let ekey = generate_ekey(key);
+        let blob = base64::engine::general_purpose::STANDARD
+            .decode(&ekey)
+            .unwrap();
+        // 确保夹具走 blob 分支而不是文本分支。
+        if let Ok(text) = std::str::from_utf8(&blob) {
+            assert!(parse_ekey(text).is_err());
+        }
+
+        let mut tail = blob;
+        let blob_len = tail.len();
+        tail.extend_from_slice(&(blob_len as u32).to_le_bytes());
+        let extracted = embedded_ekey_from_bytes(&tail, 32).expect("raw-key V1 应可提取");
+        assert_eq!(extracted, ekey);
+    }
+
+    #[tokio::test]
+    async fn prepare_retries_without_strip_on_magic_mismatch() {
+        let root = test_cache_root().join("retry_nostrip");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let key = b"0123456789abcdefghij"; // 20 bytes → map cipher
+
+        let ekey = generate_ekey(key);
+        let mut plaintext = b"fLaC".to_vec();
+        plaintext.extend((0..512).map(|i| (i % 256) as u8));
+        let (encrypted, _) = testutil::make_encrypted(&plaintext, key, false);
+
+        // 直接给 strip_len = Some(0)：首次解密为空 → magic mismatch →
+        // `finish_download` 去掉 strip 重试一次。§4.1 修复后「假 V1」夹具
+        // 已不会再触发剥离，故重试分支改由这里白盒覆盖。
+        let tmp = root.join(".retry.tmp");
+        std::fs::write(&tmp, &encrypted).unwrap();
+        let result = finish_download(&root, "retry-key", "bin", &tmp, &ekey, Some(0))
+            .await
+            .expect("magic mismatch 后无剥离重试应成功");
+
+        let path = url::Url::parse(&result).unwrap().to_file_path().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), plaintext);
+        assert_eq!(path.extension(), Some(std::ffi::OsStr::new("flac")));
+        assert!(!tmp.exists(), "临时文件应已清理");
 
         cleanup(&root);
     }

@@ -18,7 +18,8 @@ pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 ///
 /// - `plaintext`：明文音频数据（应以已知魔数开头，如 `b"fLaC"`）
 /// - `key`：原始密钥字节
-/// - `with_footer`：是否在末尾附加 V1 尾部 `[key_bytes][key_len LE u32]`
+/// - `with_footer`：是否在末尾附加 V1 尾部 `[ekey 文本][key_len LE u32]`
+///   （真实 V1 的 key 区就是 Base64 ekey，不是原始密钥字节）
 ///
 /// 返回 `(encrypted_data, ekey)`。
 pub(crate) fn make_encrypted(plaintext: &[u8], key: &[u8], with_footer: bool) -> (Vec<u8>, String) {
@@ -29,8 +30,8 @@ pub(crate) fn make_encrypted(plaintext: &[u8], key: &[u8], with_footer: bool) ->
     cipher.decrypt(0, &mut encrypted);
 
     if with_footer {
-        let key_len = key.len() as u32;
-        encrypted.extend_from_slice(key);
+        let key_len = ekey.len() as u32;
+        encrypted.extend_from_slice(ekey.as_bytes());
         encrypted.extend_from_slice(&key_len.to_le_bytes());
     }
 
