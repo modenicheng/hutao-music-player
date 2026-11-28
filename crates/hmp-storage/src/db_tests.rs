@@ -2483,6 +2483,21 @@ fn album_keys_of(db: &LibraryDb) -> Vec<(i64, String, String)> {
     rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
 }
 
+/// `track_artists` 行（name, mid, artist_id），position 序。
+fn track_artist_ids(db: &LibraryDb, track_id: i64) -> Vec<(String, Option<String>, Option<i64>)> {
+    let mut stmt = db
+        .conn
+        .prepare(
+            "SELECT artist, artist_mid, artist_id FROM track_artists \
+             WHERE track_id = ?1 ORDER BY position",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map(params![track_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap();
+    rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+}
+
 fn table_count(db: &LibraryDb, table: &str) -> i64 {
     db.conn
         .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
@@ -2728,5 +2743,283 @@ fn migration_v10_rolls_back_on_failure() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert!(!cols.iter().any(|c| c == "album_id"), "加列也回滚");
+}
+
+/// 跨 provider 归一：同名歌手/专辑（本地无 mid + QQ 有 mid）归一到一个实体、
+/// 挂两个 key；不同名则各自实体（不猜译名）；同 mid 不同名按 key 命中同一实体。
+#[test]
+fn cross_provider_entities_normalize_by_name_then_key() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let local = TrackRow {
+        source: "local",
+        source_key: "local:/zs.flac".into(),
+        title: "大鱼".into(),
+        album: Some("大鱼".into()),
+        artist: Some("周深".into()),
+        artist_refs: vec![ArtistRefRow {
+            mid: None,
+            name: "周深".into(),
+        }],
+        ..Default::default()
+    };
+    let local_tid = db.upsert_track(&local).unwrap();
+    let qq = TrackRow {
+        source: "qq",
+        source_key: "qq-mid-1".into(),
+        title: "大鱼 (QQ)".into(),
+        album: Some("大鱼".into()),
+        album_mid: Some("amid-1".into()),
+        artist: Some("周深".into()),
+        artist_refs: vec![ArtistRefRow {
+            mid: Some("smid-1".into()),
+            name: "周深".into(),
+        }],
+        ..Default::default()
+    };
+    let qq_tid = db.upsert_track(&qq).unwrap();
+
+    let keys = artist_keys_of(&db);
+    assert_eq!(keys.len(), 2, "同一歌手：qq mid + local 名称两个 key");
+    let local_artist_id = track_artist_ids(&db, local_tid)[0].2.unwrap();
+    assert_eq!(
+        track_artist_ids(&db, qq_tid)[0].2,
+        Some(local_artist_id),
+        "同名歌手归一到同一实体"
+    );
+    let album_keys = album_keys_of(&db);
+    assert_eq!(album_keys.len(), 2, "同一专辑：qq mid + local key");
+    assert_eq!(
+        track_album_id(&db, qq_tid),
+        track_album_id(&db, local_tid),
+        "同名同专辑歌手归一到同一专辑实体"
+    );
+
+    // 不同名（不猜译名）→ key 与名称都查不到 → 各自实体。
+    db.upsert_track(&TrackRow {
+        source: "qq",
+        source_key: "qq-mid-2".into(),
+        title: "光亮".into(),
+        artist: Some("Zhou Shen".into()),
+        artist_refs: vec![ArtistRefRow {
+            mid: Some("smid-2".into()),
+            name: "Zhou Shen".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(table_count(&db, "artists"), 2);
+    assert_eq!(artist_keys_of(&db).len(), 3);
+
+    // 同 mid 不同名 → key 命中，仍是同一实体（key 优先于名称）。
+    let qq_same_mid = TrackRow {
+        source: "qq",
+        source_key: "qq-mid-3".into(),
+        title: "另一版".into(),
+        artist: Some("周深老师".into()),
+        artist_refs: vec![ArtistRefRow {
+            mid: Some("smid-1".into()),
+            name: "周深老师".into(),
+        }],
+        ..Default::default()
+    };
+    let same_tid = db.upsert_track(&qq_same_mid).unwrap();
+    assert_eq!(
+        track_artist_ids(&db, same_tid)[0].2,
+        Some(local_artist_id),
+        "同 mid 不同名按 key 归一到同一实体"
+    );
+    assert_eq!(table_count(&db, "artists"), 2);
+    assert_eq!(artist_keys_of(&db).len(), 3, "不新增 key");
+}
+
+/// 入库幂等：同一 TrackRow 单条/批量重复 upsert，实体、key、关联都不重复。
+#[test]
+fn upsert_track_keeps_entities_idempotent() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let row = TrackRow {
+        source: "qq",
+        source_key: "mid-idem".into(),
+        title: "曲".into(),
+        album: Some("专辑".into()),
+        album_mid: Some("amid".into()),
+        artist: Some("A / B".into()),
+        artist_refs: vec![
+            ArtistRefRow {
+                mid: Some("smid-a".into()),
+                name: "A".into(),
+            },
+            ArtistRefRow {
+                mid: Some("smid-b".into()),
+                name: "B".into(),
+            },
+        ],
+        year: Some(2024),
+        ..Default::default()
+    };
+    let first = db.upsert_track(&row).unwrap();
+    let before = entity_counts(&db);
+    let album_before = track_album_id(&db, first);
+    let artists_before = track_artist_ids(&db, first);
+    assert_eq!(before.1, 2, "两个歌手 key");
+    assert_eq!(before.3, 1, "一个专辑 key");
+
+    let again = db.upsert_track(&row).unwrap();
+    assert_eq!(again, first);
+    assert_eq!(entity_counts(&db), before, "单条重复 upsert 不新增实体");
+    assert_eq!(track_album_id(&db, first), album_before);
+    assert_eq!(track_artist_ids(&db, first), artists_before);
+
+    db.upsert_tracks_batch(&[row.clone(), row]).unwrap();
+    assert_eq!(entity_counts(&db), before, "批量重复 upsert 不新增实体");
+    assert_eq!(track_artists_rows_of(&db, first), 2);
+}
+
+fn track_artists_rows_of(db: &LibraryDb, track_id: i64) -> i64 {
+    db.conn
+        .query_row(
+            "SELECT COUNT(*) FROM track_artists WHERE track_id = ?1",
+            params![track_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// 空 / 纯数字 mid 不产生空 key（退回 local 名称键）；mid 原文仍留在行上。
+#[test]
+fn empty_or_numeric_mid_uses_local_keys() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let tid = db
+        .upsert_track(&TrackRow {
+            source: "qq",
+            source_key: "mid-num".into(),
+            title: "数字 mid 曲".into(),
+            album: Some("专辑".into()),
+            album_mid: Some("12345".into()), // 纯数字 fallback → 不是身份键
+            artist: Some("歌手 / 另一歌手".into()),
+            artist_refs: vec![
+                ArtistRefRow {
+                    mid: Some(String::new()),
+                    name: "歌手".into(),
+                },
+                ArtistRefRow {
+                    mid: Some("67890".into()),
+                    name: "另一歌手".into(),
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+
+    let artist_keys = artist_keys_of(&db);
+    assert_eq!(artist_keys.len(), 2);
+    assert!(
+        artist_keys
+            .iter()
+            .all(|(_, provider, _)| provider == "local"),
+        "纯数字/空 mid 不得成为 qq 身份键"
+    );
+    assert!(artist_keys.iter().any(|(_, _, k)| k == "歌手"));
+    assert!(artist_keys.iter().any(|(_, _, k)| k == "另一歌手"));
+    let album_keys = album_keys_of(&db);
+    assert_eq!(album_keys.len(), 1);
+    assert_eq!(album_keys[0].1, "local");
+    let empties: i64 = db
+        .conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM artist_keys WHERE TRIM(provider_key) = '') \
+                  + (SELECT COUNT(*) FROM album_keys WHERE TRIM(provider_key) = '')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(empties, 0, "空字符串不得写入 key");
+
+    // phase 1 的 mid 保留语义不变：行上 mid 原文仍在（即使不用于身份键）。
+    let refs = db.track_artists(tid).unwrap();
+    assert_eq!(refs[0].mid, None, "空 mid 不落空串");
+    assert_eq!(refs[1].mid.as_deref(), Some("67890"));
+    assert_eq!(db.album_mid(tid).unwrap().as_deref(), Some("12345"));
+}
+
+/// 专辑 `album_artist_id`：album_artist 标签优先，缺失用曲目首个歌手，
+/// 都没有则 NULL；年份随首次入库落实体，后续缺失不回退。
+#[test]
+fn album_artist_id_resolution_rules() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let tagged = db
+        .upsert_track(&TrackRow {
+            source: "local",
+            source_key: "local:/t1.flac".into(),
+            title: "一".into(),
+            album: Some("合辑".into()),
+            album_artist: Some("专辑歌手".into()),
+            artist: Some("甲 / 乙".into()),
+            artist_refs: vec![
+                ArtistRefRow {
+                    mid: None,
+                    name: "甲".into(),
+                },
+                ArtistRefRow {
+                    mid: None,
+                    name: "乙".into(),
+                },
+            ],
+            year: Some(1999),
+            ..Default::default()
+        })
+        .unwrap();
+    let album = db
+        .album_by_id(track_album_id(&db, tagged).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(album.album_artist.as_deref(), Some("专辑歌手"));
+    assert_eq!(album.year, Some(1999));
+    let album_artist = db
+        .artist_by_id(album.album_artist_id.unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(album_artist.name, "专辑歌手");
+
+    let first_singer = db
+        .upsert_track(&TrackRow {
+            source: "local",
+            source_key: "local:/t2.flac".into(),
+            title: "二".into(),
+            album: Some("合辑二".into()),
+            artist: Some("丙 / 丁".into()),
+            artist_refs: vec![
+                ArtistRefRow {
+                    mid: None,
+                    name: "丙".into(),
+                },
+                ArtistRefRow {
+                    mid: None,
+                    name: "丁".into(),
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+    let album = db
+        .album_by_id(track_album_id(&db, first_singer).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(album.album_artist.as_deref(), Some("丙"), "回退首个歌手");
+
+    let no_artist = db
+        .upsert_track(&TrackRow {
+            source: "local",
+            source_key: "local:/t3.flac".into(),
+            title: "三".into(),
+            album: Some("合辑三".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let album = db
+        .album_by_id(track_album_id(&db, no_artist).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(album.album_artist, None);
+    assert_eq!(album.album_artist_id, None);
 }
 

@@ -500,28 +500,37 @@ fn write_track_artists(
         let mut map = std::collections::HashMap::new();
         for row in rows {
             let (name, mid) = row?;
-            if let Some(mid) = mid.filter(|m| !m.is_empty()) {
+            if let Some(mid) = mid.map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()) {
                 map.insert(name, mid);
             }
         }
         map
     };
-    conn.execute(
-        "DELETE FROM track_artists WHERE track_id = ?1",
-        params![track_id],
-    )?;
-    for (i, artist) in artists.iter().enumerate() {
-        if artist.name.is_empty() {
+    // 实体先解析（写入顺序 = 原 position 顺序）。
+    let mut rows: Vec<(String, Option<String>, i64)> = Vec::with_capacity(artists.len());
+    for artist in artists {
+        if artist.name.trim().is_empty() {
             continue;
         }
         let mid = artist
             .mid
-            .clone()
+            .as_deref()
+            .map(str::trim)
             .filter(|m| !m.is_empty())
+            .map(str::to_owned)
             .or_else(|| old_mids.get(&artist.name).cloned());
+        let artist_id = resolve_artist_entity(conn, &artist.name, mid.as_deref())?;
+        rows.push((artist.name.clone(), mid, artist_id));
+    }
+    conn.execute(
+        "DELETE FROM track_artists WHERE track_id = ?1",
+        params![track_id],
+    )?;
+    for (i, (name, mid, artist_id)) in rows.iter().enumerate() {
         conn.execute(
-            "INSERT OR IGNORE INTO track_artists (track_id, artist, artist_mid, position) VALUES (?1,?2,?3,?4)",
-            params![track_id, artist.name, mid, i as i64],
+            "INSERT OR IGNORE INTO track_artists (track_id, artist, artist_mid, position, artist_id) \
+             VALUES (?1,?2,?3,?4,?5)",
+            params![track_id, name, mid, i as i64, artist_id],
         )?;
     }
     Ok(())
@@ -630,59 +639,83 @@ impl LibraryDb {
     /// 幂等写入/更新曲目元数据；返回 track id。
     /// v9：`album_mid` 与 `artist_refs` 随行落库（NULL/空串不覆盖旧值；
     /// 歌手行的 mid 按同名旧行保留（见私有 `write_track_artists`）。
+    /// v10：专辑/歌手实体在**同一事务**内解析，写 `tracks.album_id` 与
+    /// `track_artists.artist_id`。调用方可能已开事务（`record_scan_file`），
+    /// 只在自动提交模式下自起事务，避免嵌套 `BEGIN`。
     pub fn upsert_track(&mut self, t: &TrackRow) -> rusqlite::Result<i64> {
         let source_key = canonical_local_key(t.source, &t.source_key);
-        self.conn.execute(
-            r#"INSERT INTO tracks (source, source_key, title, album, album_mid, artist, duration_ms, cover_uri, album_artist, track_number, disc_number, year, genre)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-               ON CONFLICT(source, source_key) DO UPDATE SET
-                 title = CASE
-                   -- 意图方不知真实标题时以（原始）键代之，不得踩掉已有元数据
-                   WHEN excluded.title = ?14 THEN tracks.title
-                   ELSE excluded.title END,
-                 album = COALESCE(excluded.album, tracks.album),
-                 album_mid = COALESCE(NULLIF(excluded.album_mid, ''), tracks.album_mid),
-                 artist = COALESCE(excluded.artist, tracks.artist),
-                 duration_ms = COALESCE(excluded.duration_ms, tracks.duration_ms),
-                 cover_uri = CASE
-                   -- 本地产物（file://）是终态：reconcile/播放 upsert 携带的
-                   -- 远程 URL 不得把已 rebind 的行打回远程形态（否则 UI 投影
-                   -- 退化回占位，还要再走一轮 CoverGet 才能恢复）。file:// 对
-                   -- file:// 仍放行——扫描重提取的内嵌图换图（内容哈希变路径）可生效。
-                   WHEN tracks.cover_uri LIKE 'file://%' AND excluded.cover_uri LIKE 'http%'
-                     THEN tracks.cover_uri
-                   ELSE COALESCE(excluded.cover_uri, tracks.cover_uri) END,
-                 album_artist = COALESCE(excluded.album_artist, tracks.album_artist),
-                 track_number = COALESCE(excluded.track_number, tracks.track_number),
-                 disc_number = COALESCE(excluded.disc_number, tracks.disc_number),
-                 year = COALESCE(excluded.year, tracks.year),
-                 genre = COALESCE(excluded.genre, tracks.genre)"#,
-            params![
-                t.source,
-                source_key,
-                t.title,
-                t.album,
-                t.album_mid,
-                t.artist,
-                t.duration_ms,
-                t.cover_uri,
-                t.album_artist,
-                t.track_number,
-                t.disc_number,
-                t.year,
-                t.genre,
-                t.source_key
-            ],
-        )?;
-        let id: i64 = self.conn.query_row(
-            "SELECT id FROM tracks WHERE source = ?1 AND source_key = ?2",
-            params![t.source, source_key],
-            |r| r.get(0),
-        )?;
-        if !t.artist_refs.is_empty() {
-            write_track_artists(&self.conn, id, &t.artist_refs)?;
+        let own_tx = self.conn.is_autocommit();
+        if own_tx {
+            self.conn.execute_batch("BEGIN")?;
         }
-        Ok(id)
+        let result = (|| -> rusqlite::Result<i64> {
+            let album_id = match track_album_identity(t) {
+                Some(identity) => Some(resolve_album_entity(&self.conn, &identity)?),
+                None => None,
+            };
+            self.conn.execute(
+                r#"INSERT INTO tracks (source, source_key, title, album, album_mid, album_id, artist, duration_ms, cover_uri, album_artist, track_number, disc_number, year, genre)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                   ON CONFLICT(source, source_key) DO UPDATE SET
+                     title = CASE
+                       -- 意图方不知真实标题时以（原始）键代之，不得踩掉已有元数据
+                       WHEN excluded.title = ?15 THEN tracks.title
+                       ELSE excluded.title END,
+                     album = COALESCE(excluded.album, tracks.album),
+                     album_mid = COALESCE(NULLIF(excluded.album_mid, ''), tracks.album_mid),
+                     album_id = COALESCE(excluded.album_id, tracks.album_id),
+                     artist = COALESCE(excluded.artist, tracks.artist),
+                     duration_ms = COALESCE(excluded.duration_ms, tracks.duration_ms),
+                     cover_uri = CASE
+                       -- 本地产物（file://）是终态：reconcile/播放 upsert 携带的
+                       -- 远程 URL 不得把已 rebind 的行打回远程形态（否则 UI 投影
+                       -- 退化回占位，还要再走一轮 CoverGet 才能恢复）。file:// 对
+                       -- file:// 仍放行——扫描重提取的内嵌图换图（内容哈希变路径）可生效。
+                       WHEN tracks.cover_uri LIKE 'file://%' AND excluded.cover_uri LIKE 'http%'
+                         THEN tracks.cover_uri
+                       ELSE COALESCE(excluded.cover_uri, tracks.cover_uri) END,
+                     album_artist = COALESCE(excluded.album_artist, tracks.album_artist),
+                     track_number = COALESCE(excluded.track_number, tracks.track_number),
+                     disc_number = COALESCE(excluded.disc_number, tracks.disc_number),
+                     year = COALESCE(excluded.year, tracks.year),
+                     genre = COALESCE(excluded.genre, tracks.genre)"#,
+                params![
+                    t.source,
+                    source_key,
+                    t.title,
+                    t.album,
+                    t.album_mid,
+                    album_id,
+                    t.artist,
+                    t.duration_ms,
+                    t.cover_uri,
+                    t.album_artist,
+                    t.track_number,
+                    t.disc_number,
+                    t.year,
+                    t.genre,
+                    t.source_key
+                ],
+            )?;
+            let id: i64 = self.conn.query_row(
+                "SELECT id FROM tracks WHERE source = ?1 AND source_key = ?2",
+                params![t.source, source_key],
+                |r| r.get(0),
+            )?;
+            if !t.artist_refs.is_empty() {
+                write_track_artists(&self.conn, id, &t.artist_refs)?;
+            }
+            Ok(id)
+        })();
+        if own_tx {
+            match &result {
+                Ok(_) => self.conn.execute_batch("COMMIT")?,
+                Err(_) => {
+                    self.conn.execute_batch("ROLLBACK").ok();
+                }
+            }
+        }
+        result
     }
 
     /// 记录播放会话开始（INSERT play_events），返回事件 id（供结束按 id 精确
@@ -832,19 +865,25 @@ impl LibraryDb {
     /// 不得踩掉已有真实标题（否则解析好的标题被打回 mid，AUDIT §30.7）。
     /// v9：`album_mid` 与 `artist_refs` 同样落库（`artist_refs` 为空 = 本次
     /// 投影没有歌手信息，保留 `track_artists` 既有行不动）。
+    /// v10：专辑/歌手实体在同一事务内解析（逐行写 `album_id`/`artist_id`）。
     pub fn upsert_tracks_batch(&mut self, rows: &[TrackRow]) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         for row in rows {
+            let album_id = match track_album_identity(row) {
+                Some(identity) => Some(resolve_album_entity(&tx, &identity)?),
+                None => None,
+            };
             tx.execute(
-                r#"INSERT INTO tracks (source, source_key, title, album, album_mid, artist, duration_ms, cover_uri)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                r#"INSERT INTO tracks (source, source_key, title, album, album_mid, album_id, artist, duration_ms, cover_uri)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                    ON CONFLICT(source, source_key) DO UPDATE SET
                      title = CASE
                        -- 意图方不知真实标题时以（原始）键代之，不得踩掉已有元数据
-                       WHEN excluded.title = ?9 THEN tracks.title
+                       WHEN excluded.title = ?10 THEN tracks.title
                        ELSE excluded.title END,
                      album = COALESCE(excluded.album, tracks.album),
                      album_mid = COALESCE(NULLIF(excluded.album_mid, ''), tracks.album_mid),
+                     album_id = COALESCE(excluded.album_id, tracks.album_id),
                      artist = COALESCE(excluded.artist, tracks.artist),
                      duration_ms = COALESCE(excluded.duration_ms, tracks.duration_ms),
                      cover_uri = COALESCE(excluded.cover_uri, tracks.cover_uri)"#,
@@ -854,6 +893,7 @@ impl LibraryDb {
                     row.title,
                     row.album,
                     row.album_mid,
+                    album_id,
                     row.artist,
                     row.duration_ms,
                     row.cover_uri,
@@ -954,6 +994,9 @@ impl LibraryDb {
             duration_ms: meta.duration_ms,
             cover_uri: None,
             qq_song_id: None,
+            // v10：专辑实体 key 用（专辑, 专辑歌手）——播放路径入库与扫描
+            // 路径必须是同一个 key，否则同一张专辑会分裂成两个实体。
+            album_artist: meta.album_artist,
             ..Default::default()
         })?;
         let md = std::fs::metadata(path).ok();
@@ -1510,13 +1553,40 @@ impl LibraryDb {
         };
         let artist = (!artists.is_empty())
             .then(|| hmp_core::join_artist_names(artists.iter().map(String::as_str)));
+        // v10：本地 key 建/找专辑实体。key 的歌手分量与 `library_albums` 的
+        // 分组口径一致（album_artist 优先，回退整行 artist 展示串）；实体
+        // 的 album_artist_id 只用单个歌手（album_artist 或首个标签歌手）。
+        let album_id = {
+            let album_artist = m
+                .album_artist
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let title = m.album.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            match title {
+                Some(title) => {
+                    let identity = AlbumIdentity {
+                        title,
+                        key_artist: album_artist.or(artist.as_deref()),
+                        album_artist: album_artist
+                            .map(|name| (name, None))
+                            .or_else(|| artists.first().map(|name| (name.as_str(), None))),
+                        album_mid: None,
+                        year: m.year,
+                    };
+                    Some(resolve_album_entity(&self.conn, &identity)?)
+                }
+                None => None,
+            }
+        };
         self.conn.execute(
-            "UPDATE tracks SET title = ?1, album = ?2, artist = ?3, duration_ms = ?4,
-                    album_artist = ?5, track_number = ?6, disc_number = ?7, year = ?8, genre = ?9
-             WHERE id = ?10",
+            "UPDATE tracks SET title = ?1, album = ?2, album_id = ?3, artist = ?4, duration_ms = ?5,
+                    album_artist = ?6, track_number = ?7, disc_number = ?8, year = ?9, genre = ?10
+             WHERE id = ?11",
             params![
                 m.title,
                 m.album,
+                album_id,
                 artist,
                 m.duration_ms,
                 m.album_artist,
