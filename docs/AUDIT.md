@@ -82,7 +82,7 @@
 1. ~~**QMC1/V1 footer 误报**（media/decrypt）：尾 4 字节 LE 恰落 1..=1024 时被当成 V1
    密钥区，静默截掉最后 `4+key_size` 字节音频（约 1/400k 概率但按文件确定）。
    修法需验证提取的 key 能解出已知魔数，涉及流式与两条下载路径，建议单独立项。~~
-   **已修**（2026-11-28，`f1298e1`，§31）：候选 V1 必须能从 key 区解析出合法 ekey
+   **已修**（2026-11-28，`a21edb1`，§31）：候选 V1 必须能从 key 区解析出合法 ekey
    （Base64 文本或历史形态的已解码 blob），否则按无 footer 处理
    （`audio_len = total_len`、不剥离；已有 API ekey 时仍用它解整段）。下载路径读
    `4 + MAX_V1_KEY_SIZE` 尾部，流式路径按末尾长度提示补拉完整 key 区再校验；QTag
@@ -1009,7 +1009,7 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 | 阶段 | 内容 | 粗估 |
 |---|---|---|
 | 0 止血 | §30.2.4 的 D1–D10 与 §30.3.3 的桌面缺陷，各补回归测试 | 2–3 人日 |
-| 1 停止丢信息 | 入库保存专辑 mid 与歌手列表（含 mid），统一分隔符，专辑按（专辑名, 专辑歌手）分组，`tag_version` 触发存量重扫 | 3–5 人日 |
+| 1 停止丢信息 | 入库保存专辑 mid 与歌手列表（含 mid），统一分隔符，专辑按（专辑名, 专辑歌手）分组，`tag_version` 触发存量重扫 | 3–5 人日 · **2026-11-28 已落地（§32.1）** |
 | 2 实体化 | `artists`/`albums` 表与 key 表，`track_artists.artist_id`；桌面改用 mid 导航 | 5–8 人日 |
 | 3 曲目与音源拆分 | `track_sources`，自动关联 + 手动关联，本地优先，集合化的「我喜欢」 | 5–8 人日 |
 | 4 读路径收编 | 见 §30.3.5 | 随问题 1 |
@@ -1174,7 +1174,7 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 
 - `persist_cover` 一律落 `<hash>.jpg`：读侧已按内容解码，盘上文件名仍然错标。
 - `read_meta` 的标题/歌手/年份只读 primary tag：WAV 只有 RIFF INFO 标签时读不到，D4 对这种文件不生效。
-- hmp-desktop 集成测试不隔离数据目录：带 runtime 的用例只要走到库读取就会只读投影真实库（既有问题，`navigation_scroll.rs` 因 D7 多一处；§31 `419c59c` 已修）。
+- hmp-desktop 集成测试不隔离数据目录：带 runtime 的用例只要走到库读取就会只读投影真实库（既有问题，`navigation_scroll.rs` 因 D7 多一处；§31 `08e8019` 已修）。
 - 目录封面在扫描读标签时生效：之后才放进目录的封面文件要等重新扫描才会被读到。
 - 内嵌 PNG 封面 >512px 走派生缩略件不受影响，≤512px 的此前一直不显示（`0d5c813` 一并修好）。
 
@@ -1230,11 +1230,11 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 | `07aa438` | **§4.3**：`add_local_file` 把播放入库的行归入所在扫描根并带当前代际；`finish_scan` 的 missing 收尾从此覆盖播放行 | `playback_ingested_file_joins_scan_root_and_is_marked_missing` |
 | `843cc57` | 封面缓存扩展名按内容魔数（此前一律 `.jpg`，PNG/WebP 被错标；读侧早已按内容解码） | `persist_cover_extension_follows_content` |
 | `57f3550` | `read_meta` 逐字段按 primary → 全部 tag 兜底；纯 RIFF `LIST/INFO` 的 WAV 不再丢标题/歌手/专辑/年份 | `read_meta_reads_riff_info_without_id3`（去掉兜底即红） |
-| `419c59c` | 桌面集成测试不再打开真实库：新增 `load_data_with_snapshot` / `load_data_offline` 与 `bind_offline`，13 个只装载空壳的 UI 用例改用 `load_data_offline`，`navigation_scroll` / `remote_navigation` 用 `bind_offline`；`load_data` / `bind` 生产语义不变 | `injected_snapshot_and_offline_bind_never_touch_data_dir`（hmp-desktop +1） |
-| `f1298e1` | **§4.1**：V1 footer 候选必须从 key 区解析出合法 ekey（Base64 文本或已解码 blob）；下载读 `4 + 0x400` 尾部，流式按长度提示补拉完整 key 区；两种形态都解析失败才按无 footer 处理，不截断 | `detect_v1_rejects_unparseable_key_area`、`detect_v1_rejects_random_bytes_key_area`、`detect_v1_accepts_decoded_ekey_blob_key_area`、`embedded_ekey_from_bytes_accepts_decoded_v1_key_blob`、`prepare_keeps_tail_when_v1_candidate_is_not_ekey`、`prepare_media_treats_unparseable_v1_tail_as_plaintext`、`prepare_media_extracts_v1_ekey_from_long_tail` |
+| `08e8019` | 桌面集成测试不再打开真实库：新增 `load_data_with_snapshot` / `load_data_offline` 与 `bind_offline`，13 个只装载空壳的 UI 用例改用 `load_data_offline`，`navigation_scroll` / `remote_navigation` 用 `bind_offline`；`load_data` / `bind` 生产语义不变 | `injected_snapshot_and_offline_bind_never_touch_data_dir`（hmp-desktop +1） |
+| `a21edb1` | **§4.1**：V1 footer 候选必须从 key 区解析出合法 ekey（Base64 文本或已解码 blob）；下载读 `4 + 0x400` 尾部，流式按长度提示补拉完整 key 区；两种形态都解析失败才按无 footer 处理，不截断 | `detect_v1_rejects_unparseable_key_area`、`detect_v1_rejects_random_bytes_key_area`、`detect_v1_accepts_decoded_ekey_blob_key_area`、`embedded_ekey_from_bytes_accepts_decoded_v1_key_blob`、`prepare_keeps_tail_when_v1_candidate_is_not_ekey`、`prepare_media_treats_unparseable_v1_tail_as_plaintext`、`prepare_media_extracts_v1_ekey_from_long_tail` |
 | `a0a99e3` + `55ecb80` | 目录封面：候选名单单一事实源（探测与 watcher 事件共用）；`local_tracks_in_dir` 走 `local_files.path` 索引区间；封面事件重读同目录曲目，内嵌图优先、删除回退/清空，只在值变化时写行并 bump `LibraryChanged` | `folder_cover_refresh_updates_only_affected_rows`、`watcher_applies_folder_cover_events`（hmp-storage +3，hmp-daemon +2） |
 
-**桌面集成测试的库隔离（`419c59c` 细节）**：
+**桌面集成测试的库隔离（`08e8019` 细节）**：
 
 - 生产启动仍是 `bridge::load_data`（`library_view::load_snapshot` 直读 `data_dir`）与
   `bridge::bind`；新增入口只供测试/离线注入，避免把「读真实库」当成启动副作用。
@@ -1251,7 +1251,7 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 - 真机验证：`cargo test -p hmp-desktop` 前后 `~/.local/share/hmp/library.sqlite3` 的
   size/mtime 不变（1445888 / 1795688714），且没有生成 `-wal` / `-shm`。
 
-**§4.1 验证边界**（`f1298e1`）：没有真实 V1/QMC1 样本，正反向测试均用 `generate_ekey`
+**§4.1 验证边界**（`a21edb1`）：没有真实 V1/QMC1 样本，正反向测试均用 `generate_ekey`
 合成夹具。手头唯一真实 `.mgg`（`/mnt/d/QQMusicDownloads`，1.9 MB，只读）尾部是 8 字节
 `musicex\0`，全文件不含 `QTag` / `STag` / `EncV2` 标记——它不是 QTag 样本，detect
 在修复前后都按无 footer 处理，既不能作 QTag 正向证据，也不能作 V1 证据。真机遇到 V1
@@ -1262,6 +1262,47 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 事件识别按探测拼写，`COVER.JPG` 这类全大写扩展名在不区分大小写的文件系统上能被探测读到，
 但自身事件不匹配，要等下次全量扫描。
 
-**仍未修 / 后续**：§29 的 UI 键盘/焦点/歌单管理开放项与 §30.2.6 phase 1 另行推进
-（任务书 `docs/plans/2026-11-28-M1-track-info.md`）；§4.2 `list_favorites` INNER JOIN 与
-§30.6 的产品语义决策仍开放。
+**仍未修 / 后续**：§4.2 `list_favorites` INNER JOIN、§30.6 的产品语义决策、以及
+§30.2.6 phase 2/3（artists/albums 实体表、`track_sources`、local-first 回退）仍开放。
+§29 的 UI 开放项与 §30.2.6 phase 1 已分别由 `fix/ui-keyboard`、`feat/track-info` 收口（§32）。
+
+## §32 曲目信息 phase 1 与 M7 UI 收口（2026-11-28）
+
+### 32.1 §30.2.6 phase 1：停止丢信息
+
+任务书 `docs/plans/2026-11-28-M1-track-info.md`；分支 `feat/track-info`，五个原子提交：
+
+| 提交 | 内容 |
+|---|---|
+| `3ed1b5f` | `hmp_core::join_artist_names` 统一 `" / "` 口径；`Track::artist_names` 与 `TrackStub::artist_names` 同源 |
+| `e61fcc1` | schema v9：`tracks.album_mid`、`track_artists.artist_mid`、`local_files.tag_version`；`TrackRow.album_mid` / `artist_refs`（`ArtistRefRow`）；upsert 与歌手行写入含 mid 保留；逐级迁移、`user_version = 9` |
+| `c4eb02d` | `library_albums` 按（专辑, album_artist 或 artist）分组；`AlbumGroup.album_mid` |
+| `66525c5` | `LOCAL_TAG_VERSION = 2`；扫描对旧版本行强制重读标签（mtime/size 未变也 `Updated`），`add_local_file` 写当前版本 |
+| `f0c9f85` | QQ 三条入库路径保留 `singer[].mid` / `album.mid`；`TrackStub` 增 `album_mid` + `artist_refs`（`serde(default)` 兼容旧 IPC）；本地行 mid 为 NULL |
+
+验收：迁移 v8→v9 幂等；QQ 入库 mid 落库且 NULL 投影不覆盖旧值；三种生产方展示串一致；
+同名不同专辑歌手分两行；`tag_version` 旧行重扫一次、再扫 `Skipped`。`cargo test --workspace`
+全绿（全仓 900+ 用例，分层计数见各 crate）。
+
+**边界（phase 2/3 才解决）**：
+- `AlbumGroup.album_mid` 生产环境目前为 NULL：`library_albums` 仍只 JOIN `local_files`，
+  本地行没有专辑 mid；该字段是本地↔QQ 关联前的透传位。
+- 桌面专辑详情仍按专辑名取第一组、按名取全部曲目；同名不同专辑歌手会显示为两张卡，
+  但点进去仍是同名合并视图，导航键要等实体表（phase 2）。
+- 本地多艺人展示从「主歌手」变为「全部标签歌手 `" / "` 拼接」，`Track`/MPRIS 的
+  `artists` 同步多值，属统一口径的预期变化。
+- 存量行不回填：`album_mid`/`artist_mid` 等下一轮 reconcile / 扫描 / 播放详情自然补。
+
+### 32.2 §29 M7 UI 收口
+
+分支 `fix/ui-keyboard`，六个提交（`ca59e74`、`b1831af`、`507cd3f`、`86dac62`、`29e8b47`、
+`2cca483`）：播放页模态焦点陷阱（`KeyNav.modal-active` / `tab-navigable`，标题栏窗口钮
+保留在环内，关闭回触发器）；右键菜单与音质弹层的 `MenuKeys` 方向键/Home/End/Enter/Esc
+与焦点回落；侧栏歌单改为组级 roving `ListKeys`（窗外行可达、不进 Tab 序）；歌单级
+菜单（重命名复用 `NewPlaylistForm`；删除按 local/subscribed/owned 分流，云端重命名禁用
+并注明；错误走反馈条）；`SettingRow` 窄窗描述换行（T8）；模态/收起层周围的 Tab 序补洞。
+
+验证：`cargo test -p hmp-desktop` 114 单测 + 23 个集成二进制全绿（新增
+`tests/overlay_focus.rs`、`tests/menu_keys.rs`、`tests/sidebar_playlists.rs`）；
+`cargo fmt --check` 与 clippy 零警告。行为与机制同步记入
+`crates/hmp-desktop/PORTING.md`「M7 键盘 / 焦点 / 减动效」。
