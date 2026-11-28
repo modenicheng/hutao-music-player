@@ -51,6 +51,9 @@ pub struct LoginService {
     client: QqMusicClient,
     store: Store,
     session: Arc<Mutex<Option<Session>>>,
+    /// 二维码 PNG 落盘目录（生产 = `hmp_storage::data_dir()`；测试注入临时目录，
+    /// 避免把真实数据目录写脏或依赖可写 HOME）。
+    qr_dir: PathBuf,
     /// 二维码文件名代次（同会话刷新换新文件，UI 按 path 变化重载图）。
     qr_counter: AtomicU64,
 }
@@ -58,10 +61,16 @@ pub struct LoginService {
 impl LoginService {
     /// 新建（`store` 由 `store_from_env()` 构造）。
     pub fn new(store: Store) -> Self {
+        Self::with_qr_dir(store, hmp_storage::data_dir())
+    }
+
+    /// 新建并指定二维码落盘目录（测试用；生产走 [`Self::new`]）。
+    fn with_qr_dir(store: Store, qr_dir: PathBuf) -> Self {
         Self {
             client: QqMusicClient::new(),
             store,
             session: Arc::new(Mutex::new(None)),
+            qr_dir,
             qr_counter: AtomicU64::new(1),
         }
     }
@@ -218,10 +227,10 @@ impl LoginService {
         Ok(path)
     }
 
-    /// 写二维码 PNG 到 `data_dir/login-qr-{n}.png`（目录不存在则创建）。
+    /// 写二维码 PNG 到 `<qr_dir>/login-qr-{n}.png`（目录不存在则创建）。
     fn write_qr_png(&self, qr: &QR) -> Result<PathBuf, String> {
         let n = self.qr_counter.fetch_add(1, Ordering::Relaxed);
-        let path = hmp_storage::data_dir().join(format!("login-qr-{n}.png"));
+        let path = self.qr_dir.join(format!("login-qr-{n}.png"));
         Self::write_png(&path, qr)
     }
 
@@ -264,7 +273,10 @@ mod tests {
     use hmp_storage::credential::FileStore;
 
     fn service_at(dir: &std::path::Path) -> LoginService {
-        LoginService::new(Box::new(FileStore::at(dir.join("cred.json"))))
+        LoginService::with_qr_dir(
+            Box::new(FileStore::at(dir.join("cred.json"))),
+            dir.join("data"),
+        )
     }
 
     /// 未登录（空 store）登出：幂等 Ok，不触碰网络。
@@ -291,6 +303,11 @@ mod tests {
         svc.cancel();
         let (qr, path) = fake_session_png(&svc);
         assert!(path.exists());
+        assert!(
+            path.starts_with(dir.path()),
+            "二维码应落在注入目录，实际 {}",
+            path.display()
+        );
         svc.session.lock().unwrap().replace(Session {
             qr,
             qr_path: path.clone(),
