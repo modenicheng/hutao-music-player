@@ -1010,7 +1010,7 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 |---|---|---|
 | 0 止血 | §30.2.4 的 D1–D10 与 §30.3.3 的桌面缺陷，各补回归测试 | 2–3 人日 |
 | 1 停止丢信息 | 入库保存专辑 mid 与歌手列表（含 mid），统一分隔符，专辑按（专辑名, 专辑歌手）分组，`tag_version` 触发存量重扫 | 3–5 人日 · **2026-11-28 已落地（§32.1）** |
-| 2 实体化 | `artists`/`albums` 表与 key 表，`track_artists.artist_id`；桌面改用 mid 导航 | 5–8 人日 |
+| 2 实体化 | `artists`/`albums` 表与 key 表，`track_artists.artist_id`；桌面改用 mid 导航 | 5–8 人日 · **2026-11-28 已落地（§33）** |
 | 3 曲目与音源拆分 | `track_sources`，自动关联 + 手动关联，本地优先，集合化的「我喜欢」 | 5–8 人日 |
 | 4 读路径收编 | 见 §30.3.5 | 随问题 1 |
 
@@ -1263,7 +1263,7 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 但自身事件不匹配，要等下次全量扫描。
 
 **仍未修 / 后续**：§4.2 `list_favorites` INNER JOIN、§30.6 的产品语义决策、以及
-§30.2.6 phase 2/3（artists/albums 实体表、`track_sources`、local-first 回退）仍开放。
+§30.2.6 phase 3（`track_sources`、local-first 回退、手动关联）仍开放；phase 2 已由 §33 收口。
 §29 的 UI 开放项与 §30.2.6 phase 1 已分别由 `fix/ui-keyboard`、`feat/track-info` 收口（§32）。
 
 ## §32 曲目信息 phase 1 与 M7 UI 收口（2026-11-28）
@@ -1306,3 +1306,51 @@ track_artists(track_id, artist_id, position)   现有表把 artist 文本换成 
 `tests/overlay_focus.rs`、`tests/menu_keys.rs`、`tests/sidebar_playlists.rs`）；
 `cargo fmt --check` 与 clippy 零警告。行为与机制同步记入
 `crates/hmp-desktop/PORTING.md`「M7 键盘 / 焦点 / 减动效」。
+
+## §33 实体化收口（§30.2.6 phase 2，2026-11-28）
+
+### 33.1 存储/入库（schema v10）
+
+| 提交 | 内容 |
+|---|---|
+| `8a3aa00` | `artists`/`artist_keys`/`albums`/`album_keys`、`tracks.album_id`、`track_artists.artist_id`；v9→v10 事务迁移、回填与回填后校验，失败整体回滚 |
+| `399590e` | `upsert_track`/`upsert_tracks_batch` 同事务解析实体；`write_track_artists` 写 `artist_id` 并保留 phase 1 mid 语义；本地 `apply_local_meta`/`add_local_file` 用同一 local key |
+| `39f1296` | `library_artists`/`library_albums` 增 `id`/`artist_mid`/`album_mid`；新增 `artist_tracks_by_id`/`album_tracks_by_id`/`artist_by_id`/`album_by_id`，按名查询保留 |
+
+身份规则：`qq` 的 key 用 mid；本地歌手 key 用名称（`NOCASE`），专辑 key 用
+`lower(title) + U+001F + lower(album_artist 或 artist)`。key 未命中时先按名称找现有实体
+再挂 key（本地/QQ 同名归一），最后才新建；空/纯数字 mid 回落 local 键。
+
+### 33.2 桌面导航（phase 2b）
+
+| 提交 | 内容 |
+|---|---|
+| `b350941` | `resolve_local` 的 `ArtistRef.id`/`AlbumRef.id` = `artist:<id>`/`album:<id>`（查不到回退 `"local"`），展示名不变 |
+| `e70e01a` | `SongRow` 增 `artist_id`/`album_id`/`artist_mid`/`album_mid`；本地行 `artist:<id>`/`album:<id>`、QQ 行 `qq:<mid>`、缺失回退裸展示名；`album_detail`/`artist_detail` 支持按 id；歌手页专辑卡与发现页行内链接统一 |
+| `85da7ae` | `style: apply rustfmt` |
+
+参数空间：`qq:<mid>`（远端）/ `artist:<id>`、`album:<id>`（本地实体）/ 裸展示名（旧链接
+兜底）。同名不同专辑歌手是两个实体，按 id 查询互不混入；歌手页不再走“最长包含匹配”。
+
+### 33.3 验证
+
+- `cargo fmt --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、
+  `cargo test --workspace`、`RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --workspace` 全绿；
+  hmp-storage 107、hmp-daemon lib 185、hmp-desktop 122 单测 + 23 个集成二进制。
+- 真实库副本（v8，4124 首）启动迁移到 v10：`artists` 8、`albums` 1570、`album_keys` 1653，
+  `track_artists.artist_id` / `tracks.album_id` 未关联行均为 0；`hmp library albums/artists`
+  正常；本地 FLAC 起播（03:22）后 `hmp quit` 干净退出。真实库未被触碰（仍 v8），下次启动
+  正常迁移。
+- 推送后 CI 见本轮推送记录。
+
+### 33.4 边界 / 后续
+
+- `SongRow` 的本地实体 id 仍靠名称索引反查、QQ 行逐行查 `track_artists`/`album_mid`；
+  收藏页 1 万行时的首帧耗时未实测。若明显，另开只读接口给 `LibraryTrackRow`/`TrackMeta`
+  补行级 id/mid（无 schema 改动）。
+- 本地多歌手行仍只有主歌手可点（PORTING 决策 5）；专辑/歌手浏览仍只覆盖本地行
+  （`library_albums`/`library_artists` 仍 JOIN `local_files`），QQ-only 实体不显示。
+- 新 daemon 与旧 desktop 的参数空间不兼容（`artist:<id>` 会被旧端当 QQ mid 补 `qq:`），
+  必须同批重建两个二进制。
+- 真机 UI 未视觉验收（本环境无显示），播放页/列表链接与同名专辑卡需人眼过一遍。
+- phase 3（`track_sources`、local-first 回退、手动关联）未做。
