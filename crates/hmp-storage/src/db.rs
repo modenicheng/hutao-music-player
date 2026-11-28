@@ -607,25 +607,44 @@ impl LibraryDb {
             self.write_track_artists(id, &artists)?;
         }
         let md = std::fs::metadata(path).ok();
+        // 播放路径入库的行也要归入所在扫描根：否则 `finish_scan` 只按
+        // `scan_root_id` 收尾，永远看不到它——daemon 停机期间删掉的文件会
+        // 一直以 missing=0 留在库里（AUDIT §4.3）。根外的文件仍无根可归。
+        let root = self.scan_root_for(path)?;
+        let (root_id, seen_generation) = match root {
+            Some((id, generation)) => (Some(id), generation),
+            None => (None, 0),
+        };
+        let mtime_ns = md
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i64);
         self.conn.execute(
-            r#"INSERT INTO local_files (track_id, path, file_size, mtime, format, bitrate, sample_rate)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            r#"INSERT INTO local_files (track_id, path, file_size, mtime, mtime_ns, format, bitrate, sample_rate, last_seen_generation, missing, scan_root_id)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)
                ON CONFLICT(path) DO UPDATE SET
                  track_id = excluded.track_id,
                  file_size = excluded.file_size,
                  mtime = excluded.mtime,
+                 mtime_ns = excluded.mtime_ns,
                  format = COALESCE(excluded.format, local_files.format),
                  bitrate = COALESCE(excluded.bitrate, local_files.bitrate),
                  sample_rate = COALESCE(excluded.sample_rate, local_files.sample_rate),
-                 missing = 0
+                 missing = 0,
+                 scan_root_id = COALESCE(local_files.scan_root_id, excluded.scan_root_id),
+                 last_seen_generation = MAX(local_files.last_seen_generation, excluded.last_seen_generation)
                ON CONFLICT(track_id) DO UPDATE SET
                  path = excluded.path,
                  file_size = excluded.file_size,
                  mtime = excluded.mtime,
+                 mtime_ns = excluded.mtime_ns,
                  format = COALESCE(excluded.format, local_files.format),
                  bitrate = COALESCE(excluded.bitrate, local_files.bitrate),
                  sample_rate = COALESCE(excluded.sample_rate, local_files.sample_rate),
-                 missing = 0"#,
+                 missing = 0,
+                 scan_root_id = COALESCE(local_files.scan_root_id, excluded.scan_root_id),
+                 last_seen_generation = MAX(local_files.last_seen_generation, excluded.last_seen_generation)"#,
             params![
                 id,
                 path.display().to_string(),
@@ -634,9 +653,12 @@ impl LibraryDb {
                     .and_then(|m| m.modified().ok())
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64),
+                mtime_ns,
                 meta.format,
                 meta.bitrate,
                 meta.sample_rate,
+                seen_generation,
+                root_id,
             ],
         )?;
         Ok(id)

@@ -1128,6 +1128,46 @@ fn scan_move_drops_old_relation_when_new_key_taken() {
 }
 
 /// 里程碑 E2：单文件删除标记（watcher Remove 事件；不删行，missing 语义与扫描一致）。
+/// 播放路径入库（`add_local_file`）的行要归入所在扫描根：否则
+/// `finish_scan` 的 missing 收尾永远看不到它，daemon 停机期间删掉的文件会
+/// 以 missing=0 永久留在库里（AUDIT §4.3 二等行）。
+#[test]
+fn playback_ingested_file_joins_scan_root_and_is_marked_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("played.mp3");
+    std::fs::write(&file, b"x").unwrap();
+    let file = crate::canonical_display_path(&file);
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let (root_id, generation) = db.begin_scan(dir.path()).unwrap();
+
+    db.add_local_file(&file, None).unwrap();
+    let (row_root, seen): (Option<i64>, i64) = db
+        .conn
+        .query_row(
+            "SELECT scan_root_id, last_seen_generation FROM local_files WHERE path = ?1",
+            params![file.display().to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(row_root, Some(root_id), "播放入库的行应归入扫描根");
+    assert_eq!(seen, generation, "应带当前代际，不被本轮收尾误判");
+
+    // 模拟「daemon 停机期间删除」：下一轮扫描走不到它，收尾应标 missing。
+    std::fs::remove_file(&file).unwrap();
+    let (root_id2, generation2) = db.begin_scan(dir.path()).unwrap();
+    assert_eq!(root_id2, root_id);
+    assert_eq!(db.finish_scan(root_id2, generation2).unwrap(), 1);
+    let missing: i64 = db
+        .conn
+        .query_row(
+            "SELECT missing FROM local_files WHERE path = ?1",
+            params![file.display().to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(missing, 1);
+}
+
 #[test]
 fn mark_missing_by_path_flags_row() {
     let mut db = LibraryDb::open_in_memory().unwrap();
