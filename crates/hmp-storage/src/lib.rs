@@ -21,12 +21,12 @@ pub mod xdg;
 pub use config::{Config, QualityMode, QualityPref};
 pub use credential::{BackendKind, CredentialStore, FileStore, SecretServiceStore};
 pub use db::{
-    FavoriteRow, LibraryDb, PlayEnd, PlaylistOpRow, PlaylistRow, PlaylistTrackRow, RecentPlay,
-    RelationRow, ScanOutcome, TrackMeta, TrackRow,
+    FavoriteRow, LibraryDb, LocalCoverRow, PlayEnd, PlaylistOpRow, PlaylistRow, PlaylistTrackRow,
+    RecentPlay, RelationRow, ScanOutcome, TrackMeta, TrackRow,
 };
 pub use local::{
-    LocalMeta, decode_lrc_text, is_audio_ext, read_embedded_lyrics, read_meta, read_sidecar_lrc,
-    sidecar_lrc_candidates,
+    LocalMeta, decode_lrc_text, is_audio_ext, is_folder_cover_path, read_embedded_lyrics,
+    read_meta, read_sidecar_lrc, sidecar_lrc_candidates,
 };
 pub use path::{canonical_display_path, strip_verbatim};
 pub use xdg::{cache_dir, config_dir, data_dir};

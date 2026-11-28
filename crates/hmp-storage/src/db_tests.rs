@@ -1892,3 +1892,125 @@ fn cover_cache_roundtrip() {
         .unwrap();
     assert_eq!(n, 1, "同 URL 只占一行");
 }
+
+/// 目录封面刷新输入：`local_tracks_in_dir` 只回本目录直系文件（子目录/邻目录
+/// 不算），并带出回写所需字段；查询走 `local_files.path` 唯一索引（整表扫在
+/// 4k 行库上会随库规模放大，封面事件成批到达时尤其明显）。
+#[test]
+fn local_tracks_in_dir_scopes_to_direct_children() {
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonical_display_path(tmp.path());
+    let album = root.join("album");
+    let other = root.join("other");
+    let disc = album.join("disc1");
+    std::fs::create_dir_all(&disc).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let files = [
+        album.join("a.mp3"),
+        album.join("b.mp3"),
+        disc.join("c.mp3"),
+        other.join("d.mp3"),
+    ];
+    // 内容各不相同：同内容同 mtime 会被 record_scan_file 判成「移动」而复用
+    // 同一行（指纹命中），测不到多行。
+    for (i, p) in files.iter().enumerate() {
+        std::fs::write(p, format!("content-{i}")).unwrap();
+    }
+    let (root_id, generation) = db.begin_scan(&root).unwrap();
+    for p in &files {
+        let size = std::fs::metadata(p).unwrap().len();
+        let fp = crate::scan::file_fingerprint(p, size).unwrap();
+        db.record_scan_file(root_id, generation, p, None, &fp)
+            .unwrap();
+    }
+    let rows = db.local_tracks_in_dir(&album).unwrap();
+    let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec![
+            album.join("a.mp3").display().to_string(),
+            album.join("b.mp3").display().to_string(),
+        ],
+        "只要直系子文件：子目录/邻目录都不算"
+    );
+    for row in &rows {
+        assert_eq!(row.source_key, format!("local:{}", row.path));
+        assert_eq!(row.cover_uri, None);
+    }
+    // 查询计划必须走索引（回归：改成整表 LIKE/子串匹配时这条会红）。
+    let plan: String = db
+        .conn
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT track_id FROM local_files WHERE path >= ?1 AND path < ?2",
+            params!["/music/a", "/music/b"],
+            |r| r.get(3),
+        )
+        .unwrap();
+    assert!(
+        plan.contains("USING") && plan.contains("INDEX") && !plan.contains("SCAN local_files"),
+        "目录前缀查询应走 path 索引：{plan}"
+    );
+}
+
+/// 封面回写/清空：只在值变化时写；清空只碰目标行（不误伤同专辑/同目录
+/// 其它行），重复调用零写入。
+#[test]
+fn update_track_cover_sets_clears_and_skips_unchanged() {
+    fn track_cover(db: &LibraryDb, key: &str) -> Option<String> {
+        db.conn
+            .query_row(
+                "SELECT cover_uri FROM tracks WHERE source = 'local' AND source_key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+    let mut db = LibraryDb::open_in_memory().unwrap();
+    let mk = |key: &str| TrackRow {
+        source: "local",
+        source_key: key.into(),
+        title: key.into(),
+        ..Default::default()
+    };
+    db.upsert_track(&mk("local:/m/a.mp3")).unwrap();
+    db.upsert_track(&mk("local:/m/b.mp3")).unwrap();
+    assert_eq!(
+        db.update_track_cover("local:/m/a.mp3", Some("file:///covers/x.jpg"))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        track_cover(&db, "local:/m/a.mp3").as_deref(),
+        Some("file:///covers/x.jpg")
+    );
+    assert_eq!(
+        db.update_track_cover("local:/m/a.mp3", Some("file:///covers/x.jpg"))
+            .unwrap(),
+        0,
+        "值未变零写入（同目录多首曲目共享同一 URI）"
+    );
+    assert_eq!(
+        track_cover(&db, "local:/m/b.mp3"),
+        None,
+        "同专辑其它行不跟着写"
+    );
+    assert_eq!(
+        db.update_track_cover("local:/m/b.mp3", None).unwrap(),
+        0,
+        "本来就是空：清空零写入"
+    );
+    assert_eq!(db.update_track_cover("local:/m/a.mp3", None).unwrap(), 1);
+    assert_eq!(track_cover(&db, "local:/m/a.mp3"), None);
+    assert_eq!(
+        db.update_track_cover("local:/m/a.mp3", None).unwrap(),
+        0,
+        "重复清空零写入"
+    );
+    assert_eq!(
+        db.update_track_cover("local:/m/nope.mp3", Some("file:///x.jpg"))
+            .unwrap(),
+        0,
+        "库中无此曲目：零行"
+    );
+}

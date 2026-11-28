@@ -71,38 +71,66 @@ pub fn parse_rg_db(s: &str) -> Option<f64> {
 /// 封面整张静默滤成「无封面」（§18）；仍保留上限防病态文件撑爆扫描内存/落盘。
 const MAX_COVER_BYTES: usize = 32 * 1024 * 1024;
 
+/// 目录封面主名（小写 + 首字母大写变体）——探测顺序：主名 → 变体 → 扩展名。
+const FOLDER_COVER_NAMES: [(&str, &str); 5] = [
+    ("cover", "Cover"),
+    ("folder", "Folder"),
+    ("front", "Front"),
+    ("album", "Album"),
+    ("albumart", "Albumart"),
+];
+
+/// 目录封面扩展名（只认小写；大小写变体按主名的两条拼写）。
+const FOLDER_COVER_EXTS: [&str; 3] = ["jpg", "jpeg", "png"];
+
+/// 目录封面候选文件名 `(主名, 扩展名)`，按探测顺序。
+/// 读标签探测 [`folder_cover`] 与 watcher 事件识别 [`is_folder_cover_path`]
+/// 共用这一份清单——候选集合只在这里定义，不要在调用方复制文件名列表。
+fn folder_cover_names() -> impl Iterator<Item = (&'static str, &'static str)> {
+    FOLDER_COVER_NAMES.iter().flat_map(|(lower, capitalized)| {
+        [*lower, *capitalized]
+            .into_iter()
+            .flat_map(|stem| FOLDER_COVER_EXTS.iter().map(move |ext| (stem, *ext)))
+    })
+}
+
+/// 路径是否是目录封面文件（watcher 事件识别；与 [`folder_cover`] 同源）。
+///
+/// 只按文件名判断（删除事件时文件已不存在）：主名/扩展名必须落在候选集合内，
+/// 大小写变体按探测规则——小写主名或首字母大写，扩展名小写。
+pub fn is_folder_cover_path(p: &Path) -> bool {
+    let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    FOLDER_COVER_NAMES
+        .iter()
+        .any(|(lower, capitalized)| stem == *lower || stem == *capitalized)
+        && FOLDER_COVER_EXTS.contains(&ext)
+}
+
 /// 目录封面探测（无内嵌图时的兜底）：音频所在目录的 `cover` / `folder` /
 /// `front` / `album` / `albumart`（各含首字母大写变体）× `jpg` / `jpeg` / `png`，
 /// 按「主名 → 大小写变体 → 扩展名」取第一个存在的常规文件并返回其字节。
 /// 命中即停，不遍历目录；超过 `MAX_COVER_BYTES` 视为没有（只 stat 不读盘，
 /// 病态大文件不进内存）。
 fn folder_cover(dir: &Path) -> Option<Vec<u8>> {
-    const NAMES: [(&str, &str); 5] = [
-        ("cover", "Cover"),
-        ("folder", "Folder"),
-        ("front", "Front"),
-        ("album", "Album"),
-        ("albumart", "Albumart"),
-    ];
-    const EXTS: [&str; 3] = ["jpg", "jpeg", "png"];
-    for (lower, capitalized) in NAMES {
-        for stem in [lower, capitalized] {
-            for ext in EXTS {
-                let candidate = dir.join(format!("{stem}.{ext}"));
-                let Ok(md) = std::fs::metadata(&candidate) else {
-                    continue;
-                };
-                if !md.is_file() {
-                    continue;
-                }
-                if md.len() > MAX_COVER_BYTES as u64 {
-                    return None;
-                }
-                return std::fs::read(&candidate)
-                    .ok()
-                    .filter(|b| !b.is_empty() && b.len() <= MAX_COVER_BYTES);
-            }
+    for (stem, ext) in folder_cover_names() {
+        let candidate = dir.join(format!("{stem}.{ext}"));
+        let Ok(md) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if !md.is_file() {
+            continue;
         }
+        if md.len() > MAX_COVER_BYTES as u64 {
+            return None;
+        }
+        return std::fs::read(&candidate)
+            .ok()
+            .filter(|b| !b.is_empty() && b.len() <= MAX_COVER_BYTES);
     }
     None
 }
@@ -488,6 +516,60 @@ mod tests {
             None,
             "超限 → 没有，不退而取 front.jpg"
         );
+    }
+
+    /// 目录封面候选单一事实源：watcher 识别（`is_folder_cover_path`）与读标签
+    /// 探测（`folder_cover`）必须认同一组文件名；非候选不认。
+    #[test]
+    fn folder_cover_path_matches_probe_candidates() {
+        let png = png_bytes();
+        let root = tempfile::tempdir().unwrap();
+        for (i, (stem, ext)) in folder_cover_names().enumerate() {
+            // 每个候选单独目录：避免优先序遮蔽，逐个确认「识别 == 能读到」。
+            let dir = root.path().join(format!("case-{i}"));
+            std::fs::create_dir(&dir).unwrap();
+            let file = dir.join(format!("{stem}.{ext}"));
+            std::fs::write(&file, &png).unwrap();
+            assert!(
+                is_folder_cover_path(&file),
+                "{} 应是封面候选",
+                file.display()
+            );
+            assert_eq!(
+                folder_cover(&dir),
+                Some(png.clone()),
+                "{} 应被探测到",
+                file.display()
+            );
+        }
+        // 非候选：扩展名不在集合、主名前缀/后缀不符、不是文件名。
+        let odd = root.path().join("odd");
+        std::fs::create_dir(&odd).unwrap();
+        for name in [
+            "cover.gif",
+            "cover.webp",
+            "mycover.jpg",
+            "cover.tar.jpg",
+            "front.bmp",
+        ] {
+            let f = odd.join(name);
+            std::fs::write(&f, &png).unwrap();
+            assert!(
+                !is_folder_cover_path(&f),
+                "{name} 不在候选集合内（探测同样不认）"
+            );
+        }
+        assert_eq!(folder_cover(&odd), None, "非候选不应被探测到");
+        // 全大写扩展名：探测在不区分大小写的文件系统上会经 `cover.jpg` 命中
+        // 同一个文件（§30.7），事件识别只认候选拼写（扩展名小写）——两者可
+        // 观察的差异只在 Windows，这里只钉死识别侧，不假定文件系统语义。
+        let upper_ext = odd.join("COVER.JPG");
+        std::fs::write(&upper_ext, &png).unwrap();
+        assert!(
+            !is_folder_cover_path(&upper_ext),
+            "扩展名大小写变体不是候选"
+        );
+        assert!(!is_folder_cover_path(&odd), "目录本身不是封面文件");
     }
 
     /// RIFF 块：FourCC + LE 长度 + 内容；奇数长度补 1 字节对齐（不计入长度）。

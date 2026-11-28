@@ -222,6 +222,15 @@ pub struct AlbumGroup {
     pub cover_uri: Option<String>,
 }
 
+/// 目录内已入库的本地曲目（目录封面刷新输入）。
+#[derive(Clone, Debug)]
+pub struct LocalCoverRow {
+    /// `local:<path>`（回写封面用）。
+    pub source_key: String,
+    pub path: String,
+    pub cover_uri: Option<String>,
+}
+
 /// 本地歌手聚合行（track_artists 多值拆行）。
 #[derive(Clone, Debug)]
 pub struct ArtistGroup {
@@ -675,6 +684,42 @@ impl LibraryDb {
             .optional()
     }
 
+    /// 目录下已入库的本地曲目（目录封面刷新用）：只回本目录的直系文件
+    /// （子目录靠 Rust 侧 `parent` 过滤掉），按 `local_files.path` 唯一索引
+    /// 做前缀区间扫描。
+    ///
+    /// 为什么不整表：封面事件可能成批到达（拖入整张专辑 → 每首曲目的
+    /// mtime 都变），`local_files` 4k 行时整表拉进 Rust 再逐个比 parent 是
+    /// 4k 次字符串比较 × 每个事件；走索引后单次只碰本目录的十几行，
+    /// 与库规模无关。
+    pub fn local_tracks_in_dir(&mut self, dir: &Path) -> rusqlite::Result<Vec<LocalCoverRow>> {
+        // canonical 拼写：扫描/播放入库的路径都是 canonical 形式（Windows
+        // 上大小写随盘上真实拼写），事件路径经同一规范化后才对得上。
+        let dir = crate::canonical_display_path(dir);
+        let (lower, upper) = dir_path_prefix_bounds(&dir);
+        let mut stmt = self.conn.prepare(
+            "SELECT t.source_key, lf.path, t.cover_uri
+             FROM local_files lf JOIN tracks t ON t.id = lf.track_id
+             WHERE lf.path >= ?1 AND lf.path < ?2
+             ORDER BY lf.path",
+        )?;
+        let rows = stmt.query_map(params![lower, upper], |r| {
+            Ok(LocalCoverRow {
+                source_key: r.get(0)?,
+                path: r.get(1)?,
+                cover_uri: r.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let row = row?;
+            if Path::new(&row.path).parent() == Some(dir.as_path()) {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
     /// 注册扫描根并推进 generation，返回 (root_id, generation)。
     /// 首次扫描 generation=1，之后每次 +1（增量/缺失判定的代际基准）。
     pub fn begin_scan(&mut self, root: &Path) -> rusqlite::Result<(i64, i64)> {
@@ -952,6 +997,33 @@ impl LibraryDb {
             params![source_key, cover_uri],
         )?;
         Ok(())
+    }
+
+    /// 回写或清空本地曲目封面（目录封面事件）：`Some` 设置、`None` 清空；
+    /// 值未变化时零行写入（同目录多首曲目共享同一 URI，后续行不重复写）。
+    /// 返回实际改动行数。
+    pub fn update_track_cover(
+        &mut self,
+        source_key: &str,
+        cover_uri: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        let changed = match cover_uri {
+            Some(uri) => self.conn.execute(
+                "UPDATE tracks SET cover_uri = ?2
+                 WHERE source = 'local' AND source_key = ?1 AND COALESCE(cover_uri, '') <> ?2",
+                params![source_key, uri],
+            )?,
+            // 目录封面删除且无内嵌图：回退到「无封面」而不是留旧 URI（旧
+            // 文件可能已不在盘上）。只清目标行，不按 album/目录批量清，避免
+            // 误伤其它目录的同名专辑。
+            None => self.conn.execute(
+                "UPDATE tracks SET cover_uri = NULL
+                 WHERE source = 'local' AND source_key = ?1
+                   AND cover_uri IS NOT NULL AND cover_uri <> ''",
+                params![source_key],
+            )?,
+        };
+        Ok(changed)
     }
 
     /// 远程封面 URL → 本地产物 URI 回写（daemon `CoverGet` 下载成功后调用）：
@@ -2095,6 +2167,25 @@ fn row_of_relation(r: &rusqlite::Row<'_>) -> rusqlite::Result<RelationRow> {
 /// 不受 SQL 变量上限约束）。
 fn json_array(keys: &[String]) -> rusqlite::Result<String> {
     serde_json::to_string(keys).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+/// 目录子项路径的字符串区间 `[lower, upper)`（BINARY 排序）。
+///
+/// `local_files.path` 有唯一索引，范围条件可走索引；上限取前缀末字节
+/// （`MAIN_SEPARATOR`）的字节后继（`/`→`0`，`\`→`]`）——任何以该前缀开头的
+/// 路径都 `< upper`，且不涉及 LIKE 通配符转义与 `case_sensitive_like` 开关。
+fn dir_path_prefix_bounds(dir: &Path) -> (String, String) {
+    let mut lower = dir.display().to_string();
+    if !lower.ends_with(std::path::MAIN_SEPARATOR) {
+        lower.push(std::path::MAIN_SEPARATOR);
+    }
+    let mut upper = lower.clone().into_bytes();
+    if let Some(last) = upper.last_mut() {
+        // 末字节是 ASCII 分隔符（'/'=0x2F 或 '\\'=0x5C），加一仍是合法 UTF-8。
+        *last = last.saturating_add(1);
+    }
+    let upper = String::from_utf8(upper).unwrap_or_else(|_| lower.clone());
+    (lower, upper)
 }
 
 /// 当前 unix 时间戳（秒）。
