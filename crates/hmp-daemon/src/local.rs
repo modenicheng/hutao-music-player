@@ -389,11 +389,7 @@ fn local_artist_entity_ids(db: &mut LibraryDb, names: &[String]) -> Vec<Option<i
 
 /// 本地专辑（名 + 专辑歌手/首位歌手）→ 实体 id：同名不同专辑歌手只认歌手
 /// 匹配的那个；无歌手匹配时标题唯一才认（否则回退 "local" 哨兵）。
-fn local_album_entity_id(
-    db: &mut LibraryDb,
-    album: &str,
-    key_artist: Option<&str>,
-) -> Option<i64> {
+fn local_album_entity_id(db: &mut LibraryDb, album: &str, key_artist: Option<&str>) -> Option<i64> {
     let title = album.trim().to_lowercase();
     if title.is_empty() {
         return None;

@@ -1550,12 +1550,7 @@ mod tests {
         );
         assert_eq!(row.duration_ms, 95_000);
         // 无缓存行/无时长列 → 诚实 0。
-        let row = song_row_from_qq(
-            "mid-none",
-            "无时长".into(),
-            None,
-            SongEntities::default(),
-        );
+        let row = song_row_from_qq("mid-none", "无时长".into(), None, SongEntities::default());
         assert_eq!(row.duration_ms, 0);
     }
 
@@ -1683,10 +1678,7 @@ mod tests {
     #[test]
     fn entity_param_prefix_parsing() {
         assert_eq!(entity_id_param("album:7", ALBUM_PARAM_PREFIX), Some(7));
-        assert_eq!(
-            entity_id_param("artist:12", ARTIST_PARAM_PREFIX),
-            Some(12)
-        );
+        assert_eq!(entity_id_param("artist:12", ARTIST_PARAM_PREFIX), Some(12));
         assert_eq!(entity_id_param("album:0", ALBUM_PARAM_PREFIX), None);
         assert_eq!(entity_id_param("album:x", ALBUM_PARAM_PREFIX), None);
         assert_eq!(entity_id_param("qq:7", ALBUM_PARAM_PREFIX), None);
@@ -1729,10 +1721,7 @@ mod tests {
         assert_eq!(row.album_id, album_id);
 
         let track = row.to_track_row();
-        assert_eq!(
-            track.artist_mid.to_string(),
-            format!("artist:{artist_id}")
-        );
+        assert_eq!(track.artist_mid.to_string(), format!("artist:{artist_id}"));
         assert_eq!(track.album_mid.to_string(), format!("album:{album_id}"));
     }
 
@@ -1818,16 +1807,10 @@ mod tests {
         let dir = test_dir("album-id");
         let a = dir.join("a.flac");
         let b = dir.join("b.flac");
-        db.add_local_file(
-            &a,
-            Some(&meta("A", "歌手甲", "同名专辑", 1_000, "flac")),
-        )
-        .unwrap();
-        db.add_local_file(
-            &b,
-            Some(&meta("B", "歌手乙", "同名专辑", 2_000, "flac")),
-        )
-        .unwrap();
+        db.add_local_file(&a, Some(&meta("A", "歌手甲", "同名专辑", 1_000, "flac")))
+            .unwrap();
+        db.add_local_file(&b, Some(&meta("B", "歌手乙", "同名专辑", 2_000, "flac")))
+            .unwrap();
 
         let groups = db.library_albums(None).unwrap();
         let album_a = groups
